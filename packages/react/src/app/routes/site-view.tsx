@@ -334,7 +334,7 @@ function ArtifactsBackLink({
       asChild
       variant="ghost"
       size="sm"
-      className="-ml-1.5 h-8 shrink-0 gap-1.5 px-2 text-fg-muted hover:text-fg"
+      className="-ml-1.5 h-8 shrink-0 gap-1.5 px-2 text-fg-muted hover:text-fg pointer-coarse:min-h-11"
     >
       <a
         href={back.href}

@@ -351,8 +351,13 @@ describe("WorkspaceDock", () => {
     await click(rendered.container.querySelector('[title="Maximize"]'));
     await click(tab(rendered.container, "Artifacts"));
     expect(rendered.container.querySelector('[title="Restore (Esc)"]')).not.toBeNull();
-    await click(rendered.container.querySelector('[title="Restore (Esc)"]'));
+    const restore = rendered.container.querySelector<HTMLElement>('[title="Restore (Esc)"]');
+    restore?.focus();
+    await click(restore);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+    // Restore removed its own button; focus stays in the dock's controls.
+    expect(document.activeElement?.getAttribute("title")).toBe("Hide workspace");
 
     // The list (no Site on screen) gives the dock's Maximize back.
     await rendered.rerender(<Dock showsSite={false} />);

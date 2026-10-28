@@ -1,5 +1,6 @@
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   createContext,
   useCallback,
@@ -512,7 +513,19 @@ export function WorkspaceDock({
         <>
           {showMaximize ? (
             <ChromeButton
-              onClick={() => setMaximized((m) => !m)}
+              onClick={(event) => {
+                // Restoring a panel that owns its expand removes this button;
+                // keep keyboard focus in the dock instead of dropping it.
+                if (maximized && expandClaims[current]) {
+                  const next =
+                    (event.currentTarget.nextElementSibling as HTMLElement | null) ??
+                    rootRef.current?.querySelector<HTMLElement>(
+                      '[role="tab"][aria-selected="true"]',
+                    );
+                  requestAnimationFrame(() => next?.focus());
+                }
+                setMaximized((m) => !m);
+              }}
               title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
               label={
                 maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")
@@ -626,7 +639,7 @@ function ChromeButton({
   label,
   children,
 }: {
-  onClick: () => void;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   title: string;
   label: string;
   children: ReactNode;
