@@ -382,7 +382,7 @@ describe("DescendantRequests", () => {
     expect(container().querySelector("[data-descendant-requests-toggle]")).toBeNull();
 
     await act(async () => setNativeValue(answerField()!, "feature/login"));
-    await click(button("Send answers")!);
+    await click(button("Send answer")!);
 
     expect(calls.submitted).toHaveLength(1);
     expect(calls.submitted[0]!.sessionId).toBe("child");

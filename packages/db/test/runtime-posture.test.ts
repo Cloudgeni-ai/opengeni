@@ -1871,6 +1871,12 @@ describe("runtime database posture evaluator", () => {
           // 1032 Knowledge collection activity: FORCE RLS, reached only
           // through the Knowledge owner's routines; no runtime DML.
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
+          // 1061 credential profiles: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1932,7 +1938,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
-        1; // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
+        1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
+        1; // 1061 credential profiles: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

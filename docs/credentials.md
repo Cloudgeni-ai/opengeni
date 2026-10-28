@@ -30,6 +30,7 @@ rather than choose. The canonical product boundary is in
 | Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | Opengeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
 | Personal GitHub Git broker bearer | Encrypted opaque `oggh1.…` password used only by Git smart HTTP | Opengeni worker from an exact accepted personal repository snapshot | Opengeni API broker plus live connection/repository/provider revalidation | Five minutes, proactively renewed without changing routes | One active managed-sandbox attempt; delivered through private editor/file ingress, never provider CLIs, Connected Machines, model context, manifests, remotes, argv, logs, events, or audit text |
 | Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials`, or a standalone product through the workspace credential provider (`docs/workspace-integrations.md`) | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
+| Credential profile variables | Environment variables (for example `GH_TOKEN`, `AZURE_CLIENT_SECRET`) mapped to vault references by an opt-in workspace or chat profile | Workspace admins or a chat's controllers ([`secrets.md`](secrets.md#credential-profiles)); values come from vaults | Upstream CLIs and SDKs (`gh`, `az`, git through the optional helper) | Resolved again for every command | One agent command's process environment, on Connected Machines and managed sandboxes; never command text, stored arguments, config or files |
 | Sandbox Codemode bearer | Narrow `ogd_…`; protected attempt file via `OPENGENI_CODEMODE_TOKEN_FILE` on managed boxes, direct `OPENGENI_CODEMODE_TOKEN` only in an exact Connected Machine child exec | Opengeni worker from first-party signing authority | Exact-attempt Codemode API | One hour per bearer, proactively renewed during the active attempt | `@opengeni/codemode`/`ogtool` on managed sandboxes; native `opengeni-agent codemode` or an installed client in Connected Machine commands. Group-global ttyd and stable machine state receive no bearer |
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
@@ -107,6 +108,22 @@ Rules that hold across the table:
   each binding file, so a multi-day turn sees current credentials without model
   action or manifest mutation and a failed sibling refresh cannot overwrite it;
   broker route changes require a newer admitted turn.
+- **Credential profiles are per command and opt-in.** A profile stores names
+  and vault references only. Each command's variables are resolved through the
+  attempt's secret resolver (vault policy, per-use approval and audit apply)
+  and added to that command's environment below anything the command sets
+  itself. Connected Machines receive them in `ExecRequest.env`; managed
+  sandboxes source and delete a 0600 env file in the same command. The optional
+  git helper uses per-command `GIT_CONFIG_*` variables for `https://github.com`
+  and writes no git config. On managed sandboxes the binding files still give
+  git, `gh`, `glab` and `az` their credentials, but for a variable a profile
+  delivers the profile wins: the git helper replaces the binding helper for
+  `github.com`, and the provider CLI wrappers keep the profile's token. Host
+  run credentials are applied after the profile and win for the same names.
+  An entry that cannot be resolved is skipped with a note; it never fails the
+  command. Profile values are known secret values, so a command that prints
+  one shows its reference in the tool result instead, within the masking
+  limits ([`secrets.md`](secrets.md#masking)).
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still

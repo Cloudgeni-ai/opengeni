@@ -13,11 +13,16 @@
  * through the masker.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { maskSecretShapes } from "@opengeni/contracts";
 
 /** What the backstop needs from a memory (`SecretValueMemory` satisfies it). */
 export type SecretValueStorageMasker = {
   readonly size: number;
   mask<T>(value: T, stage?: string): T;
+  /** Known values plus secret-shaped parts; tool output only. */
+  maskToolOutput?<T>(value: T, stage?: string): T;
+  /** Capture secret-shaped values in tool output (task vault); never throws. */
+  captureShapes?(value: unknown, stage?: string): Promise<void>;
 };
 
 const maskers = new AsyncLocalStorage<SecretValueStorageMasker>();
@@ -32,6 +37,16 @@ function composed(
     },
     mask<T>(value: T, stage?: string): T {
       return outer.mask(inner.mask(value, stage), stage);
+    },
+    maskToolOutput<T>(value: T, stage?: string): T {
+      const once = inner.maskToolOutput
+        ? inner.maskToolOutput(value, stage)
+        : inner.mask(value, stage);
+      return outer.maskToolOutput ? outer.maskToolOutput(once, stage) : outer.mask(once, stage);
+    },
+    async captureShapes(value: unknown, stage?: string): Promise<void> {
+      await inner.captureShapes?.(value, stage);
+      await outer.captureShapes?.(value, stage);
     },
   };
 }
@@ -63,5 +78,36 @@ export function maskSecretValuesForStorage<T>(value: T, stage = "storage"): T {
   } catch {
     // SecretValueMemory never throws; a foreign masker must not fail a write.
     return value;
+  }
+}
+
+/**
+ * Tool output about to be stored (command output, Codemode results): known
+ * values and secret-shaped parts replaced (docs/secrets.md, Masking). Outside
+ * an attempt (background command output stored between turns) secret-shaped
+ * parts still get their `[masked <kind>]` marker.
+ */
+export function maskToolOutputForStorage<T>(value: T, stage = "tool_output"): T {
+  const masker = maskers.getStore();
+  try {
+    if (!masker) return maskSecretShapes(value);
+    if (masker.maskToolOutput) return masker.maskToolOutput(value, stage);
+    return masker.size === 0 ? value : masker.mask(value, stage);
+  } catch {
+    return value;
+  }
+}
+
+/** Capture secret-shaped values in tool output before storing it; best effort. */
+export async function captureToolOutputSecretShapes(
+  value: unknown,
+  stage = "tool_output",
+): Promise<void> {
+  const masker = maskers.getStore();
+  if (!masker?.captureShapes) return;
+  try {
+    await masker.captureShapes(value, stage);
+  } catch {
+    // Capture is best effort; masking still uses markers.
   }
 }

@@ -54,21 +54,24 @@ export interface WindowEvents {
 }
 
 /**
- * The height of the web app's title row. On macOS the traffic lights are
- * centred on it; on Windows the caption buttons fill it.
+ * The height of the bar across the top of the window that holds the window
+ * controls (the web app draws it, in the app's colour). On macOS the traffic
+ * lights, and the wider sharing badge macOS swaps in while the window is
+ * shared or recorded, are centred on it; on Windows the caption buttons fill
+ * it.
  */
-const TITLE_ROW_HEIGHT = 56;
+const WINDOW_BAR_HEIGHT = 44;
 
 /**
  * Windows' own minimize, maximize and close buttons, drawn over the page's
- * title row. The overlay is transparent so the page shows through, and the
+ * window bar. The overlay is transparent so the bar shows through, and the
  * glyphs follow the app's appearance.
  */
 function captionButtons(dark: boolean) {
   return {
     color: "#00000000",
     symbolColor: dark ? "#ffffff" : "#000000",
-    height: TITLE_ROW_HEIGHT,
+    height: WINDOW_BAR_HEIGHT,
   };
 }
 
@@ -130,15 +133,14 @@ export class MainWindow {
       backgroundColor: mac ? "#00000000" : dark ? config.background.dark : config.background.light,
       // macOS: the page runs under an inset title bar with sidebar material.
       // Windows: the page runs under the caption buttons, as in other modern
-      // Windows apps, so there is one title row instead of two.
+      // Windows apps. Either way the page draws one thin bar for the controls.
       // Linux keeps the system title bar, so the window follows the desktop's
       // own theme and controls.
       ...(mac
         ? {
             titleBarStyle: "hiddenInset" as const,
-            // Centred on the 56px title row: the rail's top row and every
-            // page's header share that centre line.
-            trafficLightPosition: { x: 18, y: 21 },
+            // Centred on the window bar (the buttons are about 14px tall).
+            trafficLightPosition: { x: 18, y: (WINDOW_BAR_HEIGHT - 14) / 2 },
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }

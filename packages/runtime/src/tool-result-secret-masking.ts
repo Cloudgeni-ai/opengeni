@@ -56,7 +56,11 @@ type MaskableAgent = {
 const agentMemories = new WeakMap<object, SecretValueMemory>();
 const maskedTools = new WeakMap<SecretValueMemory, WeakMap<object, Tool<any>>>();
 
-/** The same function tool with its result (and error message) masked. Stable per tool. */
+/**
+ * The same function tool with its result (and error message) masked: known
+ * values, then secret-shaped parts, which are first captured into the task
+ * vault so their reference can replace them. Stable per tool.
+ */
 export function secretMaskedTool<T extends Tool<any>>(tool: T, memory: SecretValueMemory): T {
   if (tool.type !== "function") return tool;
   let cache = maskedTools.get(memory);
@@ -75,7 +79,8 @@ export function secretMaskedTool<T extends Tool<any>>(tool: T, memory: SecretVal
         result = await invoke(...args);
       } catch (error) {
         await memory.refresh();
-        throw maskSecretValuesInError(error, memory);
+        if (error instanceof Error) await memory.captureShapes(error.message, "tool_error");
+        throw maskSecretValuesInError(error, memory, "tool_output");
       }
       // Values another process resolved for this session tree (run_on, an
       // earlier turn) are loaded first, bounded and best effort.
@@ -83,7 +88,8 @@ export function secretMaskedTool<T extends Tool<any>>(tool: T, memory: SecretVal
       // `secret_get` is the explicit, audited plaintext read: what it reveals
       // stays readable for the rest of the attempt (docs/secrets.md, Masking).
       revealSecretGetResult(memory, tool.name, result);
-      return memory.mask(result, "tool_result");
+      await memory.captureShapes(result, "tool_result");
+      return memory.maskToolOutput(result, "tool_result");
     },
   } as T;
   cache.set(tool, next);

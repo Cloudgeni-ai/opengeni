@@ -50,7 +50,8 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { withClaudeUsageObserver } from "@opengeni/runtime";
+import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
+import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
@@ -572,7 +573,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         capabilityServerCategories,
         credentialSubjectId,
         fileAuthoritySubjectId,
-        capabilitySettings,
+        capabilitySettings: claimedCapabilitySettings,
         codexAppsCoreConnectionId,
         turnExecutionPolicy,
         trigger,
@@ -586,6 +587,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      // EU-ONLY INFERENCE — read the workspace's setting again on every
+      // attempt, before any model call: a setting turned on after the claim
+      // still applies. Every later phase uses these settings, so resolution,
+      // run settings and every client carry the requirement, and this
+      // attempt's transport context is bound to it (never widened).
+      const capabilitySettings = await settingsWithTurnInferenceResidency({
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        settings: claimedCapabilitySettings,
+      });
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
@@ -2330,8 +2342,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const secretValues = createAttemptSecretValueMemory(resolvedServices.observability);
           // Work that outlives the attempt (process-wide caches started inside
           // it) neither keeps these values nor masks with them afterwards.
+          // EU-only inference: model requests are refused until the claim
+          // binds this context to the turn's settings.
           return runWithAttemptSecretValues(secretValues, () =>
-            runAgentTurn(input, resolvedServices, span),
+            withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span)),
           ).finally(() => secretValues.dispose());
         }),
       );

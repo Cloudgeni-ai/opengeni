@@ -341,6 +341,7 @@ import {
   provisionSandbox,
   runOnSandbox,
   createRunOnSecretResolver,
+  createSessionCredentialEnvironment,
   swapActiveSandbox,
   type FleetContext,
   type FleetServices,
@@ -4681,6 +4682,8 @@ function registerFleetTools(
             : null;
         // Output that shows a value this call resolved shows its reference
         // instead, here and in anything the call stores (docs/secrets.md, Masking).
+        // Profile values resolve through the same remembering resolver, so
+        // they are masked too.
         return await withSecretValueMasking(resolvedValues, async () =>
           json(
             resolvedValues.mask(
@@ -4688,6 +4691,17 @@ function registerFleetTools(
                 await runOnSandbox(services, await fleetContext(), target, typedOp, {
                   ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
                   ...(secretResolver ? { secretResolver } : {}),
+                  // The session's credential profile reaches run_on commands too.
+                  ...(secretResolver && claims && typedOp.kind === "exec"
+                    ? {
+                        credentials: createSessionCredentialEnvironment({
+                          db: deps.db,
+                          workspaceId: grant.workspaceId,
+                          sessionId: claims.sessionId,
+                          resolver: secretResolver,
+                        }),
+                      }
+                    : {}),
                 }),
                 userSetupCard("run_on", target),
               ),

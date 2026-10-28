@@ -69,7 +69,7 @@ describe("exact Skill review browser acceptance", () => {
         const save = page.getByRole("radio", { name: "Save", exact: true });
         await save.focus();
         await page.keyboard.press("Space");
-        const submit = page.getByRole("button", { name: "Send answers", exact: true });
+        const submit = page.getByRole("button", { name: "Send answer", exact: true });
         await submit.focus();
         await page.keyboard.press("Enter");
         expect(await page.evaluate(() => (window as any).skillReviewFixture.responses)).toEqual([
@@ -87,11 +87,11 @@ describe("exact Skill review browser acceptance", () => {
       await page.getByText("The request could not be completed.", { exact: true }).waitFor();
       expect(await page.getByText("Preview unavailable", { exact: true }).count()).toBe(0);
       await chooseAnswerRow(page.getByRole("radio", { name: "Save", exact: true }));
-      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      await page.getByRole("button", { name: "Send answer", exact: true }).click();
       expect(await page.evaluate(() => (window as any).skillReviewFixture.responses)).toEqual([]);
       expect(await page.locator("pre").count()).toBe(0);
       await chooseAnswerRow(page.getByRole("radio", { name: "Don't save", exact: true }));
-      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      await page.getByRole("button", { name: "Send answer", exact: true }).click();
       expect(await page.evaluate(() => (window as any).skillReviewFixture.responses)).toEqual([
         { outcome: "answered", answers: [{ questionId: "skill:revision", values: ["skip"] }] },
       ]);
@@ -120,7 +120,7 @@ describe("exact Skill review browser acceptance", () => {
       expect(await page.getByRole("radio", { name: "Save", exact: true }).count()).toBe(0);
       await page.screenshot({ path: "/tmp/qa-skill-remove-1280.png", fullPage: true });
       await chooseAnswerRow(page.getByRole("radio", { name: "Permanently delete", exact: true }));
-      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      await page.getByRole("button", { name: "Send answer", exact: true }).click();
       expect(await page.evaluate(() => (window as any).skillReviewFixture.responses)).toEqual([
         { outcome: "answered", answers: [{ questionId: "skill:revision", values: ["save"] }] },
       ]);

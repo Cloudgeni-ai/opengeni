@@ -24,6 +24,7 @@ export default defineConfig({
     "src/canonical-human-identities.ts",
     "src/client-error-report.ts",
     "src/secret-value-masking.ts",
+    "src/secret-shape-masking.ts",
     "src/analytics-consent-report.ts",
     "src/connection-account-label.ts",
     "src/personal-integration-setup.ts",

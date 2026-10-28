@@ -55,6 +55,7 @@ export {
   type SingleModelCallTarget,
 } from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
+import { inferenceResidencyRequirement } from "./inference-residency";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
@@ -527,6 +528,7 @@ import {
   type TurnSandboxCommandSession,
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
+import type { CredentialEnvironment } from "./sandbox/credential-profile-delivery";
 import {
   withRetainableSessionImageOutputHook,
   type RetainableSessionImageOutputHook,
@@ -721,6 +723,14 @@ export {
   vercelGatewayRoutingFetch,
   warmCodexResponsesWebSocket,
 } from "./model-provider";
+export {
+  InferenceRegionRestrictedError,
+  currentInferenceResidency,
+  findInferenceRegionRestrictedError,
+  inferenceResidencyRequirement,
+  resolveInferenceResidency,
+  withInferenceResidency,
+} from "./inference-residency";
 export {
   appendWorkspaceGovernance,
   CompanyProfilePromptLimitError,
@@ -1283,7 +1293,12 @@ export async function generateSessionTitle(
         ? null
         : new MultiProviderModelProvider(settings).resolveBinding(modelName);
   const target: SingleModelCallTarget = binding
-    ? { client: binding.client, provider: binding.provider, modelId: binding.modelId }
+    ? {
+        client: binding.client,
+        provider: binding.provider,
+        modelId: binding.modelId,
+        residency: inferenceResidencyRequirement(settings),
+      }
     : { model: options.model! };
   const result = await runSingleModelCall(target, {
     messages: [
@@ -1492,7 +1507,12 @@ export async function summarizeForCompaction(
     const claude = new AnthropicMessagesModel(
       provider,
       model,
-      instrumentedModelFetch(provider.id, globalThis.fetch),
+      instrumentedModelFetch(
+        provider.id,
+        globalThis.fetch,
+        false,
+        inferenceResidencyRequirement(settings),
+      ),
     );
     const claudeRequest = (forbidToolCalls: boolean) =>
       anthropicCompactionRequest(input, {
@@ -2557,6 +2577,13 @@ export type BuildAgentOptions = {
    */
   secretResolver?: SecretResolver | null;
   /**
+   * The attempt's credential profile: variables added to the environment of
+   * every sandbox command (exec_command and background commands), resolved
+   * through `secretResolver` (so the values are remembered and masked like
+   * any other resolved value). Omitted: commands get no profile variables.
+   */
+  credentials?: CredentialEnvironment | null;
+  /**
    * The attempt's known secret values (docs/secrets.md, Masking). Every tool
    * result is masked with it before the model, the run state or history sees it.
    */
@@ -3511,6 +3538,7 @@ export function buildOpenGeniAgent(
         ? { onToolCancellationFence: options.onToolCancellationFence }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.credentials ? { credentials: options.credentials } : {}),
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
@@ -4786,6 +4814,7 @@ export function buildAgentCapabilities(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    credentials?: CredentialEnvironment | null;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   return buildAgentCapabilitiesFromComposition(
@@ -4815,15 +4844,20 @@ function buildAgentCapabilitiesFromComposition(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    credentials?: CredentialEnvironment | null;
   },
 ): ReturnType<typeof Capabilities.default> {
   // A secret resolver needs the controller's wrappers even without a turn
   // signal: they are where references are resolved below every recorder.
   const toolCancellation =
-    options.turnCancellationSignal || options.onToolCancellationFence || options.secretResolver
+    options.turnCancellationSignal ||
+    options.onToolCancellationFence ||
+    options.secretResolver ||
+    options.credentials
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+          ...(options.credentials ? { credentials: options.credentials } : {}),
         })
       : null;
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
@@ -13206,6 +13240,14 @@ function gitCredentialHelperCommandLines(
     "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
     "  *) provider=; token_env= ;;",
     "esac",
+    // A credential profile that delivered this tool's token variable to the
+    // command wins over the platform binding (docs/secrets.md, "Credential
+    // profiles"): run the real tool with the inherited value.
+    'if [ -n "$token_env" ]; then',
+    '  case ",${OPENGENI_CREDENTIAL_PROFILE_VARS:-}," in',
+    '    *",$token_env,"*) provider= ;;',
+    "  esac",
+    "fi",
     "hash_binding_id() {",
     "  if command -v sha256sum >/dev/null 2>&1; then printf '%s' \"$1\" | sha256sum | cut -c1-32; return; fi",
     "  if command -v shasum >/dev/null 2>&1; then printf '%s' \"$1\" | shasum -a 256 | cut -c1-32; return; fi",

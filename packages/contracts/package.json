@@ -82,6 +82,10 @@
       "types": "./src/secret-value-masking.ts",
       "default": "./src/secret-value-masking.ts"
     },
+    "./secret-shape-masking": {
+      "types": "./src/secret-shape-masking.ts",
+      "default": "./src/secret-shape-masking.ts"
+    },
     "./client-error-report": {
       "types": "./src/client-error-report.ts",
       "default": "./src/client-error-report.ts"

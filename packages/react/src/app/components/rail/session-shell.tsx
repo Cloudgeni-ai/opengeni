@@ -67,7 +67,6 @@ import { applySessionArchiveProjection } from "../../lib/session-pagination";
 import { notifySessionListChanged } from "../../lib/session-list-invalidation";
 import type { Session } from "../../types";
 import { cn } from "../../lib/utils";
-import { windowControlsInPage } from "../../lib/desktop";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useUiEventTarget } from "../../lib/ui-events";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -101,21 +100,14 @@ export function RailBody() {
       data-rail
       className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
     >
-      {/* Native macOS controls sit over this row. Keep it outside the clipped
-          viewport so navigation cannot scroll underneath them. */}
-      {windowControlsInPage ? (
-        <div data-rail-window-controls className="relative z-10 shrink-0 pb-3">
-          <RailHeader showSwitcher={false} />
-        </div>
-      ) : null}
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
-          {!windowControlsInPage ? <RailHeader /> : null}
+          <RailHeader />
 
-          {rail.collapsed || windowControlsInPage ? switcher : null}
+          {rail.collapsed ? switcher : null}
 
           {rail.isMobile && mobileWorkspacePanel ? (
             <>
@@ -344,7 +336,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
     <TooltipProvider delayDuration={300}>
       <div
         className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
-        // Lets page chrome (the desktop title bar) follow the rail without a
+        // Lets page chrome and host styles follow the rail without a
         // document-wide `:has()` selector.
         data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
       >
