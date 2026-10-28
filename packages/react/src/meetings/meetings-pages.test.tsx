@@ -621,7 +621,7 @@ describe("Recorder provider", () => {
         ),
       );
       // The key asks for a start while the page still loads its models...
-      store.requestStart({ title: "" });
+      act(() => store.requestStart({ title: "" }));
       // ...and the person clicks Start before it happens.
       const button = [...container.querySelectorAll("button")].find(
         (candidate) => candidate.textContent?.trim() === "Start recording",
