@@ -1014,15 +1014,16 @@ export class ThisComputer {
     );
     if (!refused) return false;
     if (this.removed.has(refused.agentId)) return false;
-    const reading = await this.reportedMachine(accountId, baseUrl, refused.workspaceId, refused);
-    if (this.removedOnServer(reading, refused)) return false;
-    // Whether it is still listed there decides where to connect it: unknown, ask again.
-    if (reading?.kind === "unread") throw reading.failure;
-    // No longer allowed to set it up there: set it up here instead.
+    // No longer allowed to set it up there (e.g. no longer a member, so its
+    // machines can't be read either): set it up here instead.
     const token = await this.deps
       .mintEnrollToken(accountId, refused.workspaceId, options.screenControl)
       .catch(() => null);
     if (token === null) return false;
+    const reading = await this.reportedMachine(accountId, baseUrl, refused.workspaceId, refused);
+    if (this.removedOnServer(reading, refused)) return false;
+    // Whether it is still listed there decides where to connect it: unknown, ask again.
+    if (reading?.kind === "unread") throw reading.failure;
     const connection = await this.enroll(
       accountId,
       baseUrl,

@@ -39,8 +39,8 @@ function computer(options: {
   screenControl?: boolean;
   /** Also used in these workspaces, made in w1. */
   alsoIn?: string[];
-  /** Workspaces the person may no longer set computers up in. */
-  mintRefused?: string[];
+  /** Workspaces the person left: no setup tokens there, and their machines can't be read. */
+  left?: string[];
   /** Connecting again where it was made keeps its enrollment, as the real server does. */
   keepEnrollment?: boolean;
 }) {
@@ -114,7 +114,7 @@ function computer(options: {
     },
     mintEnrollToken: async (_account, workspaceId) => {
       minted.push(workspaceId);
-      if (options.mintRefused?.includes(workspaceId))
+      if (options.left?.includes(workspaceId))
         throw new Error("You can't set up computers in this workspace.");
       writeFileSync(enrollIn, workspaceId);
       return "setup-token";
@@ -127,9 +127,11 @@ function computer(options: {
       allowed.push(enrollmentId);
       grants.push(`${workspaceId}:${enrollmentId}`);
     },
-    readMachine: async (account, _baseUrl, _workspaceId, enrollmentId) => {
+    readMachine: async (account, _baseUrl, workspaceId, enrollmentId) => {
       // Enrollments are the person's own: another account's view doesn't list them.
       if (options.ownerOnly && account !== "me") return null;
+      if (options.left?.includes(workspaceId))
+        throw { status: 404, message: "workspace not found" };
       const reading = readings[enrollmentId] ?? null;
       if (reading instanceof Error) throw reading;
       if (reading && "status" in reading) throw reading;
@@ -382,12 +384,14 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
       service: false,
       screenControl: true,
       alsoIn: ["w2"],
-      mintRefused: ["w1"],
+      left: ["w1"],
     });
     writeFileSync(join(c.home, "connections.txt"), REFUSED);
     c.readings.a1 = { online: false };
     c.readings.a2 = { online: true };
     const app = c.create();
+    // w1's machines can't be read any more, but w2 still sees the problem.
+    expect((await app.status(SERVER, "w2", "me")).errorCode).toBe("reconnect_required");
     const next = await app.connect("me", SERVER, "w2", { screenControl: true });
     expect(c.minted).toEqual(["w1", "w2"]);
     expect(next.state).toBe("connected");
@@ -413,6 +417,20 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
       expect(next.errorCode).toBeUndefined();
     });
   }
+
+  test("removed where it was made, not yet seen here: still set up here, never back there", async () => {
+    const c = computer({ service: false, screenControl: true, alsoIn: ["w2"] });
+    writeFileSync(join(c.home, "connections.txt"), REFUSED);
+    c.readings.a1 = null;
+    c.readings.a2 = { online: true };
+    const app = c.create();
+    const next = await app.connect("me", SERVER, "w2", { screenControl: true });
+    // The token for w1 goes unused and expires; only w2 is set up.
+    expect(c.minted).toEqual(["w1", "w2"]);
+    expect(c.commands().filter((command) => command.startsWith("token="))).toHaveLength(1);
+    expect(c.grants).toEqual(["w2:a2"]);
+    expect(next.state).toBe("connected");
+  });
 
   test("connecting again where it was made keeps its enrollment, and every workspace keeps it", async () => {
     const c = computer({
@@ -454,7 +472,7 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
     expect(c.minted).toEqual(["w1"]);
   });
 
-  test("whether it is still listed where it was made can't be read: asks to try again", async () => {
+  test("whether it is still listed where it was made can't be read: asks to try again, changing nothing", async () => {
     const c = computer({ service: false, screenControl: true, alsoIn: ["w2"] });
     writeFileSync(join(c.home, "connections.txt"), REFUSED);
     c.readings.a1 = { status: 503, message: "unavailable" };
@@ -464,7 +482,9 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
       .then(() => null)
       .catch((caught: unknown) => caught);
     expect(failed).toBeInstanceOf(ThisComputerError);
-    expect(c.minted).toEqual([]);
+    expect(c.minted).toEqual(["w1"]);
+    expect(c.commands().filter((command) => command.startsWith("token="))).toEqual([]);
+    expect(c.grants).toEqual([]);
   });
 
   test("the menu bar says a refused connection needs reconnecting, but not while paused", async () => {
