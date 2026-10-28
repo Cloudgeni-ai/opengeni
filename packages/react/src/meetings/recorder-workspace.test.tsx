@@ -137,7 +137,14 @@ function mountProvider() {
     seen,
     opened,
     meetingsOpened,
-    takePendingStart: () => pendingStart(),
+    // Taking the pending start clears provider state, so it runs inside act.
+    takePendingStart: () => {
+      let taken = false;
+      act(() => {
+        taken = pendingStart();
+      });
+      return taken;
+    },
     open: (recordingId: string, workspaceId: string) => open!(recordingId, workspaceId),
     render: (workspaceId: string | null, options: { scope?: string | null } = {}) =>
       act(async () => {
