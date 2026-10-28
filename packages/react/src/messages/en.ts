@@ -3301,6 +3301,8 @@ export const englishMessages = {
   "native.meetings.meetingView.delete": "Delete",
   "native.meetings.meetingView.makePrivate": "Make private",
   "native.meetings.meetingView.nameSpeaker": "Name speaker",
+  /** Turns down, for now, remembering the voice of a speaker someone just named. */
+  "native.meetings.meetingView.notNow": "Not now",
   "native.meetings.meetingView.recordingNowTheTranscriptStarts":
     "Recording. The transcript comes after you stop.",
   "native.meetings.meetingView.renameName": "Rename {name}",
