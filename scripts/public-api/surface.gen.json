@@ -37312,6 +37312,7 @@
       "parsePartialJson": "value",
       "settleInteractiveAnswer": "value",
       "toggleInteractiveSelection": "value",
+      "trailingOpenFence": "value",
       "useInteractiveAnswerHost": "value",
       "useInteractiveAnswerState": "value",
       "visibleInteractiveItems": "value"

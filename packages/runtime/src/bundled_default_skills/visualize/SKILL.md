@@ -44,7 +44,7 @@ An `opengeni-ui` fenced block holding one JSON object draws the options as cards
 
 - `items` (required, at most 60): `id`, `title`, and optional `subtitle`, `description` (one or two sentences), `badge` (a word or two), `url` (http or https) and `values`. Values are strings, numbers, booleans or null; write numbers as numbers, without units.
 - `fields` (at most 12) choose which values are shown and in what order; values without a field are not shown. `unit` is a currency sign before the number or a unit after it. `better` marks the best option for that field. `filter: true` offers the field's values as filter chips; use it for a few repeated categories.
-- `chart` names one numeric field to draw as bars. `view: "table"` opens as a table when there are many fields to compare; cards are the default and phones always show cards.
+- `chart` names one numeric field from `fields` to draw as bars. `view: "table"` opens as a table when there are many fields to compare; cards are the default and phones always show cards.
 - `select: true` lets the person pick any number; `{ "max": 1 }` asks for one. `action` is the verb phrase that starts their message. Omit `select` when there is nothing to choose.
 - Write valid, literal JSON with no comments. Keep explanations outside the block, and do not repeat its data in a table. Write a new block to update the options.
 

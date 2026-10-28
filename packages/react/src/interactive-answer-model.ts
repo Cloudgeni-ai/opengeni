@@ -74,23 +74,48 @@ export type InteractiveAnswerParse =
  * Parse a fence body. With `partial`, an unfinished body (the assistant is
  * still writing it) yields the options that have arrived so far instead of an
  * error, so the answer grows in place while it streams.
+ * A body that already parses whole is complete even if its closing fence
+ * never arrived (an answer that ended without one), so it can still be picked.
  */
 export function parseInteractiveAnswer(
   source: string,
   options: { partial?: boolean | undefined } = {},
 ): InteractiveAnswerParse {
-  const partial = options.partial === true;
+  let partial = false;
   let raw: unknown;
   try {
     raw = JSON.parse(source);
   } catch {
-    if (!partial) return { status: "invalid", reason: "json" };
+    if (options.partial !== true) return { status: "invalid", reason: "json" };
+    partial = true;
     raw = parsePartialJson(source);
     if (raw === undefined) return { status: "partial", spec: null };
   }
   const result = normalizeSpec(raw, partial);
-  if (result.status === "invalid") return partial ? { status: "partial", spec: null } : result;
+  if (result.status === "invalid") {
+    return options.partial === true ? { status: "partial", spec: null } : result;
+  }
   return partial ? { status: "partial", spec: result.spec } : result;
+}
+
+/**
+ * Whether a message ends inside an unclosed code fence, and that fence's body.
+ * Read from the message as written, so renderers that parse a rewritten copy
+ * (softened while streaming, math normalized) still know which fence is open.
+ */
+export function trailingOpenFence(message: string): string | null {
+  let open: { char: string; length: number; lines: string[] } | null = null;
+  for (const line of message.split("\n")) {
+    if (open) {
+      const close = /^ {0,3}([`~]{3,})\s*$/.exec(line);
+      if (close && close[1]![0] === open.char && close[1]!.length >= open.length) open = null;
+      else open.lines.push(line);
+      continue;
+    }
+    const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (start) open = { char: start[1]![0]!, length: start[1]!.length, lines: [] };
+  }
+  return open ? open.lines.join("\n") : null;
 }
 
 /**
@@ -117,6 +142,10 @@ export function parsePartialJson(source: string): unknown {
   const candidates = [source.length, ...cuts.reverse()];
   // A long body has many cut points; the last few are always enough.
   for (const end of candidates.slice(0, 64)) {
+    // The whole text may end in a number or literal that is still being
+    // written (139 of 13990), so it only counts when it ends in a string or
+    // bracket. Cuts at a comma or bracket end after a finished value.
+    if (end === source.length && /[\w.+-]\s*$/u.test(source) && !inString) continue;
     const closed = closeJson(source.slice(0, end));
     if (closed === null) continue;
     try {

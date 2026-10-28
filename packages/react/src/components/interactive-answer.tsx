@@ -158,7 +158,7 @@ function LoadedAnswer({
     <section
       aria-labelledby={spec.title ? titleId : undefined}
       aria-label={spec.title ? undefined : t("interactiveAnswer.options")}
-      aria-busy={streamState === "streaming" || undefined}
+      aria-busy={(streamState === "streaming" && !complete) || undefined}
       className="og-interactive-answer @container/answer my-3 flex min-w-0 flex-col gap-3 first:mt-0"
     >
       {spec.title || (interactive && spec.fields.length > 0) ? (
@@ -256,8 +256,8 @@ function LoadedAnswer({
         </p>
       ) : null}
 
-      {streamState === "streaming" ? <AnswerStatus streaming /> : null}
-      {streamState === "incomplete" ? (
+      {streamState === "streaming" && !complete ? <AnswerStatus streaming /> : null}
+      {streamState === "incomplete" && !complete ? (
         <p className="m-0 text-og-sm text-og-fg-muted">{t("interactiveAnswer.stopped")}</p>
       ) : null}
 

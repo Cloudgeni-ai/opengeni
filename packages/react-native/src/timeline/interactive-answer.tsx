@@ -243,8 +243,8 @@ function Loaded({
             : t("interactiveAnswer.omitted", { count: spec.omitted })}
         </Text>
       ) : null}
-      {streamState === "streaming" ? <Writing /> : null}
-      {streamState === "incomplete" ? (
+      {streamState === "streaming" && !complete ? <Writing /> : null}
+      {streamState === "incomplete" && !complete ? (
         <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
           {t("interactiveAnswer.stopped")}
         </Text>

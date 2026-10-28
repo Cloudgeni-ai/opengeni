@@ -27,7 +27,7 @@ import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
 import { InteractiveAnswer } from "./interactive-answer";
-import { INTERACTIVE_ANSWER_FENCE } from "../interactive-answer-model";
+import { INTERACTIVE_ANSWER_FENCE, trailingOpenFence } from "../interactive-answer-model";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
@@ -634,10 +634,15 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
   const language = fenceLanguage(children);
   if (language === INTERACTIVE_ANSWER_FENCE) {
     // Drawn by the package itself: no scripts, so no host opt-in is needed.
-    const state = fenceIsClosed(node, source) ? "complete" : streaming ? "streaming" : "incomplete";
+    // Whether it is still open is read from the message as written: node
+    // offsets point into the parsed copy, which softening and math rewrite.
+    const body = nodeText(children).replace(/\n$/, "");
+    const tail = source.includes(INTERACTIVE_ANSWER_FENCE) ? trailingOpenFence(source) : null;
+    const open = tail !== null && tail.trimEnd() === body.trimEnd();
+    const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
     return (
       <InteractiveAnswer
-        source={nodeText(children).replace(/\n$/, "")}
+        source={body}
         state={state}
         renderSource={() => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>}
       />

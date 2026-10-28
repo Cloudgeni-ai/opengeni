@@ -166,7 +166,8 @@ export function NativeSessionScreen({
         send={controller.composer.send}
         scope={controller.sessionId}
         store={answerStore}
-        readOnly={status === "failed" || status === "cancelled"}
+        // Like the web: only a cancelled session can't take another message.
+        readOnly={status === "cancelled"}
       >
         <NativeTimelineMessagesProvider messages={timelineMessages}>
           <SessionScreenBoundary sessionId={controller.sessionId}>

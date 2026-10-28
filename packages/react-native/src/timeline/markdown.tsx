@@ -37,7 +37,10 @@ import {
 } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { NativeInteractiveAnswer } from "./interactive-answer";
-import { INTERACTIVE_ANSWER_FENCE } from "@opengeni/react/interactive-answer-model";
+import {
+  INTERACTIVE_ANSWER_FENCE,
+  trailingOpenFence,
+} from "@opengeni/react/interactive-answer-model";
 import { tableColumns, tableLayout } from "./markdown-table-layout";
 
 /**
@@ -676,21 +679,7 @@ export interface MarkdownLinkOptions {
 /** Text groups whose only link the host drew as a block, so they render as views. */
 const BLOCK_LINK_GROUPS = new WeakSet<object>();
 
-/** Whether the message ends inside an unclosed fence, and that fence's body. */
-export function trailingOpenFence(text: string): string | null {
-  let open: { char: string; length: number; lines: string[] } | null = null;
-  for (const line of text.split("\n")) {
-    if (open) {
-      const close = /^ {0,3}([`~]{3,})\s*$/.exec(line);
-      if (close && close[1]![0] === open.char && close[1]!.length >= open.length) open = null;
-      else open.lines.push(line);
-      continue;
-    }
-    const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (start) open = { char: start[1]![0]!, length: start[1]!.length, lines: [] };
-  }
-  return open ? open.lines.join("\n") : null;
-}
+export { trailingOpenFence };
 
 const FenceStateContext = createContext<{ openTail: string | null; streaming: boolean }>({
   openTail: null,

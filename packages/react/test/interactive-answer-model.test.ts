@@ -11,6 +11,7 @@ import {
   parsePartialJson,
   settleInteractiveAnswer,
   toggleInteractiveSelection,
+  trailingOpenFence,
   visibleInteractiveItems,
   EMPTY_INTERACTIVE_ANSWER_STATE,
   type InteractiveAnswerSpec,
@@ -78,7 +79,10 @@ test("a streaming body yields the options that have arrived, growing as it strea
 });
 
 test("partial JSON closes open strings and brackets and drops half-written keys", () => {
-  expect(parsePartialJson('{"a": [1, 2')).toEqual({ a: [1, 2] });
+  // A trailing number may still be growing (2 of 25), so it waits for its comma.
+  expect(parsePartialJson('{"a": [1, 2')).toEqual({ a: [1] });
+  expect(parsePartialJson('{"a": [1, 2]')).toEqual({ a: [1, 2] });
+  expect(parsePartialJson('{"price": 139')).toEqual({});
   expect(parsePartialJson('{"a": "hel')).toEqual({ a: "hel" });
   expect(parsePartialJson('{"a": 1, "b')).toEqual({ a: 1 });
   expect(parsePartialJson('{"a": 1, "b":')).toEqual({ a: 1 });
@@ -218,4 +222,18 @@ test("an answer that stopped leaves out a last option that only had its title", 
     partial: true,
   });
   expect(settleInteractiveAnswer(withValues, "incomplete")).toBe(withValues);
+});
+
+test("a whole body is complete even when its closing fence never arrived", () => {
+  const parsed = parseInteractiveAnswer(SOURCE, { partial: true });
+  expect(parsed.status).toBe("ok");
+  expect(settleInteractiveAnswer(parsed, "incomplete")).toBe(parsed);
+});
+
+test("the open fence is read from the message as written", () => {
+  expect(trailingOpenFence('Here:\n\n```opengeni-ui\n{"items": [')).toBe('{"items": [');
+  expect(trailingOpenFence("```opengeni-ui\n{}\n```\nDone.")).toBeNull();
+  // A longer closer still closes; a shorter one is content.
+  expect(trailingOpenFence("````opengeni-ui\n{}\n```")).toBe("{}\n```");
+  expect(trailingOpenFence("````opengeni-ui\n{}\n`````")).toBeNull();
 });
