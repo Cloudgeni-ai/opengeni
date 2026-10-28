@@ -279,17 +279,13 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     // An interrupted batch is tested again first, keeping any bisection.
     pending = [numbers, ...manifest.pending];
     const left = manifest.members.find((m) => byNumber.get(m.number)?.headSha !== m.head);
-    const urgent = pulls.some((p) => (p.priority || p.version) && p.greenAt !== null);
-    const isUrgent = manifest.members.some(
-      (m) => m.version || byNumber.get(m.number)?.priority === true,
-    );
+    // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     if (manifest.base !== mainSha) reason = "main moved since the batch was built";
     else if (left)
       reason = byNumber.has(left.number)
         ? `#${left.number} has a new head`
         : `#${left.number} left the queue`;
-    else if (urgent && !isUrgent) reason = "a priority PR is ready";
     if (reason) actions.push({ kind: "abandon", batch, reason });
     else {
       const result = verdict(batch, now, settings);

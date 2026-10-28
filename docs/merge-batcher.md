@@ -13,7 +13,8 @@ environment that only `main` can use.
 Add the `queue-ready` label or turn on auto-merge (`gh pr merge --auto --squash`).
 A queued PR is batched once its **PR CI** check has passed on its exact current
 head. Add `queue-priority` as well for an urgent fix: priority PRs are tested
-next, ahead of an ordinary batch that is still running.
+next, as soon as the batch that is already running finishes. A running batch is
+never cancelled for one.
 
 A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
@@ -53,7 +54,7 @@ The numbered directories are listed in `NUMBERED_FILES`
    turn until the failing PR is found and removed from the queue.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
-new head or leaves the queue, or a priority PR becomes ready.
+new head or leaves the queue.
 
 ## Main CI cadence
 

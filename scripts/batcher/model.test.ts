@@ -237,10 +237,13 @@ describe("decide", () => {
     expect(left[0]).toMatchObject({ kind: "abandon", reason: "#1 left the queue" });
   });
 
-  test("a ready priority PR preempts an ordinary batch", () => {
+  test("a ready priority PR waits for the running batch, then goes next", () => {
     const running = batch([1], { runs: [run({ status: "in_progress", conclusion: null })] });
-    const actions = decide(observe([pull(1), pull(2, { priority: true })], [running]));
-    expect(actions[0]).toMatchObject({ kind: "abandon", reason: "a priority PR is ready" });
+    const waiting = decide(observe([pull(1), pull(2, { priority: true })], [running]));
+    expect(waiting).toEqual([]);
+    const passed = batch([1], { runs: [run({ status: "completed", conclusion: "success" })] });
+    const actions = decide(observe([pull(1), pull(2, { priority: true }), pull(3)], [passed]));
+    expect(actions[0]).toMatchObject({ kind: "land" });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
   });
 
