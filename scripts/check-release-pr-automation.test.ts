@@ -4832,13 +4832,7 @@ describe("workflow contracts", () => {
     for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
       if (
         reports.has(name) ||
-        [
-          "automation-admission",
-          "main-ci-cadence",
-          "batch-attestation",
-          "merge-content",
-          "full-green",
-        ].includes(name)
+        ["automation-admission", "main-ci-cadence", "merge-content", "full-green"].includes(name)
       )
         continue;
       // Execute the checked-in boolean predicate with GitHub's documented
@@ -5203,9 +5197,9 @@ describe("workflow contracts", () => {
   test("shards selected work while preserving current acceptance and full-mode safety gates", () => {
     const plan = ci.jobs.plan;
     expect(plan.name).toBe("Explain change impact");
-    // main-ci-cadence and batch-attestation are push-to-main only; plan
-    // tolerates their skipped results and stops when a push is deferred.
-    expect(plan.needs).toEqual(["automation-admission", "main-ci-cadence", "batch-attestation"]);
+    // main-ci-cadence is push-to-main only; plan tolerates its skipped result
+    // and stops when a push is deferred.
+    expect(plan.needs).toEqual(["automation-admission", "main-ci-cadence"]);
     expect(plan.if).toBe(
       "${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
@@ -5293,8 +5287,7 @@ describe("workflow contracts", () => {
     expect(shards.strategy).toEqual({
       "fail-fast": false,
       matrix: {
-        include:
-          '${{ fromJSON(needs.plan.outputs.unit_reuse == \'true\' && \'[{"index":0,"number":1,"total":1}]\' || needs.plan.outputs.unit_matrix) }}',
+        include: "${{ fromJSON(needs.plan.outputs.unit_matrix) }}",
       },
     });
     const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
@@ -5699,11 +5692,8 @@ describe("workflow contracts", () => {
       ARTIFACT_RUNTIME_REQUIRED: "${{ needs.plan.outputs.artifact_runtime_required }}",
       BAKE_IMAGES: "${{ needs.plan.outputs.bake_images }}",
       BUILD_COUNT: "${{ needs.plan.outputs.build_count }}",
-      // Boolean JSON for jq; only a verified identical-tree Batch attestation is true.
-      ATTESTED: "${{ needs.plan.outputs.attested == 'true' }}",
     });
     expect(requireLanes.run).toContain("scripts/ci/required-results.jq");
-    expect(requireLanes.run).toContain('--argjson attested "$ATTESTED"');
     expect(ci.jobs["automation-report"].needs).toEqual([
       "automation-admission",
       "test",

@@ -109,6 +109,7 @@ import {
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
   resolveWorkspaceDefaultExecutionTarget,
+  machineCanBeWorkspaceDefault,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -279,6 +280,10 @@ import {
   admissibleWorkspaceModel,
 } from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import {
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+} from "./personal-workspace-connectors";
 import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
@@ -2988,7 +2993,7 @@ async function createSessionForRequestInFileScope(
           !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
           !machine ||
           machine.kind !== "selfhosted" ||
-          machine.scope === "user"
+          !machineCanBeWorkspaceDefault(machine, workspace)
         ) {
           throw new HTTPException(422, {
             message:
@@ -3181,7 +3186,22 @@ async function createSessionForRequestInFileScope(
   const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
   if (Object.keys(requestedMcpPolicies).length > 0) {
     requirePermission(grant, "sessions:control");
-    const inheritedServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    const ownServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    // Include any connectors a Personal workspace carries for its owner: the
+    // same enabled set the session runs with.
+    const inheritedServers = [
+      ...ownServers,
+      ...(await personalWorkspaceExtensionMcpServers(db, {
+        workspaceId,
+        accountId: grant.accountId,
+        subjectId: personalWorkspaceExtensionSubject(
+          inheritedPersonalConnectionDelegations
+            ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+            : { subjectId: grant.subjectId },
+        ),
+        ownServers: [...settings.mcpServers, ...ownServers],
+      })),
+    ];
     for (const [id, policy] of Object.entries(requestedMcpPolicies)) {
       const inherited = inheritedServers.find((server) => server.id === id);
       if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {

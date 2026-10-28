@@ -393,8 +393,8 @@ async function seedCrossWorkspaceScopedMachine(scope: "organization" | "user") {
       set_config('opengeni.workspace_id', ${originWorkspaceId}, true),
       set_config('opengeni.subject_id', 'user-m10', true),
       set_config('opengeni.initiating_human_subject_id', 'user-m10', true)`;
-    const [row] = await tx<Array<{ enrollmentId: string }>>`
-      select enrollment_id as "enrollmentId"
+    const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+      select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
       from finalize_scoped_enrollment(
         ${accountId}::uuid, ${originWorkspaceId}::uuid, ${scope},
         ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
@@ -405,7 +405,13 @@ async function seedCrossWorkspaceScopedMachine(scope: "organization" | "user") {
   });
   await admin`update enrollments set last_seen_at = now() where id = ${machine.enrollmentId}`;
   await claimConnection(originWorkspaceId, machine.enrollmentId);
-  return { accountId, originWorkspaceId, targetWorkspaceId, enrollmentId: machine.enrollmentId };
+  return {
+    accountId,
+    originWorkspaceId,
+    targetWorkspaceId,
+    enrollmentId: machine.enrollmentId,
+    sandboxId: machine.sandboxId,
+  };
 }
 
 async function bearer(
@@ -1133,6 +1139,38 @@ describe("Connected Machine command policy", () => {
 
     const personal = await seedCrossWorkspaceScopedMachine("user");
     expect((await patchPolicy(personal, ["enrollments:manage"])).status).toBe(200);
+  }, 90_000);
+
+  test("a personal machine can be the default of its owner's Personal workspace only", async () => {
+    if (!available) return;
+    const machine = await seedCrossWorkspaceScopedMachine("user");
+    const setDefault = async (workspaceId: string) =>
+      await appFor(new MemoryEventBus(), {
+        settings: { ...settings, sandboxOwnershipEnabled: true },
+      }).request(`/v1/workspaces/${workspaceId}/settings`, {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${await bearer(machine.accountId, workspaceId, [
+            "workspace:read",
+            "workspace:admin",
+          ])}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId },
+        }),
+      });
+
+    const personal = await setDefault(machine.originWorkspaceId);
+    expect(personal.status).toBe(200);
+    expect(
+      ((await personal.json()) as { settings: Record<string, unknown> }).settings
+        .defaultExecutionTarget,
+    ).toEqual({ kind: "machine", targetSandboxId: machine.sandboxId });
+
+    const sharedResponse = await setDefault(machine.targetWorkspaceId);
+    expect(sharedResponse.status).toBe(422);
+    expect(await sharedResponse.text()).toContain("shared Connected Machine");
   }, 90_000);
 
   test("updates exact memory and CPU limits under a revision fence and projects them", async () => {

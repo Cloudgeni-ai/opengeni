@@ -920,6 +920,9 @@ function AgentScheduleForm({
     workspaceTarget?.kind === "machine"
       ? scheduledMachines.find((item) => item.sandboxId === workspaceTarget.targetSandboxId)
       : null;
+  // A personal machine runs only the automations it is chosen on, so an
+  // automation can't follow a workspace default that is one.
+  const defaultIsPersonalMachine = workspaceMachine?.scope === "user";
   const defaultMachineLabel =
     workspaceTarget?.kind === "machine"
       ? (workspaceMachine?.name ?? "Machine unavailable")
@@ -933,7 +936,9 @@ function AgentScheduleForm({
     !fleet.loading &&
     (draft.executionTarget === "workspace_default"
       ? workspaceTarget?.kind === "machine"
-        ? !workspaceMachine || !isMachineComputeSelectable(workspaceMachine.state)
+        ? !workspaceMachine ||
+          defaultIsPersonalMachine ||
+          !isMachineComputeSelectable(workspaceMachine.state)
         : machineOnly
       : draft.executionTarget === "machine" &&
         !scheduledMachines.some(
@@ -951,6 +956,12 @@ function AgentScheduleForm({
       value: "workspace_default",
       label: "Workspace default",
       description: defaultMachineLabel,
+      ...(defaultIsPersonalMachine
+        ? {
+            disabled: true,
+            disabledReason: "It's your own machine, which runs only automations it's chosen on.",
+          }
+        : {}),
     },
     {
       value: "managed",
@@ -1199,7 +1210,9 @@ function AgentScheduleForm({
       ? "Only the automation's owner can change it. Duplicate it to make your own."
       : "You need permission to manage automations in this workspace."
     : selectedComputeUnavailable && computeChanged
-      ? "Machine unavailable. Choose another machine or update the workspace default."
+      ? draft.executionTarget === "workspace_default" && defaultIsPersonalMachine
+        ? "The workspace default is your own machine. Choose it under Where it runs to run this automation on it."
+        : "Machine unavailable. Choose another machine or update the workspace default."
       : cantRunHere && computeChanged
         ? "Connect a machine first. This Opengeni server can't run automations without one."
         : pinningAccounts && requiresAccountChoice
@@ -1637,7 +1650,9 @@ function AgentScheduleForm({
                   error={errors.machine}
                   hint={
                     selectedComputeUnavailable
-                      ? "Machine unavailable. Choose a replacement or reconnect it."
+                      ? draft.executionTarget === "workspace_default" && defaultIsPersonalMachine
+                        ? "The workspace default is your own machine. Choose it here to run this automation on it."
+                        : "Machine unavailable. Choose a replacement or reconnect it."
                       : draft.executionTarget === "workspace_default"
                         ? `Currently: ${defaultMachineLabel}. Follows changes to the workspace default.`
                         : undefined

@@ -199,7 +199,9 @@ export {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
@@ -3187,6 +3189,19 @@ export function resolveWorkspaceDefaultExecutionTarget(
   return value === undefined || value === null
     ? null
     : WorkspaceDefaultExecutionTarget.parse(value);
+}
+
+/**
+ * Whether a machine may be a workspace's default for new chats. A personal
+ * (Only me) machine qualifies only in a Personal workspace: nobody else starts
+ * chats there, and the scoped machine lookup returns it to its owner alone.
+ * Chats that start on it still ask for the owner's personal-machine consent.
+ */
+export function machineCanBeWorkspaceDefault(
+  machine: { scope?: string | null | undefined },
+  workspace: { kind?: string | null | undefined } | null | undefined,
+): boolean {
+  return machine.scope !== "user" || workspace?.kind === "personal";
 }
 
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
@@ -10537,8 +10552,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * consumer could see that the rendering does not capture: what a field means,
  * the `sourceId`, dedupe keys, classification, summary or lineage the
  * producers write, or how a consumer supersedes, wakes on or renders a notice.
+ *
+ * 2: a child's `child_requires_action` may target the nearest ancestor that
+ * can act instead of a parent that cannot (new lineage `escalatedFromSessionId`),
+ * its resolution follows it there, and it also wakes a parent whose goal is
+ * completed.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 1;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 2;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -19788,13 +19808,25 @@ export const HumanInputAnswer = /* @__PURE__ */ defineSchema(() =>
 );
 export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
 
+/**
+ * `agentDecides` on a skipped response records "Let the agent decide": the
+ * asking agent proceeds with its own best choice and says what it chose. It is
+ * accepted even when the request does not allow an ordinary skip, but never
+ * for secret questions, Skill reviews or secret-use approvals.
+ */
+const SkippedHumanInputResponse = () =>
+  z.object({
+    outcome: z.literal("skipped"),
+    agentDecides: z.literal(true).optional(),
+  });
+
 export const HumanInputResponse = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("outcome", [
     z.object({
       outcome: z.literal("answered"),
       answers: z.array(HumanInputAnswer).max(20),
     }),
-    z.object({ outcome: z.literal("skipped") }),
+    SkippedHumanInputResponse(),
     z.object({ outcome: z.literal("expired") }),
     z.object({ outcome: z.literal("cancelled") }),
   ]),
@@ -19809,7 +19841,7 @@ export const SubmitHumanInputResponseRequest = /* @__PURE__ */ defineSchema(() =
       /** Write-only secret values; the API strips them before building any event. */
       secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
     }),
-    z.object({ outcome: z.literal("skipped") }),
+    SkippedHumanInputResponse(),
   ]),
 );
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;

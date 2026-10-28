@@ -263,51 +263,6 @@ evidence does not pass that gate. First demonstrate the optimized real critical
 path, aggregate failures after in-job retry, actual runner quota and full-CI capacity
 reserve; then rerun the model. Merely configuring C16 does not create runners.
 
-## Continuous timing and post-land watch
-
-`queue-health.yml` records JSON after each queue/full-CI completion and reconciles
-the last day hourly. Cheap PR-entry completions are filtered before job concurrency.
-Event receipts and reconciliation have separate non-cancelling lanes, so PR/queue
-traffic cannot displace the hourly reconciliation. It reads provider queue-add/remove events, synthetic commit
-timestamps, exact-attempt job starts/finishes and PR merge time. Missing timestamps
-remain null; workflow metadata `updated_at` is not substituted for CI completion.
-It reports ready → candidate, candidate → CI, CI → result and result → merge, with
-separate cancellation/failure counts. Rebuilds count once per enqueue for waiting
-percentiles. A rolling-day p95 enqueue-to-CI-start wait over 30 minutes sets
-`stopSignal: true` and recommends true batching (option B). Reports are retained
-for 30 days; no pre-activation native stage times are invented.
-
-The in-house batcher adds `Batch CI` completion receipts and hourly reconciliation
-to the same report. `batchRows` and `batchSummary` contain exact-attempt provider
-job timing and separate cancellation/provider-red counts. A provider-red run is
-not itself a verified code-failure verdict. These rows deliberately leave ready,
-actual build and landing timestamps unknown: deterministic candidate commit dates
-are not build timestamps. The controller stage ledger owns those stages and its
-rolling-day wait signal; an unknown batch queue wait must not be read as healthy.
-Batch collection errors are recorded as unavailable and cannot suppress the
-independent full-main alert reconciliation. Provider start delay uses the selected
-attempt's `run_started_at`; a retry without that timestamp remains unknown.
-Hourly reconciliation contains only the latest attempt of each run, while event
-receipts retain each delivered completion. Do not interpret that hourly sample as
-the controller's complete retry history.
-Historical `queue/shadow-traffic/` runs are reported in separate
-`trafficShadowRows` / `trafficShadowSummary` fields; they never contribute to the
-live batch provider sample. Historical readiness proxies and reconstruction
-artifacts must not be presented as live queue capacity or culprit evidence.
-
-Landing instrumentation does **not** post public comments or issues. Explicit
-rollout opt-in `QUEUE_HEALTH_ALERTS=true` enables the hourly/manual reconciliation
-lane as the sole public writer. For red **push CI on main**, it comments on the
-exact landing PR and appends a deduplicated alert to **Main CI health: failed
-full-suite runs**. Event receipts remain read-only. Hourly reconciliation catches
-reports coalesced while the event lane was busy. Cancelled, neutral, skipped and unfinished runs never
-become failures. The landing PR is an investigation suspect, **not a proven
-culprit**: coalesced full CI includes earlier changes too. Compare the last green
-SHA and failing leaf, then bisect/reproduce if needed. Once confirmed, revert the
-culprit PR first through the queue and fix it afterwards; do not leave main red
-while developing a forward fix. There is no automatic blind revert or external
-paging integration. A failed full run cannot prove causality alone.
-
 ## Agent procedure
 
 1. Freeze the reviewable head. Run `bun run typecheck`, the process-isolated

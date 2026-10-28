@@ -5,6 +5,7 @@ import {
   startedJobCount,
   supersededQueuedRuns,
   dueMainRun,
+  mainCiInterval,
   type MainRun,
   type ParkedRun,
   type QueuedRun,
@@ -154,4 +155,10 @@ test("re-runs the newest deferred main SHA on the main CI cadence", () => {
   // With no full run listed, main is due.
   expect(dueMainRun([head], sha, now)).toBe(3);
   expect(dueMainRun([head], "c".repeat(40), now)).toBeNull();
+  // A longer configured interval waits for it.
+  expect(dueMainRun([head, full], sha, now, mainCiInterval("60"))).toBeNull();
+  // Below five minutes falls back to the default.
+  expect(dueMainRun([head, full], sha, now, mainCiInterval("2"))).toBe(3);
+  expect(mainCiInterval(undefined)).toBe(30 * 60_000);
+  expect(mainCiInterval("abc")).toBe(30 * 60_000);
 });

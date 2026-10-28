@@ -130,8 +130,11 @@ update pulls it to now and its producer still signals after commit; without
 that signal the input would wait for the periodic dispatcher tick. The extra
 signal is a hint only: one claim consumes the whole pending batch, and the
 acknowledgement rules above keep the revision open until it does. Terminal
-background-command settlement registers the same wake but does not signal from
-its settlement callers, so the dispatcher delivers it. Claim, supersession, and
+background-command settlement registers the same wake and returns it, and each
+settlement caller (pushed Connected Machine completion, in-turn, API and reaper
+retained-process settlement, the selfhosted reaper, lost or contained boxes)
+signals it after commit, bounded to 5 seconds; the dispatcher delivers any wake
+a caller could not signal. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 for completed/paused goals without a held wait do not create new work.
 "Eligible" includes the compaction-failure hold: when the newest finished turn
@@ -213,11 +216,21 @@ backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
 the claim returns its rows sorted instead of in heap order (migration 0528). Like
 child results, an immediate child notice may autonomously wake a parent with either
 an active goal or a current session-level wait. Like `child_terminal_result`, a
-`child_requires_action` also wakes an idle parent that has no goal at all, so
-the parent can answer the child's question while the person sees the same card;
-a parent whose goal is paused or completed is not woken by it. Without such an
-obligation, other child lifecycle notices remain pending until new intent
-arrives.
+`child_requires_action` also wakes an idle parent that has no goal at all or a
+completed goal (without reopening it), so the parent can answer the child's
+question while the person sees the same card; a parent whose goal is paused is
+not woken by it. Without such an obligation, other child lifecycle notices
+remain pending until new intent arrives.
+
+A `child_requires_action` goes to the child's parent unless the parent cannot
+act on it: it is failed or cancelled, or its frozen agent configuration has
+`subagents` off, so it has no `session_human_input_respond`. Then the notice
+goes to the nearest ancestor that can act, and only to that one
+(`childRequiresActionRouteTx`). Its authority is that ancestor's own turn that
+started the branch, its lineage names `escalatedFromSessionId`, and its summary
+says the parent can't act. The question's `child_requires_action_resolved`
+follows it to the same session, so it supersedes the notice there. With no
+such ancestor, the notice stays with the parent.
 
 A failed or cancelled child reports from its settlement transaction. An idle
 child reports at its workflow's terminal-for-now idle boundary: after goal

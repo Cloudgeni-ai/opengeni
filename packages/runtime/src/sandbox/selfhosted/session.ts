@@ -91,7 +91,13 @@ import {
   type OpStreamOutputReceipt,
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
-import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
+import {
+  connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
+  isWindowsConnectedMachinePath,
+  relativeConnectedMachinePath,
+  resolveConnectedMachinePath,
+} from "./workspace-path";
 import type { ShellDialect } from "@opengeni/vaults";
 import {
   carryHasReferences,
@@ -1911,7 +1917,11 @@ export class SelfhostedSession {
     return exists;
   }
 
-  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. */
+  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. Like the
+   *  other providers, an entry's `path` is absolute when the listed path was and
+   *  workspace-relative otherwise, so it can be passed straight back to
+   *  `readFile`/`listDir`; the machine reports it relative to the listed
+   *  directory, which is only the bare name. */
   async listDir(args: {
     path: string;
     runAs?: string;
@@ -1920,9 +1930,24 @@ export class SelfhostedSession {
       path: args.path,
       ...(args.runAs ? { runAs: args.runAs } : {}),
     });
+    const directory = resolveConnectedMachinePath(this.workspaceRoot, args.path);
+    const windows = isWindowsConnectedMachinePath(this.workspaceRoot);
+    const base = isConnectedMachineAbsolutePath(args.path)
+      ? directory
+      : (relativeConnectedMachinePath(this.workspaceRoot, directory) ?? directory);
+    // Join literally: a POSIX name may contain a backslash or other bytes the
+    // path normalizers reject, and the machine never reports `.` or `..`.
+    const entryPath = (reported: string) => {
+      const relative = windows ? reported.replaceAll("\\", "/") : reported;
+      if (windows ? isConnectedMachineAbsolutePath(relative) : relative.startsWith("/")) {
+        return relative;
+      }
+      if (!base) return relative;
+      return `${base.endsWith("/") ? base : `${base}/`}${relative}`;
+    };
     return result.fsList.entries.map((entry) => ({
       name: entry.name,
-      path: entry.path,
+      path: entryPath(entry.path),
       type:
         entry.kind === FsEntryKind.FS_ENTRY_KIND_DIRECTORY
           ? ("dir" as const)
