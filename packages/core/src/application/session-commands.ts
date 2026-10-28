@@ -28,6 +28,8 @@ import {
   getSession,
   retireArchivedChatWaits,
   setSessionArchive,
+  SessionArchiveConfirmationRequiredError,
+  sessionArchiveNeedsPauseConfirmation,
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionQueueSnapshot,
@@ -1043,6 +1045,20 @@ export async function archiveHumanSessionWorkstream(
 ) {
   if (input.archived && input.pause) {
     await authorizeHumanSessionCommand(deps, context, "session.control");
+  }
+  // Ask about active work at once, not after the archive and control locks:
+  // waiting for those first is what delayed the question on busy workspaces.
+  if (
+    input.archived &&
+    input.pause &&
+    !input.confirmPause &&
+    (await sessionArchiveNeedsPauseConfirmation(deps.db, {
+      workspaceId: context.workspaceId,
+      subjectId: context.subjectId,
+      sessionId: context.sessionId,
+    }))
+  ) {
+    throw new SessionArchiveConfirmationRequiredError();
   }
   let control: Awaited<ReturnType<typeof mutateSessionControlInTransaction>> | undefined;
   const session = await setSessionArchive(deps.db, {

@@ -301,6 +301,75 @@ describe("archiving a chat", () => {
     expect(postCommitTasks.length).toBe(0);
   });
 
+  test("the active-work question does not wait behind the archive and workspace control locks", async () => {
+    if (!available) return;
+    const chat = await freshChat();
+    const authorization = await bearer(chat, OWNER);
+    // A busy workspace: other archives by this person and admissions in the
+    // workspace hold the locks an archive takes before it pauses.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      held = resolve;
+    });
+    const holder = admin.begin(async (sql) => {
+      await sql`select pg_advisory_xact_lock(hashtextextended(${`session-personal-state:${chat.workspaceId}:${OWNER}`}, 0))`;
+      await sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${chat.workspaceId}`}, 0))`;
+      held();
+      await released;
+    });
+    try {
+      await holding;
+      const answered = await Promise.race([
+        rawArchive(chat, authorization, { archived: true }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+      ]);
+      expect(answered).not.toBeNull();
+      expect(answered!.status).toBe(409);
+      expect((await answered!.json()).code).toBe("session_archive_confirmation_required");
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await archivedFor(chat)).toBe(false);
+    expect(await directState(chat.sessionId)).toBe("active");
+  });
+
+  test("an unknown chat or a sub-chat gets no active-work answer", async () => {
+    if (!available) return;
+    const chat = await freshChat();
+    const response = await rawArchive(
+      { workspaceId: chat.workspaceId, sessionId: crypto.randomUUID() },
+      await bearer(chat, OWNER),
+      { archived: true },
+    );
+    expect(response.status).toBe(404);
+    // Archive applies to whole chats; a working sub-chat is not asked about.
+    const child = await createSession(db, {
+      accountId: chat.accountId,
+      workspaceId: chat.workspaceId,
+      parentSessionId: chat.sessionId,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: OWNER },
+    });
+    await admin`update sessions set status = 'running' where id = ${child.id}`;
+    const sub = await rawArchive(
+      { workspaceId: chat.workspaceId, sessionId: child.id },
+      await bearer(chat, OWNER),
+      { archived: true },
+    );
+    expect(sub.status).toBe(404);
+  });
+
   test("an idle chat pauses without confirmation", async () => {
     const chat = await freshChat("idle");
     await archive(chat, await bearer(chat, OWNER), true, {});
