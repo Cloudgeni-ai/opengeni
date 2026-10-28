@@ -38169,6 +38169,7 @@
       "annotationFromSelection": "value",
       "annotationHasNote": "value",
       "annotationNoteNeedsDisclosure": "value",
+      "annotationQuoteText": "value",
       "AnnotationSelection": "type",
       "answersFromDrafts": "value",
       "applyPatchOpsFromToolItem": "value",
