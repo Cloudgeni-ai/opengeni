@@ -957,10 +957,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }),
     ]);
     // A fresh form starts on the caller's own default when it is usable now.
-    return c.json({
-      ...draft,
-      memberDefaultExecutionTarget: memberDefault.usable ? memberDefault.target : null,
-    });
+    // Without one the draft keeps its usual shape and the form follows the
+    // workspace default.
+    return c.json(
+      memberDefault.usable && memberDefault.target
+        ? { ...draft, memberDefaultExecutionTarget: memberDefault.target }
+        : draft,
+    );
   });
 
   app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
