@@ -182,6 +182,7 @@ import {
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
+export * from "./secret-value-masking";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -22396,6 +22397,7 @@ export * from "./task-notes";
 export * from "./canonical-human-identities";
 export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
+export * from "./inference-residency";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
 

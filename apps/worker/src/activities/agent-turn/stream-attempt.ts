@@ -57,6 +57,7 @@ import {
   preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
+  secretValueModelInputFilter,
   type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
@@ -220,6 +221,7 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
+import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
 
 export type TurnStreamAttemptDeps = {
@@ -1001,6 +1003,7 @@ export async function runTurnStreamAttempt(
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
       deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
+    const attemptSecretValues = currentAttemptSecretValues();
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
@@ -1058,7 +1061,15 @@ export async function runTurnStreamAttempt(
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
-          onModelVisibleContext: async (snapshot) => {
+          // Final guard: no known secret value reaches the provider, whatever
+          // path brought it into the model input (docs/secrets.md, Masking).
+          ...(attemptSecretValues
+            ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
+            : {}),
+          onModelVisibleContext: async (rawSnapshot) => {
+            const snapshot = attemptSecretValues
+              ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
+              : rawSnapshot;
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,

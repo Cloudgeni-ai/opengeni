@@ -2878,7 +2878,13 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Conversation, source, tool, and error text is not centrally regex-redacted.
+  Known secret values (what an attempt's references resolve to and the
+  credentials Opengeni injects) are replaced by their references in tool
+  results, model input and stored conversation text before storage and before
+  the model sees them (docs/secrets.md, Masking). Other conversation, source,
+  tool, and error text is not regex-redacted. Known-value masking supersedes
+  the 5 August 2026 "keep content exact" decision for this case, approved on
+  26 October 2026.
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
