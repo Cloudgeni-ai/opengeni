@@ -207,50 +207,74 @@ function hostOf(baseUrl: string): string | null {
 
 /**
  * The deployment an endpoint URL calls, from its `/deployments/{name}` path
- * segment (Azure OpenAI's deployment-path form), or null when the path has no
- * such segment. Such an endpoint runs that deployment whatever model the
- * request body names. Segments are percent-decoded, empty segments are
- * dropped and `deployments` matches in any case, the way the provider reads
- * the path. An empty string means the path calls a deployment that can't be
- * read: refuse it under EU. That is a missing name, two different names, or a
- * segment that could mean another path once decoded (undecodable, `.` or
- * `..`, or containing `/`, `\` or `%`).
+ * segment (Azure OpenAI's deployment-path form), or null when no segment
+ * holds or hides a `deployments` marker. Such an endpoint runs that
+ * deployment whatever model the request body names.
+ *
+ * Only a plain path is read: empty segments are dropped, the marker matches in
+ * any case (percent-encoded too), and the name and every segment after it must
+ * be readable `[A-Za-z0-9._-]+` and not `.` or `..`. Anything else returns an
+ * empty string, meaning a deployment that can't be read, which is refused
+ * under EU. That covers a missing name, a second marker, a marker hidden in a
+ * longer or encoded segment (`deployments;`, `x%2Fdeployments`), and a later
+ * segment that could lead somewhere else once decoded (`..%2F`, `%5C`, `;`).
  */
 export function modelEndpointDeployment(url: string | URL): string | null {
   let pathname: string;
   try {
+    // The URL parser has already resolved plain and %2e dot segments.
     pathname = new URL(url).pathname;
   } catch {
     return null;
   }
-  // The URL parser has already resolved plain and %2e dot segments; what is
-  // left decoded is one segment, or null when it can't be read as one name.
   const segments = pathname
     .split("/")
     .filter((raw) => raw !== "")
     .map((raw) => {
-      let decoded: string;
+      let decoded: string | null;
       try {
         decoded = decodeURIComponent(raw);
       } catch {
-        return { raw, name: null };
+        decoded = null;
       }
-      const unreadable = decoded === "." || decoded === ".." || /[/\\%]/u.test(decoded);
-      return { raw, name: unreadable ? null : decoded };
+      return {
+        decoded,
+        marker: decoded?.toLowerCase() === "deployments",
+        hidesMarker: hidesDeploymentsMarker(raw),
+        plain: decoded !== null && isPlainDeploymentSegment(decoded),
+      };
     });
-  const names = new Set<string>();
-  for (const [index, segment] of segments.entries()) {
-    if (segment.name === null) {
-      // An unreadable segment that may hold the marker hides the deployment.
-      if (/deployments/iu.test(looselyDecoded(segment.raw))) names.add("");
-      continue;
-    }
-    if (segment.name.toLowerCase() !== "deployments") continue;
-    names.add(segments[index + 1]?.name ?? "");
-  }
-  if (names.size === 0) return null;
-  if (names.size > 1 || names.has("")) return "";
-  return [...names][0]!;
+  const first = segments.findIndex((segment) => segment.marker || segment.hidesMarker);
+  if (first < 0) return null;
+  const marker = segments[first]!;
+  const name = segments[first + 1];
+  if (!marker.marker || !name) return "";
+  const rest = segments.slice(first + 1);
+  if (!rest.every((segment) => segment.plain)) return "";
+  // A second marker after the name (the name itself may be anything plain).
+  if (rest.slice(1).some((segment) => segment.marker || segment.hidesMarker)) return "";
+  return name.decoded!;
+}
+
+/** A readable, plain path segment: `[A-Za-z0-9._-]+`, not `.` or `..`. */
+function isPlainDeploymentSegment(segment: string): boolean {
+  return /^[A-Za-z0-9._-]+$/u.test(segment) && segment !== "." && segment !== "..";
+}
+
+/**
+ * Whether a raw segment holds or hides `deployments`: any part of it, decoded
+ * as far as it goes and split on separators, starts with the word in any case
+ * once leading punctuation is dropped.
+ */
+function hidesDeploymentsMarker(raw: string): boolean {
+  return looselyDecoded(raw)
+    .split(/[/\\]/u)
+    .some((part) =>
+      part
+        .replace(/^[^A-Za-z0-9]+/u, "")
+        .toLowerCase()
+        .startsWith("deployments"),
+    );
 }
 
 /** Every ASCII %XX escape decoded, repeatedly (to catch double encoding). */

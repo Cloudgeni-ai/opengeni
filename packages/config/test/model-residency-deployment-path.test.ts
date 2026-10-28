@@ -78,8 +78,35 @@ describe("deployment-path endpoints and residency", () => {
       "/openai/deployments%5Cgpt-global/responses",
       "/openai/%2564eployments%2Fgpt-global/responses",
       "/openai/%64eployments%E0/gpt-global/responses",
+      // After the name too: every later segment must be plain.
+      "/openai/deployments/gpt-eu/%2e%2e%2fgpt-global/responses",
+      "/openai/deployments/gpt-eu/..%2fgpt-global/responses",
+      "/openai/deployments/gpt-eu/%2e%2e%5cgpt-global/responses",
+      "/openai/deployments/gpt-eu/x%2F..%2F..%2Fgpt-global/responses",
+      "/openai/deployments/gpt-eu/..;/gpt-global/responses",
+      "/openai/deployments/gpt-eu;v=1/responses",
+      // A marker in a longer segment is hidden, not absent.
+      "/openai/deployments%3B/gpt-global/responses",
+      "/openai/deployments%00/gpt-global/responses",
+      "/openai/deployments%20/gpt-global/responses",
+      "/openai/Deployments;x/gpt-global/responses",
+      "/openai/x%2Fdeployments/gpt-global/responses",
     ]) {
       expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("");
+    }
+    // Ordinary Azure deployment paths still resolve, query string and all.
+    for (const path of [
+      "chat/completions",
+      "responses",
+      "embeddings",
+      "audio/transcriptions",
+      "images/generations",
+    ]) {
+      expect(
+        modelEndpointDeployment(
+          `https://res.openai.azure.com/openai/deployments/gpt-eu.v2_1/${path}?api-version=2025-04-01-preview`,
+        ),
+      ).toBe("gpt-eu.v2_1");
     }
     // Paths without a deployment marker are unaffected by unreadable segments.
     expect(

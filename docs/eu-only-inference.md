@@ -49,9 +49,11 @@ Rules:
   such a claim as unknown. The path is read the way the provider reads it
   (`modelEndpointDeployment`): segments percent-decoded, empty segments
   dropped, `deployments` in any case. A deployment path whose name can't be
-  read is never EU: a missing name, two different names, or a segment that
-  could mean another path once decoded (undecodable, `.` or `..`, or
-  containing `/`, `\` or `%`).
+  read is never EU. Once a segment holds or hides `deployments` (in any case,
+  percent-encoded, or inside a longer segment), the name and every later
+  segment must be plain `[A-Za-z0-9._-]+` and not `.` or `..`, with no second
+  marker; anything else (a missing name, `..%2F`, `%5C`, `;`, `deployments;`)
+  is unknown.
   `OPENGENI_MODEL_PROVIDERS_JSON`,
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` and the catalog upsert refuse it; a
   stored database document is never refused for it, so a later release that

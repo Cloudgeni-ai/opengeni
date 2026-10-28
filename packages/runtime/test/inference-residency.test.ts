@@ -359,6 +359,16 @@ describe("EU-only inference enforcement", () => {
       "/openai/deployments/gpt-eu%252F..%252Fgpt-global-standard/responses",
       "/openai/deployments/gpt-eu/../gpt-global-standard/responses",
       "/openai/deployments/gpt-eu/%2e%2e/gpt-global-standard/responses",
+      // Nor do they after the name, and a marker hidden in a longer segment
+      // makes the deployment unknown rather than absent.
+      "/openai/deployments/gpt-eu/%2e%2e%2fgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu/..%2fgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu/%2e%2e%5cgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu/x%2F..%2F..%2Fgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu/..;/gpt-global-standard/responses",
+      "/openai/deployments%3B/gpt-global-standard/responses",
+      "/openai/deployments%00/gpt-global-standard/responses",
+      "/openai/deployments%20/gpt-global-standard/responses",
     ]) {
       await expect(
         guarded(`https://res.openai.azure.com${path}?api-version=1`, post("gpt-eu")),
@@ -368,7 +378,15 @@ describe("EU-only inference enforcement", () => {
       "https://res.openai.azure.com/openai/DEPLOYMENTS//gpt-eu/responses",
       post("gpt-eu"),
     );
-    expect(sent).toHaveLength(2);
+    // Ordinary Azure model-call deployment paths still pass (other endpoints
+    // such as audio and images are refused here as non-model requests).
+    for (const path of ["chat/completions", "responses"]) {
+      await guarded(
+        `https://res.openai.azure.com/openai/deployments/gpt-eu/${path}?api-version=2025-04-01-preview`,
+        post("gpt-eu"),
+      );
+    }
+    expect(sent).toHaveLength(4);
   });
 
   test("built-in Azure deployment-path mode refuses a model that is not its deployment", () => {
