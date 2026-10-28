@@ -110,6 +110,17 @@ never treats opaque tokens, decoded JWTs or missing identity as proof that two
 accounts are the same. A reviewed verification adapter can enable distinct
 accounts without changing the persistence policy.
 
+Reviewed adapters exist for Slack, Gmail and Google Calendar (in their OAuth
+profiles) and, by exact MCP URL in `accountIdentityVerifierFor`
+(`apps/api/src/integrations/oauth-profiles.ts`), for Google Drive (Drive About's
+`user.emailAddress`, identity `googleDriveEmail`) and Atlassian's hosted Rovo
+MCP (the read-only `atlassianUserInfo` tool, identity `atlassianAccountId`, with
+the email and name kept for the label). These run after the normal tool
+verification with the new token. A failed identity read leaves the identity
+unknown, so the one-connection rule above still applies. Connections made before
+an adapter existed have no identity: reconnect that account once before adding
+another.
+
 Existing duplicate records are not deleted or rebound by this flow. Their
 accepted session/schedule references and approval policies remain intact.
 Account lists and pickers show available provider names, workspace names and

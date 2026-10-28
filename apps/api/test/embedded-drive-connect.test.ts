@@ -125,6 +125,8 @@ test("Drive callback requires an authenticated read and binds one exact personal
   let readRejected = true;
   let reportedScopes = OFFICIAL_DRIVE_MCP_SCOPES.join(" ");
   let hasRefreshToken = true;
+  let driveEmail = "anna@example.test";
+  let identityReads = 0;
   // Exercise the real HTTP routes, PKCE state, MCP handshake, claims and database
   // writes. Only external provider transport is synthetic, with no live fallback.
   const transport = spyOn(network, "pinnedFetch").mockImplementation(async (input, init) => {
@@ -156,6 +158,11 @@ test("Drive callback requires an authenticated read and binds one exact personal
         expires_in: 3600,
         scope: reportedScopes,
       });
+    }
+    if (url === "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)") {
+      identityReads++;
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-drive-access");
+      return Response.json({ user: { emailAddress: driveEmail } });
     }
     if (url === OFFICIAL_DRIVE_MCP_URL) {
       if (init?.method === "GET" || init?.method === "DELETE")
@@ -404,8 +411,10 @@ test("Drive callback requires an authenticated read and binds one exact personal
       metadata: {
         mcpUrl: OFFICIAL_DRIVE_MCP_URL,
         mcpToolsVerification: { status: "ok", toolCount: 1 },
+        googleDriveEmail: "anna@example.test",
       },
     });
+    expect(identityReads).toBe(1);
     expect(JSON.stringify(saved)).not.toContain("private-file-id");
     expect(JSON.stringify(saved)).not.toContain("private-file-name");
     expect(await accounts()).toHaveLength(1);
@@ -473,6 +482,24 @@ test("Drive callback requires an authenticated read and binds one exact personal
       ),
     ).toEqual(saved);
     expect(await accounts()).toHaveLength(1);
+
+    // The verified Drive email tells a second account from the same one again.
+    readRejected = false;
+    driveEmail = "erik@example.test";
+    const second = await begin();
+    await callback(second.state);
+    const added = await read(second.attempt.id);
+    expect(added).toMatchObject({ state: "complete", credentialsCommitted: true });
+    expect(added.account.id).not.toBe(completed.account.id);
+    expect(await accounts()).toHaveLength(2);
+    driveEmail = "anna@example.test";
+    const again = await begin();
+    await callback(again.state);
+    expect(await read(again.attempt.id)).toMatchObject({
+      state: "complete",
+      account: { id: completed.account.id },
+    });
+    expect(await accounts()).toHaveLength(2);
   } finally {
     transport.mockRestore();
   }

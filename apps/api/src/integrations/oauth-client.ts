@@ -83,6 +83,8 @@ import {
   OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
+  accountIdentityKeysFor,
+  accountIdentityVerifierFor,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
   builtInOAuthProfileFor,
@@ -90,12 +92,13 @@ import {
   defaultOwnershipFor,
   deploymentManagedClientFor,
   oauthProfileFromCatalog,
+  type AccountIdentityVerifier,
   type OAuthProviderProfile,
   type PinnableAuthorizationServer,
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
 import { decideOAuthAccountConnection, oauthAccountFailureMessage } from "./oauth-account-identity";
-import { errorMessage } from "@opengeni/contracts/values";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 
@@ -1131,7 +1134,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         mcpUrl: state.mcpUrl,
         metadata,
         grantedScopes: scopes,
-        identityKeys: profile?.accountIdentityMetadataKeys,
+        identityKeys: accountIdentityKeysFor(profile, state.mcpUrl),
         requestedConnectionId: state.connectionId,
       });
       if (decision.kind === "reject") {
@@ -2816,8 +2819,12 @@ async function verifyMcpToolsList(
   token: TokenResponse,
   signal: AbortSignal,
   verification?: OAuthProviderProfile["remoteToolVerification"],
-): Promise<Array<{ name: string; description?: string }>> {
-  const listed = await withMcpStreamableHttpClient(
+  identity?: AccountIdentityVerifier,
+): Promise<{
+  tools: Array<{ name: string; description?: string }>;
+  providerIdentity?: Record<string, string>;
+}> {
+  const { listed, providerIdentity } = await withMcpStreamableHttpClient(
     {
       url: resource,
       clientName: "opengeni-integration-verify",
@@ -2850,13 +2857,80 @@ async function verifyMcpToolsList(
         if (result.isError) throw new Error("Authenticated connector verification failed");
         // Discard file metadata. Setup retains only the successful proof and tool descriptors.
       }
-      return toolsResult;
+      // Identity only labels and de-duplicates accounts: a failure leaves it unknown.
+      const providerIdentity =
+        identity?.kind === "mcp_tool" &&
+        toolsResult.tools.some((tool) => tool.name === identity.toolName)
+          ? await client
+              .callTool(
+                { name: identity.toolName, arguments: identity.arguments },
+                { timeout: 10_000, maxTotalTimeout: 10_000 },
+              )
+              .then((result) =>
+                result.isError ? undefined : identity.validateIdentity(mcpToolResultObject(result)),
+              )
+              .catch(() => undefined)
+          : undefined;
+      return { listed: toolsResult, providerIdentity };
     },
   );
-  return listed.tools.map((tool) => ({
-    name: tool.name,
-    ...(tool.description ? { description: tool.description } : {}),
-  }));
+  return {
+    tools: listed.tools.map((tool) => ({
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+    })),
+    ...(providerIdentity ? { providerIdentity } : {}),
+  };
+}
+
+/** A tool result's object payload: structured content, else a JSON text block. */
+function mcpToolResultObject(result: {
+  structuredContent?: unknown;
+  content?: unknown;
+}): Record<string, unknown> {
+  if (isRecord(result.structuredContent)) return result.structuredContent;
+  const blocks = Array.isArray(result.content) ? result.content : [];
+  for (const block of blocks) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    try {
+      const parsed: unknown = JSON.parse(block.text);
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // Not JSON; try the next block.
+    }
+  }
+  return {};
+}
+
+/** Reviewed authenticated REST identity read; any failure leaves identity unknown. */
+async function verifyHttpAccountIdentity(
+  settings: Settings,
+  identity: Extract<AccountIdentityVerifier, { kind: "http" }>,
+  token: TokenResponse,
+  signal: AbortSignal,
+): Promise<Record<string, string> | undefined> {
+  try {
+    const response = await fetchOAuth(identity.url, settings, {
+      method: "GET",
+      signal,
+      headers: {
+        authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+      },
+    });
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      return undefined;
+    }
+    const payload = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "Connector account verification",
+      { signal },
+    );
+    return identity.validateIdentity(payload);
+  } catch {
+    return undefined;
+  }
 }
 
 async function verifyMcpToolsListNonFatal(
@@ -2880,13 +2954,20 @@ async function verifyMcpToolsListNonFatal(
     let providerIdentity: Record<string, string> | undefined;
     const tools = await deadline.run("tools_list", async (signal) => {
       if (!local || state.mcpUrl !== profile?.requireExactMcpUrl?.url) {
-        return verifyMcpToolsList(
+        const identity = local ? undefined : accountIdentityVerifierFor(state.mcpUrl);
+        const verified = await verifyMcpToolsList(
           settings,
           state.mcpUrl,
           token,
           signal,
           profile?.remoteToolVerification,
+          identity,
         );
+        providerIdentity =
+          identity?.kind === "http"
+            ? await verifyHttpAccountIdentity(settings, identity, token, signal)
+            : verified.providerIdentity;
+        return verified.tools;
       }
       const response = await fetchOAuth(local.url, settings, {
         method: local.method ?? "POST",
