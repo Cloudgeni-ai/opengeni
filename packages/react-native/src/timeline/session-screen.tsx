@@ -704,12 +704,14 @@ function StuckCard({
         <>
           <Text style={textStyle}>{approved.body}</Text>
           <Text style={textStyle}>{approved.next}</Text>
-          {approved.action && approvedTarget && runOnApprovedMachine ? (
+          {session.effectiveControl.state === "paused" ? (
+            <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>
+          ) : approved.action && approvedTarget && runOnApprovedMachine ? (
             <Button
               label={rechecking ? t("sessionAdmission.moving") : approved.action}
               variant="primary"
               busy={busy || rechecking}
-              disabled={busy || rechecking || session.effectiveControl.state === "paused"}
+              disabled={busy || rechecking}
               style={{ alignSelf: "flex-start" }}
               onPress={() => {
                 if (recheckPending.current) return;
