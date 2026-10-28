@@ -41,7 +41,8 @@ import {
   markCodemodeOperationExecutionStarted,
   renewCodemodeOperationClaim,
   settleCodemodeOperationWithOutput,
-  maskSecretValuesForStorage,
+  captureToolOutputSecretShapes,
+  maskToolOutputForStorage,
   type Database,
 } from "@opengeni/db";
 import { currentAttemptSecretValues } from "./agent-turn/secret-values";
@@ -643,14 +644,16 @@ export class CodemodeAttemptDispatcher {
         settlement.result,
       );
     }
+    // The journal row and its timeline event store known secret values and
+    // secret-shaped parts (captured into the task vault) as references; a
+    // script can pass a reference on to its next call.
+    await captureToolOutputSecretShapes(settlement, "codemode_journal");
     const result = await settleCodemodeOperationWithOutput(this.db, {
       ...this.scope,
       operationId: operation.operationId,
       claimId,
       producerId: operation.caller.subjectId,
-      // The journal row and its timeline event store known secret values as
-      // their references; a script can pass a reference on to its next call.
-      settlement: maskSecretValuesForStorage(settlement, "codemode_journal"),
+      settlement: maskToolOutputForStorage(settlement, "codemode_journal"),
     });
     if (!result.committed || result.events.length === 0) return;
     recordToolApproval(settlement.state === "outcome_unknown" ? "unknown" : settlement.state);

@@ -26,7 +26,7 @@ import {
   SheetTrigger,
 } from "@opengeni/react/ui/sheet";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { desktopPlatform, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
+import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
@@ -276,16 +276,14 @@ function SettingsRail({
     }
   };
 
-  const nav = (
+  return (
     <SettingsNav
       ref={ref}
       variant="rail"
       aria-label={label}
       data-settings-rail
       className={cn(
-        "w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
-        // Inside the macOS frame below, the frame paints the rail and only this list scrolls.
-        windowControlsInPage ? "min-h-0 flex-1 bg-transparent" : "og-rail-glow h-full",
+        "og-rail-glow h-full w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
         className,
       )}
       onClick={(event) => {
@@ -296,16 +294,14 @@ function SettingsRail({
       }}
       header={
         <div className="flex min-w-0 flex-col gap-3">
-          {windowControlsInPage ? null : (
-            <LinkShell
-              link={home}
-              aria-label="Opengeni home"
-              className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
-            >
-              <BrandMark className="w-5" />
-              <Wordmark className="text-[18px]" />
-            </LinkShell>
-          )}
+          <LinkShell
+            link={home}
+            aria-label="Opengeni home"
+            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+          >
+            <BrandMark className="w-5" />
+            <Wordmark className="text-[18px]" />
+          </LinkShell>
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}
           </NavItem>
@@ -345,26 +341,6 @@ function SettingsRail({
         ))
       )}
     </SettingsNav>
-  );
-
-  if (!windowControlsInPage) return nav;
-  // macOS draws its window controls (and, while the window is shared, the
-  // sharing badge) over the rail's top-left corner. That row stays outside the
-  // scrolling list, like the main rail's, so the back link, workspace picker
-  // and search can never scroll underneath them. It still moves the window.
-  return (
-    <div
-      data-settings-rail-frame
-      className="og-rail-glow flex h-full min-h-0 w-full flex-col bg-bg"
-    >
-      <div
-        data-settings-window-controls
-        data-window-drag
-        aria-hidden="true"
-        className="h-11 shrink-0"
-      />
-      {nav}
-    </div>
   );
 }
 

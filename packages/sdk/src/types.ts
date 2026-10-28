@@ -4184,6 +4184,8 @@ export type FirstPartyMcpToolName =
   | "secret_get"
   | "secret_move"
   | "secret_delete"
+  | "secret_profile_get"
+  | "secret_profile_set"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"

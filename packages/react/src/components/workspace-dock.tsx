@@ -394,6 +394,7 @@ export function WorkspaceDock({
         </div>
         <div
           data-workspace-surface
+          data-window-layer
           role="dialog"
           aria-modal="true"
           aria-label={msg("workspaceDock.workspace")}
@@ -526,6 +527,7 @@ export function WorkspaceDock({
               layout changes must never destroy an editor buffer or terminal view. */}
           <div
             data-workspace-surface
+            data-window-layer={maximized || undefined}
             role={maximized ? "dialog" : undefined}
             aria-modal={maximized ? true : undefined}
             aria-label={maximized ? msg("workspaceDock.workspace") : undefined}

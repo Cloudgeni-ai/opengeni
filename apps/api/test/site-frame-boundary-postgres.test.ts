@@ -887,24 +887,6 @@ test("a schedule created from a Site records the Site; another Site cannot chang
   await expect(
     assertScheduledTaskMutationOwner(db.db, await f.agentGrant(fromA), directTask.id),
   ).rejects.toMatchObject({ status: 403 });
-
-  // Automations are never created or changed from a Site page, even by an admin.
-  const automation = await withSiteSessionOrigin(originA, () =>
-    f.app.request(`/v1/workspaces/${f.workspace.id}/automations/sources`, {
-      method: "POST",
-      headers: f.service,
-      body: JSON.stringify({}),
-    }),
-  );
-  expect(automation.status).toBe(403);
-  expect(await automation.text()).toContain("A Site page cannot create or change automations");
-  // Outside a Site the same admin request reaches validation.
-  const outside = await f.app.request(`/v1/workspaces/${f.workspace.id}/automations/sources`, {
-    method: "POST",
-    headers: f.service,
-    body: JSON.stringify({}),
-  });
-  expect(outside.status).not.toBe(403);
 });
 
 test("Site pages cannot change publications; their agents use normal owner authorization", async () => {

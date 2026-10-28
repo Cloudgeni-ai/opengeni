@@ -555,6 +555,13 @@ const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",
   ],
+  "test/e2e/desktop-window-bar.ts": [
+    "test/e2e/artifact-desktop.browser.e2e.ts",
+    "test/e2e/desktop-corner.browser.e2e.ts",
+    "test/e2e/desktop-rail.browser.e2e.ts",
+    "test/e2e/session-sidebar.browser.e2e.ts",
+    "test/e2e/signed-out-page.browser.e2e.ts",
+  ],
 };
 
 const ARTIFACT_RUNTIME_WORKSPACES = [

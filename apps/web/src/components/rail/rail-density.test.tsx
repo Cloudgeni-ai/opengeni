@@ -96,12 +96,12 @@ describe("rail overflow boundaries", () => {
     );
   });
 
-  test("reserves the macOS title row outside scrolling without pinning the workspace picker", () => {
-    expect(railShell).toMatch(
-      /windowControlsInPage \? \([\s\S]*?data-rail-window-controls[\s\S]*?<RailHeader showSwitcher=\{false\} \/>[\s\S]*?data-rail-scroll-viewport/,
-    );
-    expect(railShell).toContain("{!windowControlsInPage ? <RailHeader /> : null}");
-    expect(railShell).toContain("{rail.collapsed || windowControlsInPage ? switcher : null}");
+  test("keeps one rail header in the scrolling list on every platform", () => {
+    // The desktop app's window bar holds the window controls above the page,
+    // so the rail reserves no row of its own for them.
+    expect(railShell).not.toContain("data-rail-window-controls");
+    expect(railShell).toMatch(/data-rail-scroll-viewport[\s\S]*?<RailHeader \/>/);
+    expect(railShell).toContain("{rail.collapsed ? switcher : null}");
     expect(webRailShell).toContain("switcher: <SwitcherBlock />,");
   });
 });
