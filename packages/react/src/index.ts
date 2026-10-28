@@ -812,7 +812,7 @@ export { SandboxFiles } from "./components/sandbox-files";
 export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";
 export type { DesktopViewerProps } from "./components/desktop-viewer";
-export { WorkspaceDock } from "./components/workspace-dock";
+export { WorkspaceDock, useWorkspacePanelOwnsExpand } from "./components/workspace-dock";
 export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
 
 // The embeddable dock "brain" (Workbench v2, M4): the whole session workspace as

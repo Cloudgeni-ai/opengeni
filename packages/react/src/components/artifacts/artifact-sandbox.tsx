@@ -36,6 +36,11 @@ export type ArtifactSandboxProps = {
   maxAutoHeight?: number | undefined;
   theme?: "light" | "dark" | undefined;
   headerControls?: ReactNode | undefined;
+  /**
+   * The toolbar's first control, for example the host's Back to the page the
+   * Site was opened from. Full screen shows its own Back there instead.
+   */
+  toolbarStart?: ReactNode | undefined;
   title: string;
   /** Hide the visible title/icon while retaining the accessible iframe title. */
   showTitle?: boolean | undefined;
@@ -175,6 +180,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         )}
       >
         <div className="flex min-w-0 items-center gap-2.5">
+          {!focused && props.toolbarStart ? props.toolbarStart : null}
           {focused ? (
             <ArtifactButton
               variant="ghost"
