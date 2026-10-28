@@ -35,6 +35,7 @@ export type ModelPreparationPhase =
   | "input_filter_base"
   | "input_filter_genesis"
   | "input_filter_host"
+  | "input_filter_secret_mask"
   | "input_filter_tool_output"
   | "input_filter_modality"
   | "input_filter_context"

@@ -54,6 +54,7 @@ import {
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import {
   allowedFirstPartyMcpToolsForSession,
+  environmentsEncryptionKeyBytes,
   resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
@@ -129,6 +130,7 @@ import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
 import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
+import { attachSessionTreeSecretValues, currentAttemptSecretValues } from "./secret-values";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -986,6 +988,22 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
+  // Best effort: values this session tree used before are masked too.
+  attachSessionTreeSecretValues({
+    memory: currentAttemptSecretValues(),
+    db,
+    encryptionKey: environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null,
+    principal: {
+      kind: "attempt",
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    observability,
+  });
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
