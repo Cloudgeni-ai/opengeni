@@ -40012,6 +40012,36 @@ class SecretUseApprovalCardSettledError extends Error {
  * `secret_use_approval_decided` input that wakes an idle chat. The turn that
  * was blocked is never resumed: nothing ran, so the agent retries the call.
  */
+/** The session's current receiving context turn, when it has one. */
+async function sessionExecutionContextTurnTx(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string },
+) {
+  const [session] = await tx
+    .select({ executionContextTurnId: schema.sessions.executionContextTurnId })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .limit(1);
+  if (!session?.executionContextTurnId) return null;
+  const [context] = await tx
+    .select()
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, session.executionContextTurnId),
+      ),
+    )
+    .limit(1);
+  return context ?? null;
+}
+
 async function acceptSecretUseApprovalCardResponse(
   db: Database,
   input: AcceptSessionHumanInputResponseInput,
@@ -40065,6 +40095,8 @@ async function acceptSecretUseApprovalCardResponse(
       approval: approvalId ? (approvals.get(approvalId) ?? null) : null,
       sameSubmission,
       answer,
+      context:
+        request.status === "pending" ? await sessionExecutionContextTurnTx(scopedDb, input) : null,
     };
   });
   if (!loaded) return { action: "not_found" };
@@ -40164,6 +40196,45 @@ async function acceptSecretUseApprovalCardResponse(
   }
   const chosen = decision as SecretUseApprovalDecision;
   const view = secretUseApprovalView(approval);
+  // The answer stands in for the person's own "go ahead": like a goal
+  // continuation it runs in their receiving context, so the agent resumes
+  // with their vaults and accounts. Someone else's context gives it no
+  // authority, and the claim re-checks the context it finds then.
+  const context = loaded.context;
+  const receivingAuthority = (() => {
+    if (!context || turnHuman(context) !== approval.approverSubjectId) {
+      return {};
+    }
+    const human = approval.approverSubjectId;
+    const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+      context.personalConnectionDelegations,
+      `session_turns:${input.workspaceId}:${input.sessionId}:${context.id}`,
+    );
+    const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
+      context.xaiProviderAccountAuthoritySnapshot,
+    );
+    const claudeProviderAccountAuthoritySnapshot = ClaudeProviderAccountAuthoritySnapshotV1.parse(
+      context.claudeProviderAccountAuthoritySnapshot,
+    );
+    return {
+      lineage: {
+        causalTurnId: context.id,
+        ...(personalConnectionDelegations.length > 0
+          ? { connectionAuthoritySubjectId: human }
+          : {}),
+        ...(xaiProviderAccountAuthoritySnapshot.scope === "user"
+          ? { xaiAuthoritySubjectId: human }
+          : {}),
+        ...(claudeProviderAccountAuthoritySnapshot.scope === "user"
+          ? { claudeAuthoritySubjectId: human }
+          : {}),
+      },
+      personalConnectionDelegations,
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(context.mcpAccountBindings),
+      xaiProviderAccountAuthoritySnapshot,
+      claudeProviderAccountAuthoritySnapshot,
+    };
+  })();
   const answered: { event?: SessionEvent; request?: SessionHumanInputRequest } = {};
   try {
     const result = await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
@@ -40195,6 +40266,7 @@ async function acceptSecretUseApprovalCardResponse(
             toolName: view.toolName.slice(0, 200),
             destination: view.destination?.slice(0, 500) ?? null,
           },
+          ...receivingAuthority,
         },
         async () => undefined,
         {
@@ -73135,7 +73207,8 @@ function systemUpdateCausalHumanTurnId(
     : update.kind === "goal_continuation" ||
         update.kind === "background_command_result" ||
         update.kind === "session_wait_timeout" ||
-        update.kind === "capability_setup_completed"
+        update.kind === "capability_setup_completed" ||
+        update.kind === "secret_use_approval_decided"
       ? lineage?.causalTurnId
       : null;
   if (typeof value !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value)) {
@@ -73190,7 +73263,8 @@ function systemUpdateCausalExecutionKey(
     update.kind === "goal_continuation" ||
     update.kind === "background_command_result" ||
     update.kind === "session_wait_timeout" ||
-    update.kind === "capability_setup_completed"
+    update.kind === "capability_setup_completed" ||
+    update.kind === "secret_use_approval_decided"
   ) {
     // Malformed historical authority-bearing rows still own distinct claims.
     // They may carry ordinary authority-neutral context, but they must never
@@ -73481,10 +73555,12 @@ async function planInboxBatch(
       loaded.context &&
       !loaded.context.externalLink &&
       (loaded.eligibleIds.has(updates[0].id) ||
-        // A setup continuation stands in for the person's own "done": like a
-        // goal continuation it runs in their receiving context.
+        // A setup continuation stands in for the person's own "done", and a
+        // secret approval answer for their own "go ahead": like a goal
+        // continuation they run in the person's receiving context.
         ((updates[0].kind === "goal_continuation" ||
-          updates[0].kind === "capability_setup_completed") &&
+          updates[0].kind === "capability_setup_completed" ||
+          updates[0].kind === "secret_use_approval_decided") &&
           compatible(updates[0])))),
   );
   const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
