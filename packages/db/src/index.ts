@@ -301,6 +301,7 @@ export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-ac
 export * from "./personal-api-keys";
 export * from "./organization-privacy-preferences";
 export * from "./organization-inference-residency";
+export * from "./workspace-content-flow";
 import { personalApiKeyAccess } from "./personal-api-keys";
 import {
   effectiveKeyPermissions,

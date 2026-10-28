@@ -1,3 +1,4 @@
+import { assertMcpCredentialContentFlowAllowed } from "../domain/mcp-credential-content-flow";
 import { createHmac } from "node:crypto";
 import { RotateSessionMcpCredentialsRequest, type AccessGrant } from "@opengeni/contracts";
 import {
@@ -108,6 +109,16 @@ export async function rotateSessionMcpCredentialsForRequest(
   } catch {
     // Header names and validation paths are caller-controlled secret channels.
     throw new HTTPException(422, { message: "invalid credential rotation headers or server IDs" });
+  }
+  // An Opengeni API key reads its organization: EU-only content stays in
+  // EU-only workspaces.
+  for (const update of request.updates) {
+    if ("headers" in update)
+      await assertMcpCredentialContentFlowAllowed(deps.db, {
+        target: { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        url: update.expectedServerUrl,
+        headers: update.headers,
+      });
   }
   const scope = {
     accountId: grant.accountId,
