@@ -18,7 +18,11 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requireWorkspaceSettingsGrant,
+} from "@opengeni/core";
 import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
@@ -46,9 +50,11 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  // A workspace-owned social account is a workspace setting: workspace admins
+  // manage it, and so does the owner of a Personal workspace.
   app.post("/v1/workspaces/:workspaceId/social/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, CreateSocialConnectionRequest);
     try {
       return c.json(
@@ -88,7 +94,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     const existing = await getSocialConnection(db, workspaceId, connectionId, grant.subjectId);
     if (!existing) throw new HTTPException(404, { message: "social connection not found" });
     if (existing.ownership === "workspace")
-      await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const connection = await updateSocialConnectionCredential(db, {
       workspaceId,
       connectionId,
@@ -113,12 +119,9 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
       message: "invalid social OAuth start request",
     });
     const payload = parsed;
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      payload.ownership === "workspace" ? "workspace:admin" : "workspace:read",
-    );
+    if (payload.ownership === "workspace")
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
     // The contract already defaults this request to workspace ownership; an
     // explicit personal choice still needs a human who can own it.
     requireLegacyOAuthActor(access);
@@ -176,7 +179,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/social/posts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, CreateSocialPostRequest);
     try {
       return c.json(

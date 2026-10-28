@@ -12,7 +12,7 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
-import { assertGoalResumeAllowed } from "@opengeni/core";
+import { assertGoalResumeAllowed, missingPermissionMessage } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
@@ -4857,7 +4857,7 @@ function registerConnectedMachineTools(
         throw new Error("machine not found in this access scope; use a sandboxes_list id");
       }
       if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
-        throw new Error("missing permission: account:admin");
+        throw new Error(missingPermissionMessage("account:admin"));
       }
       if (enrollment.scope === "user" && sessionId && attempt) {
         // The same per-attempt admission run_on requires for personal machines.
@@ -4924,7 +4924,7 @@ function registerConnectedMachineTools(
         throw new Error("machine enrollment not found in this access scope");
       }
       if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
-        throw new Error("missing permission: account:admin");
+        throw new Error(missingPermissionMessage("account:admin"));
       }
       const result = await removeEnrollment(deps.db, {
         accountId: grant.accountId,

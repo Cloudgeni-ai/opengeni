@@ -6,6 +6,7 @@ import {
   type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  ErrorEnvelope,
   isReadOnlyPermissionSet,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -79,8 +80,15 @@ export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
   );
 }
 
-/** The billing routes' 403 when the caller lacks billing:manage (requireSelectedAccount). */
-const BILLING_MANAGE_MISSING = "missing permission: billing:manage";
+/** Whether a 403 body is the billing routes' refusal for a missing billing:manage. */
+async function refusedForBillingManage(response: Response): Promise<boolean> {
+  try {
+    const envelope = ErrorEnvelope.safeParse(await response.clone().json());
+    return envelope.success && envelope.data.error.details?.permission === "billing:manage";
+  } catch {
+    return false;
+  }
+}
 
 /** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
 const EXTERNAL_PERSON_REFUSED_HINT =
@@ -380,7 +388,7 @@ export async function callOrganizationAction(
     options.billingForbidden &&
     outcome.externalPerson !== true &&
     outcome.response.status === 403 &&
-    (await outcome.response.clone().text()).includes(BILLING_MANAGE_MISSING)
+    (await refusedForBillingManage(outcome.response))
   ) {
     await outcome.response.body?.cancel();
     return failure(options.billingForbidden);

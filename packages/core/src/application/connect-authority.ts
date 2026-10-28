@@ -112,16 +112,22 @@ export async function requireConnectOwnerAuthority(
   await withWorkspaceSubjectRls(db, state.workspaceId, state.subjectId, async (tx) => {
     await lockExternalWorkspaceMembershipLifecycle(tx, state.accountId);
     const membership = await getWorkspaceGrant(tx, state.subjectId, state.workspaceId);
-    const grant =
-      membership?.accountId === state.accountId
-        ? membership
-        : state.personalOwnerVerified
-          ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
-          : null;
+    const ownMembership = membership?.accountId === state.accountId;
+    const grant = ownMembership
+      ? membership
+      : state.personalOwnerVerified
+        ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
+        : null;
+    // A Personal workspace's settings are its verified owner's, who never holds
+    // workspace:admin there (requireWorkspaceSettingsGrant). The step that
+    // minted this owner already passed that full check; here the owner only
+    // has to still own the workspace.
+    const personalOwnerSettings =
+      permission === "workspace:admin" && !ownMembership && grant !== null;
     if (
       !grant ||
       grant.accountId !== state.accountId ||
-      !hasPermission(grant.permissions, permission)
+      (!personalOwnerSettings && !hasPermission(grant.permissions, permission))
     )
       throw new HTTPException(403, { message: "Connection owner authority changed" });
   });

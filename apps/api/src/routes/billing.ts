@@ -44,7 +44,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
 import { sql } from "drizzle-orm";
-import { requireAccessContext } from "@opengeni/core";
+import { requireAccessContext, MissingPermissionRefusal } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { subscriptionStore } from "../billing-subscription-store";
@@ -1259,7 +1259,7 @@ export function requireSelectedAccount(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new MissingPermissionRefusal(permission);
   }
   return accountId;
 }

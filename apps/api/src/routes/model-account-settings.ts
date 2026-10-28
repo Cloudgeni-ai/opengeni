@@ -5,7 +5,11 @@ import {
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   deliverSubscriptionCoreCodexWake,
   readOrganizationSubscriptionSettings,
@@ -217,7 +221,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
 
   app.patch(workspacePath, async (c) => {
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // The owner of a Personal workspace may ask too; it then follows the
+    // organization's settings, a plain 409 rather than an admin refusal.
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
       throw requestValidationError(parsed.error, "body", {

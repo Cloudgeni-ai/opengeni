@@ -41,6 +41,7 @@ import {
   requireApiKeyManagementContext,
   requireExplicitPermissionDelegation,
   type AccessGrantAuthorization,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import { sha256Hex } from "@opengeni/contracts/values";
@@ -286,7 +287,7 @@ function requireAccountPermission(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new MissingPermissionRefusal(permission);
   }
 }
 
