@@ -62,6 +62,10 @@ import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-ch
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
+import {
+  InteractiveAnswerProvider,
+  type InteractiveAnswerStore,
+} from "@opengeni/react/interactive-answer-model";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -125,6 +129,12 @@ export interface NativeSessionScreenProps extends Omit<
    * A floating composer must report its height through `onHeightChange`.
    */
   renderComposer?: ((props: SessionComposerProps) => ReactNode) | undefined;
+  /**
+   * Where interactive answers (`opengeni-ui`) remember picks, filters and
+   * whether a pick was sent, for example AsyncStorage. Without it they are
+   * remembered until the app closes.
+   */
+  answerStore?: InteractiveAnswerStore | undefined;
 }
 
 export function NativeSessionScreen({
@@ -143,33 +153,43 @@ export function NativeSessionScreen({
   timelineMessages,
   renderComposer,
   renderMessageActions: hostMessageActions,
+  answerStore,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  const status = controller.sessionStatus;
   // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
   // not a queue, and no Steer to learn.
   return (
     <SingleSendWording enabled={controller.composer.singleSend === true}>
-      <NativeTimelineMessagesProvider messages={timelineMessages}>
-        <SessionScreenBoundary sessionId={controller.sessionId}>
-          <SessionScreenBody
-            controller={controller}
-            composer={composerSlots}
-            trailing={trailing}
-            topBar={topBar}
-            bottomInset={bottomInset}
-            keyboardBottomOffset={keyboardBottomOffset}
-            feedback={feedback}
-            humanInputMessages={humanInputMessages}
-            approvalMessages={approvalMessages}
-            client={client}
-            inChatConnect={inChatConnect}
-            models={models}
-            renderComposer={renderComposer}
-            renderMessageActions={hostMessageActions}
-            {...timelineProps}
-          />
-        </SessionScreenBoundary>
-      </NativeTimelineMessagesProvider>
+      <InteractiveAnswerProvider
+        // A pick goes out as the person's next message, through the ordinary Send.
+        send={controller.composer.send}
+        scope={controller.sessionId}
+        store={answerStore}
+        readOnly={status === "failed" || status === "cancelled"}
+      >
+        <NativeTimelineMessagesProvider messages={timelineMessages}>
+          <SessionScreenBoundary sessionId={controller.sessionId}>
+            <SessionScreenBody
+              controller={controller}
+              composer={composerSlots}
+              trailing={trailing}
+              topBar={topBar}
+              bottomInset={bottomInset}
+              keyboardBottomOffset={keyboardBottomOffset}
+              feedback={feedback}
+              humanInputMessages={humanInputMessages}
+              approvalMessages={approvalMessages}
+              client={client}
+              inChatConnect={inChatConnect}
+              models={models}
+              renderComposer={renderComposer}
+              renderMessageActions={hostMessageActions}
+              {...timelineProps}
+            />
+          </SessionScreenBoundary>
+        </NativeTimelineMessagesProvider>
+      </InteractiveAnswerProvider>
     </SingleSendWording>
   );
 }
@@ -232,7 +252,7 @@ function SessionScreenBody({
   renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
-}: Omit<NativeSessionScreenProps, "timelineMessages">) {
+}: Omit<NativeSessionScreenProps, "timelineMessages" | "answerStore">) {
   const theme = useNativeTimelineTheme();
   const t = useOpenGeniText();
   const m = useNativeTimelineMessages();

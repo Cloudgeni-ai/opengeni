@@ -26,6 +26,8 @@ import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
+import { InteractiveAnswer } from "./interactive-answer";
+import { INTERACTIVE_ANSWER_FENCE } from "../interactive-answer-model";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
@@ -603,31 +605,46 @@ function fenceLanguage(children: ReactNode): string | null {
   return found;
 }
 
+/** Whether a fenced code node's closing fence has arrived in the message source. */
+function fenceIsClosed(node: ExtraProps["node"], source: string): boolean {
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  const original =
+    start !== undefined && end !== undefined && end <= source.length
+      ? source.slice(start, end)
+      : "";
+  const lines = original.trimEnd().split("\n");
+  const opening = lines[0]?.match(/^ {0,3}([\x60]{3,}|~{3,})/);
+  const closing = lines
+    .at(-1)
+    ?.replace(/^\s*(?:>\s*)+/, "")
+    .trim();
+  return Boolean(
+    opening &&
+    lines.length > 1 &&
+    closing &&
+    closing.length >= opening[1]!.length &&
+    [...closing].every((c) => c === opening[1]![0]),
+  );
+}
+
 function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
   const t = useOpenGeniText();
   const { source, render, streaming } = useContext(InteractiveContext);
   const language = fenceLanguage(children);
+  if (language === INTERACTIVE_ANSWER_FENCE) {
+    // Drawn by the package itself: no scripts, so no host opt-in is needed.
+    const state = fenceIsClosed(node, source) ? "complete" : streaming ? "streaming" : "incomplete";
+    return (
+      <InteractiveAnswer
+        source={nodeText(children).replace(/\n$/, "")}
+        state={state}
+        renderSource={() => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>}
+      />
+    );
+  }
   if (render && (language === "opengeni-html" || language === "opengeni-site")) {
-    const start = node?.position?.start.offset;
-    const end = node?.position?.end.offset;
-    const original =
-      start !== undefined && end !== undefined && end <= source.length
-        ? source.slice(start, end)
-        : "";
-    const lines = original.trimEnd().split("\n");
-    const opening = lines[0]?.match(/^ {0,3}([\x60]{3,}|~{3,})/);
-
-    const closing = lines
-      .at(-1)
-      ?.replace(/^\s*(?:>\s*)+/, "")
-      .trim();
-    const complete =
-      opening &&
-      lines.length > 1 &&
-      closing &&
-      closing.length >= opening[1]!.length &&
-      [...closing].every((c) => c === opening[1]![0]);
-    if (!complete) {
+    if (!fenceIsClosed(node, source)) {
       return (
         <div role="status" aria-live="polite" aria-busy={streaming === true} className="my-3">
           {streaming ? (

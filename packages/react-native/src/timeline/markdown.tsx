@@ -36,6 +36,8 @@ import {
   type NativeTimelineTheme,
 } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { NativeInteractiveAnswer } from "./interactive-answer";
+import { INTERACTIVE_ANSWER_FENCE } from "@opengeni/react/interactive-answer-model";
 import { tableColumns, tableLayout } from "./markdown-table-layout";
 
 /**
@@ -556,6 +558,15 @@ function webRules(
       const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
       const info = (node as { sourceInfo?: unknown }).sourceInfo;
       const language = typeof info === "string" ? (info.trim().split(/\s+/)[0] ?? "") : "";
+      if (language === INTERACTIVE_ANSWER_FENCE) {
+        return (
+          <AnswerFence
+            key={node.key}
+            content={content}
+            renderSource={() => <CodeFence content={content} language={language} onCopy={onCopy} />}
+          />
+        );
+      }
       const kind = interactivePreviewKind(language);
       if (kind && media.renderInteractiveBlock) {
         return (
@@ -701,6 +712,20 @@ function InteractiveFence({
   return <>{render({ kind, content: state === "complete" ? content : "", state })}</>;
 }
 
+/** An `opengeni-ui` answer: drawn natively, growing in place while it streams. */
+function AnswerFence({
+  content,
+  renderSource,
+}: {
+  content: string;
+  renderSource: () => ReactNode;
+}) {
+  const { openTail, streaming } = useContext(FenceStateContext);
+  const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
+  const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
+  return <NativeInteractiveAnswer source={content} state={state} renderSource={renderSource} />;
+}
+
 /** Plain image URLs load directly; retained files need the host's `renderImage`. */
 function MarkdownImage({ src, alt }: { src: string; alt: string }) {
   const theme = useNativeTimelineTheme();
@@ -764,8 +789,12 @@ function TrimmedMarkdown({
     return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
   }, [theme, tone, textStyle]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
+  // Previews and interactive answers both need to know whether the last fence is still open.
   const openTail = useMemo(
-    () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
+    () =>
+      media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE)
+        ? trailingOpenFence(text)
+        : null,
     [media.renderInteractiveBlock, text],
   );
   const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);

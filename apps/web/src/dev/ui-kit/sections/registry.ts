@@ -112,6 +112,7 @@ export const SECTION_KEYS = [
   "chat-approvals",
   "chat-questions",
   "chat-connect",
+  "chat-answers",
   // Foundations
   "logo-tile",
   "relative-time",
@@ -723,6 +724,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Ask the person to connect an account, add a key or a server so the agent can carry on.",
     usedOn: "Chat and embedded chat",
     load: () => import("./chat-connect"),
+  },
+  {
+    key: "chat-answers",
+    group: "Chat",
+    title: "Interactive answers",
+    purpose:
+      "Show options the agent found as cards, a table and a chart the person can filter and pick from.",
+    usedOn: "Chat, embedded chat and phone",
+    load: () => import("./chat-answers"),
   },
   {
     key: "cadence-picker",
