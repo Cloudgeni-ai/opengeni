@@ -7,7 +7,6 @@ import { scheduledRunErrorText } from "./scheduled-run-error";
 import {
   isCodexUsageLimitFailure,
   latestTurnFailedOnUsageLimit,
-  modelAfterCodexUsageLimit,
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
@@ -201,39 +200,6 @@ describe("unavailableModelReplacement", () => {
         rows: [],
         defaultSelection: null,
         latencyMode: "standard",
-      }),
-    ).toBeNull();
-  });
-});
-
-describe("modelAfterCodexUsageLimit", () => {
-  test("offers the workspace default when it is another provider's model", () => {
-    expect(
-      modelAfterCodexUsageLimit({
-        rows,
-        defaultSelection: { model: "gpt-6-sol", reasoningEffort: "high", source: "credits" },
-      }),
-    ).toEqual({ model: "gpt-6-sol", label: "GPT-6 Sol", reasoningEffort: "high" });
-  });
-
-  test("never offers a Codex model, even when Codex is the default", () => {
-    const offered = modelAfterCodexUsageLimit({
-      rows,
-      defaultSelection: {
-        model: "codex/gpt-6-sol",
-        reasoningEffort: "high",
-        source: "subscription",
-      },
-    });
-    expect(offered?.model).not.toStartWith("codex/");
-    expect(offered?.reasoningEffort).toBe("low");
-  });
-
-  test("is null when only Codex models can run", () => {
-    expect(
-      modelAfterCodexUsageLimit({
-        rows: sortPickerRows(projectPickerRows(t, [codex])),
-        defaultSelection: null,
       }),
     ).toBeNull();
   });

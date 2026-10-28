@@ -14,11 +14,7 @@ import {
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
 import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
-import {
-  ContinueWithModelButton,
-  ModelSwitchHeadsUp,
-  type ContinueWithModel,
-} from "./continue-with-model";
+import { CodexUsageActions, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -46,7 +42,7 @@ export function FailedSessionBanner({
   sandboxRecovery,
   analyticsKey,
   shownInTimeline = false,
-  continueWith,
+  codexUsage,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
@@ -83,10 +79,10 @@ export function FailedSessionBanner({
    */
   shownInTimeline?: boolean | undefined;
   /**
-   * When the ChatGPT/Codex plan is out of usage, offer to continue this chat
-   * with another model (it switches the chat and runs the turn again).
+   * When the ChatGPT/Codex plan is out of usage: say when it resets and offer
+   * "Wait for reset" and "Switch model" in place of Retry.
    */
-  continueWith?: ContinueWithModel | undefined;
+  codexUsage?: CodexUsageChoice | undefined;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
@@ -105,15 +101,21 @@ export function FailedSessionBanner({
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
   const offerCredits = Boolean(workspaceId && canBuyCredits);
   const offerConnect = Boolean(workspaceId && canConnectModel);
-  const headline = freeModelLimit
-    ? freeModelDailyLimitReason({
-        modelChanged,
-        canBuyCredits: offerCredits,
-        canConnectModel: offerConnect,
-        subscriptions,
-        canChooseModel: hasModelPicker ?? canChooseModel,
-      })
-    : reason;
+  const codexUsageFailure =
+    codexUsage && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure
+      ? codexUsage
+      : null;
+  const headline = codexUsageFailure
+    ? `Codex usage limit reached. ${codexUsageFailure.resetText}`
+    : freeModelLimit
+      ? freeModelDailyLimitReason({
+          modelChanged,
+          canBuyCredits: offerCredits,
+          canConnectModel: offerConnect,
+          subscriptions,
+          canChooseModel: hasModelPicker ?? canChooseModel,
+        })
+      : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -124,22 +126,23 @@ export function FailedSessionBanner({
       return actions.onRetry();
     },
   };
-  const continueAction =
-    continueWith && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure ? (
-      <>
-        <ContinueWithModelButton {...continueWith} />
-        {continueWith.headsUp ? (
-          <ModelSwitchHeadsUp text={continueWith.headsUp} className="order-last basis-full" />
-        ) : null}
-      </>
-    ) : null;
-  const retryActions =
-    trackedActions &&
+  // Waiting for the reset runs the turn again when it can; Retry would only
+  // hit the same limit, so the two choices replace it.
+  const retryActions = codexUsageFailure ? (
+    <>
+      <CodexUsageActions {...codexUsageFailure} />
+      {codexUsageFailure.error ? (
+        <p role="alert" className="order-last basis-full text-xs text-fg-muted">
+          {codexUsageFailure.error}
+        </p>
+      ) : null}
+    </>
+  ) : trackedActions &&
     !failure.safetyRefusal &&
     failure.failureCode !== "knowledge_learning_scope_changed" &&
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
-      <FailedSessionActions {...trackedActions} />
-    ) : null;
+    <FailedSessionActions {...trackedActions} />
+  ) : null;
   if (shownInTimeline && compaction && !structuralFailure) {
     const recovery = sandboxRecovery ? (
       <SandboxRecoveryActions
@@ -227,21 +230,15 @@ export function FailedSessionBanner({
             <ConnectModelLink workspaceId={workspaceId} label="Use your own provider account" />
           ) : null
         ) : sandboxRecovery ? (
-          <>
-            {continueAction}
-            <SandboxRecoveryActions
-              {...sandboxRecovery}
-              structuralFailure={structuralFailure}
-              retryActions={retryActions}
-            >
-              {!structuralFailure ? retryActions : null}
-            </SandboxRecoveryActions>
-          </>
+          <SandboxRecoveryActions
+            {...sandboxRecovery}
+            structuralFailure={structuralFailure}
+            retryActions={retryActions}
+          >
+            {!structuralFailure ? retryActions : null}
+          </SandboxRecoveryActions>
         ) : !structuralFailure ? (
-          <>
-            {continueAction}
-            {retryActions}
-          </>
+          retryActions
         ) : null}
       </div>
     </div>

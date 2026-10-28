@@ -102,38 +102,6 @@ export function unavailableModelReplacement(input: {
 }
 
 /**
- * The model a chat offers to continue with when its ChatGPT/Codex plan is out
- * of usage: the server-resolved default when it is another provider's model,
- * else a connected service, else the first other model that can run. Null
- * when no other model can run. The chat switches in place; a Codex
- * remote-compaction chat rebuilds its context for the new model.
- */
-export function modelAfterCodexUsageLimit(input: {
-  rows: readonly PickerModelRow[];
-  defaultSelection: DefaultModelSelection | null;
-}): { model: string; label: string; reasoningEffort: ReasoningEffort } | null {
-  const others = input.rows.filter(
-    (row) => row.selectable && row.catalog.source !== "codex" && !row.id.startsWith("codex/"),
-  );
-  const resolved = input.defaultSelection
-    ? findPickerRow(others, input.defaultSelection.model)
-    : undefined;
-  const row =
-    resolved ??
-    others.find((candidate) => CONNECTED_BILLING_CLASSES.has(candidate.billingClass)) ??
-    others[0];
-  if (!row) return null;
-  return {
-    model: row.id,
-    label: row.label,
-    reasoningEffort:
-      resolved && input.defaultSelection
-        ? input.defaultSelection.reasoningEffort
-        : defaultEffortForModel(row.catalog),
-  };
-}
-
-/**
  * Failure codes for a ChatGPT/Codex plan that has run out of usage, and for a
  * subscription capacity wait that ended without capacity.
  */
