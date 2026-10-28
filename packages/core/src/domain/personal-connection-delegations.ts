@@ -32,8 +32,7 @@ import {
   listSocialConnections,
   listOwnedConnectionAccounts,
   namedSubjectHasLiveWorkspaceAuthority,
-  namedSubjectPersonalWorkspaceId,
-  externalPersonPersonalWorkspaceId,
+  isSubjectOwnPersonalWorkspace,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -217,12 +216,8 @@ export async function personalWorkspaceOwnerOriginConnections(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<PersonalWorkspaceOriginConnections[]> {
-  const personalWorkspaceId = input.subjectId.startsWith("user:")
-    ? await namedSubjectPersonalWorkspaceId(db, input)
-    : input.subjectId.startsWith("external_user:")
-      ? await externalPersonPersonalWorkspaceId(db, input)
-      : null;
-  if (!personalWorkspaceId || personalWorkspaceId !== input.workspaceId) return [];
+  // Shared workspaces stop here, before any membership or connection read.
+  if (!(await isSubjectOwnPersonalWorkspace(db, input))) return [];
   const byOrigin = new Map<string, ConnectionMetadata[]>();
   for (const connection of await listOwnConnectionMetadata(db, input)) {
     if (

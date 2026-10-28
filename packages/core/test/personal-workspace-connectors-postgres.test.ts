@@ -46,9 +46,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!shared) return;
-  await client.close();
+  await client.close().catch(() => undefined);
   await shared.release();
-});
+}, 60_000);
 
 async function workspace(accountId: string, name: string): Promise<string> {
   const [row] = await sql<{ id: string }[]>`
