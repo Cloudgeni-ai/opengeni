@@ -910,4 +910,72 @@ describe("HumanInputForm yes/no decisions", () => {
     expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
     expect(mounted.container.textContent).toContain("Other");
   });
+
+  test("an agent-marked confirm answers with its own labels everywhere, action last", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    const request = decision(["Send the email", "Keep it as a draft"]);
+    const confirm = { ...request, questions: [{ ...request.questions[0]!, confirm: true }] };
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: confirm,
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.textContent).not.toContain("Other");
+    const buttons = [...mounted.container.querySelectorAll("[data-human-input-choice]")];
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "Keep it as a draft",
+      "Send the email",
+    ]);
+    await act(async () => {
+      (buttons[1] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      { outcome: "answered", answers: [{ questionId: "decision", values: ["a"] }] },
+    ]);
+  });
+});
+
+describe("HumanInputForm option hints", () => {
+  test("marks the recommended option without choosing it, and shows option previews", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-hints",
+          questions: [
+            {
+              id: "format",
+              kind: "single_select" as const,
+              prompt: "How should dates look in the export?",
+              options: [
+                { id: "iso", label: "ISO", recommended: true, preview: "2026-10-27" },
+                { id: "long", label: "Written out", preview: "27 October 2026" },
+              ],
+              required: true,
+              allowOther: true,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const badges = mounted.container.querySelectorAll("[data-human-input-recommended]");
+    expect(badges.length).toBe(1);
+    expect(badges[0]!.textContent).toBe("Recommended");
+    expect(badges[0]!.closest("label")?.textContent).toContain("ISO");
+    const previews = [...mounted.container.querySelectorAll("[data-human-input-preview]")];
+    expect(previews.map((preview) => preview.textContent)).toEqual([
+      "2026-10-27",
+      "27 October 2026",
+    ]);
+    const radios = [...mounted.container.querySelectorAll('input[type="radio"]')];
+    expect(radios.some((radio) => (radio as HTMLInputElement).checked)).toBe(false);
+  });
 });

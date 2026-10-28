@@ -2516,6 +2516,10 @@ export type HumanInputOption = {
   id: string;
   label: string;
   description?: string | null | undefined;
+  /** The agent's suggestion; mark it, never pre-select it. */
+  recommended?: boolean | null | undefined;
+  /** A short sample of what the option produces, shown as-is (monospace). */
+  preview?: string | null | undefined;
 };
 
 export type SkillReviewReference = {
@@ -2538,6 +2542,11 @@ export type HumanInputQuestion = {
   /** Required exactly when `kind` is "secret"; null otherwise. */
   secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
+  /**
+   * A yes/no decision: a single_select with exactly two options, the action
+   * first and the way out second, answered with two buttons.
+   */
+  confirm?: boolean | null | undefined;
   allowOther: boolean;
   validation?:
     | {
@@ -3912,6 +3921,14 @@ export type CreateSessionRequest = {
   startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
+  /**
+   * First-party tools `modelContext` is for, such as the tool that reaches the
+   * open document it names. The first turn loads them before its first model
+   * request, as a tool search by name would, so it can use them without
+   * searching; the session's tools are unchanged. Decided once at creation;
+   * names outside the session's tool selection are ignored.
+   */
+  modelContextTools?: string[] | undefined;
   /**
    * IANA time zone of the person sending `initialMessage` (for example
    * `Europe/Oslo`), so the model sees the message's local time. In a browser
@@ -10491,6 +10508,19 @@ export type SessionMachineAccess = {
    *  brings them to the agent; moving the chat to a machine the sender may
    *  use runs them. Older servers omit it. */
   waitingMessages?: SessionWaitingMessages[] | undefined;
+  /** The next saved message is the machine owner's own and was approved for
+   *  other machines, not this one, so it can't start here and no recheck
+   *  helps: it runs after the chat moves to a machine it was approved for, or
+   *  it is removed and sent again here. Older servers omit it. */
+  queuedTurnNotApprovedHere?: boolean | undefined;
+  /** Where that message may run: the owner's personal machines it was
+   *  approved for. Listed only for its sender; empty for everyone else. */
+  queuedTurnApprovedMachines?: SessionApprovedMachine[] | undefined;
+};
+
+export type SessionApprovedMachine = {
+  sandboxId: string;
+  machineName: string;
 };
 
 export type SessionWaitingMessages = {

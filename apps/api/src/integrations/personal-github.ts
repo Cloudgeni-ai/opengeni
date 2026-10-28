@@ -41,7 +41,7 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
+  connectOwnerStateFields,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
 } from "../connection-ownership";
@@ -238,9 +238,10 @@ export async function startPersonalGitHubOAuth(
   const verifier = randomBytes(48).toString("base64url");
   const returnPath = personalGitHubReturnPath(input.workspaceId, input.returnPath);
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: grant.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: grant.subjectId,
+    ...connectOwnerStateFields(
+      { accountId: grant.accountId, workspaceId: input.workspaceId, subjectId: grant.subjectId },
+      true,
+    ),
     kind: PERSONAL_GITHUB_OAUTH_STATE_KIND,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(externalActorContinuationForAuthorization(input.access)
@@ -251,7 +252,6 @@ export async function startPersonalGitHubOAuth(
           ),
         }
       : {}),
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     canonicalManagedHumanSession: input.access.canonicalManagedHumanSession,
     returnPath,
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),

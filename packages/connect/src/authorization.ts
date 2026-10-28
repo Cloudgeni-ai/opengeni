@@ -1,9 +1,23 @@
 import { pollConnectAttempt } from "./poll";
 import type { ConnectAttempt, ConnectTransport } from "./types";
 
+/** A sign-in window the host opened. */
+export type ConnectPopup = {
+  /** Best effort: a browser can't close a window that moved to another site. */
+  close(): void;
+  readonly closed?: boolean | undefined;
+  /**
+   * True only while the host can see its window is still open. False once it
+   * closed, or when the host can no longer tell (the provider cut it off).
+   */
+  isOpen?(): boolean;
+  /** Ask the window to come to the front. */
+  focus?(): void;
+};
+
 /** Inject navigation so hosts own routing and this package needs no DOM globals. */
 export type ConnectNavigation = {
-  openPopup(url: string): { close(): void; readonly closed?: boolean | undefined } | null;
+  openPopup(url: string): ConnectPopup | null;
   redirect(url: string): void;
 };
 

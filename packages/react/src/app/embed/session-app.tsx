@@ -26,6 +26,7 @@ import { PortalContainerProvider } from "../../ui/portal-container";
 import { AppContext, useAppContext } from "../app-context";
 import { createSlackLinkPrepareController, useAppState, type AppStateHost } from "../app-state";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "../components/common";
+import { ConversationRenderBoundary } from "../../components/conversation-render-boundary";
 import { RailProvider } from "../components/rail/rail-context";
 import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
@@ -287,8 +288,21 @@ function SessionAppRoot(props: { className?: string | undefined; children: React
   );
 }
 
-/** The session page or the new-chat page, from the in-memory location. */
+/**
+ * The session page or the new-chat page, from the in-memory location. A
+ * failure (including code that didn't download) stays inside the app instead
+ * of blanking the host page, and opening another screen gets a fresh attempt.
+ */
 function SessionAppRoutes({ workspaceId }: { workspaceId: string }) {
+  const location = useLocation();
+  return (
+    <ConversationRenderBoundary resetKey={`${workspaceId}:${location.pathname}`}>
+      <SessionAppRoute workspaceId={workspaceId} />
+    </ConversationRenderBoundary>
+  );
+}
+
+function SessionAppRoute({ workspaceId }: { workspaceId: string }) {
   const location = useLocation();
   const sessionId = sessionIdIn(location.pathname);
   const launch = parseComposerLaunchSearch(location.search);

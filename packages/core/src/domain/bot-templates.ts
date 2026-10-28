@@ -1,5 +1,6 @@
 import {
   SessionAvatar,
+  type BotTemplateVisibility,
   type ParsedCreateBotTemplateRequest,
   type ParsedUpdateBotTemplateRequest,
   type WorkspaceBotTemplate,
@@ -20,9 +21,11 @@ import { hasPermission } from "../access";
 import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
 
 /**
- * Bot templates saved in a workspace: everyone in it may start a bot from
- * one; whoever saved it, an admin, or a workspace-level caller may change or
- * delete it. The server stores templates and never starts a chat from one:
+ * Bot templates saved in a workspace. A shared one is for everyone in the
+ * workspace to start bots from; whoever saved it, an admin, or a
+ * workspace-level caller may change or delete it. An Only me one exists only
+ * for whoever saved it, like an Only me chat: nobody else reads, finds or
+ * changes it. The server stores templates and never starts a chat from one:
  * the client opens a new chat with the template's setup instructions as its
  * first message and gives it the template's name, description and avatar.
  */
@@ -59,6 +62,7 @@ function forViewer(viewer: BotTemplateViewer, template: BotTemplateRecord): Work
     description: template.description,
     avatar: avatar.success ? avatar.data : null,
     setupInstructions: template.setupInstructions,
+    visibility: template.visibility,
     sourceSessionId: template.sourceSessionId,
     createdBySubjectId: template.createdBySubjectId,
     viewerAccess: botTemplateAccess(viewer, template),
@@ -67,14 +71,37 @@ function forViewer(viewer: BotTemplateViewer, template: BotTemplateRecord): Work
   };
 }
 
+/** Whether the viewer may see the template at all. */
+function visibleTo(viewer: BotTemplateViewer, template: BotTemplateRecord): boolean {
+  return (
+    template.visibility === "workspace" ||
+    (viewer.subjectId !== null && template.createdBySubjectId === viewer.subjectId)
+  );
+}
+
 async function requireTemplate(
   db: Database,
   workspaceId: string,
   templateId: string,
+  viewer: BotTemplateViewer,
 ): Promise<BotTemplateRecord> {
   const template = await getBotTemplate(db, workspaceId, templateId);
-  if (!template) throw new HTTPException(404, { message: "bot template not found" });
+  if (!template || !visibleTo(viewer, template)) {
+    throw new HTTPException(404, { message: "bot template not found" });
+  }
   return template;
+}
+
+function requireOwnerForPrivate(
+  viewer: BotTemplateViewer,
+  visibility: BotTemplateVisibility | undefined,
+): void {
+  if (visibility === "private" && viewer.subjectId === null) {
+    throw new HTTPException(422, {
+      message:
+        "Only a person can keep a bot template to themselves. Save it for the workspace instead.",
+    });
+  }
 }
 
 function requireManage(viewer: BotTemplateViewer, template: BotTemplateRecord): void {
@@ -90,7 +117,9 @@ export async function listBotTemplatesForViewer(
   workspaceId: string,
   viewer: BotTemplateViewer,
 ): Promise<WorkspaceBotTemplate[]> {
-  return (await listBotTemplates(db, workspaceId)).map((template) => forViewer(viewer, template));
+  return (await listBotTemplates(db, workspaceId, viewer.subjectId)).map((template) =>
+    forViewer(viewer, template),
+  );
 }
 
 export async function getBotTemplateForViewer(
@@ -99,7 +128,7 @@ export async function getBotTemplateForViewer(
   templateId: string,
   viewer: BotTemplateViewer,
 ): Promise<WorkspaceBotTemplate> {
-  return forViewer(viewer, await requireTemplate(db, workspaceId, templateId));
+  return forViewer(viewer, await requireTemplate(db, workspaceId, templateId, viewer));
 }
 
 export async function createBotTemplateForViewer(input: {
@@ -110,6 +139,7 @@ export async function createBotTemplateForViewer(input: {
   request: ParsedCreateBotTemplateRequest;
 }): Promise<WorkspaceBotTemplate> {
   const { db, request, viewer, workspaceId } = input;
+  requireOwnerForPrivate(viewer, request.visibility);
   try {
     const created = await createBotTemplate(db, {
       accountId: input.accountId,
@@ -118,6 +148,7 @@ export async function createBotTemplateForViewer(input: {
       description: request.description,
       avatar: request.avatar,
       setupInstructions: request.setupInstructions,
+      visibility: request.visibility,
       sourceSessionId: request.sourceSessionId,
       createdBySubjectId: viewer.subjectId,
     });
@@ -138,8 +169,15 @@ export async function updateBotTemplateForViewer(input: {
   request: ParsedUpdateBotTemplateRequest;
 }): Promise<WorkspaceBotTemplate> {
   const { db, request, viewer, workspaceId } = input;
-  const template = await requireTemplate(db, workspaceId, input.templateId);
+  const template = await requireTemplate(db, workspaceId, input.templateId, viewer);
   requireManage(viewer, template);
+  // Making a template Only me keeps it with whoever saved it, not the caller.
+  if (request.visibility === "private" && template.createdBySubjectId === null) {
+    throw new HTTPException(422, {
+      message:
+        "This template was saved for the workspace, not by a person, so it can't become Only me.",
+    });
+  }
   const updated = await updateBotTemplate(db, {
     workspaceId,
     templateId: template.id,
@@ -147,6 +185,7 @@ export async function updateBotTemplateForViewer(input: {
     description: request.description,
     avatar: request.avatar,
     setupInstructions: request.setupInstructions,
+    visibility: request.visibility,
   });
   if (!updated) throw new HTTPException(404, { message: "bot template not found" });
   return forViewer(viewer, updated);
@@ -158,7 +197,12 @@ export async function deleteBotTemplateForViewer(input: {
   templateId: string;
   viewer: BotTemplateViewer;
 }): Promise<void> {
-  const template = await requireTemplate(input.db, input.workspaceId, input.templateId);
+  const template = await requireTemplate(
+    input.db,
+    input.workspaceId,
+    input.templateId,
+    input.viewer,
+  );
   requireManage(input.viewer, template);
   if (!(await deleteBotTemplate(input.db, input.workspaceId, template.id))) {
     throw new HTTPException(404, { message: "bot template not found" });

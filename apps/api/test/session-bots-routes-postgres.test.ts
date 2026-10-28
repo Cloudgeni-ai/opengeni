@@ -1,12 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessGrant, Permission } from "@opengeni/contracts";
+import type { AccessGrant, Permission, SessionAvatar } from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createDb, getSession, listBotTemplates, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  ensureManagedAccessForUserWithOrganizationMemberships,
+  getSession,
+  listBotTemplates,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+import { sessionAvatarImageUrl } from "../src/integrations/session-avatar-image";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 // Bots through the API and the agent's tools (real PostgreSQL): a chat's name,
@@ -31,6 +39,8 @@ class WorkflowStub implements SessionWorkflowClient {
   async deleteScheduledTaskSchedule(): Promise<void> {}
   async triggerScheduledTask(): Promise<void> {}
 }
+
+const AVATAR_SIGNING_SECRET = "bots-avatar-signing-secret";
 
 async function freshWorkspace(name: string): Promise<Workspace> {
   const admin = shared!.admin;
@@ -129,6 +139,7 @@ beforeAll(async () => {
       productAccessMode: "managed",
       delegationSecret: DELEGATION_SECRET,
       sandboxBackend: "none",
+      slackSigningSecret: AVATAR_SIGNING_SECRET,
     }),
     db: client.db,
     bus: new MemoryEventBus(),
@@ -301,6 +312,51 @@ describe("bots through the API (real PostgreSQL)", () => {
 
     expect((await call(alice, "DELETE", `${base}/${template.id}`)).status).toBe(200);
     expect((await call(alice, "GET", base)).json.templates).toEqual([]);
+
+    // A source chat must be one in this workspace the caller can open.
+    const foreignSource = await call(alice, "POST", base, {
+      name: "Copied",
+      setupInstructions: "Set up.",
+      sourceSessionId: crypto.randomUUID(),
+    });
+    expect(foreignSource.status).toBe(422);
+    expect(foreignSource.json.error.message).toContain("sourceSessionId");
+
+    // Only me: nobody else sees it, not even an admin, until it is shared.
+    const mine = await call(alice, "POST", base, {
+      name: "My inbox bot",
+      setupInstructions: "Sort my inbox.",
+      visibility: "private",
+    });
+    expect(mine.status).toBe(201);
+    expect(mine.json.template).toMatchObject({ visibility: "private", viewerAccess: "manage" });
+    const mineId = mine.json.template.id as string;
+    expect((await call(alice, "GET", base)).json.templates.map((row: any) => row.id)).toEqual([
+      mineId,
+    ]);
+    for (const viewer of [bob, admin, service]) {
+      expect((await call(viewer, "GET", base)).json.templates).toEqual([]);
+      expect((await call(viewer, "GET", `${base}/${mineId}`)).status).toBe(404);
+      expect((await call(viewer, "PATCH", `${base}/${mineId}`, { name: "Taken" })).status).toBe(
+        404,
+      );
+      expect((await call(viewer, "DELETE", `${base}/${mineId}`)).status).toBe(404);
+    }
+    // Nobody to keep it for: a workspace-level caller can't save one.
+    expect(
+      (
+        await call(service, "POST", base, {
+          name: "Nobody's",
+          setupInstructions: "Set up.",
+          visibility: "private",
+        })
+      ).status,
+    ).toBe(422);
+    const sharedNow = await call(alice, "PATCH", `${base}/${mineId}`, { visibility: "workspace" });
+    expect(sharedNow.json.template.visibility).toBe("workspace");
+    expect((await call(bob, "GET", base)).json.templates.map((row: any) => row.id)).toEqual([
+      mineId,
+    ]);
   }, 180_000);
 
   test("the agent edits its own profile and saves itself as a template", async () => {
@@ -377,7 +433,87 @@ describe("bots through the API (real PostgreSQL)", () => {
       sourceSessionId: sessionId,
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
     });
-    const stored = await listBotTemplates(client.db, workspace.workspaceId);
+    expect(saved.body.template.visibility).toBe("workspace");
+    const stored = await listBotTemplates(client.db, workspace.workspaceId, null);
     expect(stored.map((template) => template.id)).toEqual([saved.body.template.id]);
+  }, 180_000);
+
+  test("the agent in an Only me chat saves an Only me template", async () => {
+    if (!shared) return;
+    const userId = `bots-private-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Bots private owner",
+    });
+    const workspaceId = provisioned.accessContext.defaultWorkspaceId!;
+    const accountId = provisioned.accessContext.workspaceGrants.find(
+      (grant) => grant.workspaceId === workspaceId,
+    )!.accountId;
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'bots-test')
+      on conflict do nothing`;
+    const chat = await createSession(client.db, {
+      accountId,
+      workspaceId,
+      initialMessage: "Be my release owner",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      visibility: "user_private",
+    });
+    const grant = { ...agentGrant({ accountId, workspaceId }, chat.id), subjectId };
+    const saved = await callTool(buildOpenGeniMcpServer(deps, grant), "bot_template_save", {
+      name: "My release owner",
+      setupInstructions: "You own my releases.",
+    });
+    expect(saved.isError).toBe(false);
+    expect(saved.body.template).toMatchObject({
+      visibility: "private",
+      createdBySubjectId: subjectId,
+    });
+    expect(await listBotTemplates(client.db, workspaceId, "user:someone-else")).toEqual([]);
+    expect(
+      (await listBotTemplates(client.db, workspaceId, subjectId)).map((row) => row.id),
+    ).toEqual([saved.body.template.id]);
+  }, 180_000);
+
+  test("a bot's avatar picture is public at its signed link and nowhere else", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("bots avatar picture");
+    const avatarUrl = (avatar: SessionAvatar) =>
+      new URL(
+        sessionAvatarImageUrl("https://app.example.test", AVATAR_SIGNING_SECRET, {
+          workspaceId: workspace.workspaceId,
+          avatar,
+        }),
+      ).pathname;
+    // Slack fetches it with no credentials at all.
+    const picture = await app.request(avatarUrl({ kind: "letters", letters: "RO", hue: 30 }));
+    expect(picture.status).toBe(200);
+    expect(picture.headers.get("content-type")).toBe("image/png");
+    const bytes = new Uint8Array(await picture.arrayBuffer());
+    expect([...bytes.slice(1, 4)].map((byte) => String.fromCharCode(byte)).join("")).toBe("PNG");
+
+    const signed = avatarUrl({ kind: "icon", icon: "rocket", hue: 30 });
+    expect((await app.request(signed.replace(/\.png$/u, "x.png"))).status).toBe(404);
+    expect((await app.request(signed.replace(/\.png$/u, ""))).status).toBe(404);
+    const forged = sessionAvatarImageUrl("https://app.example.test", "another-secret", {
+      workspaceId: workspace.workspaceId,
+      avatar: { kind: "icon", icon: "rocket", hue: 30 },
+    });
+    expect((await app.request(new URL(forged).pathname)).status).toBe(404);
+    // An image that is not in the workspace draws nothing.
+    expect(
+      (await app.request(avatarUrl({ kind: "image", artifactId: crypto.randomUUID() }))).status,
+    ).toBe(404);
   }, 180_000);
 });

@@ -2357,6 +2357,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/public/session-avatars/:file",
+    "method": "GET",
+    "path": "/v1/public/session-avatars/:file",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
