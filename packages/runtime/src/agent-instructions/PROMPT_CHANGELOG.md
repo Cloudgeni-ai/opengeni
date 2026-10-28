@@ -1,26 +1,14 @@
 # Modular prompt changelog
 
-A routine, reversible step of the task that is blocked no longer ends the turn
-with a question. Autonomy and persistence now says to take the conventional
-default without changing user or machine configuration (for example with a
-per-command option), name it in the final answer and continue, and to ask only
-when the step is destructive, acts outside the workspace, needs authority the
-user has not given, or has no conventional default and the choice would
-materially change the result. Repositories and Git adds the three cases behind
-it: commit with a per-command identity when Git has none, branch from the
-remote's default branch (or else the current branch) when the requested base
-such as `main` exists neither locally nor on the remote, and treat steps an
-AGENTS.md reserves for people (maintainer agreement, sign-off, issue
-discussion) as part of submitting work: make the change on a local branch, do
-not push or open a pull request until those steps are done unless the user
-explicitly asks, and list them in the final answer. In the DeepSWE comparison against
-another agent, most of the gap came from sessions with no one to answer: 38
-attempts finished and staged the work, then asked "What name and email should I
-use?" after `git commit` failed for lack of an identity; 15 asked whether to
-branch from `master` or `develop` when told to branch from `main`; 3 asked for
-the maintainer agreement the repository's AGENTS.md required. None of the work
-was committed, so none counted. Both compositions change identically; legacy
-prompt digests are refreshed.
+A blocked routine, reversible step no longer ends the turn with a question.
+Autonomy and persistence adds one general principle: take the conventional
+default without changing user or machine configuration, say which default was
+taken in the final answer, and continue; end the turn with a question only when
+the step is destructive, acts outside the workspace, needs authority the user
+has not given, or has no conventional default and the choice would materially
+change the result. Sessions run through the API, schedules and other headless
+paths often have no one to answer, so a question there ends the work unfinished.
+Both compositions change identically; legacy prompt digests are refreshed.
 
 Settings that block a tool are changed in the chat. When the app-action tools
 may exist (capability `workspaceAdmin` on and neither `admin_actions_search`

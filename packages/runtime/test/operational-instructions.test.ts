@@ -386,31 +386,18 @@ describe("proportional effort", () => {
     expect(guidance).toContain("instead of rediscovering");
   });
 
-  test("proceeds past routine local blocks instead of ending the turn with a question", () => {
-    // DeepSWE: finished, staged work was lost when an agent asked for a commit
-    // name and email, asked whether to branch from `master` when told `main`, or
-    // asked for the maintainer agreement a repository's AGENTS.md required.
+  test("proceeds past routine, reversible blocks instead of ending the turn with a question", () => {
+    // API, scheduled and other headless sessions often have no one to answer, so
+    // a question about a step with a conventional default leaves the work unfinished.
     const autonomy = section("## Autonomy and persistence");
     expect(autonomy).toContain(
-      "When a routine, reversible step of the task is blocked, such as a missing local setting or a differently named branch, take the conventional default without changing user or machine configuration, for example with a per-command option, say which default you took in your final answer, and continue.",
+      "When a routine, reversible step of the task is blocked, take the conventional default without changing user or machine configuration, say which default you took in your final answer, and continue.",
     );
     // Asking stays right for destructive, external or unauthorized steps and for
     // a choice with no conventional default that changes the result.
     expect(autonomy).toContain(
       "End the turn with a question only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result.",
     );
-    const git = OPENGENI_OPERATIONAL_INSTRUCTIONS;
-    expect(git).toContain(
-      "commit with a per-command one, such as `git -c user.name='Opengeni Agent' -c user.email=agent@opengeni.invalid commit`, without changing Git configuration.",
-    );
-    expect(git).toContain(
-      "If a requested base branch such as `main` exists neither locally nor on the remote, branch from the remote's default branch, or else from the current branch.",
-    );
-    expect(git).toContain(
-      "apply when work is submitted, not to local changes: make the requested change on a local branch, do not push it or open a pull request until those steps are done unless the user explicitly asks, and list the steps in your final answer.",
-    );
-    // Destructive Git operations still need the user's request.
-    expect(git).toContain("Never use destructive commands like `git reset --hard`");
   });
 
   test("keeps progress updates short and skips the opening update for quick answers", () => {
