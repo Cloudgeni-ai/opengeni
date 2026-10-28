@@ -9,7 +9,7 @@ on:
       # Merge batcher candidates (docs/merge-batcher.md): tested like a PR,
       # against the batch's base on main, and never publish anything.
       - "batch/**"
-  # Main PRs/merge groups use merge-queue.yml. Full CI is a separate,
+  # Main PRs use pr-ci.yml and land through the merge batcher. Full CI is a separate,
   # non-cancelling release-candidate lane.
   pull_request:
     branches:
@@ -2694,21 +2694,6 @@ jobs:
           AUTOMATION_CHECK_CONCLUSION: ${{ needs.automation-admission.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
-
-      # GITHUB_TOKEN-created Version PRs do not emit pull_request workflows.
-      # Their authenticated full CI is stronger than the fast entry check.
-      # merge_group still tests their combined tree normally after enqueueing.
-      - name: Report queue entry check for the admitted Version PR
-        if: ${{ success() && needs.automation-admission.result == 'success' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ inputs.automation_head_sha }}
-          CONCLUSION: ${{ needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
-        run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
-            -f name='Queue ready' -f head_sha="$HEAD_SHA" -f status=completed \
-            -f conclusion="$CONCLUSION" \
-            -f details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   merge-content:
     name: Verify landed merge content

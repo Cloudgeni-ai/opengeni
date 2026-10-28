@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "935dfe76cd63aaa07c94e17999bab7c17edb9b1c1a8d4ec4c12f3c9946c53bfe"
+      "sha256": "5155dfbccbf44b02874235b318dd7ab7bc1e5df365e55f69fe0c27b6a249fc4c"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -65,12 +65,8 @@
       "sha256": "e73d479146d440c32179858f7ab8ea5e6fb7339262c7ab093fb552badc1e4a0b"
     },
     {
-      "path": ".github/workflows/merge-queue.yml",
-      "sha256": "9528e10ad52923afbb48b0093bee8c7751aefa6c3a2e1dabe921c9d00a986023"
-    },
-    {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "a47898708d5634062d28075041ea111863891617da27cb22e5ca0b67cf493b0a"
+      "sha256": "fdebedaaa55772ea83f395776354e238617ffbf7ea031b936dfec256f56e1e32"
     },
     {
       "path": ".github/workflows/pr-ci-superseded.yml",
@@ -668,12 +664,6 @@
       "job": "automation-report",
       "step": "Complete exact-head automation CI check",
       "sha256": "dcdc181521aaa90b02a3abe81d25af741f76924204ad28e1fd35dd3fc679cc4c"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "automation-report",
-      "step": "Report queue entry check for the admitted Version PR",
-      "sha256": "15c35345a5835ec42287692e6f1d888076944b5d9445734107f904841bdc748e"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1354,66 +1344,6 @@
       "sha256": "58808325ef978e67fac85965381b0808323d1adb509b66a3bba9530e37523799"
     },
     {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "contracts",
-      "step": "Check committed Site browser runtime before builds",
-      "sha256": "fc4ba920e6a51460ee5b60430c35ebd5f1ee2c381818d52b7469bbc69250f1f4"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "contracts",
-      "step": "Check impacted static contracts",
-      "sha256": "1d182fb43dac544f7e5091d150b925e66c612f60ea143c6f92873d7857df348e"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "contracts",
-      "step": "Check impacted types",
-      "sha256": "83df402e5776c5500e4a6cd33786a86469d35463f3bb084141f82740040808cc"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "contracts",
-      "step": "Install dependencies",
-      "sha256": "d5b0a12f3e1afc3cd05865491a3bf95c58af7dcd39f56255a055748af1915f0d"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "contracts",
-      "step": "Validate the combined tree's outstanding changeset release plan",
-      "sha256": "3275ae311590a1a9e902f864ddbe40f4999aa3f9b2df72ef549c3f86e5bf4c1e"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "entry",
-      "step": "Explain queue entry",
-      "sha256": "f8bb554e6f7df6ef9e3606bfa844c09ad5ba3589851919a56cf39508b7a17936"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "plan",
-      "step": "Plan the complete combined tree, not only the last PR",
-      "sha256": "5a6b6762717faa59410ac30d72110199103a7af21d0e7d53ec192e472a52ddd0"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "ready",
-      "step": "Fail closed on failed, cancelled or unexpectedly skipped work",
-      "sha256": "fa9620a2271737540fa508c63b2d402670e3f7746373a762bb302d6e4f119ac3"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "units",
-      "step": "Install dependencies",
-      "sha256": "0395a50ea3b1adf9e6e4c8d117bec9d005e3e590b56ab435dfd890c4f60db1d2"
-    },
-    {
-      "workflow": ".github/workflows/merge-queue.yml",
-      "job": "units",
-      "step": "Run every impact-selected unit file with real database enforcement",
-      "sha256": "3ea69456ef607e6a771bb1333de88b05f85af34eb5426192358f417b93482f2b"
-    },
-    {
       "workflow": ".github/workflows/open-version-pr.yml",
       "job": "version",
       "step": "Detect versionable changesets",
@@ -1424,6 +1354,12 @@
       "job": "version",
       "step": "Dispatch exact-head Version PR CI",
       "sha256": "382691ebd189b1576a8dca66899797a174245de57d1d41c7b0ea7bf1f3950b46"
+    },
+    {
+      "workflow": ".github/workflows/open-version-pr.yml",
+      "job": "version",
+      "step": "Dispatch PR CI for the merge batcher",
+      "sha256": "3768e411dc69096867a33f7cb48b128a9b183ec93a82211491778e0b5ea20558"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",

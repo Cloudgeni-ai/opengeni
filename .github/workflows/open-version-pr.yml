@@ -115,3 +115,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           VERSION_PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
         run: node scripts/check-release-pr-automation.mjs dispatch-version-ci
+
+      # Pushes made with GITHUB_TOKEN start no pull_request workflows, and the
+      # merge batcher batches a PR only once PR CI passed on its exact head.
+      - name: Dispatch PR CI for the merge batcher
+        if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
+        run: |
+          set -euo pipefail
+          head_sha="$(gh pr view "$VERSION_PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          gh workflow run pr-ci.yml --repo "$GITHUB_REPOSITORY" --ref changeset-release/main \
+            -f pr_number="$VERSION_PR_NUMBER" -f head_sha="$head_sha"
