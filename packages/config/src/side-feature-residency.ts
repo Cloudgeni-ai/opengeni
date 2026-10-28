@@ -33,6 +33,12 @@ type RouteSpec = {
   features: readonly InferenceFeatureId[];
   /** Operators may declare its residency (the deployment could be EU). */
   declarable: boolean;
+  /**
+   * The route calls one named deployment on its endpoint (Azure: one resource
+   * can hold EU and global deployments), so a declaration names it too and
+   * covers only that deployment.
+   */
+  namedDeployment?: true;
   /** Code-owned record for routes operators cannot declare. */
   rule?: Rule;
 };
@@ -120,7 +126,11 @@ export const SIDE_FEATURE_ROUTES = {
     rule: subscription("SuperGrok"),
   },
   // The deployment's own Azure resource.
-  "realtime_voice.azure_live": { features: ["realtime_voice"], declarable: true },
+  "realtime_voice.azure_live": {
+    features: ["realtime_voice"],
+    declarable: true,
+    namedDeployment: true,
+  },
   "realtime_voice.ai_gateway": {
     features: ["realtime_voice"],
     declarable: false,
@@ -151,7 +161,11 @@ export const SIDE_FEATURE_ROUTES = {
     },
   },
   // The deployment's own Azure OpenAI and Azure Speech resources.
-  "transcription.azure-openai": { features: TRANSCRIPTION, declarable: true },
+  "transcription.azure-openai": {
+    features: TRANSCRIPTION,
+    declarable: true,
+    namedDeployment: true,
+  },
   "transcription.azure-speech": { features: TRANSCRIPTION, declarable: true },
   "transcription.openai-realtime": {
     features: LIVE,
@@ -164,7 +178,11 @@ export const SIDE_FEATURE_ROUTES = {
   },
   // The Realtime API on the deployment's Azure OpenAI resource; its own
   // declaration, since a batch deployment's region says nothing about it.
-  "transcription.azure-openai-realtime": { features: LIVE, declarable: true },
+  "transcription.azure-openai-realtime": {
+    features: LIVE,
+    declarable: true,
+    namedDeployment: true,
+  },
   "transcription.elevenlabs": {
     features: TRANSCRIPTION,
     declarable: false,
@@ -218,12 +236,28 @@ export type CodeOwnedSideFeatureRouteId = Exclude<SideFeatureRouteId, Declarable
 
 /**
  * What a side-feature call names: a code-owned route, or a route with the
- * endpoint the call actually sends to. A declaration describes one endpoint,
- * so a declarable route without its resolved endpoint is unknown.
+ * endpoint the call actually sends to and, for a route that calls a named
+ * deployment, the deployment it calls. A declaration describes one endpoint
+ * (and deployment), so a declarable route without them is unknown.
  */
 export type SideFeatureTarget =
   | CodeOwnedSideFeatureRouteId
-  | { route: SideFeatureRouteId; endpoint: string | null | undefined };
+  | {
+      route: SideFeatureRouteId;
+      endpoint: string | null | undefined;
+      deployment?: string | null | undefined;
+    };
+
+/** Whether a route calls one named deployment, which its declaration names. */
+export function sideFeatureRouteNamesDeployment(route: SideFeatureRouteId): boolean {
+  return (SIDE_FEATURE_ROUTES[route] as RouteSpec).namedDeployment === true;
+}
+
+/** A deployment name as Azure reads it: plain `[A-Za-z0-9._-]+`, not `.` or `..`. */
+function plainDeploymentName(value: string | null | undefined): string | null {
+  if (!value || value === "." || value === "..") return null;
+  return /^[A-Za-z0-9._-]+$/u.test(value) ? value : null;
+}
 
 export function sideFeatureTargetRoute(target: SideFeatureTarget): SideFeatureRouteId {
   return typeof target === "string" ? target : target.route;
@@ -272,9 +306,13 @@ export function sideFeatureEndpointOrigin(endpoint: string | null | undefined): 
   }
 }
 
-/** One operator declaration: the residency of the deployment at `endpoint`. */
+/**
+ * One operator declaration: the residency of the deployment at `endpoint`
+ * (and, for a route that calls a named deployment, of `deployment` there).
+ */
 const SideFeatureResidencyDeclaration = z.object({
   endpoint: z.string().trim().min(1),
+  deployment: z.string().trim().min(1).optional(),
   residency: ModelResidencyDeclaration,
 });
 
@@ -305,11 +343,32 @@ const SideFeatureResidencyDeclarations = z
           message: "a vendor default host has a code-owned rule and cannot be declared",
         });
       }
+      if (!isSideFeatureRouteId(key)) continue;
+      if (sideFeatureRouteNamesDeployment(key)) {
+        if (!plainDeploymentName(declaration.deployment)) {
+          context.addIssue({
+            code: "custom",
+            path: [key, "deployment"],
+            message:
+              "must name the deployment this route calls ([A-Za-z0-9._-]+); one resource can hold EU and global deployments",
+          });
+        }
+      } else if (declaration.deployment !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: [key, "deployment"],
+          message: "this route does not call a named deployment",
+        });
+      }
     }
   });
 
-/** A parsed declaration: the endpoint origin it describes and its residency. */
-export type SideFeatureResidencyDeclarationV1 = { endpoint: string; residency: ModelResidencyV1 };
+/** A parsed declaration: the endpoint origin (and deployment) it describes and its residency. */
+export type SideFeatureResidencyDeclarationV1 = {
+  endpoint: string;
+  deployment?: string;
+  residency: ModelResidencyV1;
+};
 
 /** Parse `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`; throws a readable error when invalid. */
 export function parseSideFeatureResidencyJson(
@@ -330,9 +389,10 @@ export function parseSideFeatureResidencyJson(
     );
   }
   const declarations: Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> = {};
-  for (const [route, { endpoint, residency }] of Object.entries(parsed.data)) {
+  for (const [route, { endpoint, deployment, residency }] of Object.entries(parsed.data)) {
     declarations[route as SideFeatureRouteId] = {
       endpoint: sideFeatureEndpointOrigin(endpoint)!,
+      ...(deployment !== undefined ? { deployment } : {}),
       residency: ModelResidencyV1.parse({
         geography: residency.geography,
         deploymentType: residency.deploymentType,
@@ -386,8 +446,10 @@ function ruleResidency(rule: Rule): ModelResidencyV1 {
  * Where a side-feature call processes data. A code-owned route has its rule.
  * A declarable route is resolved from the endpoint the call sends to: a
  * vendor default host has its code-owned rule; otherwise the operator's
- * declaration applies only when it names that same endpoint origin. An
- * undeclared route, a missing endpoint or a different endpoint is unknown.
+ * declaration applies only when it names that same endpoint origin and, for
+ * a route that calls a named deployment, that same deployment. An undeclared
+ * route, a missing endpoint or deployment, or a different one is unknown.
+ * Nothing in a request (its body model or a query parameter) is read.
  */
 export function sideFeatureRouteResidency(
   settings: SideFeatureResidencySettings,
@@ -401,7 +463,12 @@ export function sideFeatureRouteResidency(
   const vendor = VENDOR_DEFAULT_HOSTS[new URL(origin).hostname];
   if (vendor) return ruleResidency(vendor);
   const declaration = declaredSideFeatureResidency(settings)[route];
-  return declaration?.endpoint === origin ? declaration.residency : UNKNOWN_MODEL_RESIDENCY;
+  if (!declaration || declaration.endpoint !== origin) return UNKNOWN_MODEL_RESIDENCY;
+  if (spec.namedDeployment) {
+    const called = plainDeploymentName(typeof target === "string" ? null : target.deployment);
+    if (!called || called !== declaration.deployment) return UNKNOWN_MODEL_RESIDENCY;
+  }
+  return declaration.residency;
 }
 
 /** Whether the route is EU by its residency record. */

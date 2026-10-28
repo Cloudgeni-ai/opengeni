@@ -34,13 +34,21 @@ function declaration(deploymentType: "self_hosted" | "azure_data_zone", region: 
   } as const;
 }
 
-/** Operator declarations, each for the one endpoint a route sends to. */
-const declare = (routes: Record<string, [endpoint: string, ReturnType<typeof declaration>]>) =>
+/**
+ * Operator declarations, each for the one endpoint (and, for an Azure
+ * deployment route, the one deployment) a route sends to.
+ */
+const declare = (
+  routes: Record<
+    string,
+    [endpoint: string, ReturnType<typeof declaration>, deployment?: string | undefined]
+  >,
+) =>
   JSON.stringify(
     Object.fromEntries(
-      Object.entries(routes).map(([route, [endpoint, residency]]) => [
+      Object.entries(routes).map(([route, [endpoint, residency, deployment]]) => [
         route,
-        { endpoint, residency },
+        { endpoint, ...(deployment ? { deployment } : {}), residency },
       ]),
     ),
   );
@@ -64,6 +72,7 @@ describe("live voice under EU-only inference", () => {
     expect(realtimeVoiceRoute(azureModel, settings)).toEqual({
       route: "realtime_voice.azure_live",
       endpoint: azureLive.azureLiveEndpoint,
+      deployment: "gpt-live-1",
     });
     expect(realtimeVoiceRoute(gatewayModel, settings)).toBe("realtime_voice.ai_gateway");
     expect(realtimeVoiceRoute("unknown/eu-voice", settings)).toBeNull();
@@ -80,10 +89,36 @@ describe("live voice under EU-only inference", () => {
         "realtime_voice.azure_live": [
           "https://other-voice.example.test",
           declaration("azure_data_zone", "swedencentral"),
+          "gpt-live-1",
         ],
       }),
     });
     expect(realtimeVoiceRegionAllowed(eu, azureModel)).toBe(false);
+  });
+
+  test("an Azure Live declaration for another deployment on the same resource does not admit this one", () => {
+    // One Azure resource can hold an EU Data Zone and a global deployment;
+    // the declaration covers only the deployment the live session names.
+    const declaredFor = (deployment: string) =>
+      testSettings({
+        ...azureLive,
+        azureLiveDeployment: "gpt-live-global",
+        requiredModelGeography: "eu",
+        sideFeatureResidencyJson: declare({
+          "realtime_voice.azure_live": [
+            azureLive.azureLiveEndpoint,
+            declaration("azure_data_zone", "swedencentral"),
+            deployment,
+          ],
+        }),
+      });
+    expect(realtimeVoiceRegionAllowed(declaredFor("gpt-live-eu"), azureModel)).toBe(false);
+    expect(
+      inferenceFeatureAvailability(declaredFor("gpt-live-eu")).find(
+        (f) => f.id === "realtime_voice",
+      ),
+    ).toEqual({ id: "realtime_voice", available: false, unavailableReason: "region_restricted" });
+    expect(realtimeVoiceRegionAllowed(declaredFor("gpt-live-global"), azureModel)).toBe(true);
   });
 
   test("admission refuses a non-EU model in an EU-only workspace before any connection", async () => {
@@ -117,6 +152,7 @@ describe("live voice under EU-only inference", () => {
         "realtime_voice.azure_live": [
           azureLive.azureLiveEndpoint,
           declaration("azure_data_zone", "swedencentral"),
+          "gpt-live-1",
         ],
       }),
     });
@@ -252,7 +288,11 @@ describe("speech to text under EU-only inference", () => {
       voiceInputAzureApiKey: "az-key",
     } satisfies Partial<Settings>;
     const batchOnly = declare({
-      "transcription.azure-openai": [AZURE_OPENAI, declaration("azure_data_zone", "swedencentral")],
+      "transcription.azure-openai": [
+        AZURE_OPENAI,
+        declaration("azure_data_zone", "swedencentral"),
+        "gpt-4o-transcribe",
+      ],
     });
 
     test("a batch declaration never admits the live secret; OpenAI's and ElevenLabs' are refused", async () => {
@@ -277,6 +317,34 @@ describe("speech to text under EU-only inference", () => {
       });
     });
 
+    test("a Realtime declaration for another deployment on the resource never admits the secret", async () => {
+      // The secret is minted for the configured deployment; a declaration
+      // naming a different one (say an EU deployment beside a global one) is
+      // not about the deployment the client will connect to.
+      const settings = testSettings({
+        ...azureOpenAi,
+        sideFeatureResidencyJson: declare({
+          "transcription.azure-openai-realtime": [
+            AZURE_OPENAI,
+            declaration("azure_data_zone", "swedencentral"),
+            "gpt-4o-transcribe-eu",
+          ],
+          "transcription.azure-openai": [
+            AZURE_OPENAI,
+            declaration("azure_data_zone", "swedencentral"),
+            "gpt-4o-transcribe-eu",
+          ],
+        }),
+      });
+      const eu = createSpeechToTextDeployment({ settings }, { isEuOnly: async () => true });
+      for (const feature of ["live_transcription", "voice_input"] as const) {
+        expect(await eu.regionAllowed("azure-openai", scope, feature)).toBe(false);
+        await expect(eu.assertRegion("azure-openai", scope, feature)).rejects.toMatchObject({
+          code: "region_restricted",
+        });
+      }
+    });
+
     test("a declared-EU Realtime endpoint is admitted; outside EU nothing changes", async () => {
       const settings = testSettings({
         ...azureOpenAi,
@@ -284,6 +352,7 @@ describe("speech to text under EU-only inference", () => {
           "transcription.azure-openai-realtime": [
             AZURE_OPENAI,
             declaration("azure_data_zone", "swedencentral"),
+            "gpt-4o-transcribe",
           ],
         }),
       });

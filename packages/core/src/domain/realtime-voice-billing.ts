@@ -117,11 +117,16 @@ export function deploymentRealtimeVoice(
  */
 export function realtimeVoiceRoute(
   model: SessionRealtimeModel | string,
-  settings: Pick<Settings, "azureLiveEndpoint">,
+  settings: Pick<Settings, "azureLiveEndpoint" | "azureLiveDeployment">,
 ): SideFeatureTarget | null {
   // The deployment's own Azure resource, at the endpoint it connects to.
   if (model === AZURE_LIVE_REALTIME_MODEL_ID) {
-    return { route: "realtime_voice.azure_live", endpoint: settings.azureLiveEndpoint };
+    // The deployment it calls is the one the live session names.
+    return {
+      route: "realtime_voice.azure_live",
+      endpoint: settings.azureLiveEndpoint,
+      deployment: settings.azureLiveDeployment,
+    };
   }
   if (model === CODEX_REALTIME_MODEL_ID) return "realtime_voice.codex_subscription";
   if (model === SUPERGROK_REALTIME_MODEL_ID) return "realtime_voice.supergrok_subscription";
@@ -140,7 +145,10 @@ export function realtimeVoiceRoute(
 export function realtimeVoiceRegionAllowed(
   settings: Pick<
     Settings,
-    "sideFeatureResidencyJson" | "requiredModelGeography" | "azureLiveEndpoint"
+    | "sideFeatureResidencyJson"
+    | "requiredModelGeography"
+    | "azureLiveEndpoint"
+    | "azureLiveDeployment"
   >,
   model: SessionRealtimeModel | string,
 ): boolean {

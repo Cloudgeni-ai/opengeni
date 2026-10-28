@@ -214,11 +214,19 @@ integration, never a region, and is never read for EU status.
   an OpenAI-compatible decision model. Each declaration describes one
   endpoint: it applies only when the call sends to that same origin, so a
   changed base URL, an Azure resource other than the declared one, or a
-  missing endpoint is unknown. Without a matching declaration a route is
+  missing endpoint is unknown. One Azure resource can hold an EU Data Zone
+  deployment and a global one, so the Azure deployment routes
+  (`realtime_voice.azure_live`, `transcription.azure-openai` and
+  `transcription.azure-openai-realtime`) also name the `deployment`: the
+  declaration applies only when the call names that same deployment
+  (`OPENGENI_AZURE_LIVE_DEPLOYMENT`, `OPENGENI_VOICE_INPUT_AZURE_DEPLOYMENT`).
+  The check reads the configured deployment, never a model in the request
+  body or a `?deployment=` query. Without a matching declaration a route is
   unknown, so not EU. `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` maps route ids to
-  `{ endpoint, residency }` and is validated at boot; it rejects unknown
-  routes, routes with a code-owned rule, non-http(s) endpoints and vendor
-  default hosts:
+  `{ endpoint, deployment?, residency }` and is validated at boot; it rejects
+  unknown routes, routes with a code-owned rule, non-http(s) endpoints, vendor
+  default hosts, an Azure deployment route without a plain
+  `[A-Za-z0-9._-]+` deployment, and a deployment on any other route:
 
   ```json
   {

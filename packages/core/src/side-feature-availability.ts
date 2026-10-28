@@ -42,7 +42,13 @@ function configuredDeclarableTargets(
     }
     case "realtime_voice":
       return settings.azureLiveEndpoint
-        ? [{ route: "realtime_voice.azure_live", endpoint: settings.azureLiveEndpoint }]
+        ? [
+            {
+              route: "realtime_voice.azure_live",
+              endpoint: settings.azureLiveEndpoint,
+              deployment: settings.azureLiveDeployment,
+            },
+          ]
         : [];
     case "voice_input":
     case "meeting_transcription":

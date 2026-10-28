@@ -213,11 +213,16 @@ export function createSpeechToTextDeployment(
             accessToken: config.apiKey || config.adToken ? null : entraToken,
             ...fetchOption,
           }),
-          { route: "transcription.azure-openai", endpoint: config.endpoint },
+          {
+            route: "transcription.azure-openai",
+            endpoint: config.endpoint,
+            deployment: config.deployment,
+          },
         );
         liveRoutes.set(config.id, {
           route: "transcription.azure-openai-realtime",
           endpoint: config.endpoint,
+          deployment: config.deployment,
         });
         break;
       case "azure-mai":

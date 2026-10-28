@@ -43,7 +43,9 @@ const SEARXNG = "https://search.internal.example";
 const searxngTarget = { route: "web_search.searxng", endpoint: SEARXNG } as const;
 
 /** One declaration in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`: a route at one endpoint. */
-function declarations(entries: Record<string, { endpoint: string; residency: unknown }>): string {
+function declarations(
+  entries: Record<string, { endpoint: string; deployment?: string; residency: unknown }>,
+): string {
   return JSON.stringify(entries);
 }
 
@@ -145,6 +147,7 @@ describe("side-feature residency records", () => {
       sideFeatureResidencyJson: declarations({
         "realtime_voice.azure_live": {
           endpoint: azure,
+          deployment: "gpt-live-1",
           residency: { ...euSelfHosted, geography: "unknown" },
         },
       }),
@@ -153,8 +156,70 @@ describe("side-feature residency records", () => {
       sideFeatureRouteIsEu(declaredUnknown, {
         route: "realtime_voice.azure_live",
         endpoint: azure,
+        deployment: "gpt-live-1",
       }),
     ).toBe(false);
+  });
+
+  test("an Azure deployment route's declaration covers only the deployment it names", () => {
+    // One Azure resource can hold an EU Data Zone deployment and a global
+    // one, so these declarations name the deployment the call names. Nothing
+    // in the request (a body model, a `?deployment=` query) is read.
+    const azure = "https://res.openai.azure.com";
+    for (const route of [
+      "realtime_voice.azure_live",
+      "transcription.azure-openai",
+      "transcription.azure-openai-realtime",
+    ] as const) {
+      const declared = settings({
+        sideFeatureResidencyJson: declarations({
+          [route]: { endpoint: azure, deployment: "gpt-eu", residency: euDataZone },
+        }),
+      });
+      expect(sideFeatureRouteIsEu(declared, { route, endpoint: azure, deployment: "gpt-eu" })).toBe(
+        true,
+      );
+      for (const deployment of [
+        "gpt-global",
+        "GPT-EU",
+        "gpt-eu/../gpt-global",
+        "",
+        null,
+        undefined,
+      ]) {
+        expect(sideFeatureRouteIsEu(declared, { route, endpoint: azure, deployment })).toBe(false);
+      }
+      // The query form names a deployment the endpoint origin never carries.
+      expect(
+        sideFeatureRouteIsEu(declared, {
+          route,
+          endpoint: `${azure}/openai/realtime?deployment=gpt-eu`,
+          deployment: "gpt-global",
+        }),
+      ).toBe(false);
+      // A declaration without the deployment, or with an unreadable one, is refused.
+      for (const deployment of [undefined, "gpt-eu/x", "..", "gpt eu"]) {
+        expect(() =>
+          parseSideFeatureResidencyJson(
+            declarations({
+              [route]: {
+                endpoint: azure,
+                ...(deployment === undefined ? {} : { deployment }),
+                residency: euDataZone,
+              },
+            }),
+          ),
+        ).toThrow(/must name the deployment/u);
+      }
+    }
+    // Other routes don't call a named deployment, so they can't name one.
+    expect(() =>
+      parseSideFeatureResidencyJson(
+        declarations({
+          "web_search.searxng": { endpoint: SEARXNG, deployment: "x", residency: euSelfHosted },
+        }),
+      ),
+    ).toThrow(/does not call a named deployment/u);
   });
 
   test("declarations are rejected for unknown or code-owned routes and bad endpoints", () => {

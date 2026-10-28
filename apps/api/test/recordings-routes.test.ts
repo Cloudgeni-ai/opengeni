@@ -1241,7 +1241,7 @@ describe("recording routes", () => {
         endpoint: "https://speech.example.cognitiveservices.azure.com",
         residency,
       },
-      "transcription.azure-openai": { endpoint: AI, residency },
+      "transcription.azure-openai": { endpoint: AI, deployment: "gpt-4o-transcribe", residency },
     };
     const refused = await live(speech);
     expect(refused.granted).toMatchObject({
@@ -1255,9 +1255,28 @@ describe("recording routes", () => {
     });
     // Recorders don't start a live transcript that can't run here.
     expect(refused.liveTranscript).toBe(false);
+    // A Realtime declaration for another deployment on the same resource
+    // (an EU one beside the configured global one) mints nothing either.
+    const otherDeployment = await live({
+      ...speech,
+      "transcription.azure-openai-realtime": {
+        endpoint: AI,
+        deployment: "gpt-4o-transcribe-eu",
+        residency,
+      },
+    });
+    expect(otherDeployment.granted).toMatchObject({
+      status: 422,
+      body: { error: { details: { code: "region_restricted" } } },
+    });
+    expect(otherDeployment.minted).toEqual([]);
     const admitted = await live({
       ...speech,
-      "transcription.azure-openai-realtime": { endpoint: AI, residency },
+      "transcription.azure-openai-realtime": {
+        endpoint: AI,
+        deployment: "gpt-4o-transcribe",
+        residency,
+      },
     });
     expect(admitted.granted).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
     expect(admitted.minted).toEqual([`${AI}/openai/v1/realtime/client_secrets`]);
