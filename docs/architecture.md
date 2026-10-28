@@ -2891,9 +2891,14 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   credentials Opengeni injects) are replaced by their references in tool
   results, model input and stored conversation text before storage and before
   the model sees them (docs/secrets.md, Masking). Other conversation, source,
-  tool, and error text is not regex-redacted. Known-value masking supersedes
-  the 5 August 2026 "keep content exact" decision for this case, approved on
-  26 October 2026.
+  tool, and error text is not regex-redacted, with one narrow exception: tool
+  results and their stored copies also mask high-precision secret shapes (URL
+  passwords, connection-string passwords, Azure keys, PEM private keys and
+  well-known token formats), capture each value into the root session's Task
+  vault and write its reference, or a `[masked <kind>]` marker when capture is
+  not possible. Known-value and shape masking supersede the 5 August 2026
+  "keep content exact" decision for these two cases, approved on 26 October
+  2026.
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
