@@ -9,6 +9,7 @@ import {
   filterOpenApiDocumentForDefinition,
   googleDiscoveryToOpenApi,
   integrationDefinitionById,
+  integrationDefinitionReadOnlyOperations,
   parseOpenApiDocument,
   MAX_CURATED_INTEGRATION_SPEC_BYTES,
   type IntegrationCredentialResolver,
@@ -112,6 +113,7 @@ async function resolveDefinition(
     ...(definition.source.kind === "openapi" && definition.source.schemaMode
       ? { schemaMode: definition.source.schemaMode }
       : {}),
+    readOnlyOperations: integrationDefinitionReadOnlyOperations(definition),
   });
   const baseUrl = firstOpenApiServerUrl(revision);
   const providerDomain = definition.provider.domain;

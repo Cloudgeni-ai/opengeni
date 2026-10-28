@@ -26,11 +26,18 @@ export type IntegrationDefinitionSource =
       /** Exact reviewed operations; never admit newly added provider methods implicitly. */
       operationAllowlist?: readonly Readonly<{
         path: string;
-        method: "get" | "post";
+        method: "get" | "post" | "patch";
         /** Provider metadata often omits delegated scopes; bind the reviewed requirement. */
         requiredScopes?: readonly string[];
         /** Support the opaque continuation token without accepting arbitrary URLs. */
         odataSkipToken?: boolean;
+        /**
+         * A reviewed provider action that only reads (for example a POST search).
+         * Only this reviewed list can relax the HTTP-method safety default.
+         */
+        readOnly?: true;
+        /** Reviewed guidance that replaces the provider's generic description. */
+        description?: string;
       }>[];
       excludedOperationPathPrefixes?: readonly string[];
       /** Expose JSON bodies without expanding the provider entity graph. */
@@ -345,6 +352,121 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
   facets: [driveKnowledgeFacet("microsoft-onedrive"), accountIdentityFacet("microsoft")],
 };
 
+const SHAREPOINT_SCOPE = ["Sites.ReadWrite.All"] as const;
+
+/**
+ * Delegated work/school SharePoint access. OneDrive stays on personal-account
+ * compatible file scopes, so site discovery, lists and search live here.
+ */
+export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition = {
+  id: "microsoft-sharepoint",
+  name: "SharePoint",
+  summary: "Find SharePoint sites, browse document libraries and lists, and search content.",
+  protocol: "openapi",
+  provider: { id: "microsoft", domain: "graph.microsoft.com" },
+  source: {
+    kind: "openapi",
+    url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
+    // No site, list or page administration, permission changes or tenant-wide enumeration.
+    operationAllowlist: [
+      {
+        path: "/search/query",
+        method: "post",
+        readOnly: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          'Search SharePoint and OneDrive content the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries; combine driveItem, listItem and list in one request if needed, but search site separately. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size.',
+      },
+      {
+        path: "/sites",
+        method: "get",
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "Find SharePoint sites by keyword with $search (for example $search=marketing). Returns sites the signed-in person can access.",
+      },
+      { path: "/me/followedSites", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      { path: "/sites/{site-id}", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/sites/{site-id}/getByPath(path='{path}')",
+        method: "get",
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "Get a site from a server-relative path under a known site. To resolve a site URL such as https://contoso.sharepoint.com/sites/hr, use site-id contoso.sharepoint.com:/sites/hr: with Get a site resource instead.",
+      },
+      { path: "/sites/{site-id}/sites", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      { path: "/sites/{site-id}/drive", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      { path: "/sites/{site-id}/drives", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/sites/{site-id}/lists",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
+      { path: "/sites/{site-id}/lists/{list-id}", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/sites/{site-id}/lists/{list-id}/items",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "List items in a SharePoint list. Use $expand=fields to include column values, and $filter on fields/<column> only for indexed columns.",
+      },
+      {
+        path: "/sites/{site-id}/lists/{list-id}/items",
+        method: "post",
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          'Create an item in a SharePoint list. Send {"fields":{"Title":"...","<Column>":"..."}} using the list\'s internal column names.',
+      },
+      {
+        path: "/sites/{site-id}/lists/{list-id}/items/{listItem-id}",
+        method: "get",
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
+      {
+        path: "/sites/{site-id}/lists/{list-id}/items/{listItem-id}/fields",
+        method: "patch",
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "Update column values of a SharePoint list item. Send only the changed columns by internal name.",
+      },
+      { path: "/sites/{site-id}/pages", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      { path: "/drives/{drive-id}/root", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/drives/{drive-id}/items/{driveItem-id}",
+        method: "get",
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
+      {
+        path: "/drives/{drive-id}/items/{driveItem-id}/children",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "List files and folders in a document library folder. Use driveItem-id root for the library's top level.",
+      },
+      {
+        path: "/drives/{drive-id}/items/{driveItem-id}/content",
+        method: "get",
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
+      {
+        path: "/drives/{drive-id}/search(q='{q}')",
+        method: "get",
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
+    ],
+  },
+  baseUrl: MICROSOFT_GRAPH_BASE_URL,
+  authentication: {
+    ...microsoftOAuth([...SHAREPOINT_SCOPE]),
+    authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
+    tokenUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
+  },
+  facets: [accountIdentityFacet("microsoft")],
+};
+
 /** Delegated work/school account access. Message sends use the connected human. */
 export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-teams",
@@ -462,11 +584,29 @@ export const CORE_INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = [
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
   MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
 ];
 
 export function integrationDefinitionById(id: string): IntegrationDefinition | undefined {
   return CORE_INTEGRATION_DEFINITIONS.find((definition) => definition.id === id);
+}
+
+/**
+ * Reviewed `"<method> <path>"` keys that read despite a non-GET method. Only
+ * a reviewed definition can supply these; provider documents cannot.
+ */
+export function integrationDefinitionReadOnlyOperations(
+  definition: IntegrationDefinition,
+): ReadonlySet<string> {
+  if (definition.source.kind !== "openapi" || !definition.source.operationAllowlist) {
+    return new Set();
+  }
+  return new Set(
+    definition.source.operationAllowlist
+      .filter((entry) => entry.readOnly === true)
+      .map((entry) => `${entry.method} ${entry.path}`),
+  );
 }
 
 export function integrationDefinitionProviderDomain(definition: IntegrationDefinition): string {
@@ -514,7 +654,7 @@ export function filterOpenApiDocumentForDefinition(
         const operations = Object.fromEntries(
           selected
             .filter(({ method }) => isRecord(item[method]))
-            .map(({ method, requiredScopes, odataSkipToken }) => {
+            .map(({ method, requiredScopes, odataSkipToken, description }) => {
               const operation = item[method] as Record<string, unknown>;
               if (operation.$ref)
                 throw new IntegrationProtocolError(
@@ -526,6 +666,7 @@ export function filterOpenApiDocumentForDefinition(
                 method,
                 {
                   ...reviewed,
+                  ...(description ? { description } : {}),
                   ...(odataSkipToken
                     ? {
                         parameters: [

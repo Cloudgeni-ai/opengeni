@@ -111,6 +111,7 @@ import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
 import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
 import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-integration";
+import { useSharePointIntegration } from "@/components/capabilities/use-sharepoint-integration";
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
 import { useOutlookContactsIntegration } from "@/components/capabilities/use-outlook-contacts-integration";
 import { useOutlookMailIntegration } from "@/components/capabilities/use-outlook-mail-integration";
@@ -589,6 +590,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     onRuntimeChanged,
     refreshRevision: catalogData.revision,
   });
+  const sharePoint = useSharePointIntegration({
+    workspaceId,
+    definitions: apiIntegrationDefinitions,
+    instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
+  });
   const slackBotMode = slack.catalogName === "Opengeni bot";
   const integrations = [
     { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
@@ -610,6 +619,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     outlookCalendar,
     outlookContacts,
     oneDrive,
+    sharePoint,
   ].map((adapter) => ({
     ...adapter,
     model: nativeIntegrationModel(

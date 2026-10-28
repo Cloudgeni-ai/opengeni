@@ -63,6 +63,11 @@ export interface CompileOpenApiOptions {
   readonly baseUrl?: string;
   readonly provider?: string;
   readonly schemaMode?: "provider_validated_json";
+  /**
+   * Reviewed `"<method> <path>"` operations that only read despite a non-GET
+   * method (a POST search, for example). Supplied by reviewed definitions only.
+   */
+  readonly readOnlyOperations?: ReadonlySet<string>;
 }
 
 export interface OpenApiServerOptions {
@@ -190,7 +195,9 @@ export function compileOpenApiRevision(
       );
       const requiredScopeAlternatives =
         operation.security === undefined ? documentSecurity : readSecurity(operation.security);
-      const safety = classifyHttpSafety(method, operation);
+      const safety = options.readOnlyOperations?.has(`${method} ${pathTemplate}`)
+        ? "read"
+        : classifyHttpSafety(method, operation);
       const inputSchema = operationInputSchema(parameters, requestBody);
       const outputSchema = options.schemaMode
         ? undefined
