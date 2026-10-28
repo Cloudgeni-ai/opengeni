@@ -401,7 +401,10 @@ jobs:
           # adds balancing headroom without increasing any test/attempt budget.
           echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 12)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
-          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
+          # The same for E2E with its 720-second deadline: the complete set ran
+          # past it on run40747935590/shard1 with every test passing (one file
+          # alone takes about six minutes). Eight shards give it headroom.
+          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 8)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'
