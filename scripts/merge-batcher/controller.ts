@@ -37,6 +37,24 @@ import type { Ejection, HeadRefresh } from "./model";
 export interface Reader {
   observe(): Promise<Observation>;
 }
+/** Files each member's merge commit changed, aligned with manifest.pulls. */
+export async function memberPaths(git: GitStore, manifest: Manifest): Promise<string[][]> {
+  const result: string[][] = [];
+  let parent = manifest.baseSha;
+  for (const pull of manifest.pulls) {
+    const output = await git.exec([
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      parent,
+      pull.mergeSha,
+    ]);
+    result.push(output.split("\0").filter(Boolean));
+    parent = pull.mergeSha;
+  }
+  return result;
+}
 export type Effect =
   | { kind: "record" }
   | { kind: "publish"; branch: string; manifest: Manifest }
@@ -196,6 +214,22 @@ export class LiveReader implements Reader {
         !archived || selected.has(candidate.manifest.batchId),
       );
       const latest = latestRun(candidate, this.config);
+      // Failed-check evidence naming files is attributable only against what
+      // each member's merge actually changed in this candidate chain.
+      if (
+        !archived &&
+        latest?.status === "completed" &&
+        latest.trusted &&
+        latest.outcome === "code_failure" &&
+        latest.diagnostics?.some((diagnostic) => diagnostic.paths.length > 0)
+      )
+        try {
+          candidate.memberPaths = await memberPaths(this.git, candidate.manifest);
+        } catch {
+          observationWarnings.push(
+            `Member paths unavailable for ${candidate.manifest.batchId}; failure attribution falls back to bisection`,
+          );
+        }
       if (
         !archived &&
         (!latest ||

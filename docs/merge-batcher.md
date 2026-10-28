@@ -598,6 +598,28 @@ current main or an exact live predecessor chain, checked before and after the
 durable submission claim. An unknown POST outcome remains reconciliation-only,
 never a blind replay; these observations do not make GitHub REST atomic with Git.
 
+Failed checks can carry structured evidence. In the source job,
+`scripts/ci/batch-source.ts` records which check failed (`changesets`,
+`typecheck`, `site-runtime` or `guard:<name>`, such as `guard:public-hygiene` or
+`guard:lint`) and the tracked files its output names; changeset errors name
+`.changeset/<name>.md`. A failed unit shard records its failing test files. The
+task receipt keeps that evidence only for a code failure, and the controller
+revalidates it from the trusted result artifact. These source-job checks are
+deterministic, so their failure skips the single flake rerun. When a named file
+was changed by exactly one member's merge in the candidate chain, that member
+is ejected for its exact head, with a comment quoting the check and the first
+error line, and the batch and its descendants are invalidated without
+cancelling CI. The other members return to the queue, or keep their place in
+sequential recovery, and are rebuilt and tested again. That member's file
+differs from the base, so this attribution does not wait for the exact-base
+comparison. Failing unit-test files are weaker evidence: they attribute only
+after the unchanged rerun reproduced the failure, and only after the
+exact-base comparison. Anything else, such as several members or none
+touching the named files, or a failure without evidence, keeps the hold,
+split and parking behavior above (and the rerun, unless a deterministic check
+failed). A deterministic singleton failure parks without a rerun. An ejected
+head re-enters on a new push or ready event.
+
 ## State machine and recovery
 
 The planner constructs speculative successors on the exact predecessor tip.

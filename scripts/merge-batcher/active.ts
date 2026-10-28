@@ -9,6 +9,7 @@ import {
   type AutoMergeState,
 } from "./github";
 import {
+  ATTRIBUTED_FAILURE,
   bindingKey,
   digest,
   emptyLedger,
@@ -649,7 +650,8 @@ export class GitHubActiveExecutor implements Executor {
       if (effect.kind === "comment" && effect.body.includes("batcher-ejection:")) {
         const conflict = state.ledger.ejected.some(
           (e) =>
-            e.reason === "merge-tree conflict against candidate predecessor" &&
+            (e.reason === "merge-tree conflict against candidate predecessor" ||
+              e.reason.startsWith(ATTRIBUTED_FAILURE)) &&
             e.pull.number === effect.number &&
             effect.body.includes(`<!-- batcher-ejection:${bindingKey(e.pull)} -->`) &&
             effect.body.includes(`: ${e.reason}. Batch: ${e.batchId}.`),
