@@ -71,7 +71,10 @@ export interface WorkspaceInstructions {
     WorkspaceInstructionPolicyHead,
     "revisionId" | "activationVersion" | "activatedAt"
   > | null;
-  /** Saves the complete text. Keeps one logical save across an uncertain outcome. */
+  /**
+   * Saves the complete text; empty text clears the instructions. Keeps one
+   * logical save across an uncertain outcome.
+   */
   save: (content: string) => Promise<void>;
   /** A rollback activated a new head. */
   accept: (head: WorkspaceInstructionPolicyHead) => void;
@@ -111,11 +114,15 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
     setContentError(null);
     void (async () => {
       try {
-        const next = revisionId
+        // A cleared (empty) version adds nothing, so an earlier-settings
+        // override applies again, exactly as when nothing was ever saved.
+        const saved = revisionId
           ? (await client.getWorkspaceInstructionPolicyRevision(workspaceId, revisionId)).content
-          : legacy
-            ? ((await client.getWorkspace(workspaceId)).agentInstructions ?? "")
-            : "";
+          : "";
+        const next =
+          saved || !legacy
+            ? saved
+            : ((await client.getWorkspace(workspaceId)).agentInstructions ?? "");
         if (!cancelled) setContent(next);
       } catch (reason) {
         if (!cancelled) setContentError(errorText(reason));
@@ -130,8 +137,8 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
 
   const save = useCallback(
     async (text: string) => {
-      if (!pending.current?.matches(client, workspaceId, text, head)) {
-        pending.current = createWorkspaceInstructionSave(client, workspaceId, text, head);
+      if (!pending.current?.matches(client, workspaceId, text, head, legacy)) {
+        pending.current = createWorkspaceInstructionSave(client, workspaceId, text, head, legacy);
       }
       try {
         const saved = await pending.current.run();
@@ -149,7 +156,7 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
         );
       }
     },
-    [client, workspaceId, head, inventory],
+    [client, workspaceId, head, legacy, inventory],
   );
 
   const accept = useCallback(
@@ -169,7 +176,8 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
       setRetry((value) => value + 1);
     },
     content,
-    configured: revisionId !== null || legacy,
+    // A cleared version is saved but empty: there are no instructions.
+    configured: content.trim().length > 0 || (revisionId === null && legacy),
     head,
     save,
     accept,
@@ -658,6 +666,8 @@ export function InstructionsEditPage({
   const tooLong = value.length > WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS;
   const limit = WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS.toLocaleString("en-US");
   const unchanged = value.trim() === instructions.content.trim();
+  // Saving empty text clears the instructions.
+  const clearing = !value.trim();
   return (
     <FormPage
       title={
@@ -665,16 +675,18 @@ export function InstructionsEditPage({
       }
       description={`Added to every chat and automation in ${personal ? "your Personal workspace" : workspaceName}. The old version stays in History.`}
       back={{ label: "Instructions", onClick: onClose }}
-      submitLabel="Save instructions"
+      submitLabel={clearing ? "Clear instructions" : "Save instructions"}
       pendingLabel="Saving…"
       loading={draft === null}
       loadingFields={1}
-      submitDisabled={unchanged || !value.trim() || tooLong}
+      submitDisabled={unchanged || tooLong}
       // Cancel and Save show once something changed; until then the back link is the way out.
       className={unchanged ? "[&>form>footer]:hidden" : undefined}
       onCancel={onClose}
       onSubmitted={() => {
-        toast("Saved the instructions. New messages use them.");
+        toast(
+          clearing ? "Cleared the instructions." : "Saved the instructions. New messages use them.",
+        );
         onClose();
       }}
       onSubmit={async () => {
@@ -735,13 +747,15 @@ export function instructionRevisions(
       const summary =
         event.type === "rollback"
           ? "Restored an earlier version"
-          : index === events.length - 1
-            ? "Created the instructions"
-            : agent
-              ? "Approved an agent's change"
-              : revision.provenance.source === "legacy_import"
-                ? "Brought over from earlier settings"
-                : "Edited the instructions";
+          : revision.content === ""
+            ? "Cleared the instructions"
+            : index === events.length - 1
+              ? "Created the instructions"
+              : agent
+                ? "Approved an agent's change"
+                : revision.provenance.source === "legacy_import"
+                  ? "Brought over from earlier settings"
+                  : "Edited the instructions";
       return [
         {
           id: event.id,
