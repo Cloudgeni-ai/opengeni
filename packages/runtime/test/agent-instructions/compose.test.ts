@@ -244,9 +244,11 @@ describe("modular composer: module selection (AC12)", () => {
     for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
       const composed = compose(capabilities, { ...NO_RESOURCES, connectedMachine: true }).composed;
       expect(composed).toContain("If a commit fails because Git has no author identity");
-      expect(composed).toContain("If a requested base branch such as `main` does not exist");
-      expect(composed).toContain("not to local changes on an unpushed branch");
-      expect(composed).toContain("When a routine, reversible step inside the workspace is blocked");
+      expect(composed).toContain(
+        "If a requested base branch such as `main` exists neither locally nor on the remote",
+      );
+      expect(composed).toContain("do not push it or open a pull request until those steps are done");
+      expect(composed).toContain("When a routine, reversible step of the task is blocked");
     }
     expect(compose(allAgentCapabilities(), NO_RESOURCES).composed).not.toContain(
       "If a commit fails because Git has no author identity",
