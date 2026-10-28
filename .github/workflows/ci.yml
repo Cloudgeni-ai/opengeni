@@ -37,6 +37,19 @@ on:
         description: Exact attempt of the source Release run.
         required: true
         type: string
+  # The merge batcher's Batch CI (.github/workflows/batch-ci.yml) calls this
+  # workflow on the exact queue/live candidate, so a batch lands only after
+  # main's own gating lanes, aggregates and workload image builds passed on its
+  # tree. Batch mode plans base..tip, builds images without pushing or signing,
+  # and leaves the unit lane to Batch CI's receipt-backed shards. Main-only
+  # jobs (attestation, approval, publication) keep their main-push guards.
+  # See docs/merge-batcher.md "Main CI lanes in Batch CI".
+  workflow_call:
+    inputs:
+      batch_base_sha:
+        description: Exact main SHA the queue/live candidate was built on.
+        required: true
+        type: string
 
 concurrency:
   # The main -> production promotion PR is not gated by this workflow (the production ruleset
@@ -282,6 +295,7 @@ jobs:
     outputs:
       unit_reuse: ${{ steps.unit_reuse.outputs.reuse }}
       attested: ${{ steps.attestation.outputs.attested }}
+      batch: ${{ steps.plan.outputs.batch }}
       batch_run_id: ${{ steps.attestation.outputs.batch_run_id }}
       batch_run_attempt: ${{ steps.attestation.outputs.batch_run_attempt }}
       batch_head_sha: ${{ steps.attestation.outputs.batch_head_sha }}
@@ -410,9 +424,20 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BATCH_BASE_SHA: ${{ inputs.batch_base_sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "pull_request" ]; then
+          batch=false
+          if [ -n "${BATCH_BASE_SHA:-}" ]; then
+            # Called by Batch CI: the same base..tip range Batch CI plans.
+            if [ "$EVENT_NAME" != "push" ] || [[ ! "$GITHUB_REF" =~ ^refs/heads/queue/ ]] ||
+               [[ ! "$BATCH_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Batch mode requires a queue push and an exact base SHA"
+              exit 1
+            fi
+            batch=true
+            bun scripts/ci/impact.ts --base "$BATCH_BASE_SHA" --head "$GITHUB_SHA" --output impact-plan.json
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
             bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
           elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ] ||
                { [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; }; then
@@ -427,6 +452,7 @@ jobs:
             fi
           fi
           jq '{schemaVersion, mode, changedCount:(.changedFiles|length), affectedPackageCount:(.affectedPackages|length), typecheckProjectCount:(.typecheckProjects|length), unitCount:(.unitTests|length), integrationCount:(.integrationTests|length), e2eCount:(.e2eTests|length), browserAcceptanceLanes, artifactRuntimeRequired, buildCount:(.buildPackages|length), exampleBuildCount:(.exampleBuildProjects|length), guardCount:(.guards|length), reasonCount:(.reasons|length)}' impact-plan.json
+          echo "batch=$batch" >> "$GITHUB_OUTPUT"
           echo "mode=$(jq -r .mode impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "unit_count=$(jq '.unitTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "integration_count=$(jq '.integrationTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
@@ -436,6 +462,11 @@ jobs:
           artifact_runtime_required="$(jq -r .artifactRuntimeRequired impact-plan.json)"
           bake_images=false
           if [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            bake_images=true
+            artifact_runtime_required=true
+          elif [ "$batch" = true ]; then
+            # Canary admission needs every workload image on the exact main
+            # SHA, which is this tested tip after a fast-forward landing.
             bake_images=true
             artifact_runtime_required=true
           elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
@@ -702,7 +733,8 @@ jobs:
   unit-shards:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
+    # In Batch mode the caller's receipt-backed unit shards run this exact plan.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' && needs.plan.outputs.batch != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -1816,6 +1848,7 @@ jobs:
           BAKE_IMAGES: ${{ needs.plan.outputs.bake_images }}
           BUILD_COUNT: ${{ needs.plan.outputs.build_count }}
           ATTESTED: ${{ needs.plan.outputs.attested == 'true' }}
+          BATCH: ${{ needs.plan.outputs.batch == 'true' }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -1836,6 +1869,7 @@ jobs:
             --argjson build "$BUILD_COUNT" \
             --argjson preImage false \
             --argjson attested "$ATTESTED" \
+            --argjson batch "$BATCH" \
             -f scripts/ci/required-results.jq \
             <<<"$RESULTS"
 
@@ -2099,8 +2133,10 @@ jobs:
     # The same required-results topology as the final aggregate applies, minus
     # the image results that do not exist yet: a failed, cancelled or wrongly
     # skipped lane fails this job.
+    # Batch mode has no approval to protect: the API image starts as soon as
+    # its artifact runtime exists, and the final aggregate checks every lane.
     needs: [automation-admission, plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.plan.outputs.batch != 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

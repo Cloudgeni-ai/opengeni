@@ -21,7 +21,9 @@ import { fixture, readsFor } from "./batch-proof-fixture";
 import type { BatchUnitProof } from "./batch-unit-proof";
 
 /** A batcher landing: main fast-forwarded to the tested `queue/live/<batchId>` tip. */
-function landing(options: { inventory?: string[]; pull?: Record<string, unknown> } = {}) {
+function landing(
+  options: { inventory?: string[]; pull?: Record<string, unknown>; lanes?: false } = {},
+) {
   const { proof, context } = fixture();
   if (options.pull) {
     // Re-derive the content-addressed identity so only the pull flag differs.
@@ -55,6 +57,13 @@ function landing(options: { inventory?: string[]; pull?: Record<string, unknown>
     ];
     result.jobs.units = shards ? "success" : "skipped";
     result.tasks = result.expectedJobs.map((job) => ({ ...result.tasks[0]!, job }));
+  }
+  if (options.lanes !== false) {
+    // Batch CI ran main's own lanes on this tree and folded them into `source`.
+    const result = proof.result as Record<string, unknown> & { tasks: Record<string, unknown>[] };
+    const source = result.tasks.find((task) => task.job === "source")!;
+    result.components = { source: { ...source }, lanes: { ...source, job: "lanes" } };
+    result.lanes = { required: true, result: "success", verdict: "success", receipt: "valid" };
   }
   const expectation = {
     repository: context.repository,
@@ -154,6 +163,43 @@ describe("main-push Batch CI attestation", () => {
       throw new Error("provider read");
     };
     await expect(findBatchAttestation(reads, landed)).rejects.toThrow("CI definition");
+  });
+
+  test.each([
+    ".github/ISSUE_TEMPLATE/bug.yml",
+    ".github/pull_request_template.md",
+    "scripts/ci/impact.test.ts",
+    "scripts/merge-batcher/core.test.ts",
+    "scripts/ci/README.md",
+  ])("a push that lands only lane-neutral %s still attests", (path) => {
+    const { proof, expectation } = landing();
+    const landed = { ...expectation, landedPaths: ["apps/web/src/page.tsx", path] };
+    expect(verifyBatchAttestation(proof, { ...landed, testedIsAncestor: true })).toBe(proof);
+  });
+
+  test("a Batch attempt without green main lanes never attests", () => {
+    const legacy = landing({ lanes: false });
+    expect(() =>
+      verifyBatchAttestation(legacy.proof, { ...legacy.expectation, testedIsAncestor: true }),
+    ).toThrow("did not pass main's own lanes");
+    const mutations: ((result: Record<string, any>) => void)[] = [
+      (r) => (r.lanes.required = false),
+      (r) => (r.lanes.result = "skipped"),
+      (r) => (r.lanes.verdict = "failure"),
+      (r) => (r.lanes.receipt = "invalid"),
+      (r) => (r.components.lanes = null),
+      (r) => (r.components.lanes.exitCode = 75),
+      (r) => (r.components.lanes.runAttempt = 99),
+      (r) => (r.components.lanes.headSha = "f".repeat(40)),
+      (r) => (r.components.lanes.job = "source"),
+    ];
+    for (const mutate of mutations) {
+      const { proof, expectation } = landing();
+      mutate(proof.result as Record<string, any>);
+      expect(() =>
+        verifyBatchAttestation(proof, { ...expectation, testedIsAncestor: true }),
+      ).toThrow("did not pass main's own lanes");
+    }
   });
 
   test.each([[null], [[]]] as [string[] | null][])(

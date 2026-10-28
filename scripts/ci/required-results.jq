@@ -7,7 +7,14 @@
 # attestation"). Every test lane must be skipped, never partially run, and
 # only full-mode pushes that build workload images qualify; deployment,
 # artifact runtime and images keep their ordinary requirements.
+#
+# $batch (optional, default false): this workflow was called by Batch CI on a
+# queue/live candidate (docs/merge-batcher.md "Main CI lanes in Batch CI").
+# Batch CI's own receipt-backed shards run the unit plan, so `unit-shards`
+# must be skipped; workload images must be built; every other lane keeps its
+# ordinary requirement.
 ($ARGS.named.attested // false) as $attested |
+($ARGS.named.batch // false) as $batch |
 if $attested then
 .plan.result == "success" and
 $event == "push" and $mode == "full" and $bakeImages and
@@ -24,8 +31,9 @@ $event == "push" and $mode == "full" and $bakeImages and
 (if $preImage then (has("images") | not) else .images.result == "success" end)
 else
 .plan.result == "success" and
+(if $batch then $event == "push" and $bakeImages else true end) and
 ."source-contracts".result == "success" and
-(if $unit == 0 then ."unit-shards".result == "skipped" else ."unit-shards".result == "success" end) and
+(if $unit == 0 or $batch then ."unit-shards".result == "skipped" else ."unit-shards".result == "success" end) and
 (if $integration == 0 then ."integration-shards".result == "skipped" else ."integration-shards".result == "success" end) and
 (if $e2e == 0 then ."e2e-shards".result == "skipped" else ."e2e-shards".result == "success" end) and
 (if $artifactRuntime then ."artifact-runtime".result == "success" else ."artifact-runtime".result == "skipped" end) and

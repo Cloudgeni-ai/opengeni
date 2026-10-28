@@ -15,7 +15,7 @@ test("Batch planning starts without a workflow-internal main-priority wait", () 
     "plan",
   ]);
   expect(workflow.jobs.plan.steps[2].run).toContain('inspect --tip "$GITHUB_SHA" --git-dir .git');
-  expect(workflow.jobs.ready.needs).toEqual(["plan", "source", "units"]);
+  expect(workflow.jobs.ready.needs).toEqual(["plan", "source", "units", "lanes", "lanes-verdict"]);
   expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
 });
 
@@ -91,7 +91,7 @@ test("controller is the sole retry owner; all unit files retain real DB and dead
 test("receipts never mix attempts and the gate runs even on failed code jobs", () => {
   const gate = workflow.jobs.ready;
   expect(gate.if).toBe("${{ always() }}");
-  expect(gate.needs).toEqual(["plan", "source", "units"]);
+  expect(gate.needs).toEqual(["plan", "source", "units", "lanes", "lanes-verdict"]);
   expect(
     gate.steps.find((step: any) => step.uses?.startsWith("actions/download-artifact")).with.pattern,
   ).toBe("batch-receipt-${{ github.run_attempt }}-*");
@@ -215,3 +215,78 @@ test.each([0, 1])(
     }
   },
 );
+
+test("main CI's own lanes run on the exact candidate and gate readiness", () => {
+  const ci = Bun.YAML.parse(readFileSync(".github/workflows/ci.yml", "utf8")) as any;
+  const lanes = workflow.jobs.lanes;
+  expect(lanes.name).toBe("Main CI lanes");
+  expect(lanes.needs).toBe("plan");
+  expect(lanes.uses).toBe("./.github/workflows/ci.yml");
+  expect(lanes.with).toEqual({ batch_base_sha: "${{ needs.plan.outputs.base_sha }}" });
+  // No secret reaches the candidate: main-only signing stays behind main guards.
+  expect(lanes.secrets).toBeUndefined();
+  expect(ci.on.workflow_call.inputs.batch_base_sha).toMatchObject({
+    required: true,
+    type: "string",
+  });
+  // A called workflow's job grants must fit inside the caller's grant.
+  const granted = lanes.permissions as Record<string, string>;
+  const rank = { none: 0, read: 1, write: 2 } as Record<string, number>;
+  for (const [name, job] of Object.entries(ci.jobs) as [string, any][])
+    for (const [scope, level] of Object.entries(job.permissions ?? {}) as [string, string][])
+      expect([name, scope, rank[granted[scope] ?? "none"]! >= rank[level]!]).toEqual([
+        name,
+        scope,
+        true,
+      ]);
+  const verdict = workflow.jobs["lanes-verdict"];
+  expect(verdict.needs).toEqual(["plan", "lanes"]);
+  expect(verdict.if).toBe("${{ always() && needs.plan.result == 'success' }}");
+  expect(verdict.env.LANES_RESULT).toBe("${{ needs.lanes.result }}");
+  const classify = verdict.steps.find((step: any) => step.run?.includes("batch-lanes.ts")).run;
+  expect(classify).toContain("batch-result.ts run --job lanes");
+  expect(classify).toContain('--caller "Main CI lanes"');
+  const upload = verdict.steps.find((step: any) =>
+    step.uses?.startsWith("actions/upload-artifact"),
+  );
+  expect(upload.with.name).toBe("batch-receipt-${{ github.run_attempt }}-lanes");
+  // The lane receipt is folded explicitly, never globbed as a separate task.
+  expect(upload.with.path).toContain("lanes-receipt.json");
+  expect(upload.with.path).not.toMatch(/receipt-[a-z]+\.json/);
+  expect(workflow.jobs.ready.env).toMatchObject({
+    BATCH_LANES: "required",
+    LANES_RESULT: "${{ needs.lanes.result }}",
+    LANES_VERDICT_RESULT: "${{ needs.lanes-verdict.result }}",
+  });
+});
+
+test("ci.yml batch mode plans base..tip, builds without publishing and leaves units to Batch CI", () => {
+  const ci = Bun.YAML.parse(readFileSync(".github/workflows/ci.yml", "utf8")) as any;
+  const plan = ci.jobs.plan.steps.find((step: any) => step.id === "plan");
+  expect(plan.env.BATCH_BASE_SHA).toBe("${{ inputs.batch_base_sha }}");
+  expect(plan.run).toContain('impact.ts --base "$BATCH_BASE_SHA" --head "$GITHUB_SHA"');
+  expect(plan.run).toContain("^refs/heads/queue/");
+  expect(ci.jobs.plan.outputs.batch).toBe("${{ steps.plan.outputs.batch }}");
+  expect(ci.jobs["unit-shards"].if).toContain("needs.plan.outputs.batch != 'true'");
+  expect(ci.jobs["release-image-validation"].if).toContain("needs.plan.outputs.batch != 'true'");
+  // Publication, attestation, approval and signing stay exact-main-push only.
+  for (const job of ["batch-attestation", "merge-content"])
+    expect(ci.jobs[job].if).toContain("github.ref == 'refs/heads/main'");
+  expect(ci.jobs["full-green"].if).toContain("github.ref == 'refs/heads/main'");
+  expect(ci.jobs["api-image"].environment).toContain("'ci-build'");
+  for (const [name, job] of Object.entries(ci.jobs) as [string, any][])
+    for (const step of job.steps ?? []) {
+      if (step.with?.push !== undefined)
+        expect([name, step.with.push]).toEqual([
+          name,
+          "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+        ]);
+      if (JSON.stringify(step.env ?? {}).includes("OPENGENI_AGENT_MINISIGN_KEY"))
+        expect([name, step.if]).toEqual([
+          name,
+          "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+        ]);
+    }
+  const aggregate = ci.jobs.test.steps.map((step: any) => step.run ?? "").join("\n");
+  expect(aggregate).toContain('--argjson batch "$BATCH"');
+});

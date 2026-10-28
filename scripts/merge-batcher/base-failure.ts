@@ -1,11 +1,36 @@
-import { attestedMainRun, type BaseCiEvidence, type Run } from "./model";
+import {
+  ATTESTED_SKIPPED_LANES,
+  attestedMainRun,
+  type BaseCiEvidence,
+  type BaseJobClass,
+  type Run,
+} from "./model";
+
+/**
+ * Main CI jobs in the `lanes` class: every gating lane Batch CI runs through
+ * its `Main CI lanes` call besides source contracts and unit shards, which
+ * keep their own classes. Aggregates and main-only release jobs are excluded.
+ */
+export function mainLaneJob(name: string): boolean {
+  return (
+    ATTESTED_SKIPPED_LANES.some(
+      (lane) =>
+        lane !== "Source and type contracts" &&
+        lane !== "Unit tests (shard" &&
+        name.startsWith(lane),
+    ) ||
+    name === "Deployment artifacts" ||
+    name.startsWith("Build exact artifact runtime inputs") ||
+    /^Build [A-Za-z -]+ workload image$/.test(name)
+  );
+}
 
 /** Static job-class mapping, not an identical assertion/fingerprint claim. */
 export function baseJobClasses(
   rows: unknown[],
   runId: number,
 ): NonNullable<BaseCiEvidence["classes"]> {
-  const unknown = { source: "unknown", units: "unknown" } as const;
+  const unknown = { source: "unknown", units: "unknown", lanes: "unknown" } as const;
   const ids = new Set<number>();
   const jobs: { name: string; status: string; conclusion: string | null }[] = [];
   for (const row of rows) {
@@ -24,10 +49,10 @@ export function baseJobClasses(
     ids.add(Number(job.id));
     jobs.push({ name: job.name, status: job.status, conclusion: job.conclusion });
   }
-  // A Batch-attested main push skips its source and unit lanes because a
-  // trusted Batch CI attempt passed both on this exact tree; that verdict is
-  // the base's source and unit class. Any non-skipped lane is not attested.
-  if (attestedMainRun(rows)) return { source: "green", units: "green" };
+  // A Batch-attested main push skips its test lanes because a trusted Batch CI
+  // attempt passed source, units and every main lane on this exact tree; that
+  // verdict is the base's class. Any non-skipped lane is not attested.
+  if (attestedMainRun(rows)) return { source: "green", units: "green", lanes: "green" };
   const verdict = (selected: typeof jobs): "green" | "red" | "unknown" => {
     if (
       !selected.length ||
@@ -49,9 +74,24 @@ export function baseJobClasses(
     count === shards.length &&
     shards.every(([index, total]) => total === count && index <= count) &&
     new Set(shards.map(([index]) => index)).size === count;
+  // Impact-skipped lanes are neutral; a job waiting for release approval holds
+  // no verdict yet. Any other pending or inconclusive lane job is unknown.
+  const lanes = jobs.filter((j) => mainLaneJob(j.name) && j.status !== "waiting");
+  const lanesVerdict = (): "green" | "red" | "unknown" => {
+    if (lanes.some((j) => j.status === "completed" && j.conclusion === "failure")) return "red";
+    const ran = lanes.filter((j) => j.conclusion !== "skipped");
+    if (
+      !ran.length ||
+      ran.some((j) => j.status !== "completed" || j.conclusion !== "success") ||
+      lanes.some((j) => j.status !== "completed")
+    )
+      return "unknown";
+    return "green";
+  };
   return {
     source: source.length === 1 ? verdict(source) : "unknown",
     units: complete ? verdict(units) : "unknown",
+    lanes: lanesVerdict(),
   };
 }
 
@@ -74,7 +114,8 @@ export function failedBaseHold(
   if (
     !run.failedClasses?.length ||
     run.failedClasses.some(
-      (kind) => !["source", "units"].includes(kind) || base.classes?.[kind] !== "green",
+      (kind: BaseJobClass) =>
+        !["source", "units", "lanes"].includes(kind) || base.classes?.[kind] !== "green",
     )
   )
     return "failed cohort has red or unknown relevant exact-base job class; no retry, split or parking";

@@ -33,14 +33,15 @@ export const ATTESTATION_STEP = MAIN_ATTESTATION_STEP;
 /**
  * Paths that define main's own test lanes, required results or batcher trust
  * (workflows, composite actions, CI scripts, the batcher). A push that lands
- * any of them runs the full suite, so the changed lanes really execute. The
- * impact planner's broader full-mode fences (changesets, lockfile, toolchain)
- * are still tested by Batch CI and do not prevent attestation.
+ * any of them runs the full suite, so the changed lanes really execute. Tests
+ * and Markdown beside those scripts, issue templates and other `.github/`
+ * metadata define no lane; Batch CI already ran them. The impact planner's
+ * broader full-mode fences (changesets, lockfile, toolchain) are still tested
+ * by Batch CI and do not prevent attestation.
  */
 export const ATTESTATION_BLOCKING_PATHS = [
-  /^\.github\//,
-  /^scripts\/ci\//,
-  /^scripts\/merge-batcher\//,
+  /^\.github\/(workflows|actions)\//,
+  /^scripts\/(ci|merge-batcher)\/(?!.*(\.test\.ts|\.md)$)/,
 ] as const;
 
 export type BatchAttestation = BatchUnitProof;
@@ -81,8 +82,38 @@ export function verifyBatchAttestation(
   )
     reject("Version PR and control-plane landings run the full main suite");
   requireAttestablePush(expected.landedPaths);
+  requireLaneCoverage(proof);
   if (expected.testedIsAncestor !== true) reject("tested Batch tip is not contained in main");
   return proof;
+}
+
+/**
+ * The attested Batch attempt must have run main's own gating lanes on the
+ * tested tree (docs/merge-batcher.md "Main CI lanes in Batch CI"): a valid,
+ * green `lanes` component bound to that exact run and attempt. Older Batch
+ * results without it never attest, so main runs its full suite.
+ */
+export function requireLaneCoverage(proof: BatchAttestation): void {
+  const result = proof.result as {
+    lanes?: { required?: unknown; result?: unknown; verdict?: unknown; receipt?: unknown };
+    components?: { lanes?: Record<string, unknown> | null };
+  } | null;
+  const lane = result?.components?.lanes;
+  if (
+    result?.lanes?.required !== true ||
+    result.lanes.result !== "success" ||
+    result.lanes.verdict !== "success" ||
+    result.lanes.receipt !== "valid" ||
+    !lane ||
+    lane.job !== "lanes" ||
+    lane.exitCode !== 0 ||
+    lane.outcome !== "success" ||
+    lane.batchId !== proof.manifest.batchId ||
+    lane.headSha !== proof.batch.head_sha ||
+    lane.runId !== String(proof.batch.id) ||
+    lane.runAttempt !== proof.batch.run_attempt
+  )
+    reject("Batch attempt did not pass main's own lanes on the tested tree");
 }
 
 /** Rejects an unknown push range or one that changes main's own CI definitions. */

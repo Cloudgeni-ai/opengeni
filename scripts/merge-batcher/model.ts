@@ -67,8 +67,11 @@ export interface Run {
   retryable: boolean;
   startedAt?: string | null;
   infrastructureRetryReason?: InfrastructureRetryReason;
-  /** Complete trusted failing task classes; absent means comparison unavailable. */
-  failedClasses?: ("source" | "units")[];
+  /**
+   * Complete trusted failing task classes; absent means comparison unavailable.
+   * `lanes` is the main CI lane set Batch CI folds into its source receipt.
+   */
+  failedClasses?: BaseJobClass[];
 }
 export interface Candidate {
   manifest: Manifest;
@@ -1045,13 +1048,15 @@ export interface Observation {
   };
   missingRuns?: Record<string, MissingRun>;
 }
+/** Exact-base comparison classes; see docs/merge-batcher.md "Main CI lanes in Batch CI". */
+export type BaseJobClass = "source" | "units" | "lanes";
 export interface BaseCiEvidence {
   sha: string;
   status: "green" | "red" | "classes" | "unknown";
   runId: number | null;
   attempt: number | null;
   reason: string;
-  classes?: Record<"source" | "units", "green" | "red" | "unknown">;
+  classes?: Partial<Record<BaseJobClass, "green" | "red" | "unknown">>;
 }
 export interface Config {
   repository: string;

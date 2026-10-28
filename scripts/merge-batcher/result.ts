@@ -1,11 +1,11 @@
-import type { Manifest, Outcome } from "./model";
+import type { BaseJobClass, Manifest, Outcome } from "./model";
 
 export interface VerifiedResult {
   outcome: Outcome;
   retryable: boolean;
   reason: string;
   infrastructureOnly?: true;
-  failedClasses?: ("source" | "units")[];
+  failedClasses?: BaseJobClass[];
 }
 interface Task {
   schemaVersion: 1;
@@ -26,6 +26,54 @@ export function classifyExit(code: number): Pick<VerifiedResult, "outcome" | "re
   if (code < 0 || [75, 124, 126, 127].includes(code) || code >= 128)
     return { outcome: "infrastructure", retryable: false };
   return { outcome: "code_failure", retryable: code !== 70 };
+}
+
+/** Cancellation, then a code failure (70 first), then infrastructure, then green. */
+export function combineExits(codes: readonly number[]): number {
+  const of = (outcome: Outcome) => codes.filter((code) => classifyExit(code).outcome === outcome);
+  const code = of("code_failure");
+  return of("cancelled")[0] ?? (code.includes(70) ? 70 : code[0]) ?? of("infrastructure")[0] ?? 0;
+}
+
+/**
+ * Batch CI folds its `Main CI lanes` receipt into the `source` task
+ * (docs/merge-batcher.md "Main CI lanes in Batch CI"). When the result carries
+ * both components and the source task is exactly their fold, a failed source
+ * task names the failing component classes; otherwise it stays `source`.
+ */
+function sourceClasses(
+  data: Record<string, unknown>,
+  source: Task,
+  manifest: Manifest,
+  runId: number,
+  attempt: number,
+): BaseJobClass[] {
+  const components = data.components as Record<string, unknown> | null | undefined;
+  if (!components || typeof components !== "object") return ["source"];
+  const component = (name: string): Task | null | undefined => {
+    const task = components[name] as Task | null | undefined;
+    if (task === null) return null;
+    if (
+      !task ||
+      task.job !== name ||
+      task.batchId !== manifest.batchId ||
+      task.headSha !== manifest.tipSha ||
+      task.runId !== String(runId) ||
+      task.runAttempt !== attempt ||
+      !Number.isSafeInteger(task.exitCode)
+    )
+      return undefined;
+    return task;
+  };
+  const own = component("source"),
+    lanes = component("lanes");
+  if (!own || lanes === undefined) return ["source"];
+  const laneExit = lanes ? lanes.exitCode : 75;
+  if (combineExits([own.exitCode, laneExit]) !== source.exitCode) return ["source"];
+  const classes: BaseJobClass[] = [];
+  if (classifyExit(own.exitCode).outcome === "code_failure") classes.push("source");
+  if (classifyExit(laneExit).outcome === "code_failure") classes.push("lanes");
+  return classes.length ? classes : ["source"];
 }
 
 // Independent of the candidate's aggregator implementation. A partial red can
@@ -133,7 +181,9 @@ export function verifyResult(
             ...new Set(
               verified
                 .filter((t) => t.outcome === "code_failure")
-                .map((t): "source" | "units" => (t.job === "source" ? "source" : "units")),
+                .flatMap((t): BaseJobClass[] =>
+                  t.job === "source" ? sourceClasses(data, t, manifest, runId, attempt) : ["units"],
+                ),
             ),
           ],
         }

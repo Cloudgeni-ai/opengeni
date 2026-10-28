@@ -5693,8 +5693,11 @@ describe("workflow contracts", () => {
       BUILD_COUNT: "${{ needs.plan.outputs.build_count }}",
       // Boolean JSON for jq; only a verified identical-tree Batch attestation is true.
       ATTESTED: "${{ needs.plan.outputs.attested == 'true' }}",
+      // Boolean JSON for jq; true only when Batch CI called this workflow.
+      BATCH: "${{ needs.plan.outputs.batch == 'true' }}",
     });
     expect(requireLanes.run).toContain("scripts/ci/required-results.jq");
+    expect(requireLanes.run).toContain('--argjson batch "$BATCH"');
     expect(requireLanes.run).toContain('--argjson attested "$ATTESTED"');
     expect(ci.jobs["automation-report"].needs).toEqual([
       "automation-admission",

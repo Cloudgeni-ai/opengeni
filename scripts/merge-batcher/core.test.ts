@@ -1311,7 +1311,8 @@ describe("wire adapters and CLI", () => {
       ["green", "prior-and-current"].includes(kind) ? "green" : kind === "red" ? "red" : "unknown",
     );
     expect(result.sha).toBe(sha);
-    if (kind === "red") expect(result.classes).toEqual({ source: "red", units: "unknown" });
+    if (kind === "red")
+      expect(result.classes).toEqual({ source: "red", units: "unknown", lanes: "unknown" });
   });
   test.each([
     "success",

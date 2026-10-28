@@ -85,7 +85,8 @@ test.each(["running", "waiting", "pages"])(
   async (kind) => {
     const { evidence, pages } = await observe(kind);
     expect(evidence.status).toBe("classes");
-    expect(evidence.classes).toEqual({ source: "green", units: "green" });
+    // No main lane job is listed in this fixture, so the lanes class is unknown.
+    expect(evidence.classes).toEqual({ source: "green", units: "green", lanes: "unknown" });
     expect(evidence.attempt).toBe(2);
     expect(failedBaseHold({ failedClasses: ["units"] } as Run, sha, evidence)).toBeNull();
     expect(pages).toEqual(kind === "pages" ? [1, 2] : [1]);

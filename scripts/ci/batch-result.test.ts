@@ -6,8 +6,12 @@ import {
   aggregateBatchResult,
   batchIdentity,
   classifyBatchExit,
+  combineBatchExits,
+  foldLanes,
   type BatchTaskReceipt,
 } from "./batch-result";
+import type { Manifest } from "../merge-batcher/model";
+import { verifyResult } from "../merge-batcher/result";
 const identity = { batchId: "batch-1", headSha: "a".repeat(40), runId: "123", runAttempt: 2 };
 const jobs = { plan: "success", source: "success", units: "success" };
 const receipt = (job: string, exitCode = 0): BatchTaskReceipt => ({
@@ -249,3 +253,225 @@ test.each([0, 1])(
     }
   },
 );
+
+const laneReceipt = (
+  exitCode = 0,
+  startedAt = "2026-10-21T11:00:30Z",
+  finishedAt = "2026-10-21T11:30:00Z",
+) => ({
+  ...receipt("lanes", exitCode),
+  startedAt,
+  finishedAt,
+});
+const greenResults = { source: "success", lanes: "success", verdict: "success" };
+
+test("main lanes fold into the source task with exit precedence and the widest time span", () => {
+  const green = foldLanes(
+    identity,
+    [receipt("plan"), receipt("source")],
+    [laneReceipt()],
+    greenResults,
+  );
+  expect(green.sourceJob).toBe("success");
+  expect(green.receipts[1]).toMatchObject({
+    job: "source",
+    exitCode: 0,
+    outcome: "success",
+    startedAt: "2026-10-21T11:00:00Z",
+    finishedAt: "2026-10-21T11:30:00Z",
+  });
+  expect(green.components.lanes).toMatchObject({ job: "lanes", exitCode: 0 });
+  expect(green.lanes).toEqual({
+    required: true,
+    result: "success",
+    verdict: "success",
+    receipt: "valid",
+  });
+  const cases: [number, number, number][] = [
+    [0, 1, 1],
+    [0, 70, 70],
+    [1, 70, 70],
+    [0, 124, 124],
+    [1, 124, 1],
+    [124, 1, 1],
+    [0, 130, 130],
+    [1, 130, 130],
+    [75, 0, 75],
+  ];
+  for (const [source, lanes, expected] of cases) {
+    const folded = foldLanes(identity, [receipt("source", source)], [laneReceipt(lanes)], {
+      ...greenResults,
+      lanes: lanes === 0 ? "success" : "failure",
+    });
+    expect(folded.receipts[0]).toMatchObject({
+      exitCode: expected,
+      ...classifyBatchExit(expected),
+    });
+  }
+  expect(combineBatchExits([])).toBe(0);
+});
+
+test("missing, duplicate or foreign lane evidence is infrastructure, never green", () => {
+  for (const lanes of [
+    [],
+    [laneReceipt(), laneReceipt()],
+    [{ ...laneReceipt(), runAttempt: 1 }],
+    [{ ...laneReceipt(), job: "source" }],
+    [null],
+  ]) {
+    const folded = foldLanes(identity, [receipt("source")], lanes, greenResults);
+    expect(folded.lanes.receipt).toBe("invalid");
+    expect(folded.receipts[0]).toMatchObject({ exitCode: 75, outcome: "infrastructure" });
+  }
+  const cancelled = foldLanes(identity, [receipt("source")], [], {
+    ...greenResults,
+    lanes: "cancelled",
+  });
+  expect(cancelled.receipts[0]).toMatchObject({ exitCode: 130, outcome: "cancelled" });
+  expect(cancelled.sourceJob).toBe("cancelled");
+  // A source code failure stays evidence even without lane evidence.
+  const red = foldLanes(identity, [receipt("source", 1)], [], {
+    ...greenResults,
+    source: "failure",
+    lanes: "failure",
+    verdict: "failure",
+  });
+  expect(red.receipts[0]).toMatchObject({ exitCode: 1, outcome: "code_failure" });
+  expect(red.sourceJob).toBe("failure");
+});
+
+test("a folded result satisfies the deployed controller verifier for every outcome", () => {
+  const manifest = { batchId: identity.batchId, tipSha: identity.headSha } as unknown as Manifest;
+  const verify = (lanesExit: number, results: typeof greenResults) => {
+    const folded = foldLanes(
+      identity,
+      [receipt("plan"), receipt("source"), receipt("unit-0")],
+      [laneReceipt(lanesExit)],
+      results,
+    );
+    const result = aggregateBatchResult(identity, ["plan", "source", "unit-0"], folded.receipts, {
+      plan: "success",
+      source: folded.sourceJob,
+      units: "success",
+    });
+    return {
+      result,
+      verified: verifyResult(
+        { ...result, components: folded.components, lanes: folded.lanes },
+        manifest,
+        123,
+        2,
+      ),
+    };
+  };
+  const green = verify(0, greenResults);
+  expect(green.result.outcome).toBe("success");
+  expect(green.verified).toMatchObject({ outcome: "success" });
+  const red = verify(1, { ...greenResults, lanes: "failure", verdict: "failure" });
+  expect(red.result).toMatchObject({ outcome: "code_failure", retryable: true });
+  expect(red.verified).toMatchObject({ outcome: "code_failure", retryable: true });
+  const infra = verify(124, { ...greenResults, lanes: "failure", verdict: "failure" });
+  expect(infra.result.outcome).toBe("infrastructure");
+  expect(infra.verified).toMatchObject({ outcome: "infrastructure", infrastructureOnly: true });
+  const lanesGreenVerdictLost = verify(0, { ...greenResults, verdict: "failure" });
+  expect(lanesGreenVerdictLost.result.outcome).toBe("infrastructure");
+});
+
+test("the verifier names the failing folded component for exact-base comparison", () => {
+  const manifest = { batchId: identity.batchId, tipSha: identity.headSha } as unknown as Manifest;
+  const classes = (
+    sourceExit: number,
+    lanesExit: number,
+    mutate?: (r: Record<string, any>) => void,
+  ) => {
+    const folded = foldLanes(
+      identity,
+      [receipt("plan"), receipt("source", sourceExit)],
+      [laneReceipt(lanesExit)],
+      {
+        source: sourceExit ? "failure" : "success",
+        lanes: lanesExit ? "failure" : "success",
+        verdict: lanesExit ? "failure" : "success",
+      },
+    );
+    const result: Record<string, any> = {
+      ...aggregateBatchResult(identity, ["plan", "source"], folded.receipts, {
+        plan: "success",
+        source: folded.sourceJob,
+        units: "skipped",
+      }),
+      components: folded.components,
+      lanes: folded.lanes,
+    };
+    mutate?.(result);
+    return verifyResult(result, manifest, 123, 2)?.failedClasses;
+  };
+  expect(classes(0, 1)).toEqual(["lanes"]);
+  expect(classes(1, 0)).toEqual(["source"]);
+  expect(classes(1, 1)).toEqual(["source", "lanes"]);
+  expect(classes(1, 124)).toEqual(["source"]);
+  // Without components, or with components that do not fold into the task, it stays `source`.
+  expect(classes(0, 1, (r) => delete r.components)).toEqual(["source"]);
+  expect(classes(0, 1, (r) => (r.components.lanes.exitCode = 0))).toEqual(["source"]);
+  expect(classes(0, 1, (r) => (r.components.lanes.runAttempt = 1))).toEqual(["source"]);
+});
+
+test("CLI aggregate folds the lane receipt only when Batch CI requires it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "batch-lanes-aggregate-"));
+  try {
+    const write = (name: string, data: unknown) =>
+      Bun.write(join(directory, "receipts", name), JSON.stringify(data));
+    await write("receipt-plan.json", receipt("plan"));
+    await write("receipt-source.json", receipt("source"));
+    await write("lanes-receipt.json", laneReceipt(1));
+    const run = async (extra: Record<string, string>) => {
+      const output = join(directory, `result-${Object.keys(extra).length}.json`);
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "scripts/ci/batch-result.ts",
+          "aggregate",
+          "--receipts",
+          join(directory, "receipts"),
+          "--output",
+          output,
+        ],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            BATCH_ID: identity.batchId,
+            GITHUB_SHA: identity.headSha,
+            GITHUB_RUN_ID: identity.runId,
+            GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
+            UNIT_SHARDS: "0",
+            PLAN_RESULT: "success",
+            SOURCE_RESULT: "success",
+            UNITS_RESULT: "skipped",
+            ...extra,
+          },
+        },
+      );
+      const code = await child.exited;
+      return { code, result: JSON.parse(readFileSync(output, "utf8")) };
+    };
+    const legacy = await run({});
+    expect(legacy.code).toBe(0);
+    expect(legacy.result.outcome).toBe("success");
+    const lanes = await run({
+      BATCH_LANES: "required",
+      LANES_RESULT: "failure",
+      LANES_VERDICT_RESULT: "failure",
+    });
+    expect(lanes.code).toBe(1);
+    expect(lanes.result).toMatchObject({
+      outcome: "code_failure",
+      jobs: { source: "failure" },
+      lanes: { required: true, receipt: "valid" },
+      components: { source: { exitCode: 0 }, lanes: { exitCode: 1 } },
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

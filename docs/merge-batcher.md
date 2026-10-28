@@ -430,8 +430,11 @@ commit or an ancestor of it, so a tree-preserving refresh landing qualifies. A
 batch containing a Version PR (`changeset-release/main`) or a control-plane PR
 never attests; both flags are bound into the manifest digest. Nor does a push
 whose landed range (`github.event.before` to `GITHUB_SHA`, which must be a proper
-ancestor range) changes `.github/`, `scripts/ci/` or `scripts/merge-batcher/`:
-those paths define main's own lanes, so a change to them runs the changed lanes.
+ancestor range) changes `.github/workflows/`, `.github/actions/`, or a file in
+`scripts/ci/` or `scripts/merge-batcher/` other than a `*.test.ts` or `*.md`
+file: those paths define main's own lanes, so a change to them runs the changed
+lanes. Issue and pull-request templates and tests beside the CI scripts define
+no lane and do not block attestation.
 The impact planner's broader full-mode fences, such as changesets, the lockfile
 and toolchain files, do not block attestation; Batch CI tests them. A
 final read rejects an attempt that changed during discovery. The
@@ -467,13 +470,13 @@ receipt with `attestation`: a release source, including a later tested
 descendant of a Version merge, needs the full main suite. The `batch-attestation-<sha>` artifact
 keeps the full proof for 30 days.
 
-**Coverage.** This is an explicit coverage reduction for batcher landings. Batch
-CI covers impact-selected source contracts and impact-selected unit shards on the
-exact tree. It does not cover the full unit inventory, real-service, E2E,
-browser, package-contract, publish-closure, SDK-compatibility or example-build
-lanes. Those lanes were never landing gates, because the batcher lands on Batch
-success whatever main CI reports. Staging canary deploys attested SHAs with
-those images. The lanes still run in full on every push without an
+**Coverage.** Batch CI runs main's own gating lanes on the exact tree (see
+"Main CI lanes in Batch CI"), so attestation reuses a verdict that covered them.
+`requireLaneCoverage` refuses a Batch result without a valid, green `lanes`
+component bound to the same run and attempt; results from before that contract
+never attest, and main runs its full suite. Batch units remain the
+impact-selected inventory, not main's complete unit inventory. The lanes still
+run in full on every push without an
 identical-tree trusted `queue/live` Batch attempt (ordinary direct pushes), on
 Version PR, control-plane and CI-definition landings, on the weekly schedule and
 on the `workflow_dispatch` run of every exact Version PR head before a release.
@@ -490,9 +493,81 @@ state but `skipped`. An attested run is never pre-fan-out, never counts as queue
 main and is never `latestMain`; it has no test fan-out to protect. Its
 runner-holding jobs remain `mainDemand` inside the main reserve and the provider
 pool, because they really occupy runners. `stage.json` headroom lists them as
-`attestedMainRuns`. An attested exact base reports green `source` and `units`
-classes for failed-cohort comparison, because the same tree passed both in Batch
+`attestedMainRuns`. An attested exact base reports green `source`, `units` and `lanes`
+classes for failed-cohort comparison, because the same tree passed them in Batch
 CI. Any lane that ran falls back to ordinary job-class evidence.
+
+### Main CI lanes in Batch CI
+
+A batch lands only when main CI's own gating lanes passed on its exact
+`queue/live` tip, so a landing cannot turn main red on a lane Batch CI never
+ran, and every landed main SHA has the jobs canary admission needs
+(`scripts/canary-source-admission.ts`: `Typecheck and unit tests`,
+`Deployment artifacts` and `Workload image builds`).
+
+- **One definition.** `ci.yml` has a `workflow_call` trigger with the input
+  `batch_base_sha`. Batch CI's `Main CI lanes` job calls the candidate's own
+  `ci.yml`, so a CI-definition change is exercised before it lands, and shard
+  sizes, deadlines, impact selection and the required-results aggregates are
+  main's. Its nested jobs are named `Main CI lanes / <main job name>`.
+- **Batch mode.** `plan` accepts the input only on a push to `refs/heads/queue/*`
+  with a 40-hex base, and plans `impact.ts --base <base> --head <tip>`, the same
+  range Batch CI plans. It always builds images and the artifact runtime. It
+  skips `Unit tests (shard N/M)`, because Batch CI's receipt-backed unit shards
+  run the same plan, and `Validation before release image`, which only gates the
+  main-push release approval. `required-results.jq` has a `$batch` mode: a push
+  that builds images, with `unit-shards` skipped and every other lane held to
+  its ordinary requirement.
+- **No publication.** Images are built, never pushed; no agent is baked or
+  signed; the API image uses the credential-free `ci-build` environment. Batch
+  attestation, merge-content, full-green publication and the `public-release`
+  approval keep their exact-main-push guards. No secret is passed to the call.
+  The caller grants the union of `ci.yml`'s job permissions, because GitHub
+  refuses a called job that asks for more; only skipped main-only jobs use the
+  write scopes.
+- **One receipt.** `Batch main-lane verdict` (`scripts/ci/batch-lanes.ts`) reads
+  the complete, paginated job list of its own run attempt and classifies the
+  `Main CI lanes / ...` jobs into one `lanes` receipt. Green needs every lane job
+  completed `success` or `skipped`, including the three canary admission jobs. A
+  failed test step is a code failure (exit 1, or 70 for a leaked process; it
+  gets the ordinary one-retry). A failed setup, checkout, install, download,
+  login or upload step, a deadline (`timed_out` or exit 124), runner loss, a
+  signal, an unreadable log or a fail-fast cancellation alone is
+  infrastructure. An aggregate (`Typecheck and unit tests`, `Workload image
+  builds`, `Validation before release image`) counts only when no other lane
+  failed.
+- **Folded into `source`.** `Batch ready` runs with `BATCH_LANES=required`.
+  The aggregator (`foldLanes` in `scripts/ci/batch-result.ts`) folds the lane
+  receipt into the `source` task: cancellation wins, then a code failure (70
+  first), then infrastructure, then green, with the earliest start and latest
+  finish. Missing, duplicate or foreign lane evidence is infrastructure.
+  `jobs.source` is `success` only when the source job, the lane call and the
+  verdict job all succeeded. The result keeps `components` (`source`, `lanes`)
+  and `lanes` (`required`, `result`, `verdict`, `receipt`). Expected jobs stay
+  `plan`, `source`, `unit-N`, so a controller that predates this contract still
+  verifies one complete result, and retry, split and ejection are unchanged.
+  The workflow conclusion is red whenever a lane fails, so even a pre-contract
+  aggregator cannot report a trusted green.
+- **Failed-cohort comparison.** When the folded `source` task fails and its
+  components reproduce it exactly, the verifier names the failing components:
+  `source` maps to main's `Source and type contracts`, and `lanes` maps to
+  main's real-service shards, real-service and recovery tests, impacted E2E
+  shards, browser and visual acceptance, package and bundle contracts, the real
+  Chromium browser controller, `Deployment artifacts`, the artifact runtime and
+  every `Build * workload image` job (`mainLaneJob`). Impact-skipped lanes are
+  neutral, an approval-waiting job holds no verdict, and any other pending or
+  inconclusive lane makes the class unknown, which holds. Base evidence recorded
+  before this class existed has no `lanes` entry and cannot clear a lane
+  failure. Without components the class stays `source`.
+- **Capacity.** The lane call adds main's fan-out to each Batch: measured on 21
+  full main pushes, its test lanes are a median 19 jobs and 143 job-minutes, and
+  images, deployment and the artifact runtime 17 jobs and 76 job-minutes.
+  Together with Batch's own unit shards, one Batch can request about 55 jobs at
+  its peak. Attested main pushes skip the test lanes but still build images,
+  deployment artifacts and the artifact runtime. The 18-job candidate
+  reservation is unchanged; raising it would stop publication under the 52-job
+  budget and 30-job main reserve. The pool may queue lane jobs; that extends a
+  round but does not change its verdict.
 
 ## Immutable candidates and CI result contract
 
@@ -557,7 +632,10 @@ Its aggregate identity fields are:
 The `tasks` placeholders must be replaced by objects, not strings. Every receipt
 has schemaVersion, batchId, headSha, **string** runId, numeric runAttempt, job,
 exitCode, outcome, retryable, startedAt and finishedAt. Expected jobs are `plan`,
-`source`, then contiguous `unit-0` through `unit-N` (at most 16 shards).
+`source`, then contiguous `unit-0` through `unit-N` (at most 16 shards). With
+`BATCH_LANES=required`, the `source` task is the fold of the source and main-lane
+receipts, and the optional `components` and `lanes` fields describe them (see
+"Main CI lanes in Batch CI").
 Generic `batch-result` artifacts and numeric runId payloads are not this contract.
 Every task identity, duplicate/missing job, timestamp and process-exit
 classification is independently reverified. A verified red may coexist with
@@ -577,8 +655,9 @@ run/attempt, request time and reason are durably recorded in Git and stage evide
 Ambiguous or partial receipts hold rather than authorize a retry or blame a PR.
 A trusted failed candidate waits for a conclusive exact-base comparison before
 retry, splitting or parking. A complete verified Batch receipt identifies its
-failed classes: `source` maps only to main's `Source and type contracts`, and
-`unit-*` maps to the complete main `Unit tests (shard N/M)` set. A red or unknown
+failed classes: `source` maps only to main's `Source and type contracts`,
+`unit-*` maps to the complete main `Unit tests (shard N/M)` set, and a folded
+main-lane failure maps to main's own lane jobs (`lanes`). A red or unknown
 relevant class holds; an unrelated browser/image/release failure does not hold
 when every relevant class is conclusively green. A still-running or approval-waiting
 exact-base workflow may supply completed relevant job classes; unrelated image,
@@ -588,7 +667,7 @@ checks totals and duplicate/run/attempt identities, and rereads the latest run/a
 before accepting those classes. Pending relevant jobs, unknown/error evidence,
 missing failure classes, duplicate jobs and incomplete shard sets do not release
 the hold. A verified full-green base also clears it. A Batch-attested exact base
-reports green `source` and `units` classes from its identical-tree Batch verdict.
+reports green `source`, `units` and `lanes` classes from its identical-tree Batch verdict.
 This is class relevance,
 not a same-assertion fingerprint proof, requeue operation or green-test waiver.
 Otherwise a trusted second code failure splits the cohort or parks a failing singleton;

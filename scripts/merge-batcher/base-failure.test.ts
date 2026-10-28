@@ -26,7 +26,7 @@ const rows = () => [
 ];
 test("unrelated red main class does not hold a conclusive relevant green source class", () => {
   const classes = baseJobClasses(rows(), 12);
-  expect(classes).toEqual({ source: "green", units: "green" });
+  expect(classes).toEqual({ source: "green", units: "green", lanes: "red" });
   expect(failedBaseHold(run, sha, evidence(classes))).toBeNull();
   const sourceRed = rows();
   sourceRed[0]!.conclusion = "failure";
@@ -46,11 +46,9 @@ test("unit failure comparison needs complete main shard set, not source or brows
   ).toBe("unknown");
 });
 test("duplicate, wrong-run, renamed, skipped and incomplete job observations cannot prove relevant green", () => {
-  expect(baseJobClasses([...rows(), rows()[0]!], 12)).toEqual({
-    source: "unknown",
-    units: "unknown",
-  });
-  expect(baseJobClasses(rows(), 99)).toEqual({ source: "unknown", units: "unknown" });
+  const unknown = { source: "unknown", units: "unknown", lanes: "unknown" } as const;
+  expect(baseJobClasses([...rows(), rows()[0]!], 12)).toEqual(unknown);
+  expect(baseJobClasses(rows(), 99)).toEqual(unknown);
   const renamed = rows();
   renamed[0]!.name = "Source and type contracts lookalike";
   expect(baseJobClasses(renamed, 12).source).toBe("unknown");
@@ -94,15 +92,92 @@ test("a Batch-attested base inherits green source and unit classes from its iden
     job(4, "Workload image builds", "failure"),
   ];
   const unitRun = { failedClasses: ["units"] } as Run;
-  expect(baseJobClasses(attested(), 12)).toEqual({ source: "green", units: "green" });
+  const green = { source: "green", units: "green", lanes: "green" } as const;
+  expect(baseJobClasses(attested(), 12)).toEqual(green);
   expect(failedBaseHold(unitRun, sha, evidence(baseJobClasses(attested(), 12)))).toBeNull();
+  expect(
+    failedBaseHold(
+      { failedClasses: ["lanes"] } as Run,
+      sha,
+      evidence(baseJobClasses(attested(), 12)),
+    ),
+  ).toBeNull();
   // Before the fan-out exists the lanes are absent; the attestation alone decides.
-  expect(baseJobClasses(attested().slice(0, 1), 12)).toEqual({ source: "green", units: "green" });
+  expect(baseJobClasses(attested().slice(0, 1), 12)).toEqual(green);
   // An unverified attestation or any lane that actually ran is ordinary evidence.
-  expect(baseJobClasses(attested("skipped"), 12)).toEqual({ source: "unknown", units: "unknown" });
+  expect(baseJobClasses(attested("skipped"), 12)).toMatchObject({
+    source: "unknown",
+    units: "unknown",
+  });
   const ran = attested();
   ran[1] = job(2, "Source and type contracts", "failure");
   expect(baseJobClasses(ran, 12).source).toBe("red");
   // Row identity validation still runs first.
-  expect(baseJobClasses(attested(), 99)).toEqual({ source: "unknown", units: "unknown" });
+  expect(baseJobClasses(attested(), 99)).toEqual({
+    source: "unknown",
+    units: "unknown",
+    lanes: "unknown",
+  });
+});
+test("main lane failures compare against main's own lanes, not its source or unit jobs", () => {
+  const laneRun = { failedClasses: ["lanes"] } as Run;
+  const lanes = (overrides: Record<string, string> = {}) =>
+    [
+      "Source and type contracts",
+      "Unit tests (shard 1/1)",
+      "Real-service shard 1/6",
+      "Impacted E2E shard 1/4",
+      "Real-service and recovery tests",
+      "Browser and visual acceptance (accounts, firefox)",
+      "Package and bundle contracts",
+      "Real Chromium browser controller",
+      "Deployment artifacts",
+      "Build exact artifact runtime inputs / Native smoke receipt (darwin-x64)",
+      "Build worker workload image",
+      "Typecheck and unit tests",
+      "Verify landed merge content",
+    ].map((name, index) => job(index + 1, name, overrides[name] ?? "success"));
+  expect(baseJobClasses(lanes(), 12).lanes).toBe("green");
+  expect(failedBaseHold(laneRun, sha, evidence(baseJobClasses(lanes(), 12)))).toBeNull();
+  for (const name of [
+    "Real-service shard 1/6",
+    "Impacted E2E shard 1/4",
+    "Real Chromium browser controller",
+    "Build worker workload image",
+    "Deployment artifacts",
+    "Build exact artifact runtime inputs / Native smoke receipt (darwin-x64)",
+  ]) {
+    const classes = baseJobClasses(lanes({ [name]: "failure" }), 12);
+    expect(classes).toEqual({ source: "green", units: "green", lanes: "red" });
+    expect(failedBaseHold(laneRun, sha, evidence(classes))).not.toBeNull();
+    // A source-only cohort failure is not held by a red main lane.
+    expect(failedBaseHold(run, sha, evidence(classes))).toBeNull();
+  }
+  // Aggregates and main-only jobs are not lane evidence.
+  expect(
+    baseJobClasses(
+      lanes({ "Typecheck and unit tests": "failure", "Verify landed merge content": "failure" }),
+      12,
+    ).lanes,
+  ).toBe("green");
+  // Impact-skipped lanes are neutral; an approval-waiting image holds no verdict.
+  const partial = lanes({ "Impacted E2E shard 1/4": "skipped" });
+  partial.push({
+    ...job(99, "Build API workload image"),
+    status: "waiting",
+    conclusion: null as unknown as string,
+  });
+  expect(baseJobClasses(partial, 12).lanes).toBe("green");
+  // A running or inconclusive lane is unknown, and unknown holds.
+  const running = lanes();
+  running[2] = { ...running[2]!, status: "in_progress", conclusion: null as unknown as string };
+  expect(baseJobClasses(running, 12).lanes).toBe("unknown");
+  expect(baseJobClasses(lanes({ "Real-service shard 1/6": "timed_out" }), 12).lanes).toBe(
+    "unknown",
+  );
+  expect(failedBaseHold(laneRun, sha, evidence(baseJobClasses(running, 12)))).not.toBeNull();
+  // Evidence persisted before the lanes class existed cannot clear a lane failure.
+  expect(
+    failedBaseHold(laneRun, sha, evidence({ source: "green", units: "green" })),
+  ).not.toBeNull();
 });

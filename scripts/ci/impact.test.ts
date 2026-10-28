@@ -1157,6 +1157,7 @@ function requiredResult(
     bakeImages?: boolean;
     preImage?: boolean;
     attested?: boolean | undefined;
+    batch?: boolean | undefined;
   },
 ): boolean {
   const result = spawnSync(
@@ -1200,6 +1201,7 @@ function requiredResult(
       ...(options.attested === undefined
         ? []
         : ["--argjson", "attested", String(options.attested)]),
+      ...(options.batch === undefined ? [] : ["--argjson", "batch", String(options.batch)]),
       "-f",
       "scripts/ci/required-results.jq",
     ],
@@ -1209,6 +1211,45 @@ function requiredResult(
 }
 
 describe("workflow fail-closed contracts", () => {
+  test("required-results batch mode leaves units to Batch CI and requires every other lane and image", () => {
+    const lanes = {
+      plan: { result: "success" },
+      "source-contracts": { result: "success" },
+      "unit-shards": { result: "skipped" },
+      "integration-shards": { result: "success" },
+      "e2e-shards": { result: "success" },
+      "artifact-runtime": { result: "success" },
+      "test-suite": { result: "success" },
+      "browser-acceptance": { result: "success" },
+      "browserd-real-e2e": { result: "success" },
+      "package-contracts": { result: "success" },
+      deployment: { result: "success" },
+      images: { result: "success" },
+    };
+    const batch = {
+      event: "push" as const,
+      mode: "full" as const,
+      unit: 900,
+      integration: 6,
+      e2e: 4,
+      browser: 5,
+      artifactRuntime: true,
+      build: 10,
+      batch: true,
+    };
+    expect(requiredResult(lanes, batch)).toBe(true);
+    // Without batch mode a selected unit inventory must run in main CI.
+    expect(requiredResult(lanes, { ...batch, batch: false })).toBe(false);
+    expect(requiredResult({ ...lanes, "unit-shards": { result: "success" } }, batch)).toBe(false);
+    for (const lane of Object.keys(lanes).filter((name) => name !== "unit-shards"))
+      expect([lane, requiredResult({ ...lanes, [lane]: { result: "skipped" } }, batch)]).toEqual([
+        lane,
+        false,
+      ]);
+    expect(requiredResult(lanes, { ...batch, bakeImages: false })).toBe(false);
+    expect(requiredResult(lanes, { ...batch, event: "pull_request" })).toBe(false);
+  });
+
   test("required-results accepts exact selected/skipped topology and rejects missing success", () => {
     const full = {
       plan: { result: "success" },

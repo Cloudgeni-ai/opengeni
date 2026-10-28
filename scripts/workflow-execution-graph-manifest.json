@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/batch-ci.yml",
-      "sha256": "b54e9a3fea1f1b754307dad72241aea62b9e8e3991c3ccdde0885d9bf8bfc509"
+      "sha256": "5c6d339ad4209caab00df7ff2e4ac099619ee809e521f9efcedf8f5fef3ed186"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "a21dab8a570bf280fa86f8931c3a809349e6230b866bae92070751514e8ae9a8"
+      "sha256": "9032a957dcd4be51313bed9b733a1d601a7e981432348d10c35ace37128dd5b6"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -597,6 +597,12 @@
     },
     {
       "workflow": ".github/workflows/batch-ci.yml",
+      "job": "lanes-verdict",
+      "step": "Classify every main lane job of this attempt",
+      "sha256": "62ca41b9f019b8c8f6a92bfb121317ad344ec721a267c68cea0283c2f8df87fa"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
       "job": "plan",
       "step": "Verify candidate provenance and plan the complete combined tree",
       "sha256": "174176c895ef72cebb813592e508df2ee3b4d9c42f256a2412b2da89d7cf4510"
@@ -1025,7 +1031,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "449dd01a3d370129eba3121a92cbb7ff8e0b04a243c19e2312ba06050d84a43d"
+      "sha256": "e1f55356683c8937af19f0fa2bac80b8205288d19769f966b4e364bc1a3fb8d3"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1085,7 +1091,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "test",
       "step": "Require every split CI lane",
-      "sha256": "aed0b05bb1764cf3c4a20e9b056211f13f3772b254f059b7a69ed2a594f1716d"
+      "sha256": "38868a1bfb6b0c5bb47909706fd617f46b6702213ff0cdb5f70307783cb82fdd"
     },
     {
       "workflow": ".github/workflows/ci.yml",

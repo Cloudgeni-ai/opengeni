@@ -207,9 +207,67 @@ jobs:
             ${{ runner.temp }}/batch-unit-${{ matrix.index }}.json
           if-no-files-found: ignore
 
+  # Main CI's own gating lanes on this exact candidate: real-service shards,
+  # real-service and recovery tests, impacted E2E shards, browser acceptance,
+  # the real Chromium controller, package contracts, deployment artifacts, the
+  # artifact runtime with native smoke receipts, every workload image build and
+  # the `Typecheck and unit tests` / `Workload image builds` aggregates that
+  # canary admission requires. The candidate's own ci.yml runs them, so a CI
+  # definition change is exercised before it lands. Images are built, never
+  # pushed or signed. Batch's receipt-backed unit shards replace main's.
+  lanes:
+    name: Main CI lanes
+    needs: plan
+    uses: ./.github/workflows/ci.yml
+    # Upper bound for ci.yml's job-level grants. Only main-push or Version-PR
+    # jobs that are skipped here use the write scopes; images stay build-only.
+    permissions:
+      actions: read
+      checks: write
+      contents: write
+      packages: write
+      pull-requests: read
+      statuses: write
+    with:
+      batch_base_sha: ${{ needs.plan.outputs.base_sha }}
+
+  # One receipt for the whole lane set, classified from this attempt's actual
+  # job results: a failed assertion is a code failure, while setup failures,
+  # deadlines and provider timeouts are infrastructure. The controller still
+  # requires the workflow conclusion to agree with the aggregate.
+  lanes-verdict:
+    name: Batch main-lane verdict
+    needs: [plan, lanes]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BATCH_ID: ${{ needs.plan.outputs.batch_id }}
+      LANES_RESULT: ${{ needs.lanes.result }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Classify every main lane job of this attempt
+        run: >-
+          bun scripts/ci/batch-result.ts run --job lanes --output "$RUNNER_TEMP/lanes-receipt.json" --
+          bun scripts/ci/batch-lanes.ts --caller "Main CI lanes" --output "$RUNNER_TEMP/lanes-jobs.json"
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: batch-receipt-${{ github.run_attempt }}-lanes
+          path: |
+            ${{ runner.temp }}/lanes-receipt.json
+            ${{ runner.temp }}/lanes-jobs.json
+          if-no-files-found: ignore
+
   ready:
     name: Batch ready
-    needs: [plan, source, units]
+    needs: [plan, source, units, lanes, lanes-verdict]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -219,6 +277,12 @@ jobs:
       PLAN_RESULT: ${{ needs.plan.result }}
       SOURCE_RESULT: ${{ needs.source.result }}
       UNITS_RESULT: ${{ needs.units.result }}
+      # Main-lane parity: a verifier that knows this contract folds the lane
+      # receipt into the source class; an older base verifier ignores it, and
+      # the workflow conclusion still fails when a lane fails.
+      BATCH_LANES: required
+      LANES_RESULT: ${{ needs.lanes.result }}
+      LANES_VERDICT_RESULT: ${{ needs.lanes-verdict.result }}
     steps:
       # The candidate must not choose the result verifier. Use its inspected
       # base; the controller independently revalidates receipt identities and
