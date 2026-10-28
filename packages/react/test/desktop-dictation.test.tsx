@@ -142,12 +142,12 @@ const oneShotClient = { transcribeAudio: async () => ({ text: "one-shot", langua
 async function mountHost(
   app: ReturnType<typeof fakeApp>,
   server: FakeServer,
-  options: { enabled?: boolean; chunks?: Uint8Array[] } = {},
+  options: { enabled?: boolean; chunks?: Uint8Array[]; elapsedMilliseconds?: number } = {},
 ) {
-  const { platform, recorders } = fakePlatform(
-    server,
-    options.chunks ? { chunks: options.chunks } : undefined,
-  );
+  const { platform, recorders } = fakePlatform(server, {
+    ...(options.chunks ? { chunks: options.chunks } : {}),
+    ...(options.elapsedMilliseconds ? { elapsedMilliseconds: options.elapsedMilliseconds } : {}),
+  });
   mounted = await renderComponent(
     <DesktopDictationHost
       client={oneShotClient}
@@ -239,6 +239,36 @@ describe("DesktopDictationHost", () => {
     await waitFor(() => server.recordings.size === 0);
     expect(server.recordings.size).toBe(0);
     expect(app.phases("d1")).not.toContain("done");
+  });
+
+  test("Cancel deletes the dictation and hands its speech to the app's recent dictations", async () => {
+    for (const when of ["recording", "transcribing"] as const) {
+      const app = fakeApp();
+      const server = new FakeServer();
+      server.heard = null;
+      await mountHost(app, server, {
+        chunks: [new Uint8Array([1, 2]), new Uint8Array([3])],
+        elapsedMilliseconds: 6_000,
+      });
+      await app.send({ kind: "start", dictationId: "d1", profileId: "default", language: null });
+      await waitFor(() => app.phases("d1").includes("recording"));
+      if (when === "transcribing") {
+        await app.send({ kind: "stop", dictationId: "d1" });
+        await waitFor(() => app.phases("d1").includes("transcribing"));
+      }
+      await app.send({ kind: "cancel", dictationId: "d1" });
+      await waitFor(() => app.phases("d1").includes("cancelled"));
+      const cancelled = app.last("d1");
+      const audio = cancelled?.phase === "cancelled" ? cancelled.audio : undefined;
+      expect(audio?.mimeType).toBe("audio/webm");
+      expect([...(audio?.bytes ?? [])]).toEqual([1, 2, 3]);
+      expect(audio?.durationMilliseconds).toBe(6_000);
+      expect(app.phases("d1").filter((phase) => phase === "cancelled")).toHaveLength(1);
+      await waitFor(() => server.recordings.size === 0);
+      expect(app.phases("d1")).not.toContain("done");
+      await mounted?.unmount();
+      mounted = null;
+    }
   });
 
   test("voice input turned off for the workspace fails a start at once", async () => {
@@ -466,6 +496,25 @@ describe("DesktopDictationSettings", () => {
       await settle();
     });
     expect(app.again).toEqual(["d1"]);
+  });
+
+  test("a cancelled dictation is kept to play or transcribe again, with no text to copy", async () => {
+    const app = fakeApp({ settings: { enabled: true } });
+    app.history.push({
+      id: "d1",
+      text: "",
+      at: new Date().toISOString(),
+      profileName: "Any language",
+      language: null,
+      audio: { mimeType: "audio/webm", durationMilliseconds: 6_000 },
+      cancelled: true,
+    });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("Recent dictations") ?? false);
+    expect(mounted.container.textContent).toContain("Cancelled, not transcribed");
+    expect(mounted.container.querySelector("button[aria-label=Play]")).not.toBeNull();
+    expect(mounted.container.querySelector("button[aria-label='Transcribe again']")).not.toBeNull();
+    expect(mounted.container.querySelector("button[aria-label='Copy text']")).toBeNull();
   });
 
   test("offers the retry and cancel shortcuts and saves the vocabulary", async () => {

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { StrictMode } from "react";
 import type { OpenGeniClient, CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { matchingActiveMcpConnections } from "../src/mcp-connection-status";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
@@ -1027,6 +1028,99 @@ test("connecting your own account to a capability enabled for personal accounts 
     ]);
     expect(enables).toEqual([]);
     expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("an integration only an admin can turn on says so after sign-in, not a generic failure", async () => {
+  sessionStorage.clear();
+  let committed = false;
+  const off = {
+    ...item,
+    id: "custom-service",
+    name: "Team tools",
+    enabled: false,
+    connectionRef: null,
+  } as unknown as CapabilityCatalogItem;
+  const account = { ...connection, id: "own-account", subjectId: "user:own" };
+  const attempt = {
+    id: "own-attempt",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [off] }),
+    listConnections: async () => (committed ? [account] : []),
+    listOwnConnectionAccounts: async () => (committed ? [account] : []),
+    enableCapability: async () => {
+      throw new OpenGeniApiError(
+        403,
+        JSON.stringify({ error: { message: "Only an admin can turn on this integration" } }),
+        { mutation: true },
+      );
+    },
+    connectTransport: () => ({
+      begin: async () => attempt,
+      advance: async () => {
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: account.id,
+            providerId: "mcp-oauth",
+            ownership: "personal",
+            status: "connected",
+            label: "Team tools",
+            version: 1,
+          },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={off.id}
+      name="Team tools"
+      returnUrl="https://host.example/"
+      dialogOnly
+      personalOnly
+    />,
+  );
+  try {
+    await flush();
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue to Team tools",
+    );
+    expect(button).toBeDefined();
+    await actRun(() => button!.click());
+    await flush();
+    expect(document.body.textContent).toContain(
+      "Only an admin can turn on Team tools. Ask an admin to turn it on, then connect your account.",
+    );
+    expect(document.body.textContent).not.toContain("Connection setup could not finish");
   } finally {
     await view.unmount();
     window.open = previousOpen;

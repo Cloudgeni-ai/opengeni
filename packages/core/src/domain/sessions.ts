@@ -498,7 +498,7 @@ export function requireDeploymentFirstPartyMcpTools(
 
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
   if (denial.code === "nested_agent_depth_override_forbidden") {
-    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; workspace:admin is required to increase it`;
+    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; only a workspace admin can raise it`;
   }
   return `nested-agent depth ${denial.attemptedDepth} exceeds effective limit ${denial.effectiveMaxNestedAgentDepth} (current parent depth ${denial.currentDepth})`;
 }

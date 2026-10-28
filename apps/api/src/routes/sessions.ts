@@ -5,6 +5,7 @@ import {
   assertGoalResumeAllowed,
   GoalResumeBlockedError,
   turnAppActionGrant,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
@@ -490,8 +491,8 @@ function requireViewerLifecyclePermission(grant: AccessGrant): void {
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: `missing permission: ${VIEWER_LIFECYCLE_PERMISSIONS.join(" or ")}`,
+  throw new MissingPermissionRefusal("stream:view", {
+    message: "You don't have permission to watch or use this chat's computer.",
   });
 }
 

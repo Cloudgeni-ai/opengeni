@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext, type Workspace } from "@opengeni/contracts";
 import {
   requireAccessGrantAuthorization,
+  requireConnectOwnerAuthority,
   workspaceSettingsAuthorized,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -31,6 +32,8 @@ import { sha256Hex } from "@opengeni/contracts/values";
 import { registerInsightsRoutes } from "../src/routes/insights";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 import { registerWorkspaceInstructionPolicyRoutes } from "../src/routes/workspace-instruction-policies";
+import { registerModelAccountSettingsRoutes } from "../src/routes/model-account-settings";
+import { registerSocialRoutes } from "../src/routes/social";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -160,6 +163,8 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerInsightsRoutes(registered, deps);
   registerInsightsUsageRoutes(registered, deps);
   registerWorkspaceInstructionPolicyRoutes(registered, deps);
+  registerModelAccountSettingsRoutes(registered, deps);
+  registerSocialRoutes(registered, deps);
   return registered;
 }
 
@@ -261,7 +266,7 @@ describe("managed personal workspace access", () => {
       body: "{",
     });
     expect(limited.status).toBe(403);
-    expect(await limited.text()).toContain("missing permission: stream:view");
+    expect(await limited.text()).toContain("You don't have permission to watch live screens.");
   });
 
   test("Personal owners save settings and learning policy without gaining access-management powers", async () => {
@@ -440,6 +445,174 @@ describe("managed personal workspace access", () => {
         },
       );
       expect(sharedDraft.status).toBe(403);
+    } finally {
+      await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    }
+  });
+
+  test("Personal owners pass the settings checks scoped to their own workspace; lookalikes do not", async () => {
+    if (!shared || !client || !app) return;
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const headers = {
+      cookie: "session=present",
+      "content-type": "application/json",
+    };
+    const subjectId = `user:${userId}`;
+
+    // Model account settings: the owner is answered that a Personal workspace
+    // follows the organization, never refused as a non-admin.
+    const settings = await app.request(`${base}/model-account-settings`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ crossProviderFailover: true }),
+    });
+    expect(settings.status, await settings.clone().text()).toBe(409);
+    expect(await settings.text()).toContain("follows the organization's model account settings");
+
+    // A workspace-owned social account in a Personal workspace is the owner's setting.
+    const social = await app.request(`${base}/social/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider: "x",
+        accountHandle: `owner-${crypto.randomUUID()}`,
+      }),
+    });
+    expect(social.status, await social.clone().text()).toBe(201);
+    const connection = (await social.json()) as {
+      id: string;
+      ownership: string;
+    };
+    expect(connection.ownership).toBe("workspace");
+    const post = await app.request(`${base}/social/posts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connectionId: connection.id,
+        text: "Owner post",
+        publishedAt: new Date().toISOString(),
+      }),
+    });
+    expect(post.status, await post.clone().text()).toBe(201);
+    const disconnected = await app.request(`${base}/social/connections/${connection.id}`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(disconnected.status, await disconnected.clone().text()).toBe(200);
+
+    // The social OAuth and Connect callbacks opt in to re-checking the
+    // verified owner of the Personal workspace for workspace:admin; nobody else
+    // gains it, and callers that don't opt in (SuperGrok) still need a real admin.
+    const owner = { accountId, workspaceId: personalWorkspaceId, subjectId };
+    const optIn = { personalOwnerSettings: true };
+    await requireConnectOwnerAuthority(
+      client.db,
+      { ...owner, personalOwnerVerified: true },
+      "workspace:admin",
+      null,
+      optIn,
+    );
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        { ...owner, personalOwnerVerified: true },
+        "workspace:admin",
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        { ...owner, personalOwnerVerified: false },
+        "workspace:admin",
+        null,
+        optIn,
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        {
+          ...owner,
+          subjectId: `user:${crypto.randomUUID()}`,
+          personalOwnerVerified: true,
+        },
+        "workspace:admin",
+        null,
+        optIn,
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
+
+    // A delegated owner lookalike without workspace:admin in its ceiling stays refused.
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId,
+      principalKind: "human_session",
+      permissions: managedPersonalWorkspacePermissions,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const delegated = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    };
+    const refusedBodies = [
+      ["PATCH", "/model-account-settings", { crossProviderFailover: true }],
+      ["POST", "/social/connections", { provider: "x", accountHandle: "lookalike" }],
+      ["POST", "/social/oauth/start", { provider: "x", ownership: "workspace" }],
+      [
+        "POST",
+        "/social/posts",
+        {
+          connectionId: connection.id,
+          text: "Lookalike post",
+          publishedAt: new Date().toISOString(),
+        },
+      ],
+    ] as const;
+    for (const [method, path, body] of refusedBodies) {
+      const response = await app.request(`${base}${path}`, {
+        method,
+        headers: delegated,
+        body: JSON.stringify(body),
+      });
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toContain(
+        "Only a workspace admin, or the owner of a Personal workspace, can do this.",
+      );
+    }
+
+    // A read-only cookie in a shared workspace is not the Personal owner, and
+    // the Connect re-check there still needs a real workspace:admin.
+    const access = await app.request("http://x/v1/access/me", {
+      headers: { cookie: "session=present" },
+    });
+    const sharedWorkspaceId = ((await access.json()) as AccessContext).defaultWorkspaceId!;
+    const [before] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    try {
+      await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+      for (const [method, path, body] of refusedBodies) {
+        const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}${path}`, {
+          method,
+          headers,
+          body: JSON.stringify(body),
+        });
+        expect(response.status, path).toBe(403);
+      }
+      await expect(
+        requireConnectOwnerAuthority(
+          client.db,
+          {
+            accountId,
+            workspaceId: sharedWorkspaceId,
+            subjectId,
+            personalOwnerVerified: true,
+          },
+          "workspace:admin",
+          null,
+          optIn,
+        ),
+      ).rejects.toThrow("Connection owner authority changed");
     } finally {
       await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
     }

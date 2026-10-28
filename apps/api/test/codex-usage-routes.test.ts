@@ -376,7 +376,7 @@ describe("PATCH /codex/source — core source refusal", () => {
   test("maps a permission source refusal to 403", async () => {
     const mutation = spyOn(opengeniDb, "setSubscriptionCoreWorkspaceCodexSource").mockRejectedValue(
       new opengeniDb.SubscriptionCoreCodexSourceRefusedError(
-        "missing permission to change this workspace's Codex source",
+        "You don't have permission to change this workspace's Codex source.",
         "forbidden",
       ),
     );

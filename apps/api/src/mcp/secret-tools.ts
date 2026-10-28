@@ -237,7 +237,9 @@ export function registerSecretTools(
         const settingsPermission = workspaceScope ? "workspace:admin" : "sessions:control";
         if (!hasPermission(grant.permissions, settingsPermission, grant.permissionMode)) {
           throw new ProfilePermissionError(
-            `changing the ${workspaceScope ? "workspace" : "chat"} credential profile needs ${settingsPermission}`,
+            workspaceScope
+              ? "Only a workspace admin can change the workspace credential profile."
+              : "You don't have permission to change this chat's credential profile.",
           );
         }
         const profile = await setCredentialProfile(deps.db, {

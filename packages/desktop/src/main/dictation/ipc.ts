@@ -98,8 +98,11 @@ export function parseDictationReport(value: unknown): DesktopDictationReport | n
             : null,
       };
     case "transcribing":
-    case "cancelled":
       return { dictationId, phase: report.phase };
+    case "cancelled": {
+      const audio = parseDictationAudio(report.audio);
+      return { dictationId, phase: "cancelled", ...(audio ? { audio } : {}) };
+    }
     case "done": {
       if (typeof report.text !== "string") return null;
       const audio = parseDictationAudio(report.audio);

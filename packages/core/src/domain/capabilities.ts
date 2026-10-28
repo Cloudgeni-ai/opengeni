@@ -484,7 +484,9 @@ function assertPersonalIntegrationSetupRequest(
   payload: EnableCapabilityRequest,
 ): void {
   if (!isPersonalIntegrationSetupCandidate(item))
-    throw new HTTPException(403, { message: "Only an admin can turn on this integration" });
+    throw new HTTPException(403, {
+      message: `Only an admin can turn on ${item.name}. Ask an admin to turn it on first, then connect your account.`,
+    });
   const ref = payload.connectionRef;
   if (
     !ref ||
@@ -945,6 +947,16 @@ async function validateMcpCapabilityConnectionRef(
       ) ?? null;
   }
   if (!connection) {
+    // "Each person signs in": every person's own account is resolved when
+    // they use it, so turning the server on needs no account of the caller's
+    // own. Only for the server's own provider, and only a plain OAuth ref.
+    if (isPerPersonOAuthRefForItem(item, normalized))
+      // Stored as each person's sign-in records it, so their rows match.
+      return {
+        ...normalized,
+        kind: "oauth2",
+        providerDomain: canonicalDomain(normalized.providerDomain),
+      };
     throw new HTTPException(422, {
       message: "connectionRef does not reference a visible active connection",
     });
@@ -978,6 +990,47 @@ async function validateMcpCapabilityConnectionRef(
     return genericSubjectRef;
   }
   return normalized;
+}
+
+function canonicalDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./u, "");
+}
+
+function hostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A per-person OAuth reference for this exact server: no account id, no
+ * account selection or resources, and the provider is the server itself
+ * (its catalog provider domain or its endpoint host). Each person's own
+ * account for that provider is resolved when they use it.
+ */
+function isPerPersonOAuthRefForItem(
+  item: CapabilityCatalogItem,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.accountSelection ||
+    ref.authoritySource === "host" ||
+    ref.selectedResources
+  )
+    return false;
+  const domain = canonicalDomain(ref.providerDomain);
+  return [item.providerDomain, hostOf(item.mcpUrl ?? item.endpointUrl)].some(
+    (candidate) => typeof candidate === "string" && canonicalDomain(candidate) === domain,
+  );
 }
 
 function authDeferredMcpConnectivity(): Record<string, unknown> {
