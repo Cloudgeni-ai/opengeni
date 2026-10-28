@@ -8,9 +8,14 @@ const WS = "11111111-1111-1111-1111-111111111111";
 
 /** Lists the way the Connected Machine agent does (`list_dir` in the
  *  agent's native.rs): only the directory's own children, directories included,
- *  each with `path` relative to the listed directory, which is its bare name. */
+ *  each with `path` relative to the listed directory, which is its bare name.
+ *  With `reportsAbsolute`, it reports the full path instead, as the agent does
+ *  when stripping the listed directory's prefix fails. */
 class NativeListingResponder extends MockAgentResponder {
-  constructor(private readonly paths: Record<string, string>) {
+  constructor(
+    private readonly paths: Record<string, string>,
+    private readonly reportsAbsolute = false,
+  ) {
     super({ files: paths });
   }
 
@@ -35,7 +40,7 @@ class NativeListingResponder extends MockAgentResponder {
         fsList: {
           entries: [...children].map(([name, isDirectory]) => ({
             name,
-            path: name,
+            path: this.reportsAbsolute ? `${directory}/${name}` : name,
             kind: isDirectory
               ? FsEntryKind.FS_ENTRY_KIND_DIRECTORY
               : FsEntryKind.FS_ENTRY_KIND_FILE,
@@ -49,13 +54,17 @@ class NativeListingResponder extends MockAgentResponder {
   }
 }
 
-function machine(workspaceRoot: string, files: Record<string, string>): SelfhostedSession {
+function machine(
+  workspaceRoot: string,
+  files: Record<string, string>,
+  reportsAbsolute = false,
+): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: WS,
     workspaceRoot,
     agentId: "enroll-1",
     connectionInstanceId: "22222222-2222-4222-8222-222222222222",
-    controlRpc: new NativeListingResponder(files),
+    controlRpc: new NativeListingResponder(files, reportsAbsolute),
     relay: RELAY,
   });
 }
@@ -114,6 +123,23 @@ describe("Connected Machine listDir paths", () => {
     ]);
     expect(await session.listDir({ path: ".agents/skills" })).toEqual([
       { name: "release", path: ".agents/skills/release", type: "dir" },
+    ]);
+  });
+
+  test("a POSIX name with a backslash is joined literally", async () => {
+    const session = machine(root, { [`${root}/odd\\name.txt`]: "x" });
+    expect(await session.listDir({ path: root })).toEqual([
+      { name: "odd\\name.txt", path: `${root}/odd\\name.txt`, type: "file" },
+    ]);
+    expect(await session.listDir({ path: "." })).toEqual([
+      { name: "odd\\name.txt", path: "odd\\name.txt", type: "file" },
+    ]);
+  });
+
+  test("an absolute path reported by the machine is kept as is", async () => {
+    const session = machine(root, files, true);
+    expect(await session.listDir({ path: `${root}/.agents/skills` })).toEqual([
+      { name: "release", path: `${root}/.agents/skills/release`, type: "dir" },
     ]);
   });
 });
