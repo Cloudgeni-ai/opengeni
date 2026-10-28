@@ -16914,7 +16914,11 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     title: primitives.string,
     /** A notification's subtitle; empty otherwise. */
     subtitle: primitives.string.default(""),
-    /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
+    /**
+     * Plain text: for an approval, where it runs (the integration, and the
+     * account when there are several); for a notification, its message
+     * (paragraphs, "- " bullets, **bold**, `code`, links).
+     */
     body: primitives.string,
     /** A notification's label/value facts; empty otherwise. */
     facts: z
