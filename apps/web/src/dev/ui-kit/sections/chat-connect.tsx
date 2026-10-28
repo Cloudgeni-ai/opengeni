@@ -1,8 +1,9 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
-import type { AuthNeededItem } from "@opengeni/react";
+import { ThisComputerCard } from "@opengeni/react/this-computer";
+import { SessionIntegrationCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { ChatFrame, lead, showPart } from "./chat-shared";
@@ -226,6 +227,107 @@ function Provider({ children }: { children: ReactNode }) {
   return <AppContext.Provider value={context as never}>{children}</AppContext.Provider>;
 }
 
+/* ----------------------------------------------------------------------------
+   Live sign-in steps: a reviewed integration's card against a fake Connect
+   backend. Press Connect to see the card wait for its sign-in window, then
+   Cancel or Reopen window. "fails" reports an error on its first poll.
+   -------------------------------------------------------------------------- */
+
+function signInClient(definitionId: string, mode: "waits" | "fails") {
+  let revision = 0;
+  let current: Record<string, unknown> | null = null;
+  const attempt = (overrides: Record<string, unknown>) => {
+    revision += 1;
+    current = {
+      id: `attempt-${definitionId}`,
+      workspaceId: "ws-kit",
+      providerId: definitionId,
+      ownership: "personal",
+      revision,
+      state: "requires_user_action",
+      nextAction: { type: "none" },
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "integration",
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      ...overrides,
+    };
+    return structuredClone(current);
+  };
+  const transport = {
+    catalog: async () => [
+      {
+        id: definitionId,
+        label: definitionId,
+        family: "microsoft",
+        readiness: "available",
+        ownership: ["personal"],
+        setup: ["oauth"],
+      },
+    ],
+    accounts: async () => [],
+    pending: async () => [],
+    begin: async () =>
+      attempt({
+        nextAction: { type: "authorize", url: "https://login.example.com/authorize?state=kit" },
+      }),
+    recover: async () => structuredClone(current),
+    get: async () => {
+      if (mode === "fails") throw new Error("kit: sign-in failed");
+      return structuredClone(current);
+    },
+    advance: async () => structuredClone(current),
+    cancel: async () => attempt({ state: "cancelled", nextAction: { type: "none" } }),
+    disconnect: async () => {},
+  };
+  return {
+    connectTransport: () => transport,
+    listApiIntegrations: async () => ({ integrations: [] }),
+    getSession: async () => ({ id: "session-kit", tools: [], toolPolicy: { mode: "default" } }),
+    updateSessionToolPolicy: async () => ({}),
+    continueAfterCapabilitySetup: async () => ({ outcome: "queued", updateId: "kit" }),
+  };
+}
+
+const SIGN_IN = [
+  {
+    label: "Waiting for sign-in (press Connect)",
+    definitionId: "microsoft-outlook-mail",
+    name: "Outlook Mail",
+    mode: "waits" as const,
+    rationale: "Saving the draft to your Outlook needs your mailbox.",
+  },
+  {
+    label: "Cancelled (press Connect, then Cancel)",
+    definitionId: "microsoft-outlook-calendar",
+    name: "Outlook Calendar",
+    mode: "waits" as const,
+    rationale: "Booking the review meeting needs your Outlook calendar.",
+  },
+  {
+    label: "Sign-in could not continue (press Connect)",
+    definitionId: "microsoft-onedrive",
+    name: "OneDrive",
+    mode: "fails" as const,
+    rationale: "Opening the quarterly report needs your OneDrive.",
+  },
+];
+
+function SignInCard({ entry }: { entry: (typeof SIGN_IN)[number] }) {
+  const [fake] = useState(() => signInClient(entry.definitionId, entry.mode));
+  return (
+    <SessionIntegrationCapabilityCard
+      client={fake as never}
+      workspaceId="ws-kit"
+      sessionId="session-kit"
+      capabilityId={`api:integration:${entry.definitionId}`}
+      name={entry.name}
+      rationale={entry.rationale}
+      returnUrl="https://app.example.com/chat"
+    />
+  );
+}
+
 export default function ChatConnectSection() {
   const oauth = CARDS.oauth!;
   return (
@@ -240,6 +342,15 @@ export default function ChatConnectSection() {
             </StateCell>
           </StatesGrid>
         ) : null}
+        {showPart("signin") ? (
+          <StatesGrid title="Sign-in steps" columns={1}>
+            {SIGN_IN.map((entry) => (
+              <StateCell key={entry.definitionId} label={entry.label} align="stretch">
+                <SignInCard entry={entry} />
+              </StateCell>
+            ))}
+          </StatesGrid>
+        ) : null}
         {showPart("kinds") ? (
           <StatesGrid title="Kinds" columns={2}>
             {Object.entries(CARDS).map(([key, card]) => (
@@ -247,6 +358,14 @@ export default function ChatConnectSection() {
                 <Card item={card.item} />
               </StateCell>
             ))}
+            <StateCell label="This computer (web, app not installed)" align="stretch">
+              <ThisComputerCard
+                rationale="Let me use your computer so I can open the spreadsheet in Excel."
+                productName="Opengeni"
+                machines={[]}
+                downloadUrl="#download"
+              />
+            </StateCell>
           </StatesGrid>
         ) : null}
       </KitSection>

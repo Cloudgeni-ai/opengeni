@@ -248,7 +248,13 @@ function ScopedSessionCapabilityCard({
                 : ""
               : "API"
       }
-      description={catalogItem?.description || recommendation.rationale}
+      badge={
+        !skill && !excel && recommendation.kind === "mcp" && showsMcpServerLabel(catalogItem)
+          ? "MCP server"
+          : undefined
+      }
+      description={recommendation.rationale || catalogItem?.description || ""}
+      clampDescription={Boolean(recommendation.rationale)}
       skill={skill}
       expanded={expanded}
       complete={complete}

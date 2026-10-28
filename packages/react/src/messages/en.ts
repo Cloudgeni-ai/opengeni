@@ -1456,7 +1456,7 @@ export const englishMessages = {
   "connectSetup.chooseTools": "Choose tools",
   "connectSetup.chooseWhichToolsToAdd": "Choose which tools to add",
   "connectSetup.completeProviderAuthorizationThenCheck":
-    "Complete provider authorization, then check the connection status.",
+    "Finish signing in there, then press Check status.",
   "connectSetup.connect": "Connect",
   "connectSetup.connectionDetails": "Connection details",
   "connectSetup.connectionReady": "Connection ready",
@@ -1487,6 +1487,7 @@ export const englishMessages = {
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
+  "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
   "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
@@ -4469,6 +4470,7 @@ export const englishMessages = {
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
   "sessionIntegrationCapabilityCard.chatAccessFailed":
     "Connected, but it couldn't be added to this chat's tools. Choose it in this chat's tools.",
+  "sessionIntegrationCapabilityCard.closeSignInWindow": "You can close the sign-in window.",
   "sessionIntegrationCapabilityCard.connected": "Your account is connected",
   "sessionIntegrationCapabilityCard.connectName": "Connect {name}",
   "sessionIntegrationCapabilityCard.couldNotLoad": "Couldn't check this connection.",
@@ -4487,9 +4489,11 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.personalUnavailable":
     "{name} can only be connected to your own account, and this app can't do that here. Ask its administrator for help.",
   "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
+  "sessionIntegrationCapabilityCard.reopenSignIn": "Reopen window",
   "sessionIntegrationCapabilityCard.retry": "Retry",
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
-  "sessionIntegrationCapabilityCard.stopWaiting": "Stop waiting",
+  "sessionIntegrationCapabilityCard.signInFailed": "Sign-in couldn't continue. Try again.",
+  "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",
