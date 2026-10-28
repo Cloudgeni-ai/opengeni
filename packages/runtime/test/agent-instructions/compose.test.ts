@@ -247,7 +247,9 @@ describe("modular composer: module selection (AC12)", () => {
       expect(composed).toContain(
         "If a requested base branch such as `main` exists neither locally nor on the remote",
       );
-      expect(composed).toContain("do not push it or open a pull request until those steps are done");
+      expect(composed).toContain(
+        "do not push it or open a pull request until those steps are done",
+      );
       expect(composed).toContain("When a routine, reversible step of the task is blocked");
     }
     expect(compose(allAgentCapabilities(), NO_RESOURCES).composed).not.toContain(
