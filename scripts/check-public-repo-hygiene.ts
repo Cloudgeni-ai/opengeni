@@ -83,6 +83,12 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     sha256: "6e8f4da503bdd91d8d16b91cb97bd5d14c21249a3bca247debac7271cb9b6157",
     offsets: "all",
   },
+  // Lucide's SVG path data for the bot avatar icons; its move-to commands look like labels.
+  "apps/api/src/integrations/session-avatar-icons.ts": {
+    bytes: 5_842,
+    sha256: "59a94eb77fd96ef62a6624e8eb2dfddf812c43ad4eaae12dcdac65f8cd9ecc43",
+    offsets: "all",
+  },
   "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
     bytes: 10_000,
     sha256: "460689f95489b6336f81772e8c2288bda85e897ffa19109c7dd4589c0715cb7f",

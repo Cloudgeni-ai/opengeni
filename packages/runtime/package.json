@@ -33,6 +33,10 @@
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
     },
+    "./calling-workspace": {
+      "types": "./src/calling-workspace.ts",
+      "default": "./src/calling-workspace.ts"
+    },
     "./model-call": {
       "types": "./src/model-call.ts",
       "default": "./src/model-call.ts"

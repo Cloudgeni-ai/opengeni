@@ -38,6 +38,7 @@ import {
   githubRestConnectorActionOutcome,
   GitHubRestMcpServer,
   type GitHubRestRepository,
+  type GitHubRestResolvedAuthority,
 } from "@opengeni/runtime/github-rest-mcp";
 
 const PERSONAL_GITHUB_DELEGATION_SERVER_ID = "github:personal";
@@ -274,7 +275,7 @@ function workspaceAppAuthorityResolver(
     }
     return installationId;
   };
-  return async ({ toolName, repository, forceRefresh }) => {
+  return async ({ toolName, repository, forceRefresh }): Promise<GitHubRestResolvedAuthority> => {
     const installationId = await validate(repository);
     const repositoryId = Number(repository.repositoryId);
     const identity = githubAppBotIdentity(input.settings);
@@ -335,7 +336,12 @@ function personalAuthorityResolver(input: {
   turn: SessionTurnForExecution;
   resolveCredential: ResolveCredential;
 }): ConstructorParameters<typeof GitHubRestMcpServer>[0]["resolveAuthority"] {
-  return async ({ toolName, destinationUrl, repository, forceRefresh }) => {
+  return async ({
+    toolName,
+    destinationUrl,
+    repository,
+    forceRefresh,
+  }): Promise<GitHubRestResolvedAuthority> => {
     const current = await validatePersonalRepository(
       input,
       repository,

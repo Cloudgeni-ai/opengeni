@@ -17,6 +17,7 @@ export type {
   AutomationTemplateTrigger,
   BotTemplateFile,
   BotTemplateResponse,
+  BotTemplateVisibility,
   SessionAvatar,
   SessionAvatarIcon,
   CreateBotTemplateRequest,

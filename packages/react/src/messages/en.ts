@@ -1114,6 +1114,8 @@ export const englishMessages = {
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",
+  "composerMessages.heldSendGaveUp":
+    "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
   "composerMessages.addMessageToQueue": "Add message to queue",
   "composerMessages.addToQueueEnterSteer": "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
   "composerMessages.alsoPausedBy": "Also paused by",
@@ -1456,7 +1458,7 @@ export const englishMessages = {
   "connectSetup.chooseTools": "Choose tools",
   "connectSetup.chooseWhichToolsToAdd": "Choose which tools to add",
   "connectSetup.completeProviderAuthorizationThenCheck":
-    "Complete provider authorization, then check the connection status.",
+    "Finish signing in there, then press Check status.",
   "connectSetup.connect": "Connect",
   "connectSetup.connectionDetails": "Connection details",
   "connectSetup.connectionReady": "Connection ready",
@@ -1464,7 +1466,7 @@ export const englishMessages = {
   "connectSetup.connectionSetupCouldNotContinue":
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
-  "connectSetup.copyAdminApprovalLink": "Copy admin approval link",
+  "connectSetup.copyAdminApprovalLink": "Copy approval link",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
@@ -1472,9 +1474,9 @@ export const englishMessages = {
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
   "connectSetup.microsoftAdminApprovalMaybe":
-    "Microsoft didn't grant access. If it said your organization needs an admin to approve {product}, a Microsoft 365 admin can approve it for everyone.",
+    "Microsoft didn't grant access. If it asked for admin approval, send this link to your Microsoft 365 admin.",
   "connectSetup.microsoftAdminApprovalRequired":
-    "Your organization needs a Microsoft 365 admin to approve {product} before you can connect.",
+    "Send this link to your Microsoft 365 admin to approve access, then sign in again.",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
@@ -1487,6 +1489,7 @@ export const englishMessages = {
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
+  "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
   "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
@@ -1868,6 +1871,7 @@ export const englishMessages = {
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
   "humanInputForm.questionOfTotal": "Question {current} of {total}",
+  "humanInputForm.recommended": "Recommended",
   "humanInputForm.retryPreview": "Retry preview",
   "humanInputForm.savingActivatesTheseExactFiles":
     "Saving activates these exact files. No additional review is required.",
@@ -1979,6 +1983,41 @@ export const englishMessages = {
   "interactionInterventionBanner.open": "Open",
   "interactionInterventionBanner.signInNeeded": "Sign in needed",
   "interactionInterventionBanner.verificationNeeded": "Verification needed",
+  "interactiveAnswer.best": "Best",
+  "interactiveAnswer.bestInColumn": "Best in its column",
+  "interactiveAnswer.cards": "Cards",
+  "interactiveAnswer.chartLabel": "{label} for each option",
+  "interactiveAnswer.clear": "Clear",
+  "interactiveAnswer.continueWithThese": "Continue with these",
+  "interactiveAnswer.continueWithThis": "Continue with this",
+  "interactiveAnswer.hideSource": "Hide source",
+  "interactiveAnswer.invalid": "These options couldn't be shown.",
+  "interactiveAnswer.no": "No",
+  "interactiveAnswer.noMatches": "No options match these filters.",
+  "interactiveAnswer.omitted_one": "{count} more option wasn't shown.",
+  "interactiveAnswer.omitted_other": "{count} more options weren't shown.",
+  "interactiveAnswer.option": "Option",
+  "interactiveAnswer.options": "Options",
+  "interactiveAnswer.pickAny": "Pick the ones you want",
+  "interactiveAnswer.pickOne": "Pick one",
+  "interactiveAnswer.pickUpTo_one": "Pick up to {count}",
+  "interactiveAnswer.pickUpTo_other": "Pick up to {count}",
+  "interactiveAnswer.select": "Select {title}",
+  "interactiveAnswer.selected": "Selected",
+  "interactiveAnswer.selectedCount_one": "{count} selected",
+  "interactiveAnswer.selectedCount_other": "{count} selected",
+  "interactiveAnswer.selectedMax_one": "{count} selected, the most you can pick",
+  "interactiveAnswer.selectedMax_other": "{count} selected, the most you can pick",
+  "interactiveAnswer.sendFailed": "Couldn't send. Try again.",
+  "interactiveAnswer.sent": "Sent",
+  "interactiveAnswer.showAll": "Show all",
+  "interactiveAnswer.showSource": "Show source",
+  "interactiveAnswer.showing": "Showing {shown} of {total}",
+  "interactiveAnswer.stopped": "The answer stopped before all options arrived.",
+  "interactiveAnswer.table": "Table",
+  "interactiveAnswer.viewAs": "View as",
+  "interactiveAnswer.writing": "Writing options…",
+  "interactiveAnswer.yes": "Yes",
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.days": "{count}d",
@@ -2064,6 +2103,9 @@ export const englishMessages = {
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
   "list.loading": "Loading {label}",
+  "loadFailure.didNotLoad": "This didn't load. Check your connection, then reload.",
+  "loadFailure.partDidNotLoad": "This part didn't load.",
+  "loadFailure.reload": "Reload",
   "machineCard.active": "Active",
   "machineCard.aSecondCopyOfThe":
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",
@@ -3013,6 +3055,7 @@ export const englishMessages = {
   "messageTimeline.goalResumed": "Goal resumed",
   "messageTimeline.goalSet": "Goal set",
   "messageTimeline.goalUpdated": "Goal updated",
+  "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
@@ -3037,6 +3080,8 @@ export const englishMessages = {
   "messageTimeline.pausedBecause": "Paused because",
   "messageTimeline.providerProviderdomain": "Provider: {providerDomain}",
   "messageTimeline.providerToolsUnavailable": "{provider} tools unavailable",
+  "messageTimeline.pluginSetupUnavailableHere":
+    "Installing {provider} needs permission to manage this workspace's plugins. Ask a workspace admin to install it.",
   "messageTimeline.providerTryAgain": "{provider}. Try again.",
   "messageTimeline.question": "Question",
   "messageTimeline.ready": "Ready",
@@ -3303,6 +3348,8 @@ export const englishMessages = {
   "native.meetings.meetingView.delete": "Delete",
   "native.meetings.meetingView.makePrivate": "Make private",
   "native.meetings.meetingView.nameSpeaker": "Name speaker",
+  /** Turns down, for now, remembering the voice of a speaker someone just named. */
+  "native.meetings.meetingView.notNow": "Not now",
   "native.meetings.meetingView.recordingNowTheTranscriptStarts":
     "Recording. The transcript comes after you stop.",
   "native.meetings.meetingView.renameName": "Rename {name}",
@@ -4115,6 +4162,15 @@ export const englishMessages = {
   "secretRefChip.secretFile": "Secret file:",
   "secretReferenceLabel.secret": "Secret",
   "sessionAdmission.aMember": "another member",
+  "sessionAdmission.approvedElsewhereBody":
+    "You sent it for “{approved}”, but this chat now runs on “{machine}”. A saved message only runs on the machine it was sent for.",
+  "sessionAdmission.approvedElsewhereNext":
+    "Run it on “{approved}”, or remove it from the queue and send it again to use “{machine}”.",
+  "sessionAdmission.approvedElsewhereOfflineNext":
+    "“{approved}” is offline right now. Run it there once it’s back, or remove it from the queue and send it again to use “{machine}”.",
+  "sessionAdmission.approvedElsewhereTitle": "Your message is waiting for “{approved}”",
+  "sessionAdmission.approvedElsewhereUnavailableNext":
+    "“{approved}” isn’t available to this chat right now. Remove the message from the queue and send it again to use “{machine}”.",
   "sessionAdmission.cantRecheckNote":
     "Someone with permission to control this session can recheck after the issue is resolved.",
   "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
@@ -4133,10 +4189,10 @@ export const englishMessages = {
     "Ask a workspace admin to investigate. Once the problem is fixed, try again. It will not retry automatically.",
   "sessionAdmission.genericTitle": "Couldn't start",
   "sessionAdmission.grantBody":
-    "A personal resource needed by this chat hasn't been authorized. Your queued work is saved.",
+    "The next message needs a machine or other personal resource that isn’t approved for this chat. Your queued work is saved.",
   "sessionAdmission.grantNext":
-    "Ask its owner to grant access, or choose a resource you can use. Then recheck to continue. It will not retry automatically.",
-  "sessionAdmission.grantTitle": "Resource permission needed",
+    "Choose one this chat may use, or ask the person it belongs to to allow it here. Then recheck to continue. It will not retry automatically.",
+  "sessionAdmission.grantTitle": "Not approved for this chat",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
   "sessionAdmission.machineChangedBody": "The saved message has not started yet.",
@@ -4163,6 +4219,11 @@ export const englishMessages = {
   "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
   "sessionAdmission.noMachineChoices":
     "No workspace or cloud machine is available for this chat right now.",
+  "sessionAdmission.notApprovedHereBody":
+    "It was sent before this chat moved to “{machine}”, so it isn’t approved for this machine.",
+  "sessionAdmission.notApprovedHereNext":
+    "Remove it from the queue and send it again to use “{machine}”, or move the chat to a workspace or cloud machine.",
+  "sessionAdmission.notApprovedHereTitle": "Your message can’t run on “{machine}”",
   "sessionAdmission.otherMachineDraftNext":
     "Your draft stays here. Choose a machine you can use, or ask {owner} about sharing this machine with the workspace.",
   "sessionAdmission.otherMachineExplanation":
@@ -4171,6 +4232,11 @@ export const englishMessages = {
     "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
+  "sessionAdmission.othersApprovedElsewhereBody":
+    "{owner} sent it for another machine, so it can’t run on “{machine}”.",
+  "sessionAdmission.othersApprovedElsewhereNext":
+    "{owner} can move the chat back to that machine, or send the message again here.",
+  "sessionAdmission.othersApprovedElsewhereTitle": "A message is waiting for another machine",
   "sessionAdmission.othersMessagesWaitingNext_one":
     "{owner}’s next message brings it to the agent.",
   "sessionAdmission.othersMessagesWaitingNext_other":
@@ -4212,6 +4278,7 @@ export const englishMessages = {
   "sessionAdmission.requestCopied": "Request copied",
   "sessionAdmission.requestCopiedNote":
     "Paste it into a message to the owner. Nothing has been sent.",
+  "sessionAdmission.runOnApprovedMachine": "Run it on {approved}",
   "sessionAdmission.savedMessageMachineNote":
     "Use a workspace or cloud machine for the saved message. A new personal-machine permission only applies to new messages.",
   "sessionAdmission.theMachineOwner": "the machine owner",
@@ -4468,6 +4535,7 @@ export const englishMessages = {
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
   "sessionIntegrationCapabilityCard.chatAccessFailed":
     "Connected, but it couldn't be added to this chat's tools. Choose it in this chat's tools.",
+  "sessionIntegrationCapabilityCard.closeSignInWindow": "You can close the sign-in window.",
   "sessionIntegrationCapabilityCard.connected": "Your account is connected",
   "sessionIntegrationCapabilityCard.connectName": "Connect {name}",
   "sessionIntegrationCapabilityCard.couldNotLoad": "Couldn't check this connection.",
@@ -4486,9 +4554,11 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.personalUnavailable":
     "{name} can only be connected to your own account, and this app can't do that here. Ask its administrator for help.",
   "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
+  "sessionIntegrationCapabilityCard.reopenSignIn": "Reopen window",
   "sessionIntegrationCapabilityCard.retry": "Retry",
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
-  "sessionIntegrationCapabilityCard.stopWaiting": "Stop waiting",
+  "sessionIntegrationCapabilityCard.signInFailed": "Sign-in couldn't continue. Try again.",
+  "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",

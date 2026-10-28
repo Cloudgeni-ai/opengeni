@@ -127,6 +127,7 @@ export * from "./model-call";
 
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
+export * from "./domain/mcp-credential-content-flow";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";

@@ -98,6 +98,71 @@ const ENVIRONMENTS = q("envs", "multi_select", "Where should I deploy version 2.
   ],
 });
 
+// Agent-marked hints: a recommended option, a yes/no confirm in the agent's
+// own words, and per-option previews.
+const DATABASE_RECOMMENDED = q(
+  "database-r",
+  "single_select",
+  "Which database should the new billing service use?",
+  {
+    helpText: "I can migrate later, but the first schema lands today.",
+    options: [
+      {
+        id: "postgres",
+        label: "PostgreSQL",
+        recommended: true,
+        description:
+          "Matches the other services; the team already runs backups and failover for it.",
+      },
+      {
+        id: "sqlite",
+        label: "SQLite",
+        description: "Simplest to start with, but one writer at a time.",
+      },
+      {
+        id: "dynamo",
+        label: "DynamoDB",
+        description: "Scales without tuning; queries across customers get harder.",
+      },
+    ],
+  },
+);
+
+const REMINDER_CONFIRM = q(
+  "send-c",
+  "single_select",
+  "Send the payment reminder to all 14 overdue customers now?",
+  {
+    confirm: true,
+    options: [
+      { id: "send", label: "Send 14 reminders", description: "They go out from billing@." },
+      { id: "wait", label: "Not yet" },
+    ],
+  },
+);
+
+const SUBJECT_PREVIEWS = q("subject", "single_select", "Which subject line should I use?", {
+  label: "Subject line",
+  options: [
+    {
+      id: "plain",
+      label: "Plain",
+      recommended: true,
+      preview: "Your invoice for October is ready",
+    },
+    {
+      id: "friendly",
+      label: "Friendly",
+      preview: "Hi Sam, here's October's invoice (and a thank-you)",
+    },
+    {
+      id: "urgent",
+      label: "With the due date",
+      preview: "Invoice #4821 is due on 3 November",
+    },
+  ],
+});
+
 const HEADLINE = q("headline", "text", "What should the release notes headline say?", {
   helpText: "One line. I'll write the rest from the merged changes.",
 });
@@ -284,6 +349,19 @@ export default function ChatQuestionsSection() {
             </StateCell>
             <StateCell label="Several choices" align="stretch">
               <Form request={request("envs", [ENVIRONMENTS])} />
+            </StateCell>
+          </StatesGrid>
+        ) : null}
+        {showPart("hints") ? (
+          <StatesGrid title="Agent hints" columns={2}>
+            <StateCell label="A recommended option" align="stretch">
+              <Form request={request("database-r", [DATABASE_RECOMMENDED])} />
+            </StateCell>
+            <StateCell label="Yes or no in the agent's words (confirm)" align="stretch">
+              <Form request={request("reminder-c", [REMINDER_CONFIRM], { allowSkip: true })} />
+            </StateCell>
+            <StateCell label="Options with previews" align="stretch" span="full">
+              <Form request={request("subject", [SUBJECT_PREVIEWS])} />
             </StateCell>
           </StatesGrid>
         ) : null}

@@ -10,6 +10,7 @@ import {
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
   WorkspaceControlBusyError,
+  WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
 import {
   ConnectionAccountSelectionError,
@@ -57,22 +58,6 @@ export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError
         details: result.data,
       })
     : null;
-}
-
-/**
- * EU-only inference refused a model-backed feature with no EU route: 422 with
- * `details.code: "region_restricted"`, the same code every availability field
- * reports for it.
- */
-export function regionRestrictedHttpError(error: unknown): ApiHttpError | null {
-  if (!(error instanceof InferenceRegionRestrictedError)) return null;
-  return new ApiHttpError(422, {
-    code: "validation_failed",
-    message: error.message,
-    retryable: false,
-    outcomeUnknown: false,
-    details: { code: error.code },
-  });
 }
 
 /** Preserve typed admission details through the common public error envelope. */
@@ -275,6 +260,38 @@ export function agentConfigHttpError(error: unknown): ApiHttpError | null {
       code: cause.code,
       ...(cause.capability ? { capability: cause.capability } : {}),
     },
+  });
+}
+
+/**
+ * EU-only refusals, rendered as 422 `region_restricted`; retrying can't
+ * change them. Content from an EU-only workspace would reach a workspace that
+ * isn't EU-only, or EU-only inference refused a model-backed feature with no
+ * EU route. The inference refusal also carries `details.code:
+ * "region_restricted"`, the code every availability field reports for it.
+ */
+export function regionRestrictedHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof InferenceRegionRestrictedError) {
+    return new ApiHttpError(422, {
+      code: "region_restricted",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  const cause =
+    error instanceof WorkspaceContentFlowRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof WorkspaceContentFlowRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "region_restricted",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
   });
 }
 

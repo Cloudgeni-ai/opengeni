@@ -55,6 +55,11 @@ session identities are not registry UUIDs and cannot be removed through this
 tool. Organization Skills are outside its scope. Off refuses new changes;
 Automatic applies deletion; Review first retains a removal proposal in
 Knowledge > Needs review without interrupting the task.
+An agent removes only Skills in its chat's own learning scope. The exception
+is work the verified owner started in their own Personal workspace: it may also
+remove that workspace's Skills, including a directly installed one, because
+the workspace has no other member (migration 1070). An agent removal never
+names a scope.
 
 A removal proposal is a marked, immutable revision, never executable guidance.
 The review surfaces explicitly label irreversible deletion. Human approval must

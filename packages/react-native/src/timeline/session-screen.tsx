@@ -2,6 +2,7 @@ import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./m
 import {
   conversationTimeline,
   personalMachineCopy,
+  sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
   useSessionStart,
   type AgentMessageItem,
@@ -62,6 +63,10 @@ import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-ch
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
+import {
+  InteractiveAnswerProvider,
+  type InteractiveAnswerStore,
+} from "@opengeni/react/interactive-answer-model";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -125,6 +130,12 @@ export interface NativeSessionScreenProps extends Omit<
    * A floating composer must report its height through `onHeightChange`.
    */
   renderComposer?: ((props: SessionComposerProps) => ReactNode) | undefined;
+  /**
+   * Where interactive answers (`opengeni-ui`) remember picks, filters and
+   * whether a pick was sent, for example AsyncStorage. Without it they are
+   * remembered until the app closes.
+   */
+  answerStore?: InteractiveAnswerStore | undefined;
 }
 
 export function NativeSessionScreen({
@@ -143,33 +154,44 @@ export function NativeSessionScreen({
   timelineMessages,
   renderComposer,
   renderMessageActions: hostMessageActions,
+  answerStore,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  const status = controller.sessionStatus;
   // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
   // not a queue, and no Steer to learn.
   return (
     <SingleSendWording enabled={controller.composer.singleSend === true}>
-      <NativeTimelineMessagesProvider messages={timelineMessages}>
-        <SessionScreenBoundary sessionId={controller.sessionId}>
-          <SessionScreenBody
-            controller={controller}
-            composer={composerSlots}
-            trailing={trailing}
-            topBar={topBar}
-            bottomInset={bottomInset}
-            keyboardBottomOffset={keyboardBottomOffset}
-            feedback={feedback}
-            humanInputMessages={humanInputMessages}
-            approvalMessages={approvalMessages}
-            client={client}
-            inChatConnect={inChatConnect}
-            models={models}
-            renderComposer={renderComposer}
-            renderMessageActions={hostMessageActions}
-            {...timelineProps}
-          />
-        </SessionScreenBoundary>
-      </NativeTimelineMessagesProvider>
+      <InteractiveAnswerProvider
+        // A pick goes out as the person's next message, through the ordinary Send.
+        send={controller.composer.send}
+        scope={controller.sessionId}
+        store={answerStore}
+        // Like the web: only a cancelled session can't take another message.
+        readOnly={status === "cancelled"}
+      >
+        <NativeTimelineMessagesProvider messages={timelineMessages}>
+          <SessionScreenBoundary sessionId={controller.sessionId}>
+            <SessionScreenBody
+              controller={controller}
+              composer={composerSlots}
+              trailing={trailing}
+              topBar={topBar}
+              bottomInset={bottomInset}
+              keyboardBottomOffset={keyboardBottomOffset}
+              feedback={feedback}
+              humanInputMessages={humanInputMessages}
+              approvalMessages={approvalMessages}
+              client={client}
+              inChatConnect={inChatConnect}
+              models={models}
+              renderComposer={renderComposer}
+              renderMessageActions={hostMessageActions}
+              {...timelineProps}
+            />
+          </SessionScreenBoundary>
+        </NativeTimelineMessagesProvider>
+      </InteractiveAnswerProvider>
     </SingleSendWording>
   );
 }
@@ -232,7 +254,7 @@ function SessionScreenBody({
   renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
-}: Omit<NativeSessionScreenProps, "timelineMessages">) {
+}: Omit<NativeSessionScreenProps, "timelineMessages" | "answerStore">) {
   const theme = useNativeTimelineTheme();
   const t = useOpenGeniText();
   const m = useNativeTimelineMessages();
@@ -645,9 +667,18 @@ function StuckCard({
     start.needsDifferentMachine && start.machineAccess
       ? personalMachineCopy(t, start.machineAccess, { queued: true })
       : null;
+  // The person's own saved message was approved for another of their
+  // machines: name it and offer to run it there; a recheck can't help here.
+  const approvedTarget = start.approvedMachines[0] ?? null;
+  const approved =
+    !machine && start.approvedElsewhere && start.machineAccess
+      ? sessionAdmissionApprovedElsewhereCopy(t, start.machineAccess, approvedTarget)
+      : null;
+  const runOnApprovedMachine = start.runOnApprovedMachine;
   // The web notice's words for the known refusal; the native stuck copy when
   // the block is only known from its status event.
   const copy = reason ? sessionAdmissionCopy(t, reason) : null;
+  const tone = approved ? c["status-waiting"] : c["status-failed"];
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -657,19 +688,56 @@ function StuckCard({
         padding: 14,
         borderRadius: 14,
         borderWidth: 1,
-        borderColor: withAlpha(c["status-failed"], 0.3),
-        backgroundColor: withAlpha(c["status-failed"], 0.08),
+        borderColor: withAlpha(tone, 0.3),
+        backgroundColor: withAlpha(tone, 0.08),
       }}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Icon name="circle-alert" size={16} color={c["status-failed"]} />
+        <Icon name={approved ? "clock-3" : "circle-alert"} size={16} color={tone} />
         <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
           {machine
             ? t("sessionAdmission.needsDifferentMachineTitle")
-            : (copy?.title ?? m.stuckTitle)}
+            : (approved?.title ?? copy?.title ?? m.stuckTitle)}
         </Text>
       </View>
-      {machine ? (
+      {approved ? (
+        <>
+          <Text style={textStyle}>{approved.body}</Text>
+          <Text style={textStyle}>{approved.next}</Text>
+          {session.effectiveControl.state === "paused" ? (
+            <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>
+          ) : approved.action && approvedTarget && runOnApprovedMachine ? (
+            <Button
+              label={rechecking ? t("sessionAdmission.moving") : approved.action}
+              variant="primary"
+              busy={busy || rechecking}
+              disabled={busy || rechecking}
+              style={{ alignSelf: "flex-start" }}
+              onPress={() => {
+                if (recheckPending.current) return;
+                recheckPending.current = true;
+                setRechecking(true);
+                setFailed(false);
+                setMoveError(null);
+                runOnApprovedMachine(approvedTarget.sandboxId)
+                  .then(setMoveError, () => setFailed(true))
+                  .finally(() => {
+                    recheckPending.current = false;
+                    setRechecking(false);
+                  });
+              }}
+            />
+          ) : null}
+          {moveError ? (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"] }}
+            >
+              {start.machineChoiceError || moveError}
+            </Text>
+          ) : null}
+        </>
+      ) : machine ? (
         <>
           <Text style={textStyle}>{machine.explanation}</Text>
           <Text style={textStyle}>{machine.next}</Text>
@@ -739,7 +807,7 @@ function StuckCard({
           {m.stuckRetryFailed}
         </Text>
       ) : null}
-      {machine ? null : (
+      {machine || approved ? null : (
         <Button
           label={m.stuckRetry}
           variant="primary"

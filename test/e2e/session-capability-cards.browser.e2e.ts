@@ -121,11 +121,11 @@ describe("session capability preview parity in Chromium", () => {
             const action = (await card
               .getByRole("button", { name: scenario.open, exact: true })
               .boundingBox())!;
-            // The shared shell wraps only when content requires it, rather than
-            // imposing the old console-only viewport breakpoint.
+            // A wide card keeps the note and its action on one row; a narrow
+            // one stacks the full-width action above the note.
             const sameRow = Math.abs(note.y + note.height / 2 - action.y - action.height / 2) <= 1;
             if (sameRow) expect(action.x).toBeGreaterThanOrEqual(note.x + note.width);
-            else expect(action.y).toBeGreaterThanOrEqual(note.y + note.height + 6);
+            else expect(note.y).toBeGreaterThanOrEqual(action.y + action.height + 6);
             if (scenario.id === "skill") {
               expect(
                 await card

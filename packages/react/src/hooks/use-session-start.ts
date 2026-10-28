@@ -4,10 +4,14 @@ import { useOpenGeniText } from "../messages/runtime";
 import {
   currentSessionMachineAccess,
   recheckSessionAdmission,
+  runSavedMessageOnMachine,
+  savedMessageApprovedMachines,
   savedMessageMachineChoices,
+  sessionAdmissionApprovedElsewhere,
   sessionAdmissionNeedsDifferentMachine,
   sessionAdmissionReason,
   sessionWaitingWorkExplainsBlock,
+  type ApprovedMachineChoice,
   type SessionAdmissionReason,
 } from "../session-admission-model";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
@@ -41,6 +45,23 @@ export type UseSessionStartResult = {
   machineAccess: SessionMachineAccess | null;
   /** The saved message was refused because only the machine's owner may start work there. */
   needsDifferentMachine: boolean;
+  /**
+   * The person's own saved message was approved for another machine, not the
+   * one the chat runs on now; a recheck can't start it here.
+   */
+  approvedElsewhere: boolean;
+  /** The machines it was approved for, the ones the chat can move to now first. */
+  approvedMachines: ApprovedMachineChoice[];
+  /**
+   * Move the chat to a machine the saved message was approved for, then
+   * recheck once. Resolves to an error to show, or null; throws when the
+   * recheck could not be confirmed. Absent when moving isn't possible here.
+   */
+  runOnApprovedMachine: ((sandboxId: string) => Promise<string | null>) | undefined;
+  /** The person's machines, as last read. */
+  machines: readonly MachineView[];
+  /** Move the chat without sending anything. Absent when moving isn't possible here. */
+  moveToMachine: ((sandboxId: string) => Promise<boolean>) | undefined;
   /** The chat runs on somebody else's personal machine, so a new message could not start. */
   warnBeforeSending: boolean;
   /** Machines the person may move the chat to (never another personal machine). */
@@ -157,10 +178,29 @@ export function useSessionStart({
     () => savedMessageMachineChoices(fleet.machines),
     [fleet.machines],
   );
+  const approvedMachines = useMemo(
+    () => savedMessageApprovedMachines(machineAccess, fleet.machines),
+    [machineAccess, fleet.machines],
+  );
+  const runOnApprovedMachine = useCallback(
+    (sandboxId: string) =>
+      runSavedMessageOnMachine({
+        sandboxId,
+        attach,
+        recheck,
+        failedMove: t("sessionAdmission.machineChangeFailed"),
+      }),
+    [attach, recheck, t],
+  );
   return {
     reason,
     machineAccess,
     needsDifferentMachine: sessionAdmissionNeedsDifferentMachine(reason, machineAccess),
+    approvedElsewhere: sessionAdmissionApprovedElsewhere(reason, machineAccess),
+    approvedMachines,
+    runOnApprovedMachine: fleet.canAttach ? runOnApprovedMachine : undefined,
+    machines: fleet.machines,
+    moveToMachine: fleet.canAttach ? attach : undefined,
     // Others' waiting updates keep the composer's machine notice beside them:
     // it is where they choose a machine or ask the owner.
     warnBeforeSending:

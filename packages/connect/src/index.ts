@@ -6,6 +6,7 @@ export {
   authorizeConnectAttempt,
   ConnectPopupClosedError,
   type ConnectNavigation,
+  type ConnectPopup,
 } from "./authorization";
 export {
   createBrowserConnectNavigation,

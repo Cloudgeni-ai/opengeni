@@ -131,6 +131,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path.startsWith("/v1/catalog-assets/")) {
     return true;
   }
+  // A bot's avatar picture, fetched by Slack without credentials. The signed
+  // path is its only authority (integrations/session-avatar-image.ts).
+  if (c.req.method === "GET" && path.startsWith("/v1/public/session-avatars/")) {
+    return true;
+  }
   // The GitHub owner-consent entry remains public like the callbacks above; it
   // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {

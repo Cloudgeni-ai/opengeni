@@ -4,6 +4,7 @@ import type { Settings } from "@opengeni/config";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
@@ -39,6 +40,8 @@ import {
   setConnectionStatus,
   updateConnection,
   updateSlackBotDocumentDestination,
+  updateSessionProfileWithEvent,
+  updateSessionTitleWithEvent,
   availableSlackBotConnectionMetadata,
   type DbClient,
 } from "@opengeni/db";
@@ -59,6 +62,7 @@ import {
   verifyOpenGeniSlackBotCredential,
   verifyScheduledTaskSlackChannel,
 } from "../src/integrations/slack-bot";
+import { verifySessionAvatarImageToken } from "../src/integrations/session-avatar-image";
 import { drainMemorySlackPublicationsOnce } from "../src/memory-slack-delivery";
 
 describe("organization bot posting from ordinary chats", () => {
@@ -567,6 +571,8 @@ type SlackCall = {
   threadTimestamp: string | null;
   unfurlLinks: string | null;
   unfurlMedia: string | null;
+  username: string | null;
+  iconUrl: string | null;
   hasText: boolean;
   query: string;
   searchQuery: string | null;
@@ -701,6 +707,8 @@ function fakeSlack(
       threadTimestamp: params.get("thread_ts"),
       unfurlLinks: params.get("unfurl_links"),
       unfurlMedia: params.get("unfurl_media"),
+      username: params.get("username"),
+      iconUrl: params.get("icon_url"),
       hasText: params.has("text"),
       query: url.search,
       searchQuery: params.get("query"),
@@ -1391,7 +1399,6 @@ describe("Opengeni Slack bot credential verification", () => {
     ).rejects.toThrow("do not satisfy");
     for (const unsafe of [
       "reactions:write",
-      "chat:write.customize",
       "users:read.email",
       "admin",
       "admin.users:read",
@@ -3737,6 +3744,94 @@ describe("Opengeni Slack bot connection", () => {
         sessionId: null,
       }),
     ).toMatchObject({ connection: { id: connected.body.connection.id } });
+  });
+
+  test("a bot chat posts under its own name and avatar only with chat:write.customize", async () => {
+    if (!available) return;
+    const post = async (scopes: string[], teamId: string) => {
+      const workspace = await freshWorkspace();
+      const slack = fakeSlack({ scopes, teamId });
+      const { bot } = await connectedTestBot(workspace, slack.fetch);
+      const session = await createSession(client.db, {
+        ...workspace,
+        initialMessage: "Own the releases",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: "subject-a" },
+        subjectId: "subject-a",
+      });
+      await updateSessionTitleWithEvent(client.db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: session.id,
+        title: "Release \n owner",
+        source: "user",
+      });
+      const plain = await bot.sessionIdentity(workspace.workspaceId, session.id);
+      await updateSessionProfileWithEvent(client.db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: session.id,
+        avatar: { kind: "icon", icon: "rocket", hue: 30 },
+        source: "user",
+      });
+      const identity = await bot.sessionIdentity(workspace.workspaceId, session.id);
+      const operationId = crypto.randomUUID();
+      await bot.postMessage({
+        operationId,
+        channelId: "C_MEMBER",
+        text: "release notes",
+        ...(identity ? { identity } : {}),
+      });
+      // An identity handed in without the grant is ignored too.
+      const forcedId = crypto.randomUUID();
+      await bot.postMessage({
+        operationId: forcedId,
+        channelId: "C_MEMBER",
+        text: "more notes",
+        identity: { username: "Someone else", iconUrl: "https://example.test/x.png" },
+      });
+      return {
+        workspace,
+        plain,
+        identity,
+        call: slack.calls.find((call) => call.clientMessageId === operationId)!,
+        forced: slack.calls.find((call) => call.clientMessageId === forcedId)!,
+      };
+    };
+
+    const withGrant = await post(
+      [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+      `T_IDENTITY_${crypto.randomUUID().slice(0, 8)}`,
+    );
+    // A chat without an avatar is not a bot here: it posts as the app.
+    expect(withGrant.plain).toBeUndefined();
+    expect(withGrant.identity?.username).toBe("Release owner");
+    expect(withGrant.identity?.iconUrl).toStartWith(
+      "https://app.example.test/v1/public/session-avatars/",
+    );
+    expect(withGrant.call).toMatchObject({
+      username: "Release owner",
+      iconUrl: withGrant.identity!.iconUrl,
+    });
+    const token = withGrant
+      .identity!.iconUrl!.split("/")
+      .at(-1)!
+      .replace(/\.png$/u, "");
+    expect(verifySessionAvatarImageToken(settings.slackSigningSecret!, token)).toEqual({
+      workspaceId: withGrant.workspace.workspaceId,
+      avatar: { kind: "icon", icon: "rocket", hue: 30 },
+    });
+
+    const withoutGrant = await post(
+      [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+      `T_PLAIN_${crypto.randomUUID().slice(0, 8)}`,
+    );
+    expect(withoutGrant.identity).toBeUndefined();
+    expect(withoutGrant.call).toMatchObject({ username: null, iconUrl: null });
+    expect(withoutGrant.forced).toMatchObject({ username: null, iconUrl: null });
   });
 
   test("reconciles an accepted post after response loss without a second mutation", async () => {

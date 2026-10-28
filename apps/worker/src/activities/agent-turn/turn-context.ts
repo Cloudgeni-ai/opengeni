@@ -15,6 +15,7 @@ import type {
 import type {
   EstablishedSandboxSession,
   InputWaitRequest,
+  InteractionRequestTargetReader,
   OpenGeniRuntime,
   RunCredentialCommandSession,
   SelfhostedSession,
@@ -177,6 +178,8 @@ export type EventingState = {
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
   inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
+  /** Reads the target an interaction_request_human pause names, as it is now. */
+  interactionRequestTargetReader: InteractionRequestTargetReader | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
@@ -372,6 +375,7 @@ export function createTurnContext(input: {
       turnStartedPublished: false,
       stream: undefined,
       inputWaitReplyGuard: null,
+      interactionRequestTargetReader: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,

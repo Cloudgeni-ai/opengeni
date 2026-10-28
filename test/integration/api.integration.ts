@@ -6246,7 +6246,7 @@ describe("API component integration", () => {
   // exercised against real Postgres in apps/api/test/knowledge-*.test.ts. These
   // HTTP checks pin the cutover and public entry lifecycle, replacing the old
   // document-index and Memory authoring API fixtures.
-  test("retired Memory and document search routes direct callers to Knowledge", async () => {
+  test("retired Memory routes direct callers to Knowledge", async () => {
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
@@ -6258,7 +6258,6 @@ describe("API component integration", () => {
     for (const [method, path] of [
       ["GET", "/knowledge/memories"],
       ["POST", "/knowledge/memories"],
-      ["POST", "/knowledge/search"],
     ] as const) {
       const response = await app.request(workspacePath(workspaceId, path), {
         method,
@@ -6388,7 +6387,6 @@ describe("API component integration", () => {
       status: string;
       model: string;
       temporalWorkflowId: string;
-      environmentId: string | null;
     }>(mcp, "session_get", { sessionId: createdReceipt.resource.id, detail: "full" });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
@@ -6403,12 +6401,11 @@ describe("API component integration", () => {
     });
     expect(listed.sessions.some((session) => session.id === created.id)).toBe(true);
 
-    const fetched = await callMcpTool<{
-      id: string;
-      environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: created.id, detail: "full" });
+    const fetched = await callMcpTool<{ id: string }>(mcp, "session_get", {
+      sessionId: created.id,
+      detail: "full",
+    });
     expect(fetched.id).toBe(created.id);
-    expect(fetched.environmentId).toBeNull();
     const compact = await callMcpTool<{ id: string; goal: { status: string; summary: string } }>(
       mcp,
       "session_get",
