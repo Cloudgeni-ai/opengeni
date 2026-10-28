@@ -722,7 +722,7 @@ export function useCodexSubscriptions({
   client,
   workspaceId,
   canManage,
-  enabled = true,
+  enabled: readsAccounts = true,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
@@ -736,7 +736,7 @@ export function useCodexSubscriptions({
     client,
     codexAccountsQueryKey(workspaceId),
     () => client.listCodexAccounts(workspaceId),
-    { enabled, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+    { enabled: readsAccounts, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
   const data = accountsQuery.error ? null : accountsQuery.data;
   const loading = accountsQuery.loading;
@@ -780,7 +780,7 @@ export function useCodexSubscriptions({
       return result;
     },
     {
-      enabled: enabled && Boolean(data?.accounts.length),
+      enabled: readsAccounts && Boolean(data?.accounts.length),
       staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS,
     },
   );
