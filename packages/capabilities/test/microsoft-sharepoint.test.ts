@@ -76,6 +76,7 @@ test("SharePoint is a work/school definition that keeps site scopes off OneDrive
     "offline_access",
     "User.Read",
     "Sites.ReadWrite.All",
+    "User.ReadBasic.All",
   ]);
   // Personal Microsoft accounts cannot consent to site scopes; OneDrive stays on files.
   expect(MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes).not.toContain(

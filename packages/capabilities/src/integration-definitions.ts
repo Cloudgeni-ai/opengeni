@@ -237,6 +237,76 @@ const microsoftOAuth = (scopes: readonly string[]): IntegrationDefinitionOAuth2A
   tokenPlacement: { carrier: "header", name: "Authorization", prefix: "Bearer " },
 });
 
+type ReviewedOperation = NonNullable<
+  Extract<IntegrationDefinitionSource, { kind: "openapi" }>["operationAllowlist"]
+>[number];
+
+/**
+ * Read-only colleague lookup in the work or school directory, shared by the
+ * work-account integrations so it is available whichever of them is connected.
+ * Microsoft requires User.Read.All for any manager lookup, so only a connection
+ * with that permission gets the manager tools.
+ */
+const directoryLookupOperations = (
+  directoryScope: "User.ReadBasic.All" | "User.Read.All",
+): readonly ReviewedOperation[] => {
+  const full = directoryScope === "User.Read.All";
+  const select = full
+    ? "id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation"
+    : "id,displayName,mail,userPrincipalName";
+  const fields = full
+    ? "Profiles include job title, department and office."
+    : "This connection reads basic profiles: name, email and sign-in name.";
+  const manager: readonly ReviewedOperation[] = full
+    ? [
+        {
+          path: "/users/{user-id}/manager",
+          method: "get",
+          requiredScopes: ["User.Read.All"],
+          description:
+            "Read a colleague's manager. user-id is the id from the directory search or the person's sign-in email. A 404 means no manager is set.",
+        },
+        {
+          path: "/me/manager",
+          method: "get",
+          requiredScopes: ["User.Read.All"],
+          description: "Read the signed-in person's manager. A 404 means no manager is set.",
+        },
+      ]
+    : [];
+  return [
+    {
+      path: "/users",
+      method: "get",
+      odataSkipToken: true,
+      requiredScopes: [directoryScope],
+      description: `Find colleagues in the organization's directory. Search by name or email with $search="displayName:anna" OR "mail:anna" and send the header ConsistencyLevel: eventual whenever $search is used. Use $select=${select} and $top to keep results small. ${fields}`,
+    },
+    {
+      path: "/users/{user-id}",
+      method: "get",
+      requiredScopes: [directoryScope],
+      description: `Read a colleague's directory profile. user-id is the id from the directory search or the person's sign-in email (userPrincipalName). ${fields}`,
+    },
+    {
+      path: "/users/{user-id}/directReports",
+      method: "get",
+      odataSkipToken: true,
+      requiredScopes: [directoryScope],
+      description:
+        "List the people who report directly to a colleague. user-id is the id from the directory search or the person's sign-in email.",
+    },
+    {
+      path: "/me/directReports",
+      method: "get",
+      odataSkipToken: true,
+      requiredScopes: [directoryScope],
+      description: "List the people who report directly to the signed-in person.",
+    },
+    ...manager,
+  ];
+};
+
 export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-outlook-mail",
   name: "Outlook Mail",
@@ -483,11 +553,12 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         method: "get",
         requiredScopes: SHAREPOINT_SCOPE,
       },
+      ...directoryLookupOperations("User.ReadBasic.All"),
     ],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: {
-    ...microsoftOAuth([...SHAREPOINT_SCOPE]),
+    ...microsoftOAuth([...SHAREPOINT_SCOPE, "User.ReadBasic.All"]),
     authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
     tokenUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
   },
@@ -498,15 +569,25 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
 export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-teams",
   name: "Microsoft Teams",
-  summary: "Read teams, channels and chats, and send messages as your connected Microsoft account.",
+  summary:
+    "Read and search teams, channels and chats, look up colleagues, and send messages as your connected Microsoft account.",
   protocol: "openapi",
   provider: { id: "microsoft", domain: "graph.microsoft.com" },
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
     schemaMode: "provider_validated_json",
-    // No tenant-wide export, membership/admin changes, app installation, or beta search.
+    // No tenant-wide export, membership/admin changes, app installation, or beta APIs.
     operationAllowlist: [
+      {
+        path: "/search/query",
+        method: "post",
+        readOnly: true,
+        searchEntityTypes: ["chatMessage"],
+        requiredScopes: ["Chat.Read", "ChannelMessage.Read.All"],
+        description:
+          'Search Teams chat and channel messages the signed-in person can access, using the same index as the Teams search box. Send {"requests":[{"entityTypes":["chatMessage"],"query":{"queryString":"..."},"from":0,"size":25}]}. KQL is supported in queryString, for example pricing from:"Anna Larsen". Page with from and size; for messages, total counts only the current page, so use moreResultsAvailable to decide whether to fetch more. Sorting is not supported. Hits include a summary and the message\'s chat or channel ids; read the full message or thread with the chat and channel message tools. Only chatMessage can be searched here.',
+      },
       {
         path: "/me/joinedTeams",
         method: "get",
@@ -571,6 +652,7 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
         method: "get",
         requiredScopes: ["Chat.Read"],
       },
+      ...directoryLookupOperations("User.Read.All"),
     ],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
@@ -582,6 +664,7 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
       "ChannelMessage.Send",
       "Chat.Read",
       "ChatMessage.Send",
+      "User.Read.All",
     ]),
     authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
     tokenUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",

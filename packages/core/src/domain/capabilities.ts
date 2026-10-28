@@ -2035,13 +2035,13 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
   },
   "microsoft-sharepoint": {
     description:
-      "Search SharePoint, find team sites, browse document libraries and read files, and read or update list items, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+      "Search SharePoint, find team sites, browse document libraries and read files, read or update list items, and look up colleagues in the organization directory, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
     category: "productivity",
     tags: ["sharepoint", "microsoft", "microsoft-365", "office-365"],
   },
   "microsoft-teams": {
     description:
-      "Read the person's teams, channels and chats, and send messages as them, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+      "Read and search the person's teams, channels and chats, send messages as them, and look up colleagues with their role, manager and reports, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
     category: "communication",
     tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
   },

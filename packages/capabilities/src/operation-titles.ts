@@ -58,6 +58,11 @@ const REVIEWED_GRAPH_TITLES: readonly (readonly [RegExp, string])[] = [
   [/\.contact\.permanentDelete$/, "Permanently delete a contact"],
   [/\.contacts\.delta$/, "Read changes to contacts"],
   [/(^|\.)ListPeople$/, "Find people"],
+  // Work or school directory.
+  [/^users\.user\.ListUser$/, "Find colleagues"],
+  [/^users\.user\.GetUser$/, "Read a colleague's profile"],
+  [/^(me|users)\.GetManager$/, "Read a manager"],
+  [/^(me|users)\.ListDirectReports$/, "Read direct reports"],
   // OneDrive and SharePoint files. An item is a file or a folder.
   [/^drives\.CreateItems$/, "Create a file or folder"],
   [/^drives\.UpdateItems$/, "Update a file or folder"],
