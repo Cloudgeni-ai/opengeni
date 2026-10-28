@@ -200,6 +200,7 @@ for (const scenario of [
             order.push("finalize");
             finalizations.push(callIds);
           },
+          compactionModeOptions: {},
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
       } catch (error) {
         caught = error;
