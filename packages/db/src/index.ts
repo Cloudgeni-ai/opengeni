@@ -405,6 +405,7 @@ import {
   historicalChildReadMatches,
 } from "./child-read-reconciliation";
 import { createRetryFailedSessionInTransaction } from "./session-retry";
+import { WorkspaceArtifactNotFoundError } from "./workspace-artifacts";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
 export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
@@ -22707,6 +22708,176 @@ export async function setSessionChannel(
   });
 }
 
+/** Bound on the conversations one Site row move re-files. */
+export const SITE_PROJECT_MOVE_LIMIT = 500;
+
+/**
+ * The conversations a Site row in one project stands for, as this person sees
+ * them: the Site's top-level conversations filed in that project (null is
+ * Default), archived or pinned ones included, so none stays behind. Up to
+ * SITE_PROJECT_MOVE_LIMIT + 1 ids, so a caller can refuse an oversized move.
+ */
+export async function listSiteProjectConversationIds(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; siteId: string; channelId: string | null },
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const rows = await scoped
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.siteId, input.siteId),
+          isNotNull(schema.sessions.siteAccessRootId),
+          isNull(schema.sessions.parentSessionId),
+          input.channelId === null
+            ? isNull(schema.sessions.channelId)
+            : eq(schema.sessions.channelId, input.channelId),
+        ),
+      )
+      .orderBy(schema.sessions.id)
+      .limit(SITE_PROJECT_MOVE_LIMIT + 1);
+    return rows.map((row) => row.id);
+  });
+}
+
+/**
+ * Moves a Site's sidebar row from one project to another (null is Default),
+ * like moving a chat. The row is the Site itself when that project is its
+ * home as this person sees it (the project someone moved it to, else the
+ * creating chat's): then the Site moves for everyone, and its new
+ * conversations are filed there. The row's conversations move with it; the
+ * caller passes the ids it authorized, and only those still filed in the
+ * source project move. Only a Site in this person's audience can move; a row
+ * left behind by a Site that is no longer theirs to see still moves its
+ * conversations, as a chat owner can always move their own chat. Nothing
+ * about the Site, its publication or audience changes.
+ */
+export async function moveSiteToProject(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    siteId: string;
+    fromChannelId: string | null;
+    channelId: string | null;
+    sessionIds: readonly string[];
+  },
+): Promise<{ siteMoved: boolean; movedSessionIds: string[] }> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scoped) => {
+      // One move of a Site at a time, so concurrent moves cannot leave the Site
+      // in one project and its conversations in another.
+      await scoped.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`site-project:${input.workspaceId}:${input.siteId}`}, 0))`,
+      );
+      const [site] = await rawRows<{
+        accountId: string;
+        homeChannelId: string | null;
+        inAudience: boolean;
+      }>(
+        scoped,
+        sql`
+          select artifact.account_id as "accountId",
+            (case when placement.site_id is not null then placement.channel_id
+              else creator.channel_id end)::text as "homeChannelId",
+            (artifact.visibility = 'workspace_shared'
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
+          from ${schema.workspaceArtifacts} artifact
+          left join ${schema.siteProjectPlacements} placement
+            on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
+          left join ${schema.workspaceArtifactVersions} version
+            on version.workspace_id = artifact.workspace_id and version.artifact_id = artifact.id
+            and version.revision = 1
+          left join ${schema.sessions} source
+            on source.workspace_id = artifact.workspace_id
+            and source.id = version.source_session_id
+          left join ${schema.sessions} creator
+            on creator.workspace_id = artifact.workspace_id
+            and creator.id = source.root_session_id and creator.site_access_root_id is null
+          where artifact.workspace_id = ${input.workspaceId} and artifact.id = ${input.siteId}
+          limit 1`,
+      );
+      if (!site || (!site.inAudience && input.sessionIds.length === 0))
+        throw new WorkspaceArtifactNotFoundError("Site not found");
+      if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
+      if (input.channelId !== null) {
+        const [channel] = await scoped
+          .select({ id: schema.channels.id })
+          .from(schema.channels)
+          .where(
+            and(
+              eq(schema.channels.workspaceId, input.workspaceId),
+              eq(schema.channels.id, input.channelId),
+            ),
+          )
+          .limit(1);
+        if (!channel) throw new ChannelNotFoundError(input.channelId);
+      }
+      const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
+      try {
+        if (siteMoved) {
+          await scoped
+            .insert(schema.siteProjectPlacements)
+            .values({
+              accountId: site.accountId,
+              workspaceId: input.workspaceId,
+              siteId: input.siteId,
+              channelId: input.channelId,
+              placedBySubjectId: input.subjectId,
+            })
+            .onConflictDoUpdate({
+              target: [
+                schema.siteProjectPlacements.workspaceId,
+                schema.siteProjectPlacements.siteId,
+              ],
+              set: {
+                channelId: input.channelId,
+                placedBySubjectId: input.subjectId,
+                updatedAt: sql`now()`,
+              },
+            });
+        }
+        const moved =
+          input.sessionIds.length === 0
+            ? []
+            : await scoped
+                .update(schema.sessions)
+                // As for a chat move: the self-assignment keeps the activity time.
+                .set({ channelId: input.channelId, updatedAt: sql`${schema.sessions.updatedAt}` })
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    inArray(schema.sessions.id, [...input.sessionIds]),
+                    eq(schema.sessions.siteId, input.siteId),
+                    isNotNull(schema.sessions.siteAccessRootId),
+                    isNull(schema.sessions.parentSessionId),
+                    input.fromChannelId === null
+                      ? isNull(schema.sessions.channelId)
+                      : eq(schema.sessions.channelId, input.fromChannelId),
+                  ),
+                )
+                .returning({ id: schema.sessions.id });
+        return { siteMoved, movedSessionIds: moved.map((row) => row.id).sort() };
+      } catch (error) {
+        // The project passed the check above but was deleted before the write.
+        if (
+          input.channelId !== null &&
+          nestedPostgresSqlState(error) === "23503" &&
+          /channel/u.test(safeDatabaseErrorFacts(error).constraint ?? "")
+        ) {
+          throw new ChannelNotFoundError(input.channelId);
+        }
+        throw error;
+      }
+    },
+  );
+}
+
 export async function countRigs(
   db: Database,
   access: string | RigAccessContext,
@@ -30483,11 +30654,12 @@ function wellFormedDriverText(value: unknown): unknown {
 }
 
 /**
- * A new Site conversation is filed in the project of the chat that created the
- * Site (the tree of its first version's session), so the Site's sidebar row and
- * its conversations sit together. Without a Site origin, or a creating chat,
- * the session stays unfiled. Callers pass "no project" as null or omit it, so
- * both mean "file it with its Site"; only a named project overrides that.
+ * A new Site conversation is filed in the Site's project: the one someone moved
+ * the Site to, else the project of the chat that created it (the tree of its
+ * first version's session), so the Site's sidebar row and its conversations
+ * sit together. Without a Site origin, or a creating chat, the session stays
+ * unfiled. Callers pass "no project" as null or omit it, so both mean "file it
+ * with its Site"; only a named project overrides that.
  */
 async function siteHomeChannelId(
   tx: Database,
@@ -30501,14 +30673,21 @@ async function siteHomeChannelId(
   const [home] = await rawRows<{ channelId: string | null }>(
     tx,
     sql`
-      select root.channel_id::text as "channelId"
-      from ${schema.workspaceArtifactVersions} version
-      join ${schema.sessions} source
-        on source.workspace_id = version.workspace_id and source.id = version.source_session_id
-      join ${schema.sessions} root
-        on root.workspace_id = source.workspace_id and root.id = source.root_session_id
-      where version.workspace_id = ${workspaceId} and version.artifact_id = ${siteId}::uuid
-        and version.revision = 1 and root.site_access_root_id is null
+      select "channelId" from (
+        select 0 as rank, placement.channel_id::text as "channelId"
+        from ${schema.siteProjectPlacements} placement
+        where placement.workspace_id = ${workspaceId} and placement.site_id = ${siteId}::uuid
+        union all
+        select 1, root.channel_id::text
+        from ${schema.workspaceArtifactVersions} version
+        join ${schema.sessions} source
+          on source.workspace_id = version.workspace_id and source.id = version.source_session_id
+        join ${schema.sessions} root
+          on root.workspace_id = source.workspace_id and root.id = source.root_session_id
+        where version.workspace_id = ${workspaceId} and version.artifact_id = ${siteId}::uuid
+          and version.revision = 1 and root.site_access_root_id is null
+      ) homes
+      order by rank
       limit 1`,
   );
   return home?.channelId ?? null;
@@ -33918,12 +34097,15 @@ async function sessionListTotalsInScope(
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
       -- its first version's session), as far as this viewer can see that
-      -- chat; new Site conversations are filed there too. Conversations in
-      -- other projects never take the Site out of its own: a Site without
+      -- chat, unless someone moved it to a project (or Default) since; new
+      -- Site conversations are filed there too. Conversations in other
+      -- projects never take the Site out of its own: a Site without
       -- conversations here is still listed here when this viewer lists its
       -- creating chat, or opened it. Candidates are the live Sites in this
       -- viewer's audience (one row each); revision 1 is a unique-index lookup.
-      select artifact.id as site_id, creator.channel_id
+      select artifact.id as site_id,
+        case when placement.site_id is not null then placement.channel_id
+          else creator.channel_id end as channel_id
       from ${schema.workspaceArtifacts} artifact
       join lateral (
         select version.source_session_id from ${schema.workspaceArtifactVersions} version
@@ -33935,6 +34117,8 @@ async function sessionListTotalsInScope(
       left join ${schema.sessions} creator
         on creator.workspace_id = ${workspaceId} and creator.id = source.root_session_id
         and creator.site_access_root_id is null
+      left join ${schema.siteProjectPlacements} placement
+        on placement.workspace_id = ${workspaceId} and placement.site_id = artifact.id
       where ${withSiteRows && !options.needsYouOnly ? sql`true` : sql`false`}
         and artifact.workspace_id = ${workspaceId} and artifact.status = 'active'
         and (artifact.visibility = 'workspace_shared'
@@ -33942,7 +34126,8 @@ async function sessionListTotalsInScope(
         and not exists (
           select 1 from site_conv_totals filed
           where filed.site_id = artifact.id
-            and filed.channel_id is not distinct from creator.channel_id)
+            and filed.channel_id is not distinct from (case when placement.site_id is not null
+              then placement.channel_id else creator.channel_id end))
         and (exists (select 1 from roots listed where listed.id = creator.id)
           ${
             // Opens and pins are this person's own plain-view state: a root

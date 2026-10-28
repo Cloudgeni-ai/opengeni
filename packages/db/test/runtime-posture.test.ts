@@ -1877,6 +1877,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1071 shared Site project placements: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1939,7 +1945,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
-        1; // 1061 credential profiles: full-DML, FORCE-RLS.
+        1 + // 1061 credential profiles: full-DML, FORCE-RLS.
+        1; // 1071 shared Site project placements: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1951,6 +1958,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_sidebar_states");
       expect(FORCE_RLS_TABLES).toContain("site_tool_allowances");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_tool_allowances");
+      expect(FORCE_RLS_TABLES).toContain("site_project_placements");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("site_project_placements");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
