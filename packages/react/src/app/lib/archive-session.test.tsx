@@ -86,7 +86,5 @@ test("dismissing a late notice leaves the chat as it was", async () => {
 
 test("a long chat name is shortened without breaking a character", () => {
   const title = `${"a".repeat(58)}😀 and more`;
-  expect(quotedChatName({ displayTitle: title } as Parameters<typeof quotedChatName>[0])).toBe(
-    `“${"a".repeat(58)}😀…”`,
-  );
+  expect(quotedChatName(title)).toBe(`“${"a".repeat(58)}😀…”`);
 });
