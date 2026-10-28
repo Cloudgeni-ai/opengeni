@@ -99,7 +99,16 @@ class FakeGitHub implements GitHub {
   }
 
   async pullFiles(number: number) {
-    return this.pulls.get(number)!.files;
+    return this.pulls.get(number)!.files.map((path) => ({ path, status: "added" }));
+  }
+
+  /** The files of every PR applied in that commit, directly in the directory. */
+  async listDirectory(path: string, ref: string) {
+    const applied = new Set(this.commits.get(ref)!.applied);
+    return [...this.pulls.values()]
+      .filter((p) => applied.has(p.head))
+      .flatMap((p) => p.files)
+      .filter((file) => file.slice(0, file.lastIndexOf("/")) === path);
   }
 
   async compareFiles() {
@@ -297,6 +306,32 @@ describe("a batcher pass", () => {
     await run(gh, options());
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1, 3]);
     expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+  });
+
+  test("ejects a PR whose migration number main already uses, and keeps equal numbers apart", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
+    const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
+    gh.refs.set("main", landed);
+    gh.pulls.get(1)!.merged = landed;
+    gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql", "packages/db/src/b.ts"] });
+    gh.addPull(3, { files: ["packages/db/drizzle/0008_c.sql"] });
+    gh.addPull(4, { files: ["packages/db/drizzle/0008_d.sql"] });
+    gh.addPull(5);
+
+    await run(gh, options());
+    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments).toEqual([
+      {
+        number: 2,
+        body: expect.stringContaining(
+          "`0007_b.sql` uses number 0007, which main already uses for `0007_a.sql`. Merge main into the branch and move it to the next free number: `bun scripts/renumber-migration.ts 0007_b --next`.",
+        ),
+      },
+    ]);
+    // #4 adds the same number as #3, so it waits for the next batch.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([3, 5]);
+    expect(gh.pulls.get(4)!.labels).toContain(QUEUE_LABEL);
   });
 
   test("stops when a landed tree differs from the tested tree", async () => {
