@@ -60,6 +60,7 @@ import {
   isContextWindowExceeded,
   isExactContextLengthExceeded,
   maybeCompactContext,
+  settleFailedContextCompactionLandmark,
   type CompactionSummarizer,
 } from "../src/activities/context-compaction";
 
@@ -3603,6 +3604,18 @@ describe("standalone context compaction execution", () => {
     );
     const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
     expect(active.some((row) => row.item.type === "compaction")).toBe(true);
+    // The turn's failure handler settles "Compacting…" once; the rebuild
+    // itself recorded no skip, so the timeline shows exactly one.
+    await settleFailedContextCompactionLandmark(client.db, scope, {
+      clearRequestedCompaction: true,
+    });
+    const events = await listSessionEvents(client.db, workspaceId, session.id, {
+      after: 0,
+      limit: 200,
+    });
+    expect(
+      events.filter((event) => event.type === "session.context.compaction.skipped"),
+    ).toHaveLength(1);
   });
 
   test("remote v2 retries one exact overflow with only tool-result bodies projected", async () => {

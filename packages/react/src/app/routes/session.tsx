@@ -3251,6 +3251,8 @@ function SessionChatPane(props: {
     context.client
       .listEvents(props.session.workspaceId, sessionId, {
         includeTypes: CONTEXT_CHECKPOINT_EVENT_TYPES,
+        // Newest first: only the latest checkpoint matters.
+        direction: "before",
         limit: 20,
         payloadMode: "none",
       })

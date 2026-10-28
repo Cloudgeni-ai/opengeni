@@ -26,6 +26,13 @@ describe("Codex model switch heads-up", () => {
         event("session.context.cleared", 2),
       ]),
     ).toBe(false);
+    // A newest-first page answers the same.
+    expect(
+      latestCheckpointIsCompaction([
+        event("session.context.cleared", 9),
+        event("session.context.compacted", 4),
+      ]),
+    ).toBe(false);
   });
 
   test("only a chat Codex compacted, switching to another provider, gets the line", () => {

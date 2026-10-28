@@ -14,12 +14,14 @@ export const CONTEXT_CHECKPOINT_EVENT_TYPES: SessionEventType[] = [
  * compaction is Codex's own, which other models cannot read.
  */
 export function latestCheckpointIsCompaction(events: readonly SessionEvent[]): boolean | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const type = events[index]!.type;
-    if (type === "session.context.compacted") return true;
-    if (type === "session.context.cleared") return false;
+  // By sequence, so a page read newest-first answers the same.
+  let latest: SessionEvent | null = null;
+  for (const event of events) {
+    if (event.type !== "session.context.compacted" && event.type !== "session.context.cleared")
+      continue;
+    if (!latest || event.sequence > latest.sequence) latest = event;
   }
-  return null;
+  return latest ? latest.type === "session.context.compacted" : null;
 }
 
 /**

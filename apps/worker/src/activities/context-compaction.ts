@@ -370,9 +370,8 @@ export async function maybeCompactContext(
     projectForWire,
   );
   if (portableModelSwitch && !outcome.compacted) {
-    // The skip already settled the "Compacting…" landmark; show it, then fail
-    // the turn so another model never runs on Codex's checkpoint.
-    await options.publishLiveEvents?.(outcome.events);
+    // Never reached: a switch rebuild throws instead of settling skipped, so
+    // the caller settles the landmark once. Fail closed all the same.
     throw new EmptyCompactionSummaryError({
       stage: "portable_model_switch",
       reason: outcome.reason,
@@ -776,6 +775,13 @@ async function compactContextPortable(
     await projectForWire([...replacementHistory, ...deferredItems]),
   );
   if (estimatedTokensAfter + prefixTokens > structuralBudget) {
+    // A model switch must not leave Codex's checkpoint in place. Throw rather
+    // than settle: the caller settles the landmark and fails the turn.
+    if (options.portableModelSwitch)
+      throw new EmptyCompactionSummaryError({
+        stage: "portable_model_switch",
+        reason: "replacement_exceeds_model_budget",
+      });
     return await settleSkippedAfterStart(db, scope, options, "replacement_exceeds_model_budget");
   }
   const replacementFingerprint = compactionReplacementFingerprint([
@@ -792,6 +798,11 @@ async function compactContextPortable(
   if (!summaryItem) {
     // Started already fanout; settle visibly so the landmark cannot stick on
     // "Compacting…". This is not an operator-request clear path.
+    if (options.portableModelSwitch)
+      throw new EmptyCompactionSummaryError({
+        stage: "portable_model_switch",
+        reason: "summarization_failed",
+      });
     return await settleSkippedAfterStart(db, scope, options, "summarization_failed");
   }
   // A model switch must replace Codex's checkpoint even when the rebuilt
