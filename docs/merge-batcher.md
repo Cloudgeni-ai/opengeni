@@ -105,16 +105,22 @@ job, and `.github/workflows/main-approval-superseded.yml` re-runs the newest
 `main` SHA's run when no full run is in progress and the last one started at
 least 30 minutes ago (the repository variable `MAIN_CI_INTERVAL_MINUTES`
 changes that). Version merges always run in full on their own push.
-Batch landings are deferred like any other push, so while `MAIN_CI_DEFERRED`
-is `true` an attested push is cancelled before it records the batch result.
+Batch landings are never deferred: an attested push records its batch's result
+and an intermediate one runs nothing else. An attested push still builds the
+signed API image, so like every image-building `main` run it waits for the
+`public-release` approval, and an older waiting run is cancelled when a newer
+`main` push supersedes it. Once approved it completes with a `Full CI` status
+that canary admission accepts. Releases are unaffected: a Version merge always
+runs in full on its own push, and tested-descendant admission needs a fully
+green tip that is not attested.
 
 If that full run fails, the same workflow re-runs its failed jobs once, as the
 batcher does for a batch, so one flaky test does not cost `main` its images for
 a whole interval. A failure on the retry stays: `main` is broken and needs a fix.
 
-To get a fully tested SHA with images now, re-run that SHA's `CI` run on `main`
-(`gh run rerun <id>`). Canary and staging deploys use the newest fully green
-`main` SHA as before.
+To get a fully tested SHA with images now, re-run that SHA's completed `CI`
+run on `main` (`gh run rerun <id>`); a re-run always runs in full. Canary and
+staging deploys use the newest fully green `main` SHA as before.
 
 ## Operating it
 

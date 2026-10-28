@@ -225,9 +225,14 @@ jobs:
   # re-run a main SHA to get its images now. Version merges always run.
   main-ci-cadence:
     name: Main CI cadence
+    # A batcher landing is never deferred: an attested push records its batch's
+    # exact-tree result and an intermediate one runs nothing (batch-receipt
+    # below). Every other push keeps the cadence.
+    needs: [batch-receipt]
     if: >-
-      ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
+      ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
       vars.MAIN_CI_DEFERRED == 'true' &&
+      !(needs.batch-receipt.result == 'success' && (needs.batch-receipt.outputs.kind == 'attested' || needs.batch-receipt.outputs.kind == 'intermediate')) &&
       !startsWith(github.event.head_commit.message, 'chore: version packages') &&
       !contains(github.event.head_commit.message, 'changeset-release/main') }}
     runs-on: ubuntu-latest
