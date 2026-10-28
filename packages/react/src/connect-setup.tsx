@@ -154,6 +154,11 @@ function ScopedSetup({
               ? t("connectSetup.microsoftAdminApprovalRequired")
               : t("connectSetup.microsoftAdminApprovalMaybe")}
           </p>
+          {inChat && (
+            <a href={adminApproval.url} target="_blank" rel="noreferrer noopener">
+              {t("connectSetup.adminApprovalLink")}
+            </a>
+          )}
           <div className="og-connect-setup-approval-actions">
             <CopyLinkButton url={adminApproval.url} />
             {onRetry && (
