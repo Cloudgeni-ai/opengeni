@@ -62,6 +62,7 @@ import {
   recordSessionCreated,
   recordUserMessageAccepted,
   scheduledOccurrenceEvents,
+  WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
   type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
@@ -896,6 +897,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
         };
         const machine = await getSandbox(db, access, resolvedMachineTarget.targetSandboxId);
+        if (machine?.scope === "user" && task.agentConfig.executionTarget === "workspace_default") {
+          // Following a default never counts as consent to run unattended on a
+          // personal machine; the automation has to choose it.
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
+          );
+        }
         // A personal machine runs only its owner's Only me schedule. The scoped
         // lookup returns a personal machine to its owner alone, and every attempt
         // re-proves the owner's membership, workspace access and grant in the
@@ -904,9 +914,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           !machine ||
           machine.kind !== "selfhosted" ||
           !machine.enrollmentId ||
-          (machine.scope === "user" &&
-            (task.agentConfig.executionTarget === "workspace_default" ||
-              !personalMachineScheduleOwner(task, access.subjectId)))
+          (machine.scope === "user" && !personalMachineScheduleOwner(task, access.subjectId))
         ) {
           return await refuseAdmission(
             "machine_target_unavailable",

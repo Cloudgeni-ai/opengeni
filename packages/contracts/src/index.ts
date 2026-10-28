@@ -3189,6 +3189,19 @@ export function resolveWorkspaceDefaultExecutionTarget(
     : WorkspaceDefaultExecutionTarget.parse(value);
 }
 
+/**
+ * Whether a machine may be a workspace's default for new chats. A personal
+ * (Only me) machine qualifies only in a Personal workspace: nobody else starts
+ * chats there, and the scoped machine lookup returns it to its owner alone.
+ * Chats that start on it still ask for the owner's personal-machine consent.
+ */
+export function machineCanBeWorkspaceDefault(
+  machine: { scope?: string | null | undefined },
+  workspace: { kind?: string | null | undefined } | null | undefined,
+): boolean {
+  return machine.scope !== "user" || workspace?.kind === "personal";
+}
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

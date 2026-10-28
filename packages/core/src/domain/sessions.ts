@@ -109,6 +109,7 @@ import {
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
   resolveWorkspaceDefaultExecutionTarget,
+  machineCanBeWorkspaceDefault,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -2988,7 +2989,7 @@ async function createSessionForRequestInFileScope(
           !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
           !machine ||
           machine.kind !== "selfhosted" ||
-          machine.scope === "user"
+          !machineCanBeWorkspaceDefault(machine, workspace)
         ) {
           throw new HTTPException(422, {
             message:
