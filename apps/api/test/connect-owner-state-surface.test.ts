@@ -51,6 +51,17 @@ const EXEMPT_STATES: Record<string, number> = {
   "src/mcp/server.ts": 1,
 };
 
+/**
+ * Owner-bound states that carry no `kind`. Every other one names its flow, so
+ * a callback can refuse another connector's state signed with the same
+ * secret (a Slack bot state once completed a Fiken connection).
+ */
+const KINDLESS_OWNER_STATES: Record<string, number> = {
+  // The full MCP OAuth state never reaches the browser: it is stored
+  // encrypted and the provider only sees the `mcp_oauth_reference` pointer.
+  "src/integrations/oauth-client.ts": 1,
+};
+
 async function sources(): Promise<Array<{ path: string; text: string }>> {
   const files: Array<{ path: string; text: string }> = [];
   for await (const path of new Glob("src/**/*.ts").scan({ cwd: apiRoot })) {
@@ -81,16 +92,20 @@ function callArguments(text: string, name: string): string[] {
 describe("owner-bound Connect state", () => {
   test("every owner-bound signed state mints the owner claim through the helper", async () => {
     const exempt: Record<string, number> = {};
+    const kindless: Record<string, number> = {};
     let ownerBound = 0;
     for (const { path, text } of await sources()) {
       for (const args of callArguments(text, "createSignedState")) {
-        if (args.includes("connectOwnerStateFields(")) ownerBound += 1;
-        else exempt[path] = (exempt[path] ?? 0) + 1;
+        if (args.includes("connectOwnerStateFields(")) {
+          ownerBound += 1;
+          if (!/\bkind\b/u.test(args)) kindless[path] = (kindless[path] ?? 0) + 1;
+        } else exempt[path] = (exempt[path] ?? 0) + 1;
       }
     }
     // Any path here that is not in EXEMPT_STATES (or a changed count) is a
     // signed state minted without the owner claim.
     expect(exempt).toEqual(EXEMPT_STATES);
+    expect(kindless).toEqual(KINDLESS_OWNER_STATES);
     // Guards the scan itself: the known owner-bound starters are still found.
     expect(ownerBound).toBeGreaterThanOrEqual(9);
   });
