@@ -49,7 +49,7 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerExternalIdentityLinkRoutes } from "../src/routes/external-identity-links";
 import { registerConnectRoutes } from "../src/routes/connect";
 
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { missingPermissionMessage, requireConnectOwnerAuthority } from "@opengeni/core";
 import { sha256Hex } from "@opengeni/contracts/values";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -1573,7 +1573,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       },
     );
     expect(posted.status).toBe(403);
-    expect(await posted.text()).toContain("api_keys:manage");
+    expect(await posted.text()).toContain(missingPermissionMessage("api_keys:manage"));
     expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
   }, 180_000);
 

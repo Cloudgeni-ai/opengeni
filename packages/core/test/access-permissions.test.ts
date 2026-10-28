@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   normalizePermission,
+  Permission,
   signDelegatedAccessToken,
   type AccessGrant,
 } from "@opengeni/contracts";
@@ -16,6 +17,11 @@ import {
   requireExplicitPermissionDelegation,
 } from "../src/access";
 import { connectSetupPermission } from "../src/application/connect-authority";
+import {
+  MISSING_PERMISSION_DETAIL_CODE,
+  MissingPermissionRefusal,
+  missingPermissionOf,
+} from "../src/access/permission-refusal";
 
 const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -79,7 +85,7 @@ describe("literal high-trust permissions", () => {
     expect(hasPermission(admin.permissions, "secrets:read")).toBe(false);
     expect(hasLiteralPermission(admin.permissions, "secrets:read")).toBe(false);
     expect(() => requireLiteralPermission(admin, "secrets:read")).toThrow(
-      "missing literal permission: secrets:read",
+      "You don't have permission to read secret values.",
     );
   });
   test("explicit policy admin remains literal across serialized grant boundaries", () => {
@@ -89,7 +95,7 @@ describe("literal high-trust permissions", () => {
     expect(() => requirePermission(admin, "workspace:admin")).not.toThrow();
     expect(hasPermission(admin.permissions, "sessions:control")).toBe(false);
     expect(() => requirePermission(admin, "sessions:control")).toThrow(
-      "missing permission: sessions:control",
+      "You don't have permission to control chats.",
     );
     expect(() => requireExplicitPermissionDelegation(admin, ["workspace:admin"])).toThrow(
       "cannot delegate a legacy workspace-admin wildcard",
@@ -308,5 +314,37 @@ describe("personal integration setup permission", () => {
     expect(
       connectSetupPermission({ providerId: "custom-api-definition", ownership: "personal" }),
     ).toBe("connections:write");
+  });
+});
+
+describe("missing permission refusals", () => {
+  test("say a plain sentence and keep the permission machine-readable", () => {
+    let thrown: unknown;
+    try {
+      requirePermission(grant(["workspace:read"]), "capabilities:manage");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(MissingPermissionRefusal);
+    const refusal = thrown as MissingPermissionRefusal;
+    expect(refusal.status).toBe(403);
+    expect(refusal.message).toBe(
+      "You don't have permission to manage this workspace's tools and integrations.",
+    );
+    expect(refusal.details).toEqual({
+      code: MISSING_PERMISSION_DETAIL_CODE,
+      permission: "capabilities:manage",
+    });
+    expect(missingPermissionOf(refusal)).toBe("capabilities:manage");
+    expect(missingPermissionOf(new Error("missing permission: capabilities:manage"))).toBeNull();
+  });
+
+  test("every permission has a sentence that never names the raw permission", () => {
+    for (const permission of Permission.options) {
+      const message = new MissingPermissionRefusal(permission).message;
+      expect(message).toMatch(/^You don't have permission to [a-z].*\.$/u);
+      expect(message).not.toContain("missing permission");
+      expect(message).not.toContain(permission);
+    }
   });
 });

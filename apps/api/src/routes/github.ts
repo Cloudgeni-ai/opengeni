@@ -56,6 +56,7 @@ import {
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
   updateGitHubActionPolicyGroup,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -1133,9 +1134,7 @@ export function requirePublicGitHubRepositoryVerificationPermission(
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: "missing permission: sessions:create or sessions:control",
-  });
+  throw new MissingPermissionRefusal("sessions:create");
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {

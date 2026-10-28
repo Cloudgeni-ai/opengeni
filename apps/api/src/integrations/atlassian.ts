@@ -20,7 +20,11 @@ import {
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import {
+  requireConnectOwnerAuthority,
+  MissingPermissionRefusal,
+  WORKSPACE_SETTINGS_REFUSAL,
+} from "@opengeni/core";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
@@ -518,10 +522,12 @@ export async function saveAtlassianSources(
     destinationSelection.authorityKind === "organization" &&
     !input.canManageOrganizationDestination
   ) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   if (destinationSelection.authorityKind === "workspace" && !input.canManageWorkspaceDestination) {
-    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+    throw new MissingPermissionRefusal("workspace:admin", {
+      message: WORKSPACE_SETTINGS_REFUSAL,
+    });
   }
   if (destinationSelection.authorityKind === "personal" && !input.canManagePersonalDestination) {
     throw new HTTPException(403, { message: "personal destination requires the exact actor" });

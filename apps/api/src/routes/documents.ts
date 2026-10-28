@@ -1,4 +1,4 @@
-import { fileOwnerContextForAccess } from "@opengeni/core";
+import { fileOwnerContextForAccess, MissingPermissionRefusal } from "@opengeni/core";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   AddDocumentRequest,
@@ -138,7 +138,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const accountAdminAuthorization = requireAccountAdminAuthorizationStamp(authorization);
     const payload = await parseRequestJson(c, RunDocumentDefaultCollectionBackfillRequest);
@@ -168,7 +168,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
       status: 400,
@@ -200,7 +200,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const runId = RunDocumentDefaultCollectionBackfillRequest.shape.runId.safeParse(
       c.req.param("runId"),
@@ -239,7 +239,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       "documents:manage",
     );
     if (!hasAccountAdminAuthority(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
       status: 400,
@@ -279,7 +279,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationAuthorityGranted =
       access.accountGrant?.permissions.includes("account:admin") === true;
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     try {
       const document = await addDocumentToBase(db, {
@@ -360,7 +360,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             payload.targetAuthorityKind === "organization") &&
           !accountAdminAuthorization
         ) {
-          throw new HTTPException(403, { message: "missing permission: account:admin" });
+          throw new MissingPermissionRefusal("account:admin");
         }
         return c.json(
           DocumentAuthorityReclassification.parse(
@@ -601,7 +601,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationAuthorityGranted =
       access.accountGrant?.permissions.includes("account:admin") === true;
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     try {
       let fileId: string;
@@ -838,7 +838,7 @@ function dropFilename(preferred: string | undefined): string {
 function documentHttpException(error: unknown): HTTPException {
   const message = documentDomainErrorMessage(error);
   if (message.includes("organization document") && message.includes("exact account authority")) {
-    return new HTTPException(403, { message: "missing permission: account:admin" });
+    return new MissingPermissionRefusal("account:admin");
   }
   if (message.includes("not found")) {
     return new HTTPException(404, { message });
@@ -920,6 +920,6 @@ function requireOrganizationDocumentAuthority(
   organizationAuthorityGranted: boolean,
 ): void {
   if (authorityKind === "organization" && !organizationAuthorityGranted) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
 }

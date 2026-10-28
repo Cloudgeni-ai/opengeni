@@ -160,6 +160,7 @@ import {
   modelUnavailableHttpError,
   connectionAccountSelectionHttpError,
   regionRestrictedHttpError,
+  missingPermissionHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -2526,7 +2527,8 @@ export function createAppComposition(deps: AppDependencies): {
               outcomeUnknown: false,
               details: { code: rawError.code },
             })
-          : (sessionUsageLimitHttpError(rawError) ??
+          : (missingPermissionHttpError(rawError) ??
+            sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
             insufficientCreditsHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
