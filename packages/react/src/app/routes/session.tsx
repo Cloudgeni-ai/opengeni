@@ -3309,6 +3309,8 @@ function SessionChatPane(props: {
       if (options.resumeFirst)
         await context.client.resumeSession(props.session.workspaceId, sessionId, {
           clientEventId: crypto.randomUUID(),
+          // Never undo a pause made after this page last read the control.
+          expectedControlEtag: admissionControl.controlEtag,
         });
       if (
         props.session.status === "failed" &&
