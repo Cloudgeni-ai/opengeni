@@ -252,8 +252,10 @@ command's process environment, never in the command text, stored tool
 arguments, git config or files left on the machine. They are resolved through
 the attempt's own resolver, so they are known values like any other
 ([Masking](#masking)): a command that prints one (`env`, `printenv`,
-`gh auth status -t`) shows its reference in the tool result instead. Masking
-is a safety net, not a reason to print them. Profile variables are applied first, so anything the
+`gh auth status -t`) shows its reference in the tool result instead, within
+that section's limits (values shorter than 8 characters, plain `text` fields
+and values read with `secret_get` stay as they are). Masking is a safety net,
+not a reason to print them. Profile variables are applied first, so anything the
 command sets itself (`GH_TOKEN=… gh …`, `export`, a reference) wins. Each
 command also gets `OPENGENI_CREDENTIAL_PROFILE_VARS`, the comma-separated names
 (never values) the profile delivered. The profile is read again at most every
@@ -326,7 +328,7 @@ UI yet. Profiles hold references, never values.
 (`apps/api/src/mcp/server.ts`) give the profile the same remembering resolver
 they use for written references, so every profile value a command receives is
 in the attempt's (or the `run_on` call's) known values and is masked, an `env`
-dump included.
+dump included, within the limits in [Masking](#masking).
 
 ## Masking decision
 

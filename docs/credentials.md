@@ -122,8 +122,8 @@ Rules that hold across the table:
   run credentials are applied after the profile and win for the same names.
   An entry that cannot be resolved is skipped with a note; it never fails the
   command. Profile values are known secret values, so a command that prints
-  one shows its reference in the tool result instead
-  ([`secrets.md`](secrets.md#masking)).
+  one shows its reference in the tool result instead, within the masking
+  limits ([`secrets.md`](secrets.md#masking)).
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still
