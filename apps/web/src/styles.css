@@ -141,6 +141,8 @@ html:is([data-desktop="macos"], [data-desktop="windows"]) [data-window-layer] {
    pane (the canvas next to a rail) sits on it as an inset, rounded panel,
    and the sidebar toggle sits in the bar beside the traffic lights. */
 html[data-desktop="macos"] {
+  --og-window-panel-gap: 4px;
+  --og-window-panel-border: color-mix(in srgb, var(--og-color-border) 60%, transparent);
   background-color: transparent;
 }
 
@@ -156,8 +158,8 @@ html[data-desktop="macos"] [data-window-frame] {
 }
 
 html[data-desktop="macos"] [data-canvas] {
-  margin: 0 8px 8px;
-  border: 1px solid var(--og-color-border);
+  margin: 0 var(--og-window-panel-gap) var(--og-window-panel-gap);
+  border: 1px solid var(--og-window-panel-border);
   border-radius: 10px;
 }
 
@@ -173,10 +175,10 @@ html[data-desktop="macos"] [data-shell-rail] + [data-canvas] {
    maximized workspace) are the same inset panel, over the rail. The sidebar
    toggle has nothing to show or hide under them. */
 html[data-desktop="macos"] :is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer] {
-  inset: var(--og-window-bar-height) 8px 8px;
+  inset: var(--og-window-bar-height) var(--og-window-panel-gap) var(--og-window-panel-gap);
   width: auto;
   height: auto;
-  border: 1px solid var(--og-color-border);
+  border: 1px solid var(--og-window-panel-border);
   border-radius: 10px;
   overflow: hidden;
 }

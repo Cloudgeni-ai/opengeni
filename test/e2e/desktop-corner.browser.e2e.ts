@@ -103,7 +103,7 @@ describe("the desktop window bar", () => {
           title.set(`${platform}-${width}-${rail}`, { x: box.x, y: box.y - pageTop(platform) });
           await expectWindowTop(page, platform);
           // In the macOS app the page is an inset, rounded panel on the
-          // window's material, flush with the rail and 8px in from the
+          // window's material, flush with the rail and 4px in from the
           // window's right and bottom edges, like native Mac apps.
           const canvas = page.locator("[data-canvas]");
           const panel = await canvas.evaluate((element) => {
@@ -125,8 +125,8 @@ describe("the desktop window bar", () => {
                   radius: "10px",
                   border: "1px",
                   gapLeft: 0,
-                  gapRight: 8,
-                  gapBottom: 8,
+                  gapRight: 4,
+                  gapBottom: 4,
                   top: WINDOW_BAR_HEIGHT,
                 }
               : {
@@ -150,7 +150,7 @@ describe("the desktop window bar", () => {
       }
     }
     // Below the bar the layout is the web app's own: same places on Windows,
-    // and on macOS the same within the panel's 1px border and its 8px inset
+    // and on macOS the same within the panel's 1px border and its 4px inset
     // (a centred column moves by half of it).
     for (const [key, box] of title) {
       if (!key.startsWith("browser-")) continue;

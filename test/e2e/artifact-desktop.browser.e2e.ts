@@ -78,9 +78,9 @@ test("expanded Sites start below the desktop window bar", async () => {
         expect(bounds!.x).toBeLessThan(30);
         const fullWindow = (await page.locator("[data-artifact-fullscreen]").boundingBox())!;
         expect(fullWindow.y).toBe(desktopBar ? WINDOW_BAR_HEIGHT : 0);
-        // On macOS it is the window's inset, rounded main panel: 8px in from
+        // On macOS it is the window's inset, rounded main panel: 4px in from
         // the window's sides and bottom, like the pane it covers.
-        const inset = platform === "macos" ? 8 : 0;
+        const inset = platform === "macos" ? 4 : 0;
         expect(fullWindow.x).toBe(inset);
         expect(fullWindow.x + fullWindow.width).toBe(width - inset);
         expect(fullWindow.y + fullWindow.height).toBe(700 - inset);
