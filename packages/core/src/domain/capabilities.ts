@@ -84,6 +84,7 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { listOwnConnectionMetadata } from "./personal-connection-delegations";
 import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
@@ -919,7 +920,7 @@ async function validateMcpCapabilityConnectionRef(
     return normalized;
   }
 
-  let connection = normalized.connectionId
+  let connection: ConnectionMetadata | null = normalized.connectionId
     ? await getConnectionMetadata(
         input.db,
         input.workspaceId,
@@ -944,6 +945,24 @@ async function validateMcpCapabilityConnectionRef(
           candidate.providerDomain === normalized.providerDomain &&
           (!normalized.kind || candidate.kind === normalized.kind) &&
           candidate.status === "active",
+      ) ?? null;
+  }
+  if (!connection && subjectScope === "subject") {
+    // A personal account follows its owner: it may have been connected from
+    // another of their workspaces and is still the same, usable connection.
+    const own = await listOwnConnectionMetadata(input.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.grant.subjectId,
+      includeInactive: true,
+    });
+    connection =
+      own.find((candidate) =>
+        normalized.connectionId
+          ? candidate.id === normalized.connectionId
+          : candidate.providerDomain === normalized.providerDomain &&
+            (!normalized.kind || candidate.kind === normalized.kind) &&
+            candidate.status === "active",
       ) ?? null;
   }
   if (!connection) {
