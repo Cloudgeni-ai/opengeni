@@ -301,6 +301,7 @@ export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-ac
 export * from "./personal-api-keys";
 export * from "./organization-privacy-preferences";
 export * from "./organization-inference-residency";
+export * from "./workspace-content-flow";
 import { personalApiKeyAccess } from "./personal-api-keys";
 import {
   effectiveKeyPermissions,
@@ -29711,6 +29712,29 @@ async function assertMeetingSummarySessionShape(
         : "A workspace meeting summary is for a meeting shared with the workspace",
     );
   }
+}
+
+/**
+ * Who an Only me meeting summary's first turn runs for: the meeting's owner.
+ * The meeting-summary service starts that chat, and
+ * assertMeetingSummarySessionShape proved at creation that its owner owns the
+ * meeting, so the turn acts for them, like their own Only me automation (their
+ * personal learning layer, their allowance). A shared meeting's workspace chat,
+ * and every other session, gets no one from here.
+ */
+function onlyMeMeetingSummaryOwner(session: {
+  createdByKind: string;
+  createdBySubjectId: string;
+  policyRole: string | null;
+  visibility: string;
+  ownerSubjectId: string | null;
+}): string | null {
+  return session.createdByKind === "service" &&
+    session.createdBySubjectId === MEETING_SUMMARY_SUBJECT_ID &&
+    session.policyRole === MEETING_SUMMARY_POLICY_ROLE &&
+    session.visibility === "user_private"
+    ? session.ownerSubjectId
+    : null;
 }
 
 async function setScheduledTaskAuthorityRlsContext(
@@ -72593,8 +72617,10 @@ export async function initializeSessionStartAtomically(
             session.initialPersonalConnectionDelegations,
             `sessions:${session.workspaceId}:${session.id}:initial`,
           );
-          let initialTurnInitiatingHumanSubjectId =
+          const creatorHumanSubjectId =
             creator.initiator.kind === "subject" ? creator.initiator.subjectId : null;
+          let initialTurnInitiatingHumanSubjectId =
+            creatorHumanSubjectId ?? onlyMeMeetingSummaryOwner(session);
           let causalParentSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
           if (session.parentSessionId && session.parentTurnId) {
             const [causalParentTurn] = await tx
@@ -72640,7 +72666,8 @@ export async function initializeSessionStartAtomically(
           const acceptedAt = new Date();
           // v2 accepted authority for every provider on the shared core (M3
           // PR 2a; M4 X2b): only the owner's own initial message freezes
-          // personal authority. A scheduled firing
+          // personal authority, so an Only me meeting summary, which runs for
+          // its owner, still uses only shared accounts. A scheduled firing
           // copies its task's frozen value (M3 PR 3b). A child session's first
           // turn takes its exact causal parent turn's immutable value (M3 PR 3,
           // design 3.7 EP-T13), never a fresh computation: it gains nothing the
@@ -72668,7 +72695,7 @@ export async function initializeSessionStartAtomically(
                       accountId: session.accountId,
                       workspaceId: input.workspaceId,
                       sessionId: session.id,
-                      acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
+                      acceptingSubjectId: creatorHumanSubjectId,
                     },
                   );
           [turn] = await tx

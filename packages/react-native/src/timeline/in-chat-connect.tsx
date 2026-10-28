@@ -699,7 +699,7 @@ function ScopedConnectSetup({
 }: NativeConnectSetupProps) {
   const t = useOpenGeniText();
   const text = useText();
-  const flow = useConnectSetupFlow(controller, { onAuthorize });
+  const flow = useConnectSetupFlow(controller, { onAuthorize, inChat: true });
   const { view, attempt } = flow;
   // Typed values live in this ref until submit, never in React state.
   const values = useRef(new Map<string, string>());
@@ -1046,7 +1046,7 @@ export function NativeIntegrationCapabilityCard({
             <NativeConnectSetup
               controller={flow.controller}
               authorizeLabel={
-                flow.signInClosed
+                flow.signInClosed || error
                   ? t("connectSetup.trySigningInAgain")
                   : t("sessionIntegrationCapabilityCard.signIn")
               }
@@ -1063,7 +1063,7 @@ export function NativeIntegrationCapabilityCard({
               onStop={flow.stopWaiting}
             />
           ) : null}
-          {!busy && !waiting && (flow.restartable || error || (flow.signInClosed && !attempt)) ? (
+          {!busy && !waiting && (flow.restartable || ((error || flow.signInClosed) && !attempt)) ? (
             <Button
               icon="rotate-ccw"
               variant="primary"

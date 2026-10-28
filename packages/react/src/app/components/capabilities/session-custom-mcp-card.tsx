@@ -151,6 +151,7 @@ function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
       logo={null}
       typeLabel="MCP server"
       description={proposal.rationale}
+      clampDescription
       skill={false}
       expanded={expanded}
       complete={false}

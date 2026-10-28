@@ -42,6 +42,11 @@ export type ConnectSetupProps = {
   className?: string;
   /** Provider-specific label supplied by the embedding host. */
   authorizeLabel?: string | undefined;
+  /**
+   * In a chat card the person signs in and moves on: offer "Check status" only
+   * when the provider asks them to finish elsewhere and come back.
+   */
+  inChat?: boolean;
 };
 
 /** Controller-backed setup surface, styled by opt-in connect.css. No provider secrets enter React state. Host owns
@@ -66,11 +71,12 @@ function ScopedSetup({
   onSelectAccount,
   className,
   authorizeLabel: authorizeLabelProp,
+  inChat = false,
 }: ConnectSetupProps) {
   const t = useOpenGeniText();
   const authorizeLabel =
     authorizeLabelProp === undefined ? t("connectSetup.authorizeConnection") : authorizeLabelProp;
-  const flow = useConnectSetupFlow(controller, { onAuthorize, onSelectAccount });
+  const flow = useConnectSetupFlow(controller, { onAuthorize, onSelectAccount, inChat });
   const { view, attempt, navigating, invoke } = flow;
   if (!attempt)
     return (
@@ -109,13 +115,24 @@ function ScopedSetup({
       aria-label={t("connectSetup.connectionSetup")}
       aria-busy={view.busy || navigating}
     >
-      <div className="og-connect-setup-summary">
-        <p className="og-connect-setup-scope">{flow.scopeLabel}</p>
-        <p role="status" className="og-connect-setup-status">
-          {flow.status}
-        </p>
-        <p className="og-connect-setup-description">{flow.scopeDescription}</p>
-      </div>
+      {/* A chat card already names the service and whose account it is; a
+          sign-in step there needs only its button, and any other step only
+          its status. */}
+      {inChat ? (
+        action.type === "authorize" ? null : (
+          <p role="status" className="og-connect-setup-status">
+            {flow.status}
+          </p>
+        )
+      ) : (
+        <div className="og-connect-setup-summary">
+          <p className="og-connect-setup-scope">{flow.scopeLabel}</p>
+          <p role="status" className="og-connect-setup-status">
+            {flow.status}
+          </p>
+          <p className="og-connect-setup-description">{flow.scopeDescription}</p>
+        </div>
+      )}
       {attempt.account && <p>{t("connectSetup.accountLabel", { label: attempt.account.label })}</p>}
       {awaitingOwner && (
         <div className="og-connect-setup-pending">
@@ -281,9 +298,11 @@ function ScopedSetup({
               </>
             )}
             <div className="og-connect-setup-secondary">
-              <button type="button" onClick={flow.refresh}>
-                {t("connectSetup.checkStatus")}
-              </button>
+              {!inChat || action.type === "wait" ? (
+                <button type="button" onClick={flow.refresh}>
+                  {t("connectSetup.checkStatus")}
+                </button>
+              ) : null}
               <button type="button" onClick={flow.cancel}>
                 {t("connectSetup.cancelSetup")}
               </button>

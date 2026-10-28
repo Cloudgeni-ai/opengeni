@@ -17884,7 +17884,9 @@
         "$": "object",
         "$.description": "string? null",
         "$.id": "string!",
-        "$.label": "string!"
+        "$.label": "string!",
+        "$.preview": "string? null",
+        "$.recommended": "boolean? null"
       }
     },
     "HumanInputQuestion": {
@@ -17894,6 +17896,7 @@
       "shape": {
         "$": "object",
         "$.allowOther": "boolean?",
+        "$.confirm": "boolean? null",
         "$.helpText": "string? null",
         "$.id": "string!",
         "$.kind": "ref(HumanInputQuestionKind)!",
@@ -36490,6 +36493,7 @@
       "useWorkspaceModelCatalog": "value",
       "UseWorkspaceModelCatalogOptions": "type",
       "UseWorkspaceModelCatalogResult": "type",
+      "useWorkspacePanelOwnsExpand": "value",
       "useWorkspaces": "value",
       "useWorkspaceSessions": "value",
       "UseWorkspaceSessionsOptions": "type",

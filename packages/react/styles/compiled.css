@@ -1367,6 +1367,9 @@
 :where(.og-root).-ml-1,:where(.og-root) .-ml-1 {
     margin-left: calc(var(--spacing) * -1);
   }
+:where(.og-root).-ml-1\.5,:where(.og-root) .-ml-1\.5 {
+    margin-left: calc(var(--spacing) * -1.5);
+  }
 :where(.og-root).-ml-2,:where(.og-root) .-ml-2 {
     margin-left: calc(var(--spacing) * -2);
   }
@@ -2272,6 +2275,9 @@
 :where(.og-root).max-w-\[520px\],:where(.og-root) .max-w-\[520px\] {
     max-width: 520px;
   }
+:where(.og-root).max-w-\[540px\],:where(.og-root) .max-w-\[540px\] {
+    max-width: 540px;
+  }
 :where(.og-root).max-w-\[560px\],:where(.og-root) .max-w-\[560px\] {
     max-width: 560px;
   }
@@ -2544,6 +2550,10 @@
   }
 :where(.og-root).-translate-y-full,:where(.og-root) .-translate-y-full {
     --tw-translate-y: -100%;
+    translate: var(--tw-translate-x) var(--tw-translate-y);
+  }
+:where(.og-root).-translate-y-px,:where(.og-root) .-translate-y-px {
+    --tw-translate-y: -1px;
     translate: var(--tw-translate-x) var(--tw-translate-y);
   }
 :where(.og-root).translate-y-\[2px\],:where(.og-root) .translate-y-\[2px\] {
@@ -3902,6 +3912,12 @@
       background-color: color-mix(in oklab, var(--og-color-accent) 10%, transparent);
     }
   }
+:where(.og-root).bg-og-accent\/12,:where(.og-root) .bg-og-accent\/12 {
+    background-color: var(--og-color-accent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-accent) 12%, transparent);
+    }
+  }
 :where(.og-root).bg-og-accent\/15,:where(.og-root) .bg-og-accent\/15 {
     background-color: var(--og-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -4005,6 +4021,12 @@
     background-color: var(--og-color-fg);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--og-color-fg) 85%, transparent);
+    }
+  }
+:where(.og-root).bg-og-fg\/\[0\.04\],:where(.og-root) .bg-og-fg\/\[0\.04\] {
+    background-color: var(--og-color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-fg) 4%, transparent);
     }
   }
 :where(.og-root).bg-og-fg\/\[0\.05\],:where(.og-root) .bg-og-fg\/\[0\.05\] {
@@ -11034,6 +11056,16 @@
       padding-block: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).\@md\/decision\:pt-\[18px\],:where(.og-root) .\@md\/decision\:pt-\[18px\] {
+    @container decision (width >= 28rem) {
+      padding-top: 18px;
+    }
+  }
+:where(.og-root).\@md\/decision\:pb-\[18px\],:where(.og-root) .\@md\/decision\:pb-\[18px\] {
+    @container decision (width >= 28rem) {
+      padding-bottom: 18px;
+    }
+  }
 :where(.og-root).\@md\/answer\:text-left,:where(.og-root) .\@md\/answer\:text-left {
     @container answer (width >= 28rem) {
       text-align: left;
@@ -11499,11 +11531,6 @@
 :where(.og-root).pointer-coarse\:min-h-8,:where(.og-root) .pointer-coarse\:min-h-8 {
     @media (pointer: coarse) {
       min-height: calc(var(--spacing) * 8);
-    }
-  }
-:where(.og-root).pointer-coarse\:min-h-9,:where(.og-root) .pointer-coarse\:min-h-9 {
-    @media (pointer: coarse) {
-      min-height: calc(var(--spacing) * 9);
     }
   }
 :where(.og-root).pointer-coarse\:min-h-10,:where(.og-root) .pointer-coarse\:min-h-10 {
@@ -12784,28 +12811,33 @@
   font-family: var(--og-font-sans,inherit);
 }
 :where(.og-root).og-session-capability-shell,:where(.og-root) .og-session-capability-shell {
+  container: og-capability / inline-size;
+  box-sizing: border-box;
   border: 1px solid var(--og-color-border);
-  border-radius: 12px;
+  border-radius: var(--og-radius-lg,14px);
   background: var(--og-color-surface-1);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .04),0 6px 20px -12px rgb(0 0 0 / .18);
 }
 :where(.og-root).og-session-capability-header,:where(.og-root) .og-session-capability-header {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 18px 19px 12px;
+  padding: 16px 16px 0;
 }
 :where(.og-root).og-session-capability-logo,:where(.og-root) .og-session-capability-logo {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 41px;
-  height: 41px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
+  box-sizing: border-box;
   border: 1px solid var(--og-color-border);
-  border-radius: 10px;
-  background: var(--og-color-surface-2);
-  font-size: 13px;
+  border-radius: var(--og-radius-md,10px);
+  background: var(--og-color-surface-1);
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
   font-weight: 600;
   overflow: hidden;
 }
@@ -12813,71 +12845,150 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
-  padding: 6px;
+  padding: 5px;
   box-sizing: border-box;
 }
 :where(.og-root).og-session-capability-identity,:where(.og-root) .og-session-capability-identity {
   flex: 1;
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 2px;
   overflow-wrap: anywhere;
 }
 :where(.og-root).og-session-capability-identity h3,:where(.og-root) .og-session-capability-identity h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.35;
   font-weight: 600;
 }
 :where(.og-root).og-session-capability-identity span,:where(.og-root) .og-session-capability-identity span {
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-header > svg,:where(.og-root) .og-session-capability-header > svg {
+  flex-shrink: 0;
 }
 :where(.og-root).og-session-capability-type,:where(.og-root) .og-session-capability-type {
   flex-shrink: 0;
-  padding: 4px 7px;
-  border-radius: 5px;
-  background: var(--og-color-surface-2);
-  font-size: 10px;
+  align-self: flex-start;
+  padding: 3px 7px;
+  border: 1px solid var(--og-color-border);
+  border-radius: 999px;
+  color: var(--og-color-fg-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 :where(.og-root).og-session-capability-copy,:where(.og-root) .og-session-capability-copy {
   margin: 0;
-  padding: 0 19px 12px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--og-color-fg-muted);
+  padding: 12px 16px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--og-color-fg);
   overflow-wrap: anywhere;
+}
+:where(.og-root).og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child {
+  padding-bottom: 16px;
+}
+:where(.og-root).og-session-capability-copy[data-clamp],:where(.og-root) .og-session-capability-copy[data-clamp] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  padding-bottom: 0;
+  margin-bottom: 0;
 }
 :where(.og-root).og-session-capability-actions,:where(.og-root) .og-session-capability-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 19px 14px;
+  flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px;
 }
 :where(.og-root).og-session-capability-actions > span,:where(.og-root) .og-session-capability-actions > span {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 11px;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--og-color-fg-muted);
 }
+:where(.og-root).og-session-capability-actions > span svg,:where(.og-root) .og-session-capability-actions > span svg {
+  flex-shrink: 0;
+}
+:where(.og-root).og-session-capability-actions[data-unavailable] > span,:where(.og-root) .og-session-capability-actions[data-unavailable] > span {
+  justify-content: flex-start;
+  align-items: flex-start;
+  text-align: left;
+}
+:where(.og-root).og-session-capability-actions[data-unavailable] > span svg,:where(.og-root) .og-session-capability-actions[data-unavailable] > span svg {
+  margin-top: 2px;
+}
 :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
-  margin-left: auto;
-  min-height: 35px;
-  padding: 8px 13px;
-  border-radius: 7px;
-  border: 1px solid var(--og-color-primary-border);
-  color: var(--og-color-primary-fg);
-  background: var(--og-color-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: var(--og-radius-md,10px);
+  border: 1px solid transparent;
+  color: var(--og-color-bg);
+  background: var(--og-color-fg);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background-color .15s,opacity .15s;
+}
+:where(.og-root).og-session-capability-actions button:hover:not(:disabled),:where(.og-root) .og-session-capability-actions button:hover:not(:disabled) {
+  background: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb,var(--og-color-fg) 85%,transparent);
+  }
+}
+:where(.og-root).og-session-capability-actions button:disabled,:where(.og-root) .og-session-capability-actions button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+:where(.og-root).og-session-capability-shell .og-session-capability-setup,:where(.og-root) .og-session-capability-shell .og-session-capability-setup {
+  padding: 16px;
+}
+@container og-capability (min-width:28rem) {
+  :where(.og-root).og-session-capability-header,:where(.og-root) .og-session-capability-header {
+    padding: 18px 20px 0;
+  }
+  :where(.og-root).og-session-capability-copy,:where(.og-root) .og-session-capability-copy {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  :where(.og-root).og-session-capability-actions,:where(.og-root) .og-session-capability-actions {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px 18px;
+  }
+  :where(.og-root).og-session-capability-actions > span,:where(.og-root) .og-session-capability-actions > span {
+    justify-content: flex-start;
+  }
+  :where(.og-root).og-session-capability-shell .og-session-capability-setup,:where(.og-root) .og-session-capability-shell .og-session-capability-setup {
+    padding: 16px 20px 18px;
+  }
+  :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
+    width: auto;
+    min-height: 36px;
+    margin-left: auto;
+  }
 }
 :where(.og-root).og-session-capability-note,:where(.og-root) .og-session-capability-note {
-  margin: 10px 0 0;
-  font-size: 10px;
-  line-height: 1.6;
+  margin: 8px 4px 0;
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability :focus-visible,:where(.og-root) .og-session-capability :focus-visible,:where(.og-root) .og-session-capability-dialog :focus-visible,:where(.og-root)  .og-session-capability-dialog :focus-visible {
@@ -12954,6 +13065,29 @@
   margin: 0;
   line-height: 1.6;
 }
+:where(.og-root).og-session-capability-step,:where(.og-root) .og-session-capability-step {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+:where(.og-root).og-session-capability-step:focus,:where(.og-root) .og-session-capability-step:focus {
+  outline: none;
+}
+:where(.og-root).og-session-capability-step > p,:where(.og-root) .og-session-capability-step > p {
+  margin: 0;
+  line-height: 1.6;
+}
+:where(.og-root).og-session-capability-step > p.og-session-capability-reminder,:where(.og-root) .og-session-capability-step > p.og-session-capability-reminder {
+  margin-top: -8px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-setup .og-connect-setup > .og-connect-setup-status,:where(.og-root) .og-session-capability-setup .og-connect-setup > .og-connect-setup-status {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-setup label,:where(.og-root) .og-session-capability-setup label {
   display: flex;
   align-items: flex-start;
@@ -12963,7 +13097,7 @@
 :where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
   font: inherit;
   padding: 9px 12px;
-  border-radius: 7px;
+  border-radius: var(--og-radius-md,10px);
   border: 1px solid var(--og-color-border);
   background: var(--og-color-surface-2);
   color: inherit;
@@ -12980,10 +13114,7 @@
   color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"],:where(.og-root) .og-session-capability-shell[data-state="complete"] {
-  border-color: var(--og-color-status-idle);
-  @supports (color: color-mix(in lab, red, red)) {
-    border-color: color-mix(in srgb,var(--og-color-status-idle) 35%,var(--og-color-border));
-  }
+  box-shadow: none;
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root)  .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   color: var(--og-color-status-idle);
@@ -13011,24 +13142,79 @@
   color: var(--og-color-fg-muted);
   font-size: 12px;
 }
-:where(.og-root).og-session-capability-setup .og-session-capability-primary,:where(.og-root) .og-session-capability-setup .og-session-capability-primary {
-  justify-self: end;
+:where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) {
+  justify-self: stretch;
+  width: 100%;
   min-height: 40px;
-  padding: 10px 16px;
-  border: 1px solid var(--og-color-primary-border);
-  background: var(--og-color-primary);
-  color: var(--og-color-primary-fg);
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--og-radius-md,10px);
+  background: var(--og-color-fg);
+  color: var(--og-color-bg);
+  font-size: 13px;
   font-weight: 500;
 }
-:where(.og-root).og-session-capability-setup .og-session-capability-primary:hover:not(:disabled),:where(.og-root) .og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) {
-  filter: brightness(.94);
+:where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary):hover:not(:disabled),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary):hover:not(:disabled) {
+  background: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb,var(--og-color-fg) 85%,transparent);
+  }
+}
+@container og-capability (min-width:28rem) {
+  :where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) {
+    justify-self: end;
+    width: auto;
+    min-height: 36px;
+  }
 }
 :where(.og-root).og-session-capability-progress,:where(.og-root) .og-session-capability-progress {
   color: var(--og-color-fg-muted);
   padding-block: 8px;
 }
-:where(.og-root).og-session-capability-setup .og-session-capability-stop,:where(.og-root) .og-session-capability-setup .og-session-capability-stop {
-  justify-self: end;
+:where(.og-root).og-session-capability-waiting,:where(.og-root) .og-session-capability-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-waiting > p,:where(.og-root) .og-session-capability-waiting > p {
+  flex: 1 1 12rem;
+  margin: 0;
+  line-height: 1.5;
+}
+:where(.og-root).og-session-capability-waiting > p:focus,:where(.og-root) .og-session-capability-waiting > p:focus {
+  outline: none;
+}
+:where(.og-root).og-session-capability-spinner,:where(.og-root) .og-session-capability-spinner {
+  flex: none;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  @supports (color: color-mix(in lab, red, red)) {
+    border: 2px solid color-mix(in srgb,currentColor 25%,transparent);
+  }
+  border-top-color: currentColor;
+  animation: og-session-capability-spin .8s linear infinite;
+}
+:where(.og-root).og-session-capability-waiting-actions,:where(.og-root) .og-session-capability-waiting-actions {
+  display: flex;
+  gap: 8px;
+  margin-inline-start: auto;
+  align-self: center;
+}
+@keyframes og-session-capability-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion:reduce) {
+  :where(.og-root).og-session-capability-spinner,:where(.og-root) .og-session-capability-spinner {
+    animation: none;
+  }
 }
 @media (pointer:coarse) {
   :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button,:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
@@ -14087,28 +14273,33 @@
   font-family: var(--og-font-sans,inherit);
 }
 :where(.og-root).og-session-capability-shell,:where(.og-root) .og-session-capability-shell {
+  container: og-capability / inline-size;
+  box-sizing: border-box;
   border: 1px solid var(--og-color-border);
-  border-radius: 12px;
+  border-radius: var(--og-radius-lg,14px);
   background: var(--og-color-surface-1);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .04),0 6px 20px -12px rgb(0 0 0 / .18);
 }
 :where(.og-root).og-session-capability-header,:where(.og-root) .og-session-capability-header {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 18px 19px 12px;
+  padding: 16px 16px 0;
 }
 :where(.og-root).og-session-capability-logo,:where(.og-root) .og-session-capability-logo {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 41px;
-  height: 41px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
+  box-sizing: border-box;
   border: 1px solid var(--og-color-border);
-  border-radius: 10px;
-  background: var(--og-color-surface-2);
-  font-size: 13px;
+  border-radius: var(--og-radius-md,10px);
+  background: var(--og-color-surface-1);
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
   font-weight: 600;
   overflow: hidden;
 }
@@ -14116,71 +14307,150 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
-  padding: 6px;
+  padding: 5px;
   box-sizing: border-box;
 }
 :where(.og-root).og-session-capability-identity,:where(.og-root) .og-session-capability-identity {
   flex: 1;
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 2px;
   overflow-wrap: anywhere;
 }
 :where(.og-root).og-session-capability-identity h3,:where(.og-root) .og-session-capability-identity h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.35;
   font-weight: 600;
 }
 :where(.og-root).og-session-capability-identity span,:where(.og-root) .og-session-capability-identity span {
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-header > svg,:where(.og-root) .og-session-capability-header > svg {
+  flex-shrink: 0;
 }
 :where(.og-root).og-session-capability-type,:where(.og-root) .og-session-capability-type {
   flex-shrink: 0;
-  padding: 4px 7px;
-  border-radius: 5px;
-  background: var(--og-color-surface-2);
-  font-size: 10px;
+  align-self: flex-start;
+  padding: 3px 7px;
+  border: 1px solid var(--og-color-border);
+  border-radius: 999px;
+  color: var(--og-color-fg-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 :where(.og-root).og-session-capability-copy,:where(.og-root) .og-session-capability-copy {
   margin: 0;
-  padding: 0 19px 12px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--og-color-fg-muted);
+  padding: 12px 16px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--og-color-fg);
   overflow-wrap: anywhere;
+}
+:where(.og-root).og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child {
+  padding-bottom: 16px;
+}
+:where(.og-root).og-session-capability-copy[data-clamp],:where(.og-root) .og-session-capability-copy[data-clamp] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  padding-bottom: 0;
+  margin-bottom: 0;
 }
 :where(.og-root).og-session-capability-actions,:where(.og-root) .og-session-capability-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 19px 14px;
+  flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px;
 }
 :where(.og-root).og-session-capability-actions > span,:where(.og-root) .og-session-capability-actions > span {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 11px;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--og-color-fg-muted);
 }
+:where(.og-root).og-session-capability-actions > span svg,:where(.og-root) .og-session-capability-actions > span svg {
+  flex-shrink: 0;
+}
+:where(.og-root).og-session-capability-actions[data-unavailable] > span,:where(.og-root) .og-session-capability-actions[data-unavailable] > span {
+  justify-content: flex-start;
+  align-items: flex-start;
+  text-align: left;
+}
+:where(.og-root).og-session-capability-actions[data-unavailable] > span svg,:where(.og-root) .og-session-capability-actions[data-unavailable] > span svg {
+  margin-top: 2px;
+}
 :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
-  margin-left: auto;
-  min-height: 35px;
-  padding: 8px 13px;
-  border-radius: 7px;
-  border: 1px solid var(--og-color-primary-border);
-  color: var(--og-color-primary-fg);
-  background: var(--og-color-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: var(--og-radius-md,10px);
+  border: 1px solid transparent;
+  color: var(--og-color-bg);
+  background: var(--og-color-fg);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background-color .15s,opacity .15s;
+}
+:where(.og-root).og-session-capability-actions button:hover:not(:disabled),:where(.og-root) .og-session-capability-actions button:hover:not(:disabled) {
+  background: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb,var(--og-color-fg) 85%,transparent);
+  }
+}
+:where(.og-root).og-session-capability-actions button:disabled,:where(.og-root) .og-session-capability-actions button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+:where(.og-root).og-session-capability-shell .og-session-capability-setup,:where(.og-root) .og-session-capability-shell .og-session-capability-setup {
+  padding: 16px;
+}
+@container og-capability (min-width:28rem) {
+  :where(.og-root).og-session-capability-header,:where(.og-root) .og-session-capability-header {
+    padding: 18px 20px 0;
+  }
+  :where(.og-root).og-session-capability-copy,:where(.og-root) .og-session-capability-copy {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  :where(.og-root).og-session-capability-actions,:where(.og-root) .og-session-capability-actions {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px 18px;
+  }
+  :where(.og-root).og-session-capability-actions > span,:where(.og-root) .og-session-capability-actions > span {
+    justify-content: flex-start;
+  }
+  :where(.og-root).og-session-capability-shell .og-session-capability-setup,:where(.og-root) .og-session-capability-shell .og-session-capability-setup {
+    padding: 16px 20px 18px;
+  }
+  :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
+    width: auto;
+    min-height: 36px;
+    margin-left: auto;
+  }
 }
 :where(.og-root).og-session-capability-note,:where(.og-root) .og-session-capability-note {
-  margin: 10px 0 0;
-  font-size: 10px;
-  line-height: 1.6;
+  margin: 8px 4px 0;
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability :focus-visible,:where(.og-root) .og-session-capability :focus-visible,:where(.og-root) .og-session-capability-dialog :focus-visible,:where(.og-root)  .og-session-capability-dialog :focus-visible {
@@ -14257,6 +14527,29 @@
   margin: 0;
   line-height: 1.6;
 }
+:where(.og-root).og-session-capability-step,:where(.og-root) .og-session-capability-step {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+:where(.og-root).og-session-capability-step:focus,:where(.og-root) .og-session-capability-step:focus {
+  outline: none;
+}
+:where(.og-root).og-session-capability-step > p,:where(.og-root) .og-session-capability-step > p {
+  margin: 0;
+  line-height: 1.6;
+}
+:where(.og-root).og-session-capability-step > p.og-session-capability-reminder,:where(.og-root) .og-session-capability-step > p.og-session-capability-reminder {
+  margin-top: -8px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-setup .og-connect-setup > .og-connect-setup-status,:where(.og-root) .og-session-capability-setup .og-connect-setup > .og-connect-setup-status {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-setup label,:where(.og-root) .og-session-capability-setup label {
   display: flex;
   align-items: flex-start;
@@ -14266,7 +14559,7 @@
 :where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
   font: inherit;
   padding: 9px 12px;
-  border-radius: 7px;
+  border-radius: var(--og-radius-md,10px);
   border: 1px solid var(--og-color-border);
   background: var(--og-color-surface-2);
   color: inherit;
@@ -14283,10 +14576,7 @@
   color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"],:where(.og-root) .og-session-capability-shell[data-state="complete"] {
-  border-color: var(--og-color-status-idle);
-  @supports (color: color-mix(in lab, red, red)) {
-    border-color: color-mix(in srgb,var(--og-color-status-idle) 35%,var(--og-color-border));
-  }
+  box-shadow: none;
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root)  .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   color: var(--og-color-status-idle);
@@ -14314,24 +14604,79 @@
   color: var(--og-color-fg-muted);
   font-size: 12px;
 }
-:where(.og-root).og-session-capability-setup .og-session-capability-primary,:where(.og-root) .og-session-capability-setup .og-session-capability-primary {
-  justify-self: end;
+:where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) {
+  justify-self: stretch;
+  width: 100%;
   min-height: 40px;
-  padding: 10px 16px;
-  border: 1px solid var(--og-color-primary-border);
-  background: var(--og-color-primary);
-  color: var(--og-color-primary-fg);
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--og-radius-md,10px);
+  background: var(--og-color-fg);
+  color: var(--og-color-bg);
+  font-size: 13px;
   font-weight: 500;
 }
-:where(.og-root).og-session-capability-setup .og-session-capability-primary:hover:not(:disabled),:where(.og-root) .og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) {
-  filter: brightness(.94);
+:where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary):hover:not(:disabled),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary):hover:not(:disabled) {
+  background: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb,var(--og-color-fg) 85%,transparent);
+  }
+}
+@container og-capability (min-width:28rem) {
+  :where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) {
+    justify-self: end;
+    width: auto;
+    min-height: 36px;
+  }
 }
 :where(.og-root).og-session-capability-progress,:where(.og-root) .og-session-capability-progress {
   color: var(--og-color-fg-muted);
   padding-block: 8px;
 }
-:where(.og-root).og-session-capability-setup .og-session-capability-stop,:where(.og-root) .og-session-capability-setup .og-session-capability-stop {
-  justify-self: end;
+:where(.og-root).og-session-capability-waiting,:where(.og-root) .og-session-capability-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-waiting > p,:where(.og-root) .og-session-capability-waiting > p {
+  flex: 1 1 12rem;
+  margin: 0;
+  line-height: 1.5;
+}
+:where(.og-root).og-session-capability-waiting > p:focus,:where(.og-root) .og-session-capability-waiting > p:focus {
+  outline: none;
+}
+:where(.og-root).og-session-capability-spinner,:where(.og-root) .og-session-capability-spinner {
+  flex: none;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  @supports (color: color-mix(in lab, red, red)) {
+    border: 2px solid color-mix(in srgb,currentColor 25%,transparent);
+  }
+  border-top-color: currentColor;
+  animation: og-session-capability-spin .8s linear infinite;
+}
+:where(.og-root).og-session-capability-waiting-actions,:where(.og-root) .og-session-capability-waiting-actions {
+  display: flex;
+  gap: 8px;
+  margin-inline-start: auto;
+  align-self: center;
+}
+@keyframes og-session-capability-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion:reduce) {
+  :where(.og-root).og-session-capability-spinner,:where(.og-root) .og-session-capability-spinner {
+    animation: none;
+  }
 }
 @media (pointer:coarse) {
   :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button,:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
@@ -16540,7 +16885,24 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px 12px;
-  padding: 0 19px 14px;
+  padding: 0 16px 14px;
+}
+:where(.og-root).og-tc-card .og-session-capability-header,:where(.og-root) .og-tc-card .og-session-capability-header {
+  padding-bottom: 12px;
+}
+:where(.og-root).og-tc-card .og-session-capability-copy,:where(.og-root) .og-tc-card .og-session-capability-copy {
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+@container og-capability (min-width: 28rem) {
+  :where(.og-root).og-tc-card-foot,:where(.og-root) .og-tc-card-foot,:where(.og-root) .og-tc-card .og-tc-card-note,:where(.og-root)  .og-tc-card .og-tc-card-note {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  :where(.og-root).og-tc-card .og-tc-card-foot > :is(button, a),:where(.og-root) .og-tc-card .og-tc-card-foot > :is(button, a) {
+    width: auto;
+    min-height: 36px;
+  }
 }
 :where(.og-root).og-tc-card-foot > p,:where(.og-root) .og-tc-card-foot > p {
   flex: 1 1 14rem;
@@ -16556,13 +16918,15 @@
 :where(.og-root).og-tc-card-foot > :is(button, a),:where(.og-root) .og-tc-card-foot > :is(button, a) {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  min-height: 34px;
+  width: 100%;
+  min-height: 40px;
   padding: 0 14px;
-  border: 1px solid var(--og-color-primary-border);
-  border-radius: 8px;
-  background: var(--og-color-primary);
-  color: var(--og-color-primary-fg);
+  border: 1px solid transparent;
+  border-radius: var(--og-radius-md, 10px);
+  background: var(--og-color-fg);
+  color: var(--og-color-bg);
   font: inherit;
   font-size: 12.5px;
   font-weight: 500;
@@ -16580,7 +16944,7 @@
 }
 :where(.og-root).og-tc-card-note,:where(.og-root) .og-tc-card-note {
   margin: 0;
-  padding: 0 19px 14px;
+  padding: 0 16px 14px;
   font-size: 11px;
   line-height: 1.5;
   color: var(--og-color-fg-muted);
@@ -16618,7 +16982,7 @@
   flex-shrink: 0;
 }
 @media (pointer: coarse) {
-  :where(.og-root).og-tc-button,:where(.og-root) .og-tc-button,:where(.og-root) .og-tc-card-foot > :is(button, a),:where(.og-root)  .og-tc-card-foot > :is(button, a) {
+  :where(.og-root).og-tc-button,:where(.og-root) .og-tc-button,:where(.og-root) .og-tc-card-foot > :is(button, a),:where(.og-root)  .og-tc-card-foot > :is(button, a),:where(.og-root) .og-tc-card .og-tc-card-foot > :is(button, a),:where(.og-root)  .og-tc-card .og-tc-card-foot > :is(button, a) {
     min-height: 44px;
   }
 }

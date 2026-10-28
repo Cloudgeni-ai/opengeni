@@ -2516,6 +2516,10 @@ export type HumanInputOption = {
   id: string;
   label: string;
   description?: string | null | undefined;
+  /** The agent's suggestion; mark it, never pre-select it. */
+  recommended?: boolean | null | undefined;
+  /** A short sample of what the option produces, shown as-is (monospace). */
+  preview?: string | null | undefined;
 };
 
 export type SkillReviewReference = {
@@ -2538,6 +2542,11 @@ export type HumanInputQuestion = {
   /** Required exactly when `kind` is "secret"; null otherwise. */
   secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
+  /**
+   * A yes/no decision: a single_select with exactly two options, the action
+   * first and the way out second, answered with two buttons.
+   */
+  confirm?: boolean | null | undefined;
   allowOther: boolean;
   validation?:
     | {
