@@ -37,6 +37,7 @@ export {
 export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
 export {
   createModelImageSizer,
+  sniffModelImageType,
   type ModelImageSizerOptions,
   type SizedImage,
 } from "./model-image-sizing";
