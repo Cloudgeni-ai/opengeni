@@ -189,6 +189,7 @@ export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
+export * from "./credential-profiles";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -1120,6 +1121,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "secret_get",
   "secret_move",
   "secret_delete",
+  "secret_profile_get",
+  "secret_profile_set",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",

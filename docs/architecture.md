@@ -1704,6 +1704,12 @@ Knowledge, artifacts, notifications and any new first-party tool) never resolve
 them: they store or forward reference text, and the receiving work resolves it
 at its own execution boundary. Only a short, justified list of first-party
 tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
+Opt-in credential profiles (workspace, plus session additions children inherit)
+name variables whose references the attempt's resolver turns into values for
+each command's own environment at the same boundary
+(`packages/runtime/src/sandbox/credential-profile-delivery.ts`); nothing is
+written to config or kept on the box, and the values are masked like any other
+resolved value.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -3037,6 +3043,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Vaults, `{{secret:…}}` references, secret delivery, or secret reads | `packages/contracts/src/vaults.ts`, `packages/core/src/domain/vaults/`, `packages/db/src/vaults.ts`, `packages/vaults/`, `apps/api/src/routes/vaults.ts` | [`secrets.md`](secrets.md) |
+| Credential profiles (per-command CLI credentials) | `packages/contracts/src/credential-profiles.ts`, `packages/core/src/domain/credential-profiles.ts`, `packages/db/src/credential-profiles.ts`, `packages/runtime/src/sandbox/credential-profile-delivery.ts`, `apps/api/src/routes/credential-profiles.ts` | [`secrets.md`](secrets.md#credential-profiles) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
 | Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 

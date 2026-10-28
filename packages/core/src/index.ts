@@ -131,6 +131,7 @@ export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
 export * from "./domain/encryption-key";
 export * from "./domain/vaults";
+export * from "./domain/credential-profiles";
 export * from "./rigs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
