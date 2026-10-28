@@ -4506,7 +4506,9 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
     item.response.outcome === "answered"
       ? t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
-        ? t("messageTimeline.skipped")
+        ? item.response.agentDecides
+          ? t("messageTimeline.youLetTheAgentDecide")
+          : t("messageTimeline.skipped")
         : item.response.outcome === "expired"
           ? t("messageTimeline.expired")
           : t("messageTimeline.cancelled");

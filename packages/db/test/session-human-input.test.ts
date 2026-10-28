@@ -29,6 +29,7 @@ import {
   peekSessionWork,
   registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
+  validateHumanInputResponse,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 
@@ -686,6 +687,69 @@ describe("durable structured human input", () => {
         respondedBy: required.grant.subjectId,
       }),
     ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+
+    // "Let the agent decide" settles even a request that cannot be skipped,
+    // and the agent's resume sees that it was asked to decide.
+    const decided = await acceptSessionHumanInputResponse(client.db, {
+      accountId: required.grant.accountId,
+      workspaceId: required.grant.workspaceId!,
+      sessionId: required.session.id,
+      requestId: required.requestId,
+      response: { outcome: "skipped", agentDecides: true },
+      respondedBy: required.grant.subjectId,
+    });
+    expect(decided).toMatchObject({
+      action: "accepted",
+      request: { status: "skipped", response: { outcome: "skipped", agentDecides: true } },
+    });
+    expect(
+      (await getSessionHumanInputRequest(
+        client.db,
+        required.grant.workspaceId!,
+        required.session.id,
+        required.requestId,
+      ))!.response,
+    ).toEqual({ outcome: "skipped", agentDecides: true });
+  });
+
+  test("only the person answers secrets, Skill reviews and secret approvals", () => {
+    const text: HumanInputQuestion = {
+      id: "branch",
+      kind: "text",
+      prompt: "Which branch?",
+      options: [],
+      required: true,
+      allowOther: false,
+    };
+    const decide = { outcome: "skipped", agentDecides: true };
+    expect(validateHumanInputResponse({ questions: [text], allowSkip: false }, decide)).toEqual(
+      decide,
+    );
+    const secret = {
+      ...text,
+      kind: "secret",
+      secret: { item: "Token", field: "token" },
+    } as unknown as HumanInputQuestion;
+    const skillReview = {
+      ...text,
+      skillReview: { skillId: "skill" },
+    } as unknown as HumanInputQuestion;
+    const approval = { ...text, id: `secret-approval:${crypto.randomUUID()}` };
+    for (const questions of [[secret], [text, secret], [skillReview], [approval]]) {
+      expect(() => validateHumanInputResponse({ questions, allowSkip: true }, decide)).toThrow(
+        HumanInputResponseValidationError,
+      );
+    }
+    expect(() =>
+      validateHumanInputResponse(
+        { questions: [text], allowSkip: true, origin: "secret_use_approval" },
+        decide,
+      ),
+    ).toThrow(HumanInputResponseValidationError);
+    // An ordinary skip is unchanged.
+    expect(
+      validateHumanInputResponse({ questions: [secret], allowSkip: true }, { outcome: "skipped" }),
+    ).toEqual({ outcome: "skipped" });
   });
 
   test("answer and early-expiry racers have one winner, while a passed deadline expires", async () => {

@@ -19775,13 +19775,25 @@ export const HumanInputAnswer = /* @__PURE__ */ defineSchema(() =>
 );
 export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
 
+/**
+ * `agentDecides` on a skipped response records "Let the agent decide": the
+ * asking agent proceeds with its own best choice and says what it chose. It is
+ * accepted even when the request does not allow an ordinary skip, but never
+ * for secret questions, Skill reviews or secret-use approvals.
+ */
+const SkippedHumanInputResponse = () =>
+  z.object({
+    outcome: z.literal("skipped"),
+    agentDecides: z.literal(true).optional(),
+  });
+
 export const HumanInputResponse = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("outcome", [
     z.object({
       outcome: z.literal("answered"),
       answers: z.array(HumanInputAnswer).max(20),
     }),
-    z.object({ outcome: z.literal("skipped") }),
+    SkippedHumanInputResponse(),
     z.object({ outcome: z.literal("expired") }),
     z.object({ outcome: z.literal("cancelled") }),
   ]),
@@ -19796,7 +19808,7 @@ export const SubmitHumanInputResponseRequest = /* @__PURE__ */ defineSchema(() =
       /** Write-only secret values; the API strips them before building any event. */
       secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
     }),
-    z.object({ outcome: z.literal("skipped") }),
+    SkippedHumanInputResponse(),
   ]),
 );
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;

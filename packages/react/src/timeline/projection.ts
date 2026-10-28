@@ -37,6 +37,7 @@ import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
 import { presentTurnFailureText } from "./compaction-copy";
 import { startupPhaseTitle } from "./platform-activity-presentation";
+import { parseHumanInputDelegation } from "../human-input-delegation";
 import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
@@ -633,6 +634,7 @@ export function buildTimeline(
         }
         const voiceMessage = realtimeVoiceMessage(payload);
         const sender = messageSender(payload.initiator);
+        const humanInputDelegation = parseHumanInputDelegation(payload.modelContext);
         const userMessage: UserMessageItem = {
           kind: "user-message",
           id: event.id,
@@ -653,6 +655,7 @@ export function buildTimeline(
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           ...(sender ? { sender } : {}),
+          ...(humanInputDelegation ? { humanInputDelegation } : {}),
           occurredAt: event.occurredAt,
         };
         items.push(userMessage);
@@ -2086,7 +2089,9 @@ function humanInputItemFromResponse(
                 .filter((answer): answer is HumanInputAnswer => answer !== null)
             : [],
         }
-      : { outcome };
+      : outcome === "skipped" && response.agentDecides === true
+        ? { outcome, agentDecides: true }
+        : { outcome };
   const questionsById = new Map(questions.map((question) => [question.id, question]));
   const answers =
     normalizedResponse.outcome === "answered"

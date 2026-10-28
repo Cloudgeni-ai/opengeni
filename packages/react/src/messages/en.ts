@@ -1864,7 +1864,6 @@ export const englishMessages = {
   "humanInputForm.loadTheExactSkillProposal":
     "Load the exact Skill proposal before approving permanent deletion.",
   "humanInputForm.next": "Next",
-  "humanInputForm.orSkipAndLetThe": "Or skip and let the agent decide.",
   "humanInputForm.otherAnswerForVisiblelabel": "{other} answer for {visibleLabel}",
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
@@ -1900,6 +1899,7 @@ export const englishMessages = {
   "humanInputModel.hide": "Hide",
   "humanInputModel.inputRequired": "Input required",
   "humanInputModel.inUnderAMinute": "in under a minute",
+  "humanInputModel.letTheAgentDecide": "Let the agent decide",
   "humanInputModel.looksLikeExample": "Looks like {example}",
   "humanInputModel.moreBelow": "More below",
   "humanInputModel.note": "Note",
@@ -1930,6 +1930,7 @@ export const englishMessages = {
   "humanInputModel.undo": "Undo",
   "humanInputModel.youCanTSaveTo":
     "You can't save to {requested}, so it will be saved to {actual}.",
+  "humanInputModel.yourAgentIsDeciding": "Your agent is deciding",
   "identityLinkAccounts.couldNotUpdateAccountLinks":
     "Could not update account links. Reload to see current access.",
   "identityLinkAccounts.expiresLocalestring": "Expires {localeString}.",
@@ -3078,6 +3079,7 @@ export const englishMessages = {
   "messageTimeline.workerReportedBack": "Worker reported back",
   "messageTimeline.workResumed": "work resumed",
   "messageTimeline.youAnswered": "You answered",
+  "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
   "modelPicker.codexOnlySession": "Codex-only session",
   "modelPicker.model": "Model",
   "modelPickerModel.billedToTheConnectedProvider": "Billed to the connected provider account",
@@ -3297,6 +3299,7 @@ export const englishMessages = {
   "native.presentation.worker": "Worker",
   "native.presentation.you": "You",
   "native.presentation.youAnswered": "You answered",
+  "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
   "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
     "Makes a new transcript from the audio. Speaker names carry over.",
@@ -3576,6 +3579,7 @@ export const englishMessages = {
   "native.timeline.messages.workerDecision": "Worker decision",
   "native.timeline.messages.working": "Working",
   "native.timeline.messages.youAnswered": "You answered",
+  "native.timeline.messages.youLetTheAgentDecide": "You let the agent decide",
   "native.timeline.messages.yourDictationIsReady":
     "Your dictation is ready. Insert it into your draft?",
   "native.timeline.messages.yourRecordingIsSaved": "Your recording is saved.",

@@ -110,6 +110,7 @@ export {
   mergeHumanInputFormMessages,
   emptyDraft,
   formatDeadline,
+  humanInputAgentMayDecide,
   humanInputHeading,
   initialDrafts,
   resolveSecretSaveTo,

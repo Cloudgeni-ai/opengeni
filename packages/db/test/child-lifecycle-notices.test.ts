@@ -611,7 +611,7 @@ describe("child lifecycle notices", () => {
     ).toBeNull();
   });
 
-  test("a blocking question wakes an idle parent with an active goal or no goal, never a settled goal", async () => {
+  test("a blocking question wakes an idle parent with an active, completed or no goal, never a paused goal", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const child = await startSession(grant, {
@@ -705,6 +705,44 @@ describe("child lifecycle notices", () => {
     if (quiet.reason !== "added") throw new Error(`unexpected ${quiet.reason}`);
     expect(quiet.shouldWake).toBe(false);
     expect(quiet.workflowWakeRevision).toBeNull();
+
+    // A parent whose goal is completed still owns the worker: its question
+    // wakes the parent so the agent can answer before the person has to,
+    // without reopening the goal.
+    const completedParent = await startSession(grant, { goal: true, message: "completed goal" });
+    const completedChild = await startSession(grant, { parent: completedParent, message: "work" });
+    await settleIdle(grant, completedParent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, completedParent.session.id, {
+      status: "completed",
+      evidence: "done",
+    });
+    await freezeChild(grant, completedChild);
+    const answerable = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: completedChild.session.id,
+          turnId: completedChild.turn.id,
+          turnGeneration: completedChild.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (answerable.reason !== "added") throw new Error(`unexpected ${answerable.reason}`);
+    expect(answerable.shouldWake).toBe(true);
+    expect(answerable.workflowWakeRevision).not.toBeNull();
+    expect(answerable.events.map((event) => event.type)).toEqual(["system.update.pending"]);
+    const completedClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: completedParent.session.id,
+      workflowId: `session-${completedParent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(completedClaim.action).toBe("claimed");
+    const [completedGoal] = await shared.admin`
+      select status from session_goals where session_id=${completedParent.session.id}`;
+    expect(completedGoal).toMatchObject({ status: "completed" });
   });
 
   test("a parent busy in a turn gets the child's question at its next turn, with every question", async () => {

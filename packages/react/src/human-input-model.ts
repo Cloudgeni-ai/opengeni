@@ -6,6 +6,7 @@ import type {
   HumanInputSecretAnswerResult,
   HumanInputSecretSaveTo,
   HumanInputSecretSpec,
+  SessionHumanInputRequest,
 } from "@opengeni/sdk";
 import { secretUseApprovalIdFromQuestionId } from "@opengeni/sdk/secret-use-approval";
 import { type OpenGeniText } from "./messages/runtime";
@@ -23,6 +24,29 @@ export function choiceOffersOther(
   return !question.skillReview && secretUseApprovalIdFromQuestionId(question.id) === null;
 }
 
+/**
+ * Whether a card offers "Let the agent decide". Secret questions, Skill
+ * reviews and secret-use approvals stay with the person, as do settled
+ * requests. The server applies the same rule.
+ */
+export function humanInputAgentMayDecide(
+  request: Pick<SessionHumanInputRequest, "questions"> &
+    Partial<Pick<SessionHumanInputRequest, "origin" | "status">>,
+): boolean {
+  if ((request.origin ?? "tool_call") !== "tool_call") return false;
+  if (request.status !== undefined && request.status !== "pending") return false;
+  return (
+    request.questions.length > 0 &&
+    request.questions.every(
+      (question) =>
+        question.kind !== "secret" &&
+        question.secret == null &&
+        question.skillReview == null &&
+        secretUseApprovalIdFromQuestionId(question.id) === null,
+    )
+  );
+}
+
 export type HumanInputAnswerDraft = {
   values: string[];
   other: string;
@@ -36,6 +60,10 @@ export type HumanInputFormMessages = {
   /** The submit label when the request asks one question; falls back to {@link submit}. */
   submitOne?: string;
   skip: string;
+  /** The one secondary action on an ordinary question: the agent chooses. */
+  letAgentDecide: string;
+  /** Shown in place of that action once an agent was asked to decide. */
+  agentDeciding: string;
   submitting: string;
   other: string;
   deadlineLabel: string;
@@ -87,6 +115,8 @@ export const defaultHumanInputFormMessages = (t: OpenGeniText): HumanInputFormMe
   submit: t("humanInputModel.sendAnswers"),
   submitOne: t("humanInputModel.sendAnswer"),
   skip: t("humanInputModel.skip"),
+  letAgentDecide: t("humanInputModel.letTheAgentDecide"),
+  agentDeciding: t("humanInputModel.yourAgentIsDeciding"),
   submitting: t("humanInputModel.submitting"),
   other: t("humanInputModel.other"),
   deadlineLabel: t("humanInputModel.expires"),
