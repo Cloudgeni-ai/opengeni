@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   createMemoryRecordingChunkStore,
   RecordingUploader,
@@ -608,6 +609,56 @@ describe("useVoiceInput: one request", () => {
     expect(hook.result.current.status).toBe("error");
     expect(hook.result.current.error).toBe("too_large");
     await hook.unmount();
+  });
+
+  test("an EU-only refusal (422 region_restricted) is a region error, with or without details", async () => {
+    for (const details of [{ code: "region_restricted" }, undefined]) {
+      installMediaMocks();
+      let calls = 0;
+      const refusal = new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          error: {
+            status: 422,
+            code: "region_restricted",
+            message: "Not supported in EU",
+            retryable: false,
+            outcomeUnknown: false,
+            ...(details ? { details } : {}),
+          },
+        }),
+        { mutation: true },
+      );
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async () => {
+                calls += 1;
+                throw refusal;
+              },
+            },
+            workspaceId: "ws-1",
+            capability: resumableCapability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+          }),
+        undefined,
+      );
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      await act(async () => {
+        hook.result.current.stop();
+        await settle();
+      });
+      expect(calls).toBe(1);
+      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.error).toBe("region_restricted");
+      await hook.unmount();
+    }
   });
 
   test("permission denial is controlled and a cancelled start stays cancelled", async () => {
