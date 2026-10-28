@@ -101,9 +101,11 @@ copied: `personalWorkspaceExtensionMcpServers`
 (`packages/core/src/domain/personal-workspace-connectors.ts`) derives them on
 every catalog read, session create, approval-policy read and worker claim.
 
-- A curated catalog connector uses its catalog definition. A custom MCP uses
-  the origin workspace's enabled capability whose connection reference matches
-  the connection. Workspace-held credential headers, installation config and
+- A curated catalog connector uses its catalog definition; the origin
+  workspace's installation config does not follow. A custom MCP uses the
+  origin workspace's enabled capability whose connection reference matches the
+  connection, including that workspace's tool settings for it (allowed tools,
+  timeout, caching and approvals). Workspace-held credential headers and
   host-authority references never follow; the carried server always binds the
   owner's own subject-scoped account.
 - It applies only in the subject's canonical Personal workspace, only to that

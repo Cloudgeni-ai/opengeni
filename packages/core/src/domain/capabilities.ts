@@ -1288,6 +1288,23 @@ export async function settingsWithEnabledCapabilityMcpServers(
 }
 
 /**
+ * Target ids a live fence could still find among a Personal workspace's
+ * carried connectors: connector ids nothing else resolved. Account route ids
+ * (`mcpAccountRouteId`) always arrive beside their canonical connector id, and
+ * Codex Apps resolves on its own, so neither is a candidate.
+ */
+export function carriedConnectorCandidateIds(
+  serverIds: Iterable<string>,
+  resolvedIds: Iterable<string>,
+): string[] {
+  const resolved = new Set(resolvedIds);
+  return [...serverIds].filter(
+    (id) =>
+      !resolved.has(id) && id !== CODEX_APPS_MCP_SERVER_ID && !/^account-[0-9a-f]{64}$/u.test(id),
+  );
+}
+
+/**
  * `settingsWithEnabledCapabilityMcpServers` for a live target fence: only the
  * rows that can produce `serverIds`. That is the capability installations that
  * produced them at preparation plus any catalog item explicitly claiming one of
@@ -1319,10 +1336,20 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     })
   ).filter((server) => serverIds.has(server.id));
   options.signal?.throwIfAborted();
+  const apiIntegrations = (
+    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
+  ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
+  options.signal?.throwIfAborted();
   // The fence re-derives a Personal workspace's carried connectors live: a
-  // lost origin membership or removed connection drops them here too.
-  const resolvedIds = new Set([...settings.mcpServers, ...enabled].map((server) => server.id));
-  if ([...serverIds].some((id) => !resolvedIds.has(id))) {
+  // lost origin membership or removed connection drops them here too. Only a
+  // connector id nothing above resolved can be a carried one, so a fence whose
+  // connectors all resolved here (every shared-workspace fence) reads nothing
+  // more.
+  const unresolved = carriedConnectorCandidateIds(serverIds, [
+    ...[...settings.mcpServers, ...enabled].map((server) => server.id),
+    ...apiIntegrations.map((integration) => integration.serverId),
+  ]);
+  if (unresolved.length > 0) {
     enabled.push(
       ...(
         await personalWorkspaceExtensionMcpServers(db, {
@@ -1340,10 +1367,6 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     );
     options.signal?.throwIfAborted();
   }
-  const apiIntegrations = (
-    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
-  ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
-  options.signal?.throwIfAborted();
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
       ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })

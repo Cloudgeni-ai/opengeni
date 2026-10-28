@@ -10,10 +10,14 @@ import {
   listEnabledMcpCapabilityServers,
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
+import { CODEX_APPS_MCP_SERVER_ID } from "@opengeni/codex";
 import {
   buildCapabilityCatalog,
+  carriedConnectorCandidateIds,
   settingsWithEnabledCapabilityMcpServers,
+  settingsWithEnabledCapabilityMcpServersForTargets,
 } from "../src/domain/capabilities";
+import { mcpAccountRouteId } from "../src/domain/mcp-account-bindings";
 import { freezeConnectionAccounts } from "../src/domain/personal-connection-delegations";
 import { getConnectorToolPermissions } from "../src/domain/connector-tool-permissions";
 import { acceptSessionUserMessageWithOutcome } from "../src/domain/sessions";
@@ -626,4 +630,49 @@ test("each carried connector needs the policy key its own setup in Personal woul
       where workspace_id = ${f.team} and capability_id = ${gmail.id}`;
     await sql`delete from capability_catalog_items where id = ${gmail.id}`;
   }
+}, 60_000);
+
+test("the live tool-call fence finds carried connectors only where something is unresolved", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const fence = async (workspaceId: string, serverIds: string[]) =>
+    ids(
+      (
+        await settingsWithEnabledCapabilityMcpServersForTargets(client.db, workspaceId, settings, {
+          subjectId: f.mia,
+          accountId: f.accountId,
+          serverIds,
+          capabilityIds: [],
+        })
+      ).mcpServers,
+    );
+  // A gateway fence names canonical connector ids beside their account routes.
+  const targets = [
+    f.custom.serverId,
+    mcpAccountRouteId(f.custom.serverId, f.connections.miaAcme),
+    f.curated.serverId,
+    mcpAccountRouteId(f.curated.serverId, f.connections.miaLinear),
+    CODEX_APPS_MCP_SERVER_ID,
+  ];
+  expect(await fence(f.miaPersonal, targets)).toEqual(
+    [f.custom.serverId, f.curated.serverId].sort(),
+  );
+  // Removed from the origin workspace, the same fence resolves nothing carried.
+  await sql`delete from workspace_memberships
+    where workspace_id = ${f.team} and subject_id = ${f.mia}`;
+  try {
+    expect(await fence(f.miaPersonal, targets)).toEqual([]);
+  } finally {
+    await sql`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${f.accountId}, ${f.team}, ${f.mia})`;
+  }
+  // In the shared workspace every connector resolves from its own rows, so the
+  // fence never looks for carried connectors there.
+  const teamResolved = await fence(f.team, targets);
+  expect(teamResolved).toEqual([f.custom.serverId, f.curated.serverId].sort());
+  expect(carriedConnectorCandidateIds(targets, teamResolved)).toEqual([]);
+  expect(carriedConnectorCandidateIds(targets, [])).toEqual([
+    f.custom.serverId,
+    f.curated.serverId,
+  ]);
 }, 60_000);
