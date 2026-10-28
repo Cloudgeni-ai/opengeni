@@ -165,7 +165,7 @@ test("re-runs the newest deferred main SHA on the main CI cadence", () => {
 });
 
 test("retries the newest full main run's failed jobs once", () => {
-  const run = (id: number, h: number, extra: Partial<MainRun> = {}): MainRun => ({
+  const fullRun = (id: number, h: number, extra: Partial<MainRun> = {}): MainRun => ({
     id,
     headSha: `${id}`.padStart(40, "b"),
     runAttempt: 2,
@@ -175,16 +175,16 @@ test("retries the newest full main run's failed jobs once", () => {
     versionMerge: false,
     ...extra,
   });
-  const deferred = run(4, 0.1, { runAttempt: 1, conclusion: "cancelled" });
-  expect(retryableMainRun([deferred, run(3, 0.5)])).toBe(3);
+  const deferred = fullRun(4, 0.1, { runAttempt: 1, conclusion: "cancelled" });
+  expect(retryableMainRun([deferred, fullRun(3, 0.5)])).toBe(3);
   // Only the newest full run: an older failure was superseded.
-  expect(retryableMainRun([run(3, 0.5, { conclusion: "success" }), run(2, 1.5)])).toBeNull();
+  expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "success" }), fullRun(2, 1.5)])).toBeNull();
   // Once only: a failure on the retry stays failed.
-  expect(retryableMainRun([run(3, 0.5, { runAttempt: 3 })])).toBeNull();
+  expect(retryableMainRun([fullRun(3, 0.5, { runAttempt: 3 })])).toBeNull();
   // Not while it runs, not after success or cancellation, not for Version merges.
-  expect(retryableMainRun([run(3, 0.5, { status: "in_progress", conclusion: null })])).toBeNull();
-  expect(retryableMainRun([run(3, 0.5, { conclusion: "success" })])).toBeNull();
-  expect(retryableMainRun([run(3, 0.5, { conclusion: "cancelled" })])).toBeNull();
-  expect(retryableMainRun([run(3, 0.5, { runAttempt: 1, versionMerge: true })])).toBeNull();
+  expect(retryableMainRun([fullRun(3, 0.5, { status: "in_progress", conclusion: null })])).toBeNull();
+  expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "success" })])).toBeNull();
+  expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "cancelled" })])).toBeNull();
+  expect(retryableMainRun([fullRun(3, 0.5, { runAttempt: 1, versionMerge: true })])).toBeNull();
   expect(retryableMainRun([deferred])).toBeNull();
 });
