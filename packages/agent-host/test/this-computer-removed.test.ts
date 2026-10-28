@@ -70,7 +70,8 @@ function computer(options: {
       `  'service start') rm -f "${paused}" ;;`,
       "  --version) echo 'opengeni-agent 0.1.109' ;;",
       `  *'connect --non-interactive'*) echo "token=$OPENGENI_ENROLL_TOKEN" >> "${calls}"; echo "  c1  ${SERVER}  workspace=$(cat "${enrollIn}")  agent=${options.keepEnrollment ? "a1" : "a2"}" > "${list}" ;;`,
-      "  *run) sleep 30 ;;",
+      // `exec`, so stopping the agent stops the sleep and leaves no process behind.
+      "  *run) exec sleep 30 ;;",
       "  *) exit 99 ;;",
       "esac",
       "",
