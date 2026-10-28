@@ -3119,13 +3119,12 @@ API, tests it with ordinary `ci.yml` planned from the candidate's base, and land
 each member as one squash commit through the pull request merge API after checking
 that every landed tree equals the tested tree. Main runs the full suite on a
 cadence (`scripts/ci/main-approval-superseded.ts`); that run, not a batch, is the
-release gate. See [merge batcher](merge-batcher.md); historical native-queue
-measurements remain in [merge queue](merge-queue.md).
+release gate. See [merge batcher](merge-batcher.md) and [main CI](main-ci.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
-| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
+| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`main-ci.md`](main-ci.md) |
 | Merge batcher and batch CI | `scripts/batcher/`, `.github/workflows/merge-batcher.yml`, `.github/workflows/ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 

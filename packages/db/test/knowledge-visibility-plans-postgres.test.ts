@@ -253,9 +253,12 @@ test("sparse and absent collection plans do not materialize unrelated members", 
   try {
     for (const mode of ["force_custom_plan", "force_generic_plan"]) {
       for (const groupId of [f.groupId, crypto.randomUUID()]) {
-        const buffers: number[] = [];
+        // Each reader runs twice and its smaller count is kept: a first read can
+        // also load catalog and cold pages, which on a busy CI database made the
+        // second reader look 70% more expensive than the first.
+        const buffers = [Infinity, Infinity];
         let previous: Awaited<ReturnType<typeof read>> | undefined;
-        for (const baseline of [true, false]) {
+        for (const baseline of [true, false, true, false]) {
           notices.length = 0;
           const result = await instrument.begin(async (tx) => {
             await tx`LOAD 'auto_explain'`;
@@ -279,7 +282,11 @@ test("sparse and absent collection plans do not materialize unrelated members", 
             p["Query Text"].includes("WITH candidate_rows AS MATERIALIZED"),
           );
           expect(main).toBeDefined();
-          buffers.push(main.Plan["Shared Hit Blocks"] + main.Plan["Shared Read Blocks"]);
+          const reader = baseline ? 0 : 1;
+          buffers[reader] = Math.min(
+            buffers[reader]!,
+            main.Plan["Shared Hit Blocks"] + main.Plan["Shared Read Blocks"],
+          );
         }
         // Relative budget detects whole-scope materialization, not universal planner behavior.
         expect(buffers[1]!).toBeLessThanOrEqual(buffers[0]! * 1.2);

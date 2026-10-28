@@ -23,6 +23,14 @@ test("the summary prompt asks for the notes in the agreed order, with the mentio
   expect(prompt).toContain("If that revision is above 0");
 });
 
+test("the notes are in the meeting's language, headings included", () => {
+  // The headings are named in English for the agent; a meeting in another
+  // language gets them in its own.
+  expect(meetingSummaryPrompt({ recordingId: id, title: null })).toContain(
+    'Write all of it in the language the meeting was held in, the headings and "None" too.',
+  );
+});
+
 test("a meeting without a title is named plainly", () => {
   expect(meetingSummaryPrompt({ recordingId: id, title: "  " })).toStartWith(
     `Write the notes for this meeting (meeting id ${id})`,

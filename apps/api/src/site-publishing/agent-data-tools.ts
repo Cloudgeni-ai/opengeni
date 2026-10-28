@@ -1,12 +1,10 @@
 import {
   siteHostname,
-  permissionsRequiredByFirstPartyTools,
   type FirstPartyMcpToolName,
-  type Permission,
   type SiteLimitProfileKind,
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
-import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteRuntimeAgentConversation,
@@ -42,38 +40,27 @@ export const SITE_AGENT_DATA_TOOLS = Object.freeze([
 export const SITE_AGENT_SQL_TOOLS = Object.freeze([
   "site_sql_run",
 ] as const satisfies readonly FirstPartyMcpToolName[]);
-export const SITE_AGENT_MEMBER_SQL_TOOLS = Object.freeze([
-  "site_sql_query",
-] as const satisfies readonly FirstPartyMcpToolName[]);
 
 export const SITE_AGENT_OTHER_SITE_MESSAGE = "This Site's assistant can only use this Site's data";
 export const SITE_AGENT_MANAGEMENT_MESSAGE =
   "This Site's assistant can use the Site's data, not manage the Site";
 
-/** The data tools one viewer's Site agent conversation gets, within the deployment's tools. */
+/**
+ * The data tools one visitor's Site agent conversation gets, within the
+ * deployment's tools. Members never get this profile (their conversation is an
+ * ordinary chat), so it is the same for every visitor kind.
+ */
 export function siteAgentDataToolNames(input: {
-  viewerKind: SiteRuntimeConversationViewerKind;
   /** Site SQL is offered here and turned on for this Site. */
   siteSql: boolean;
   /** The deployment's first-party tool allowlist. */
   allowed: readonly string[];
-  /** Live member ceiling; omitted only where the native caller filters tools itself. */
-  memberPermissions?: readonly Permission[];
 }): FirstPartyMcpToolName[] {
   const names: FirstPartyMcpToolName[] = [
     ...SITE_AGENT_DATA_TOOLS,
     ...(input.siteSql ? SITE_AGENT_SQL_TOOLS : []),
-    ...(input.siteSql && input.viewerKind === "member" ? SITE_AGENT_MEMBER_SQL_TOOLS : []),
   ];
-  return names.filter(
-    (name) =>
-      input.allowed.includes(name) &&
-      (input.viewerKind !== "member" ||
-        input.memberPermissions === undefined ||
-        permissionsRequiredByFirstPartyTools([name]).every((permission) =>
-          hasPermission(input.memberPermissions!, permission),
-        )),
-  );
+  return names.filter((name) => input.allowed.includes(name));
 }
 
 /** Whether Site SQL is offered on this deployment and turned on for the Site. */
@@ -87,19 +74,15 @@ export async function siteAgentSiteSqlOn(
   return database?.enabled === true;
 }
 
-/** The data tools for a new conversation of this viewer on this Site. */
+/** The data tools for a new visitor conversation on this Site. */
 export async function siteAgentDataToolsForStart(
   deps: Pick<ApiRouteDeps, "db" | "settings">,
   scope: { accountId: string; workspaceId: string },
   siteId: string,
-  viewerKind: SiteRuntimeConversationViewerKind,
-  memberPermissions?: readonly Permission[],
 ): Promise<FirstPartyMcpToolName[]> {
   return siteAgentDataToolNames({
-    viewerKind,
     siteSql: await siteAgentSiteSqlOn(deps, scope, siteId),
     allowed: resolveFirstPartyMcpToolPolicy(deps.settings).allowed,
-    ...(memberPermissions === undefined ? {} : { memberPermissions }),
   });
 }
 

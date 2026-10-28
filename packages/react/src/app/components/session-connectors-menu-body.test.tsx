@@ -9,7 +9,10 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SessionToolSelection } from "./pickers";
 import { useConnectionAccounts } from "./capabilities/use-connection-accounts";
 import { getComposerSendBlocker } from "../lib/composer-send-blocking";
-import { connectionAccountLabel } from "./capabilities/connection-account-picker";
+import {
+  ConnectionAccountPicker,
+  connectionAccountLabel,
+} from "./capabilities/connection-account-picker";
 import type { ConnectionAccountChoices } from "./capabilities/session-connection-accounts";
 
 let container: HTMLDivElement;
@@ -441,6 +444,49 @@ test("transient account failure still offers Retry in the composer menu", async 
       .click(),
   );
   expect(retry).toHaveBeenCalledTimes(1);
+});
+
+test("your own accounts without an identity read apart: where each was added, then when", async () => {
+  const own = (id: string, workspaceId: string, createdAt: string) =>
+    ({
+      id,
+      subjectId: "me",
+      workspaceId,
+      createdAt,
+      metadata: {},
+    }) as unknown as ConnectionMetadata;
+  const group = {
+    serverId: "tools",
+    name: "Team tools",
+    accounts: [
+      own("here-1", "shared", "2026-10-01T09:00:00Z"),
+      own("here-2", "shared", "2026-10-20T09:00:00Z"),
+      own("personal-1", "personal", "2026-10-02T09:00:00Z"),
+    ],
+  };
+  await act(async () =>
+    root.render(
+      <ConnectionAccountPicker
+        presentation="dialog"
+        groups={[group]}
+        choices={{}}
+        onChoose={() => {}}
+        workspaceId="shared"
+        workspaces={[
+          { id: "shared", name: "Acme", kind: "shared" },
+          { id: "personal", name: "Mia", kind: "personal" },
+        ]}
+      />,
+    ),
+  );
+  const labels = [...container.querySelectorAll('[role="switch"]')].map((node) =>
+    node.getAttribute("aria-label"),
+  );
+  expect(labels).toHaveLength(3);
+  expect(new Set(labels).size).toBe(3);
+  expect(labels[0]).toMatch(/^Team tools account · Connected .+, Only me$/);
+  expect(labels[1]).toMatch(/^Team tools account · Connected .+, Only me$/);
+  expect(labels[2]).toBe("Team tools account, Only me · From Personal workspace");
 });
 
 test("account labels use readable metadata and never fall back to a raw connection ID", () => {

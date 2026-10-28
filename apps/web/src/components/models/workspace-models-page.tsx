@@ -723,7 +723,15 @@ export function WorkspaceModelsPageBody({
     );
   } else if (view === "connect" || view === "connect-workspace") {
     // Owners and admins connect for the organization and choose the
-    // workspaces on the next step.
+    // workspaces on the next step. An organization key can't reach a
+    // Personal workspace, so there a key goes to this workspace instead,
+    // like a member's own key here.
+    const workspaceKeys: readonly GatewayId[] =
+      workspacePage && personal && canManageWorkspaceKeys
+        ? PERSONAL_WORKSPACE_KEYS
+        : NO_WORKSPACE_KEYS;
+    const pickerGateways = { ...orgGateways };
+    for (const id of workspaceKeys) pickerGateways[id] = gateways[id];
     page = (
       <ConnectPickerPage
         target="organization"
@@ -732,11 +740,20 @@ export function WorkspaceModelsPageBody({
         codexAvailable
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
-        gateways={orgGateways}
+        gateways={pickerGateways}
+        workspaceKeys={workspaceKeys}
         personal={workspacePage && personal}
         onClose={backToList}
-        onPick={(provider) => nav.openView(`connect-org:${provider}`)}
-        onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
+        onPick={(provider) =>
+          nav.openView(
+            (workspaceKeys as readonly string[]).includes(provider)
+              ? `connect:${provider}`
+              : `connect-org:${provider}`,
+          )
+        }
+        onOpenConnected={(provider) =>
+          nav.openAccount(accountKey("gateway", provider, !workspaceKeys.includes(provider)))
+        }
       />
     );
   } else if (
@@ -1755,6 +1772,19 @@ type ConnectChoice =
   | "openai"
   | "azure_openai";
 
+const NO_WORKSPACE_KEYS: readonly GatewayId[] = [];
+/**
+ * The keys a Personal workspace holds itself. Organization keys can't reach a
+ * Personal workspace, so on its page these connect for it. OpenAI and Azure
+ * OpenAI have no Models key of a workspace's own.
+ */
+const PERSONAL_WORKSPACE_KEYS: readonly WorkspaceGatewayId[] = [
+  "anthropic",
+  "openrouter",
+  "opper",
+  "vercel",
+];
+
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
  * opens that provider's own connect step; a provider that is already
@@ -1770,6 +1800,7 @@ export function ConnectPickerPage({
   grok,
   claude = "hidden",
   gateways,
+  workspaceKeys = NO_WORKSPACE_KEYS,
   personal = false,
   backLabel = "Models",
   onClose,
@@ -1791,6 +1822,8 @@ export function ConnectPickerPage({
   grok: "available" | "not_enabled" | "not_in_personal" | "hidden";
   claude?: "available" | "hidden";
   gateways?: Partial<Record<GatewayId, ProviderConnection>> | undefined;
+  /** Keys that connect for this workspace, not the organization. */
+  workspaceKeys?: readonly GatewayId[];
   /** In a Personal workspace, organization keys serve shared workspaces only. */
   personal?: boolean;
   backLabel?: string;
@@ -1844,7 +1877,11 @@ export function ConnectPickerPage({
               id === "anthropic" || id === "claude_subscription"
                 ? gateways[id]!.config.summary
                 : providerPaymentSummary(id, gateways[id]!.config.title),
-            note: keysSkipPersonal ? "Not used in Personal workspaces" : undefined,
+            note: !keysSkipPersonal
+              ? undefined
+              : workspaceKeys.includes(id)
+                ? "For your Personal workspace"
+                : "Not used in Personal workspaces",
             connected: gateways[id]!.connected,
           }),
         )
