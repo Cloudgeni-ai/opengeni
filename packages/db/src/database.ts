@@ -227,6 +227,11 @@ export type ManagedUserProfile = {
   id: string;
   name: string | null;
   email: string;
+  /**
+   * The host has verified that this person controls `email`. Only verified
+   * addresses are bound for Site SQL's `:viewer_email`; omitted means unknown.
+   */
+  emailVerified?: boolean;
 };
 
 /** Host identity projection used by organization administration rosters. */
@@ -555,8 +560,10 @@ const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
 
 /**
  * Run a pool query again after its connection was refused with 28P01, on the
- * pool's next password candidate (see `withDatabaseAuthenticationRetry`): only
- * while another distinct candidate exists, at most once per candidate.
+ * password candidate the pool then selects (see
+ * `withDatabaseAuthenticationRetry`): only while the pool selects another
+ * password than the refused login used, under a small hard cap; a single
+ * password fails fast.
  *
  * Repeating is safe: PostgreSQL raises 28P01 only while authenticating a NEW
  * connection, before the server has run any statement on it. postgres.js
@@ -564,7 +571,7 @@ const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
  * "initial" query or BEGIN); the queries queued behind it go to the next
  * attempt, which asks for the password again. So nothing the rejected
  * operation asked for has run, and running it again cannot apply anything
- * twice. At most one attempt per candidate; the last 28P01 surfaces unchanged.
+ * twice. The last 28P01 surfaces unchanged.
  */
 function hasDriverQueryMode(query: unknown): boolean {
   const state = query as {
@@ -780,9 +787,10 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     // postgres.js accepts a function here (its own default is one) but types
     // the option as a number.
     max_lifetime: maxLifetime as unknown as number,
-    // Asked on every connection attempt: re-reads the files, then returns the
-    // pool's selected candidate.
-    ...(credential ? { pass: () => credential.password() } : {}),
+    // Asked on every login attempt: re-reads the files, then returns the
+    // pool's selected candidate and records it for that login (our postgres.js
+    // patch passes the login's identity and tags its 28P01 with it).
+    ...(credential ? { pass: (login: object) => credential.password(login) } : {}),
     // postgres.js grows one pool-wide reconnect delay after every refused or
     // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
     // After a restart or failover that left the server refusing connections

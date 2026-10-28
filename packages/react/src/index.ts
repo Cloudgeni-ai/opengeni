@@ -661,6 +661,7 @@ export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
   ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
@@ -811,7 +812,7 @@ export { SandboxFiles } from "./components/sandbox-files";
 export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";
 export type { DesktopViewerProps } from "./components/desktop-viewer";
-export { WorkspaceDock } from "./components/workspace-dock";
+export { WorkspaceDock, useWorkspacePanelOwnsExpand } from "./components/workspace-dock";
 export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
 
 // The embeddable dock "brain" (Workbench v2, M4): the whole session workspace as
@@ -918,3 +919,11 @@ export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+export { InteractiveAnswer, type InteractiveAnswerProps } from "./components/interactive-answer";
+export {
+  browserInteractiveAnswerStore,
+  INTERACTIVE_ANSWER_FENCE,
+  InteractiveAnswerProvider,
+  type InteractiveAnswerHost,
+  type InteractiveAnswerStore,
+} from "./interactive-answer-model";

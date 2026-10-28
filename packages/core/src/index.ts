@@ -14,6 +14,7 @@ export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
+export * from "./domain/meeting-summary";
 export * from "./domain/voice-input-billing";
 export * from "./domain/web-search-billing";
 export * from "./domain/realtime-voice-billing";
@@ -124,15 +125,15 @@ export * from "./model-call";
 
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
+export * from "./domain/mcp-credential-content-flow";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
 export * from "./domain/encryption-key";
 export * from "./domain/vaults";
+export * from "./domain/credential-profiles";
 export * from "./rigs";
-export * from "./domain/automations";
-export * from "./domain/pr-review";
 export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
@@ -146,6 +147,7 @@ export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
+export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";

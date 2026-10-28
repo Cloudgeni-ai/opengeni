@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { readFileSync } from "node:fs";
 import {
   CREDIT_GRANT_CLASSES,
   PRODUCT_LIFECYCLE_FACT_ATTRIBUTES,
@@ -35,25 +34,9 @@ import {
   revokeConnection,
   saveSlackBotUserLink,
   upsertOrganizationModelProviderConnection,
+  withSessionRlsActorContext,
   type DbClient,
 } from "../src";
-import { upsertOrganizationClaudeSubscription } from "./fixtures/legacy-claude/accounts";
-import postgres from "postgres";
-import {
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
-  SUBSCRIPTION_RETIREMENT_MIGRATION,
-} from "../src/runtime-posture";
-
-// The model-setup facts are written through the legacy SuperGrok and Claude
-// connect paths, which run only before their drained subscription-core
-// cutovers: the ledger records those migrations, and the retirement migration
-// that requires them, without running them. Removed with the legacy runtimes.
-const LEGACY_SUBSCRIPTION_CUTOVERS = [
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  SUBSCRIPTION_RETIREMENT_MIGRATION,
-];
-import { upsertCodexSubscriptionCredential } from "./fixtures/legacy-codex";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanExactLoginBindingForAuthUser,
@@ -62,21 +45,23 @@ import {
 } from "../src/canonical-human-identities";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
+import { SUBSCRIPTION_CORE_CLAUDE } from "../src/subscription-core-claude-adapter";
+import { SUBSCRIPTION_CORE_CODEX } from "../src/subscription-core-codex-adapter";
+import { SUBSCRIPTION_CORE_XAI } from "../src/subscription-core-xai-adapter";
+import { connectSubscriptionCoreConnection } from "../src/subscription-core/connections";
+import type { SubscriptionCoreProvider } from "../src/subscription-core/provider";
+
+const SUBSCRIPTION_PROVIDERS = {
+  codex: SUBSCRIPTION_CORE_CODEX,
+  xai: SUBSCRIPTION_CORE_XAI,
+  claude: SUBSCRIPTION_CORE_CLAUDE,
+} as Record<"codex" | "xai" | "claude", SubscriptionCoreProvider>;
 
 // Replaying the full migration ledger is slow and grows with every migration.
 setDefaultTimeout(180_000);
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const CONSUMER = "lifecycle-facts-test";
-const migrationText = readFileSync(
-  new URL("../drizzle/0532_product_lifecycle_fact_export.sql", import.meta.url),
-  "utf8",
-);
-const usageAnalyticsMigrationText = readFileSync(
-  new URL("../drizzle/0565_usage_analytics_presence_and_facts.sql", import.meta.url),
-  "utf8",
-);
 
 let owned: OwnerMigratedTestDatabase | null = null;
 // The opengeni_app runtime role: FORCE RLS applies, exactly like production.
@@ -204,19 +189,8 @@ beforeAll(async () => {
   }
   // Migrate as the NOSUPERUSER NOBYPASSRLS owner so the capture triggers run
   // under FORCE RLS exactly as they do in production.
-  const ledger = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
-  try {
-    await ledger`create table if not exists schema_migrations (
-      name text primary key, applied_at timestamptz not null default now())`;
-    await ledger`insert into schema_migrations (name)
-      select unnest(${LEGACY_SUBSCRIPTION_CUTOVERS}::text[])`;
-  } finally {
-    await ledger.end();
-  }
   await migrate(owned.ownerUrl);
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
-  // The legacy connect paths run before the retirement, under that release's grants.
-  await restorePreRetirementGrants(owned.adminUrl);
   const appUrl = new URL(owned.ownerUrl);
   appUrl.username = "opengeni_app";
   appUrl.password = owned.appPassword;
@@ -230,9 +204,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("product lifecycle facts (real PostgreSQL)", () => {
-  test("the migration is rolling and its fixed lists match the contract", async () => {
-    expect(migrationText.split("\n", 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(usageAnalyticsMigrationText.split("\n", 1)[0]).toBe("-- deployment-mode: rolling");
+  test("the database's fixed lists match the contract", async () => {
     if (!owned) return;
     for (const type of PRODUCT_LIFECYCLE_FACT_TYPES) {
       const allowed: readonly string[] = PRODUCT_LIFECYCLE_FACT_ATTRIBUTES[type];
@@ -437,26 +409,30 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     const person = `user:setup-${crypto.randomUUID()}`;
     const target = await workspace("setup", person);
 
-    const codex = await upsertCodexSubscriptionCredential(client.db, {
-      ...target,
-      credentialEncrypted: remember(`codex-ciphertext-${crypto.randomUUID()}`),
-      chatgptAccountId: remember(`chatgpt-${crypto.randomUUID()}`),
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 60_000),
-      lastRefreshAt: new Date(),
-      accountEmail: remember(`codex-${crypto.randomUUID()}@example.test`),
-      connectedBySubjectId: person,
+    const subscription = (
+      provider: "codex" | "xai" | "claude",
+      scope: { accountId: string; workspaceId: string | null; subjectId: string },
+    ) =>
+      withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+        connectSubscriptionCoreConnection(client!.db, SUBSCRIPTION_PROVIDERS[provider], {
+          ...scope,
+          credentialEncrypted: remember(`${provider}-ciphertext-${crypto.randomUUID()}`),
+          providerAccountId: remember(`${provider}-account-${crypto.randomUUID()}`),
+          providerSubjectId: remember(`${provider}-person-${crypto.randomUUID()}`),
+          planType: "pro",
+          providerState: {},
+          expiresAt: new Date(Date.now() + 60_000),
+          lastRefreshAt: new Date(),
+          accountEmail: remember(`${provider}-${crypto.randomUUID()}@example.test`),
+          label: remember(`Lifecycle ${provider} label`),
+          connectedBySubjectId: scope.subjectId,
+        }),
+      );
+    expect(await subscription("codex", { ...target, subjectId: person })).toMatchObject({
+      kind: "connected",
     });
-    expect(codex).toBeDefined();
-    await createXaiSubscriptionCredential(client.db, {
-      ...target,
-      subjectId: person,
-      encryptionKey: Buffer.alloc(32, 7),
-      secret: { version: 1, accessToken: remember(`xai-secret-${crypto.randomUUID()}`) },
-      providerAccountId: remember(`xai-account-${crypto.randomUUID()}`),
-      label: remember("Lifecycle xAI label"),
+    expect(await subscription("xai", { ...target, subjectId: person })).toMatchObject({
+      kind: "connected",
     });
     await upsertOrganizationModelProviderConnection(client.db, {
       organizationId: owner.organizationId,
@@ -478,23 +454,13 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
         expectedVersion: 0,
       });
     }
-    // 0598 retires the legacy Claude organization credential store; the
-    // canonical pool must still emit exactly the same content-free fact.
-    const providerAccountId = remember(crypto.randomUUID());
-    await upsertOrganizationClaudeSubscription(client.db, {
-      organizationId: owner.organizationId,
-      actorSubjectId: owner.subjectId,
-      encryptionKey: Buffer.alloc(32, 7),
-      providerAccountId,
-      secret: {
-        version: 1,
-        token: remember(`sk-ant-oat01-lifecycle-${crypto.randomUUID()}`),
-        identity: { accountUuid: providerAccountId, deviceId: remember("a".repeat(64)) },
-      },
-      label: null,
-      accountEmail: null,
-      expiresAt: null,
-    });
+    expect(
+      await subscription("claude", {
+        accountId: owner.organizationId,
+        workspaceId: null,
+        subjectId: owner.subjectId,
+      }),
+    ).toMatchObject({ kind: "connected" });
     const models = [
       ...(await factsFor({ type: "model.connected", accountId: target.accountId })),
       ...(await factsFor({ type: "model.connected", accountId: owner.organizationId })),
@@ -944,5 +910,3 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     expect(await lifecycleRows()).toHaveLength(before);
   });
 });
-
-import { createXaiSubscriptionCredential } from "./fixtures/legacy-xai";

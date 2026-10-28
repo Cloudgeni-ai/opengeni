@@ -61,8 +61,6 @@ function scheduledTask(): ScheduledTask {
     },
     targetSessionId: null,
     reusableSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: now,

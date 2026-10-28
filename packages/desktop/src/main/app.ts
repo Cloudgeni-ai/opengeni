@@ -11,7 +11,6 @@ import {
   Menu,
   nativeTheme,
   net,
-  Notification,
   powerMonitor,
   safeStorage,
   screen,
@@ -53,7 +52,6 @@ import {
   type DesktopAppShotPermissionId,
   type DesktopAppShotResult,
   type DesktopCommand,
-  type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
@@ -62,6 +60,9 @@ import {
 } from "../contract";
 import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
+import type { Dictation } from "./dictation";
+import { createDesktopDictation } from "./dictation/electron";
+import { handleDictationIpc } from "./dictation/ipc";
 import { ComputerCapabilities, ComputerSettingsStore } from "./computer-capabilities";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
@@ -74,20 +75,15 @@ import {
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
-import {
-  MeetingDetection,
-  MeetingDetectionStore,
-  ownAppRoot,
-  promptText,
-  type MeetingPrompt,
-  type ShownPrompt,
-} from "./meeting-detection";
+import type { MeetingDetection } from "./meeting-detection";
+import { createMeetingDetection } from "./meeting-detection/electron";
+import { handleMeetingDetectionIpc } from "./meeting-detection/ipc";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
-import { handleSystemAudioIpc, SystemAudioCaptures, systemAudioUsable } from "./system-audio";
+import { handleSystemAudioIpc, SystemAudioCaptures } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { refuseAllPermissions } from "./web-permissions";
@@ -179,12 +175,12 @@ export class DesktopShell {
   private readonly inbox: InboxNotifier;
   /** The shortcut that sends the window in front into the composer. */
   private readonly appShots: AppShots;
+  /** Dictation from anywhere: shortcuts that type speech where the person types. */
+  private readonly dictation: Dictation;
   /** Other apps' audio for the web app's meeting recorder. */
   private readonly systemAudio: SystemAudioCaptures;
   /** Offers to record when a call starts, and to stop when it ends. */
   private readonly meetings: MeetingDetection;
-  /** Pages that report whether they record, cleared when they navigate or close. */
-  private readonly meetingPages = new WeakSet<WebContents>();
   /** What Opengeni may do on this computer: the This computer settings page. */
   private readonly capabilities: ComputerCapabilities;
   private tray: AppTray | null = null;
@@ -369,19 +365,22 @@ export class DesktopShell {
         ended: DESKTOP_IPC.systemAudioEnded,
       },
     });
-    this.meetings = new MeetingDetection({
+    this.meetings = createMeetingDetection({
       helperPath: config.systemAudioHelperPath ?? null,
-      available: systemAudioUsable(config.systemAudioHelperPath),
-      own: {
-        pid: process.pid,
-        bundlePrefix: config.appId,
-        root: ownAppRoot(process.execPath, process.platform),
-        platform: process.platform,
+      appId: config.appId,
+      dataDir: app.getPath("userData"),
+      logDir: app.getPath("logs"),
+      iconPath: config.appIconPath,
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
       },
-      store: new MeetingDetectionStore(app.getPath("userData")),
-      notify: (prompt, act) => this.showMeetingPrompt(prompt, act),
-      request: (request) => this.deliverMeetingRequest(request),
-      onChange: () => this.broadcast(DESKTOP_IPC.meetingDetectionChanged),
+      // The account the window shows records; while its page loads, the choice waits for it.
+      chooseTarget: (pages) => {
+        const accountId = this.window?.accountId;
+        const shown = accountId ? this.window?.contentsFor(accountId) : null;
+        return pages.find((page) => page === shown);
+      },
       log: (message, caught) => console.warn(message, caught ?? ""),
     });
     this.appShots = new AppShots({
@@ -409,6 +408,30 @@ export class DesktopShell {
       deliver: (result) => this.deliverAppShot(result),
       onChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
       log: (message, caught) => console.warn(message, caught),
+    });
+    this.dictation = createDesktopDictation({
+      productName: config.productName,
+      dataDir: app.getPath("userData"),
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
+      },
+      guide: (id, granted) => {
+        if (id && granted) this.permissionGuide.granted();
+        else if (id) this.permissionGuide.show(id);
+        else this.permissionGuide.hide();
+      },
+      // The account the window shows records, when its page listens.
+      chooseTarget: (targets) => {
+        const accountId = this.window?.accountId;
+        const shown = accountId ? this.window?.contentsFor(accountId) : null;
+        return targets.find((target) => target === shown);
+      },
+      log: (message, caught) => console.warn(message, caught ?? ""),
+      wake: () => {
+        const active = this.store.active();
+        if (!this.window && active && !active.signedOut) this.openWindow(false);
+      },
     });
     this.inbox = new InboxNotifier({
       accounts: () => {
@@ -485,6 +508,14 @@ export class DesktopShell {
     this.registerIpc();
     this.appShots.start();
     this.meetings.start();
+    this.dictation.start();
+    // Dictation shortcuts work only while the app runs: it opens at login while they are on.
+    let dictating = this.dictation.enabled;
+    this.dictation.onChange(() => {
+      if (this.dictation.enabled === dictating) return;
+      dictating = this.dictation.enabled;
+      void this.refreshTray();
+    });
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -517,6 +548,7 @@ export class DesktopShell {
     app.on("will-quit", () => {
       this.appShots.stop();
       this.systemAudio.stopAll();
+      this.dictation.stop();
       this.meetings.stop();
       this.computer.shutdownNow();
     });
@@ -647,7 +679,8 @@ export class DesktopShell {
 
   // --- Window -------------------------------------------------------------------------------------
 
-  private openWindow(): void {
+  /** `show` false loads the account page without showing it (dictation from the menu bar). */
+  private openWindow(show = true): void {
     const window = new MainWindow(this.config, app.getPath("userData"), {
       connectComputer: (url) => this.handleUrl(url),
       navigated: (accountId, url) => this.rememberPath(accountId, url),
@@ -684,6 +717,7 @@ export class DesktopShell {
       flushMarks();
       if (measuring()) void recordMemory();
     });
+    if (!show) return;
     window.reveal();
     mark("window-shown");
   }
@@ -1083,7 +1117,6 @@ export class DesktopShell {
       baseUrl,
       ...(token ? { apiKey: token } : {}),
       fetch: ((input: string, init?: RequestInit) => net.fetch(input, init)) as never,
-      onDeprecation: false as const,
       apiContract: "compatible" as const,
     };
   }
@@ -1290,25 +1323,15 @@ export class DesktopShell {
       captures: this.systemAudio,
       allow: (event) => void this.senderAccount(event),
     });
-    handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());
-    handle(DESKTOP_IPC.meetingDetectionUpdate, (_account, change) => this.meetings.update(change));
-    ipcMain.on(DESKTOP_IPC.meetingDetectionRecording, (event, recording: unknown) => {
-      try {
-        this.senderAccount(event);
-      } catch {
-        return;
-      }
-      const page = event.sender;
-      if (!this.meetingPages.has(page)) {
-        this.meetingPages.add(page);
-        const id = page.id;
-        const end = () => this.meetings.setRecording(id, false);
-        page.once("destroyed", end);
-        page.on("did-start-navigation", (details) => {
-          if (details.isMainFrame && !details.isSameDocument) end();
-        });
-      }
-      this.meetings.setRecording(page.id, recording === true);
+    handleDictationIpc({
+      ipcMain,
+      dictation: this.dictation,
+      allow: (event) => void this.senderAccount(event),
+    });
+    handleMeetingDetectionIpc({
+      ipcMain,
+      detection: this.meetings,
+      allow: (event) => void this.senderAccount(event),
     });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
@@ -1356,46 +1379,6 @@ export class DesktopShell {
     if (!contents || contents.isDestroyed()) return;
     const send = () => {
       if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.appShotsCaptured, result);
-    };
-    if (contents.isLoading()) contents.once("did-finish-load", send);
-    else send();
-  }
-
-  /** A meeting notification: buttons on macOS, a click everywhere. */
-  private showMeetingPrompt(prompt: MeetingPrompt, act: () => void): ShownPrompt {
-    if (!Notification.isSupported()) return { close: () => {} };
-    const text = promptText(prompt, process.platform);
-    const banner = new Notification({
-      title: text.title,
-      body: text.body,
-      actions: [{ type: "button", text: text.action }],
-    });
-    let done = false;
-    const choose = () => {
-      if (done) return;
-      done = true;
-      act();
-    };
-    banner.on("click", choose);
-    banner.on("action", choose);
-    banner.show();
-    return {
-      close: () => {
-        done = true;
-        banner.close();
-      },
-    };
-  }
-
-  /** The person chose a meeting notification: the window comes up and the page acts. */
-  private deliverMeetingRequest(request: DesktopMeetingRequest): void {
-    app.focus({ steal: true });
-    this.reveal();
-    const accountId = this.window?.accountId;
-    const contents = accountId ? this.window?.contentsFor(accountId) : null;
-    if (!contents || contents.isDestroyed()) return;
-    const send = () => {
-      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.meetingDetectionRequest, request);
     };
     if (contents.isLoading()) contents.once("did-finish-load", send);
     else send();
@@ -1480,8 +1463,11 @@ export class DesktopShell {
           needsPermissions: false,
           missingPermissions: [],
         };
-    if (this.config.thisComputer && app.isPackaged) {
-      const change = this.computer.openAtLoginChange(summary.connected);
+    if (app.isPackaged) {
+      const change = this.computer.openAtLoginChange(
+        this.config.thisComputer && summary.connected,
+        this.dictation.enabled,
+      );
       if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the

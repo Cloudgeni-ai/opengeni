@@ -603,7 +603,6 @@ describe("core new-session draft hydration", () => {
           sandboxBackend: "selfhosted",
           targetSandboxId: crypto.randomUUID(),
           workingDir: "projects/opengeni",
-          variableSetId: crypto.randomUUID(),
           rigId: crypto.randomUUID(),
         },
       }),

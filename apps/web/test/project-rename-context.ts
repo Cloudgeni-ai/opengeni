@@ -128,4 +128,5 @@ const context = {
   resetSessionView: () => {},
 } as unknown as AppContextValue;
 export const useAppContext = () => context;
+export const useOptionalAppContext = () => context;
 export const useRail = () => ({ workspaceId, setDrawerOpen: () => {} });

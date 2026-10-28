@@ -240,8 +240,8 @@ function words(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Actions an MCP caller can complete: browser-only and retired ones are left out. */
-const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly && !entry.retired);
+/** Actions an MCP caller can complete: browser-only ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
 const DESCRIPTIONS = new Map(
   CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
 );
@@ -334,7 +334,6 @@ export function describeActionResult(id: string): CallToolResult {
   const entry = findAppAction(id);
   if (!entry) return failure(`No action "${id}". Search for it first.`);
   if (entry.browserOnly) return browserOnly(entry);
-  if (entry.retired) return retired(entry);
   return json(describeAction(entry));
 }
 
@@ -407,7 +406,6 @@ export async function runOrganizationAction(
   const entry = findAppAction(input.id);
   if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
   if (entry.browserOnly) return { refused: browserOnly(entry) };
-  if (entry.retired) return { refused: retired(entry) };
   const reads = entry.method === "GET" || entry.method === "HEAD";
   const externalWorkspace = externalPersonWorkspace(context.caller);
   if (context.caller.kind === "person" && context.caller.subjectId.startsWith("external_user:")) {
@@ -680,14 +678,6 @@ function json(value: unknown): CallToolResult {
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
     `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
-  );
-}
-
-/** A removed action: name the action that replaced it instead of calling it. */
-function retired(entry: ActionCatalogEntry): CallToolResult {
-  const replacement = entry.retired ? findAppAction(entry.retired) : undefined;
-  return failure(
-    `${entry.id} was removed. Use ${replacement ? `the ${replacement.id} action (${entry.retired})` : entry.retired} instead; describe it for its input.`,
   );
 }
 

@@ -35,10 +35,7 @@ import {
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { boundedLimit } from "../http/common";
 import { z } from "zod";
-import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
-const discoverablePlugins = pluginSnapshot.sources
-  .flatMap((source) => source.entries.map((entry) => ({ ...entry, provider: source.provider })))
-  .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+import { discoverablePlugins } from "../integrations/marketplace-plugin-catalog";
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
 import { parseRequestJson } from "../http/request-body";
 

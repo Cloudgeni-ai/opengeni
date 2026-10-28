@@ -6521,6 +6521,7 @@ describe("transient provider error classifier", () => {
       refresh: refreshCodexToken,
       resolveModel: (model) => model,
       onUsageHeaders: () => undefined,
+      onReportedUsage: () => undefined,
       beforeProviderDispatch,
       onRequestPreparationDiagnostic: () => undefined,
       onModelRequestDiagnostic: () => undefined,
@@ -6537,6 +6538,8 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
+    // Title requests feed the same per-turn credit guard as the main turn.
+    expect(titleCodexContext.onReportedUsage).toBe(codexContext.onReportedUsage);
     // The main dispatch checks still run for title requests, scoped as a title dispatch.
     await titleCodexContext.beforeProviderDispatch?.({
       requestId: "title-request",

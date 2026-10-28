@@ -35,9 +35,9 @@ under this policy:
 3. **Package exports.** Every export of every `package.json` entry point of
    `@opengeni/sdk` and `@opengeni/react`, plus the public members of exported
    SDK client classes.
-4. **Ingress formats.** The automation webhook ingress
-   (`POST /v1/webhooks/automations/:endpointId`) and its accepted payload
-   format.
+4. **Ingress formats.** Public routes that no SDK method calls, listed in
+   `PUBLIC_INGRESS_ROUTES` (`scripts/public-api/surface.ts`), such as the
+   OpenAI-compatible routes a stock OpenAI client calls.
 
 The following are **internal**. They may change without notice:
 
@@ -87,22 +87,10 @@ A breaking change needs all of the following:
 
 1. **Announce it.** Add a changeset that declares `"@opengeni/sdk": major`,
    add a changelog/docs entry, and write migration notes.
-2. **Advertise it on the wire.** Add an entry to `DEPRECATED_ROUTES` in
-   `apps/api/src/http/deprecation.ts`. Every response of the affected route
-   then carries:
-   - `Deprecation: @<unix seconds>` (RFC 9745)
-   - `Sunset: <HTTP-date>` (RFC 8594)
-   - `Link: <notes>; rel="deprecation"`
-
-   These headers are exposed through CORS. The SDK surfaces them through
-   `OpenGeniClientOptions.onDeprecation`. By default it logs one
-   `console.warn` per route; `false` silences it. If the change is to a field
-   rather than a whole route, deprecate the routes that carry the field and
-   mark the SDK type `@deprecated`.
-3. **Keep the old behaviour** on the managed service for **at least 90 days**
-   or until the next major ships, whichever is later. The registry rejects a
-   `sunset` less than 90 days after `deprecatedAt`.
-4. **Remove it only in a new major**, with migration notes. Record the change
+2. **Keep the old behaviour** on the managed service for **at least 90 days**
+   or until the next major ships, whichever is later. Mark the affected SDK
+   types and methods `@deprecated`.
+3. **Remove it only in a new major**, with migration notes. Record the change
    in `scripts/public-api/breaking-changes.json` with:
    - `ids`: the check's finding ids
    - `deprecation`: a reference to the changeset or docs
@@ -134,10 +122,6 @@ a versioning mechanism for integrations:
 - **Bearer callers** (API keys, delegated tokens) are admitted with an older or
   missing revision. Only a revision in `REFUSED_API_CONTRACT_REVISIONS` is
   refused.
-- **Responses to a bearer caller** that announced a different revision omit the
-  header (`apps/api/src/http/api-contract-compat.ts`). Published SDKs up to 7.x
-  reject any other revision, so sending it would break them on the next bump.
-  An explicit `API_CONTRACT_CHANGED` refusal keeps the header.
 - **New SDKs** default to a compatible mode outside a cookie browser.
 - **Bumping the revision** is a web-bundle event, never by itself a public API
   change.
@@ -147,8 +131,6 @@ a versioning mechanism for integrations:
 | Check | Command | What it proves |
 | --- | --- | --- |
 | Public surface snapshot | `bun run check:public-api` (refresh: `bun run public-api:refresh`) | See below |
-| Published-SDK compatibility | `bun run test:sdk-compat` | See below |
-| Deprecation headers | `apps/api/test/deprecation-headers.test.ts`, `packages/sdk/test/deprecation.test.ts` | Registry validity, header format, CORS exposure, and the SDK notice hook |
 | Contract parity | `packages/sdk/test/contract-parity.test.ts` | SDK wire types match `@opengeni/contracts` |
 
 **Public surface snapshot** (`bun run check:public-api`) regenerates
@@ -169,24 +151,7 @@ The check fails in each of these cases:
 - **Missing route.** A public SDK method calls a route the API does not
   register.
 
-**Published-SDK compatibility** (`bun run test:sdk-compat`) installs the latest
-patch of the last three stable minors of the current major from npm. They are
-configurable through `--versions`, `OPENGENI_SDK_COMPAT_VERSIONS`, and
-`OPENGENI_SDK_COMPAT_MINORS`.
-
-- Each version drives the current API over real HTTP on real PostgreSQL with
-  the contract fence enabled. The flow is:
-  1. `ensureWorkspace`
-  2. `addExternalWorkspaceMember`, then `asUser`
-  3. `createSession`, then `sendMessage`
-  4. `listEvents`, then an SSE replay
-  5. `createScheduledTask`, then `triggerScheduledTask`
-- The check fails on any 5xx, any `409 API_CONTRACT_CHANGED`, any
-  SDK-thrown contract mismatch, or any broken step.
-- No worker or model runs. The check stops at API acceptance plus durable
-  event and scheduled-task state.
-
-Both checks are CI guards. They run in full mode and whenever the impact plan
+The snapshot check is a CI guard. It runs in full mode and whenever the impact plan
 touches `@opengeni/api-router`, `@opengeni/contracts`, `@opengeni/sdk`, or
 `@opengeni/react`, including anything those packages depend on.
 
@@ -224,11 +189,6 @@ impact.
   and a message of the form "upgrade `@opengeni/sdk` to ≥ X". The generic
   "Reload this client" text only suits stale stock-web tabs. Each refused
   revision is paired with the minimum SDK release that no longer sends it.
-- **Pinned-SDK header omission depends on bearer admission.** The response-header
-  rule in (e) keeps published SDKs from throwing on a newer revision. Their
-  mutations are still refused with `409 API_CONTRACT_CHANGED` until bearer
-  callers are admitted across revisions. Until then, a contract revision bump
-  fails `bun run test:sdk-compat`, and that failure is deliberate.
 
 ## Exception log
 
@@ -238,3 +198,4 @@ impact.
 | 2026-10-03 | Native Atlassian browse/source-save/resume and source-sync execution return retirement refusals; hosted MCP remains supported. | Operator explicitly requested immediate retirement of the native Jira/Confluence integration in favor of hosted MCP. This is a user-directed semantic compatibility exception to the usual announcement/90-day/new-major sequence, not a security exception. Routes, SDK methods, wire types, historical data and cleanup remain. See [migration guidance](../atlassian.md). | Unchanged; no SDK revision refusal is introduced. | Requested by the managed-service operator; no outbound integrator notification was sent. |
 | 2026-10-12 | Variable Sets are replaced by vaults: `/variable-sets` and `/environments` routes return 410 `variable_sets_removed`, legacy selection fields (`variableSetIds`, `variableSetId`, `environmentId`, `defaultVariableSetIds`) return 422 when they carry a value, and protected-fill site authentication is removed. SDK and React move to 2.0.0. | Founder-directed secrets overhaul shipped as one release: existing sets were migrated to vaults with the same ids and values, and the replacement (`client.vaults(workspaceId)`, `{{secret:…}}` references, `vaultPolicy`) ships in the same release. User-directed exception to the 90-day deprecation window, not a security exception. | 2.0.0 for vault methods; older SDKs keep working except for the removed Variable Set calls. | Requested by the managed-service operator; no outbound integrator notification was sent. |
 | 2026-10-21 | PR5165: `sessionRealtimeTransportKind` returns `websocket` instead of the deprecated `gateway` and `xai-subscription` names. Legacy negotiation helpers and transport starters remain available and deprecated. Ship the existing declaration unchanged: SDK/contracts minor, React patch. | Bendik (bendik@cloudgeni.ai) approved this **one-off** exception at **06:21 UTC on October 21, 2026**, recorded in PR5165 comment6309551766. The bounded audit found no known incompatible production consumer, not zero usage: historical Gateway counters, unidentified callers and unproven deployed bundles remain limits. This explicitly permits this change without the usual new-major/retained-behaviour sequence; it is not a security exception or a general policy relaxation. See the [release note](../../.changeset/realtime-kind-policy-exception.md) and [response compatibility disclosure](../../.changeset/realtime-response-compatibility-notes.md). | No new SDK revision refusal. Update consumers matching the old return names to `websocket`; response-validator and new-client/old-server limitations remain as disclosed. | Operator-approved exception; no outbound integrator notification is claimed. Independent review and normal release gates remain required. |
+| 2026-10-27 | Removed without the 90-day window: the first automation API and its webhook ingress, PR Review and the Opengeni Lens App, resumable transcription recordings, the retired Knowledge search routes, the `Deprecation`/`Sunset` headers with the SDK `onDeprecation` option, the response-header omission for SDKs up to 7.x, and the 410 answers on the removed Variable Set routes (they now answer 404; non-empty legacy selection fields still answer 422). | Pre-launch cleanup directed by the maintainer: these surfaces had no users. | None (no refusal) | Not applicable |

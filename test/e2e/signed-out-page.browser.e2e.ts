@@ -5,6 +5,8 @@ import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
+import { expectWindowTop, simulateWindowsTitleBar, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
+
 describe("signed-out homepage on the real app route", () => {
   let browser: Browser;
   let web: StartedProcess;
@@ -183,6 +185,69 @@ describe("signed-out homepage on the real app route", () => {
     } finally {
       await context.close();
     }
+  }, 90_000);
+
+  test("in the desktop app the page starts below the window bar", async () => {
+    const brand = new Map<string, { x: number; y: number }>();
+    for (const platform of ["browser", "macos", "windows"] as const) {
+      const context = await browser.newContext();
+      try {
+        await installApi(context, "legacy");
+        if (platform !== "browser") {
+          await context.addInitScript((desktopPlatform) => {
+            Object.assign(window, {
+              opengeniDesktop: {
+                version: 1,
+                platform: desktopPlatform,
+                capabilities: [],
+                setAppearance: () => {},
+                openExternal: () => {},
+              },
+            });
+          }, platform);
+        }
+        if (platform === "windows") await simulateWindowsTitleBar(context);
+        const top = platform === "browser" ? 0 : WINDOW_BAR_HEIGHT;
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.goto(baseUrl);
+        await signedOutHeading(page).waitFor();
+        const header = page.locator("header[data-signed-out-column]");
+        const brandRow = header.locator("> div").first();
+        for (const width of [720, 900, 1100, 1128, 1280]) {
+          await page.setViewportSize({ width, height: 800 });
+          const box = (await brandRow.boundingBox())!;
+          brand.set(`${platform}-${width}`, { x: box.x, y: box.y - top });
+          // The header, page and footer keep one edge.
+          expect((await signedOutHeading(page).boundingBox())!.x).toBe(box.x);
+          await expectWindowTop(page, platform);
+        }
+        // Scrolled to the end in the smallest window, nothing on the page
+        // reaches the window controls.
+        await page.setViewportSize({ width: 720, height: 520 });
+        await header.evaluate((element) => {
+          const scroller = element.closest(".overflow-y-auto")!;
+          scroller.scrollTop = scroller.scrollHeight;
+        });
+        expect(
+          await header.evaluate((element) => element.closest(".overflow-y-auto")!.scrollTop),
+        ).toBeGreaterThan(0);
+        await expectWindowTop(page, platform);
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+    // Below the bar the page is the web page: 16px in a 720px window, then
+    // the 1040px column's 40px inset.
+    for (const width of [720, 900, 1100, 1128, 1280]) {
+      expect(brand.get(`macos-${width}`)).toEqual(brand.get(`browser-${width}`)!);
+      expect(brand.get(`windows-${width}`)).toEqual(brand.get(`browser-${width}`)!);
+    }
+    expect([720, 900, 1100, 1128, 1280].map((width) => brand.get(`browser-${width}`)!.x)).toEqual([
+      16, 40, 70, 84, 160,
+    ]);
   }, 90_000);
 
   test("broker registration stays embedded and social providers remain in the isolated popup", async () => {

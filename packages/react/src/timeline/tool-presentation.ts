@@ -873,6 +873,7 @@ export function skillToolPreview(item: ToolCallItem): string | null {
 const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Chats, goals and notifications
   nameChat: "rename",
+  saveBotTemplate: "rename",
   notify: "bell",
   withdrawNotification: "bell",
   tidyInbox: "inbox",
@@ -1884,7 +1885,22 @@ export function toolRowPresentation(
 ): ToolRowPresentation {
   item = invokedToolCall(item);
   const row = presentedToolRow(t, item, context);
-  return context.details === "plain" ? plainToolRow(t, item, row, context) : row;
+  const presented = context.details === "plain" ? plainToolRow(t, item, row, context) : row;
+  return item.awaitingApproval ? awaitingApprovalRow(t, presented) : presented;
+}
+
+/** A call waiting for the person's approval has not run: say so, never "Done". */
+function awaitingApprovalRow(t: OpenGeniText, row: ToolRowPresentation): ToolRowPresentation {
+  return {
+    ...row,
+    iconTone: "accent",
+    running: false,
+    chip: undefined,
+    failed: false,
+    cancelled: false,
+    detailPreview: false,
+    preview: textPreview(t("timeline.toolRenderers.waitingForYourApproval")),
+  };
 }
 
 function presentedToolRow(

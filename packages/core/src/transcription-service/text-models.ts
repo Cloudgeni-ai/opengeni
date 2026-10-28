@@ -23,6 +23,8 @@ export function textModelCapabilities(limits: {
   maxFileBytes: number | null;
   /** The model also transcribes audio as it streams, for the live transcript. */
   live?: boolean;
+  /** The model takes names and terms to listen for (as its prompt). */
+  keyterms?: boolean;
 }): RecordingTranscriptionCapabilities {
   return {
     batch: true,
@@ -34,7 +36,7 @@ export function textModelCapabilities(limits: {
     wordTimestamps: false,
     languages: [],
     languageDetection: true,
-    keyterms: false,
+    keyterms: limits.keyterms === true,
     speakerLibrary: false,
     maxDurationSeconds: limits.maxDurationSeconds,
     maxFileBytes: limits.maxFileBytes,
@@ -47,7 +49,10 @@ export function usdPerHourFromCreditPricing(pricing: VoiceInputPricing | null): 
   return (pricing.microsPerMinute * 60) / 1_000_000;
 }
 
-/** A deployment-funded text model priced from the deployment's voice pricing. */
+/**
+ * A deployment-funded text model priced from the deployment's voice pricing.
+ * These are OpenAI's speech-to-text models, which take keyterms as a prompt.
+ */
 export function deploymentTextModel(input: {
   model: string;
   name: string;
@@ -59,7 +64,7 @@ export function deploymentTextModel(input: {
   return {
     model: input.model,
     name: input.name,
-    capabilities: textModelCapabilities(input),
+    capabilities: textModelCapabilities({ ...input, keyterms: true }),
     usdPerHour: usdPerHourFromCreditPricing(input.pricing),
     creditPricing: input.pricing,
   };
@@ -92,6 +97,15 @@ export function requireScope(request: RecordingTranscriptionRequest): RecordingT
 
 export function requestIdOf(request: RecordingTranscriptionRequest): string {
   return request.scope?.requestId ?? crypto.randomUUID();
+}
+
+/**
+ * The request's keyterms as a prompt for an OpenAI speech-to-text model,
+ * which spells the words it hears like the prompt does; null without any.
+ */
+export function keytermsPrompt(request: RecordingTranscriptionRequest): string | null {
+  const terms = (request.keyterms ?? []).map((term) => term.trim()).filter(Boolean);
+  return terms.length > 0 ? terms.join(", ") : null;
 }
 
 export function textTranscriptionResult(input: {

@@ -4,11 +4,14 @@ import {
   appActionCallChangesState,
   appActionCallHandlesSecrets,
   appActionCallNeedsConfirmation,
+  appActionCallSecretInputs,
+  appActionCallStoresVaultItem,
   appActionConfirmationTitle,
   appActionHandlesSecrets,
   appActionNeedsConfirmation,
   appActionPaymentPage,
   findAppAction,
+  mapAppActionCallSecretInputs,
   PAYMENT_PAGE_ACTIONS,
 } from "../src/app-actions";
 import {
@@ -41,10 +44,6 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
   const search = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   expect(search).toBeDefined();
   expect(appActionCallChangesState({ id: search!.id })).toBe(false);
-  // A retired action runs nothing (it only names its replacement), so it never asks.
-  const retired = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
-  expect(retired?.retired).toBeDefined();
-  expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
 });
 
 test("opening a checkout needs no confirmation in the chat; a billing portal link still does", () => {
@@ -536,4 +535,83 @@ test("actions that handle secrets are marked in the catalog, so the chat route l
   }
   // Bounded: most of the app stays reachable.
   expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(80);
+});
+
+test("secret inputs are only the filled request fields an action marks as secret", () => {
+  const createSession = {
+    id: "createSession",
+    pathParameters: { workspaceId: "w" },
+    body: {
+      initialMessage: "hi",
+      mcpServers: [
+        { id: "a", headers: { Authorization: "Bearer a" } },
+        { id: "b", url: "https://x.test" },
+        { id: "c", headers: { "x-key": "c" } },
+      ],
+    },
+  };
+  expect(appActionCallSecretInputs(createSession)).toEqual([
+    { Authorization: "Bearer a" },
+    { "x-key": "c" },
+  ]);
+  const mapped = mapAppActionCallSecretInputs(createSession, () => ({ replaced: true }));
+  expect(mapped).toEqual({
+    ...createSession,
+    body: {
+      initialMessage: "hi",
+      mcpServers: [
+        { id: "a", headers: { replaced: true } },
+        { id: "b", url: "https://x.test" },
+        { id: "c", headers: { replaced: true } },
+      ],
+    },
+  });
+  // The input is never changed in place.
+  expect(createSession.body.mcpServers[0]!.headers).toEqual({ Authorization: "Bearer a" });
+  // Response-side secrets, unknown actions and JSON text have no inputs.
+  for (const args of [
+    { id: "createOrganizationWebhook", body: { url: "https://x.test" } },
+    { id: "POST /v1/workspaces/:workspaceId/tools/invoke", body: { name: "session_create" } },
+    { id: "noSuchAction", body: { token: "x" } },
+    JSON.stringify({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
+  ]) {
+    expect(appActionCallSecretInputs(args)).toEqual([]);
+    expect(mapAppActionCallSecretInputs(args, () => "changed")).toBe(args);
+  }
+  expect(
+    appActionCallSecretInputs({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
+  ).toEqual(["x"]);
+  // Only creating or updating a vault item keeps its body in the vault.
+  expect(
+    appActionCallStoresVaultItem({ id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items" }),
+  ).toBe(true);
+  expect(
+    appActionCallStoresVaultItem({
+      id: "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    }),
+  ).toBe(true);
+  expect(
+    appActionCallStoresVaultItem({
+      id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
+    }),
+  ).toBe(false);
+  expect(appActionCallStoresVaultItem({ id: "createSession" })).toBe(false);
+});
+
+test("no action's secret request fields nest inside each other", () => {
+  // mapAppActionCallSecretInputs puts resolved values back by visit order;
+  // nested secret fields (".credentials" and ".credentials.token") would
+  // visit one value twice.
+  for (const entry of ACTION_CATALOG) {
+    const fields = (entry.secretFields ?? []).filter(
+      (field) => field.startsWith("request.") || field.startsWith("request[]"),
+    );
+    for (const outer of fields) {
+      for (const inner of fields) {
+        if (outer === inner) continue;
+        const nested = inner.startsWith(`${outer}.`) || inner.startsWith(`${outer}[`);
+        expect([entry.id, outer, inner, nested]).toEqual([entry.id, outer, inner, false]);
+      }
+    }
+  }
 });

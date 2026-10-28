@@ -5,7 +5,7 @@ import {
   workspaceInsightsPhaseMetricObserver,
   normalizeWorkspaceInsightsFilter,
   normalizeWorkspaceInsightsSessionScope,
-  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   scheduledTaskViewerForGrant,
   WorkspaceInsightsFilterValidationError,
   type ApiRouteDeps,
@@ -106,7 +106,7 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       const workspaceId = c.req.param("workspaceId");
       const grant = await measureInsightsPhase(observePhase, "auth", () =>
-        requireAccessGrant(c, deps, workspaceId, "workspace:admin"),
+        requireWorkspaceSettingsGrant(c, deps, workspaceId),
       );
 
       const rangeParsed = InsightsRange.safeParse(rangeRaw);

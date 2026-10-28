@@ -197,7 +197,6 @@ describe("automation words", () => {
       "connection_account_unavailable",
       "scheduled_model_unavailable",
       "machine_target_unavailable",
-      "variable_set_unavailable",
       "rig_version_unavailable",
       "insufficient_credits",
       "allowance_exhausted",

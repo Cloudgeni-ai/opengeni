@@ -190,7 +190,6 @@ beforeEach(() => {
     schedule: { type: "manual" },
     overlapPolicy: "allow_concurrent",
     executionDigest: "0".repeat(64),
-    variableSetId: null,
     rigId: null,
     metadata: {},
     agentConfig: {

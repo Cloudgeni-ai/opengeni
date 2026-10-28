@@ -146,7 +146,7 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const excluded = (text: string) =>
     [...text.matchAll(/--exclude"?,?\s*"?([a-z-]+)/g)].map((m) => m[1]);
   const batchExcluded = excluded(batch.slice(batch.indexOf("run-guards-plan.ts")));
-  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure", "sdk-compat"]);
+  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure"]);
   expect(excluded(guards.run).sort()).toEqual([...batchExcluded, "lint"].sort());
 });
 

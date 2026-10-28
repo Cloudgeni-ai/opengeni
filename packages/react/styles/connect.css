@@ -228,6 +228,7 @@
 .og-plugin-details-header h2 { margin:0; font-size:20px; line-height:1.4; font-weight:600; letter-spacing:-.5px; overflow-wrap:anywhere; }
 .og-plugin-details-header p { margin:7px 0 0; font-size:13px; opacity:.6; }
 .og-plugin-details-meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:22px; font-size:11px; }
+.og-plugin-details-meta:first-child { margin-top:0; }
 .og-plugin-details-meta span { padding:4px 8px; border-radius:5px; background:color-mix(in srgb,currentColor 5%,transparent); text-transform:capitalize; }
 .og-plugin-details-overview { margin:28px 0; font-size:14px; line-height:1.8; }
 .og-plugin-details-overview p { margin:0 0 14px; }
@@ -292,3 +293,9 @@
 .og-catalog-more, .og-skill-discovery .og-catalog-more { margin-top:12px; min-height:36px; padding:8px 12px; border:1px solid var(--og-color-border,#888); border-radius:8px; background:var(--og-color-surface-1,transparent); color:inherit; font:inherit; font-size:13px; cursor:pointer; }
 .og-catalog-more:focus-visible { outline:2px solid var(--og-color-accent,currentColor); outline-offset:2px; }
 .og-plugin-discovery.og-catalog-overview { border-top:1px solid var(--og-color-border,#888); margin-top:24px; padding-top:24px; }
+
+.og-connect-setup .og-connect-setup-approval { display:grid; gap:20px; }
+.og-connect-setup .og-connect-setup-approval-actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.og-connect-setup .og-connect-setup-approval-actions button { min-height:44px; }
+
+.og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary { border-color:transparent; background:transparent; padding-inline:0; text-decoration:underline; text-underline-offset:3px; }

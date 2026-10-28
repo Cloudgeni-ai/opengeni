@@ -1,4 +1,5 @@
 import { ArchiveConfirmationProvider } from "../lib/archive-session";
+import { SiteToolConsentProvider } from "../lib/site-tool-consent";
 // The Opengeni session app for an embedding page that already holds an
 // authenticated API client (a first-party side pane such as the Excel add-in,
 // the desktop app, a playground). It renders the web app's own session shell,
@@ -235,7 +236,6 @@ function createEmbedStateHost(
         headers,
         fetch: fetchImpl,
         beginSharedRead,
-        onDeprecation: false,
         apiContract: "compatible",
       }),
     fetchClientConfig: (signal, workspaceId) =>
@@ -444,7 +444,9 @@ function SessionAppGates({
     content = (
       <AppContext.Provider value={context}>
         <ArchiveConfirmationProvider>
-          <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
+          <SiteToolConsentProvider>
+            <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
+          </SiteToolConsentProvider>
           <CreditRequiredGate
             creditRequired={state.creditRequired}
             setCreditRequired={state.setCreditRequired}

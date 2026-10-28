@@ -152,15 +152,27 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
       // The SDK invokes this only after validating the Connector JWT, audience,
       // issuer, expiry and service URL. Never pass a pre-authenticated request token.
       app.server.onRequest = async ({ body }) => {
-        const m = normalizeTeamsMessage(body);
-        if (
-          !m ||
-          m.botId.toLowerCase() !== `28:${deps.settings.teamsBotClientId!.toLowerCase()}` ||
-          !teamsTenantEnabled(deps.settings, m.tenantId) ||
-          (!m.personal &&
-            !deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`))
-        )
+        const observed = (reason: string) =>
+          deps.observability?.info("Teams authenticated activity outcome", { reason });
+        const m = normalizeTeamsMessage(body, (diagnostic) => {
+          deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
+        });
+        if (!m) return { status: 200 };
+        if (m.botId.toLowerCase() !== `28:${deps.settings.teamsBotClientId!.toLowerCase()}`) {
+          observed("bot_identity_mismatch");
           return { status: 200 };
+        }
+        if (!teamsTenantEnabled(deps.settings, m.tenantId)) {
+          observed("tenant_disabled");
+          return { status: 200 };
+        }
+        if (
+          !m.personal &&
+          !deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`)
+        ) {
+          observed("channel_disabled");
+          return { status: 200 };
+        }
         const i = await getTeamsInstallation(deps.db, m.tenantId);
         if (!i?.active) {
           if (
@@ -168,7 +180,8 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
             deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)
           ) {
             await send(app, m, `Connect Teams to Opengeni: ${proofLink(deps, m, null)}`);
-          }
+            observed("setup_link_sent");
+          } else observed("setup_not_permitted");
           return { status: 200 };
         }
         const grant = await actorGrant(deps, i, m.actorId);

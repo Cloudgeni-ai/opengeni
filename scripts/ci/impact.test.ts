@@ -260,11 +260,10 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-deployment-mode");
     expect(plan.guards).toContain("migration-online-safety");
-    expect(plan.guards).toContain("migration-schema-contract");
+    expect(plan.guards).toContain("migration-immutability");
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
-    expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
   });
 
@@ -278,11 +277,9 @@ describe("fail-closed change impact", () => {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.guards).toContain("public-api");
-      expect(plan.guards).toContain("sdk-compat");
     }
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
-    expect(web.guards).not.toContain("sdk-compat");
   });
 
   test("the subscription contract guard runs on docs-only and focused plans", () => {
@@ -335,6 +332,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
@@ -371,10 +369,12 @@ describe("fail-closed change impact", () => {
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -847,6 +847,20 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the desktop window bar helper selects every browser test that uses it", () => {
+    const plan = createImpactPlan(["test/e2e/desktop-window-bar.ts"]);
+    expect(plan.mode).toBe("focused");
+    for (const path of [
+      "test/e2e/artifact-desktop.browser.e2e.ts",
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
+      "test/e2e/session-sidebar.browser.e2e.ts",
+      "test/e2e/signed-out-page.browser.e2e.ts",
+    ]) {
+      expect(plan.e2eTests).toContain(path);
+    }
+  });
+
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
       "apps/web/src/components/rail/switcher-block.tsx",
@@ -929,6 +943,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
@@ -965,10 +980,12 @@ describe("fail-closed change impact", () => {
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,

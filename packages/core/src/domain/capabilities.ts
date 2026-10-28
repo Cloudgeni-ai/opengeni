@@ -1,3 +1,4 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
@@ -41,21 +42,19 @@ import {
   CODEX_APPS_STARTUP_TIMEOUT_MS,
 } from "@opengeni/codex";
 import {
-  decryptVariableSetValue,
+  decryptEnvironmentValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
   isTransactionHandle,
-  readCodexCutoverDisposition,
   resolveSubscriptionCoreCodexAppsDesignation,
   rlsContextForWorkspace,
   subscriptionCoreCodexAppsRequestAuth,
   type SubscriptionCoreCodexAppsRequestAuth,
-  type CodexCutoverDisposition,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -548,6 +547,13 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    await assertMcpCredentialContentFlowAllowed(input.db, {
+      target: { accountId: input.accountId, workspaceId: input.workspaceId },
+      url: item.endpointUrl,
+      headers,
+    });
     if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
     let serverInfo: unknown;
     installationMetadata = {
@@ -573,7 +579,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
       );
     }
   }
@@ -746,7 +752,7 @@ async function resolveMcpCredentialHeaders(
     return Object.fromEntries(
       Object.entries(storedCiphertext).map(([name, value]) => [
         name,
-        decryptVariableSetValue(key, value),
+        decryptEnvironmentValue(key, value),
       ]),
     );
   } catch {
@@ -1352,12 +1358,10 @@ export type CodexAppsDesignationForRun = {
 
 /**
  * What the caller already knows, so the resolver does not read it again: the
- * workspace's organization (skips the workspace lookup) and the organization's
- * Codex cutover disposition (skips the cutover read; a claim has read it).
+ * workspace's organization (skips the workspace lookup).
  */
 export type CodexAppsRunContext = {
   accountId?: string;
-  disposition?: CodexCutoverDisposition | Promise<CodexCutoverDisposition>;
 };
 
 export async function resolveCodexAppsDesignationForRun(
@@ -1365,15 +1369,8 @@ export async function resolveCodexAppsDesignationForRun(
   workspaceId: string,
   known: CodexAppsRunContext = {},
 ): Promise<CodexAppsDesignationForRun | null> {
-  let owner = known.accountId;
-  const accountId = async () =>
-    (owner ??= (await rlsContextForWorkspace(db, workspaceId)).accountId);
-  const disposition =
-    known.disposition !== undefined
-      ? await known.disposition
-      : await readCodexCutoverDisposition(db, await accountId(), workspaceId);
-  if (disposition === "maintenance") return null;
-  const coreAccountId = await accountId();
+  const coreAccountId =
+    known.accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
   const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
     accountId: coreAccountId,
     workspaceId,
@@ -2032,13 +2029,19 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
   },
   "microsoft-onedrive": {
     description:
-      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them.",
+      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them. Use SharePoint to find team sites, libraries and lists.",
     category: "productivity",
-    tags: ["onedrive", "sharepoint", "microsoft", "microsoft-365", "office-365"],
+    tags: ["onedrive", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-sharepoint": {
+    description:
+      "Search SharePoint, find team sites, browse document libraries and read files, read or update list items, and look up colleagues in the organization directory, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "productivity",
+    tags: ["sharepoint", "microsoft", "microsoft-365", "office-365"],
   },
   "microsoft-teams": {
     description:
-      "Read the person's teams, channels and chats, and send messages as them, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+      "Read and search the person's teams, channels and chats, send messages as them, and look up colleagues with their role, manager and reports, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
     category: "communication",
     tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
   },

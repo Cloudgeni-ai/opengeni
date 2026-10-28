@@ -38,6 +38,7 @@ import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
+import { SessionPluginCapabilityCard } from "./session-plugin-card";
 import { usePage } from "../../lib/navigation";
 import {
   OPENGENI_UPDATING_NOTICE,
@@ -150,6 +151,17 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const setup =
     capability && grant ? inChatCapabilitySetup(grant, capability.id, resolved) : undefined;
   if (setup?.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
+  if (capability?.kind === "plugin") {
+    return (
+      <SessionPluginCapabilityCard
+        key={`${props.workspaceId}:${capability.id}`}
+        item={item}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   if (capability && integrationDefinitionIdFromCapabilityId(capability.id)) {
     return (
       <SessionIntegrationCapabilityCard
@@ -248,7 +260,13 @@ function ScopedSessionCapabilityCard({
                 : ""
               : "API"
       }
-      description={catalogItem?.description || recommendation.rationale}
+      badge={
+        !skill && !excel && recommendation.kind === "mcp" && showsMcpServerLabel(catalogItem)
+          ? "MCP server"
+          : undefined
+      }
+      description={recommendation.rationale || catalogItem?.description || ""}
+      clampDescription={Boolean(recommendation.rationale)}
       skill={skill}
       expanded={expanded}
       complete={complete}

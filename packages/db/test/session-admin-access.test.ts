@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
-import { readFile } from "node:fs/promises";
 
 import {
   createDb,
@@ -18,7 +17,6 @@ import {
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "../src";
-import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 // Full access for agent sessions (stored as admin access): allowed per
 // organization (off by default), given by any member of the session's
@@ -90,18 +88,6 @@ async function sqlState(promise: Promise<unknown>): Promise<string | null> {
 }
 
 describe("session admin access", () => {
-  test("ships as rolling FORCE RLS tables the runtime may change", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0692_session_admin_access.sql", import.meta.url),
-      "utf8",
-    );
-    expect(migration.split("\n")[0]).toBe("-- deployment-mode: rolling");
-    for (const table of ["organization_agent_admin_access", "session_admin_access"] as const) {
-      expect(FORCE_RLS_TABLES).toContain(table);
-      expect(RUNTIME_FULL_DML_TABLES).toContain(table);
-    }
-  });
-
   test("is off until an owner or admin allows it", async () => {
     if (!client) return;
     const db = client.db;

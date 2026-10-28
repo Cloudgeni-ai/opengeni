@@ -40,7 +40,14 @@ import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
-import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../interactive-answer-model";
+import type {
+  ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
+} from "./composer-transcription-control";
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { AuthNeededRow } from "./auth-needed-row";
@@ -167,8 +174,10 @@ export type SessionConversationProps = ClientOverride &
     /**
      * Composer microphone (dictation into the draft). Defaults to true; it
      * appears only when the client config reports voice input available.
+     * Pass options instead of `true` to set the language dictations are
+     * heard in, or a check (such as a consent prompt) before each one starts.
      */
-    voiceInput?: boolean | undefined;
+    voiceInput?: boolean | ComposerVoiceInputOptions | undefined;
     /**
      * Live speech-to-speech voice in the composer. Opt-in: a call spends the
      * workspace's credits and asks for the microphone, so it is off unless this
@@ -463,6 +472,7 @@ function ConversationView({
   const context = conversation;
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerView = useComposerWithStreamState(
     composer,
     feed.connectionState,
@@ -514,6 +524,7 @@ function ConversationView({
     context.client,
     context.workspaceId,
     voiceInputRequested && !importedArchive ? config.voiceInput : null,
+    typeof voiceInputRequested === "object" ? voiceInputRequested : undefined,
   );
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
@@ -699,53 +710,60 @@ function ConversationView({
             </button>
           </div>
         ) : (
-          <MessageTimeline
-            renderMessageText={renderMessageText}
-            resolveLink={links}
-            renderInteractiveBlock={
-              renderInteractiveBlock === false
-                ? undefined
-                : (renderInteractiveBlock ?? defaultInteractiveBlock)
-            }
-            userMessageDisclosureLabels={userMessageDisclosureLabels}
-            genieLoading={loadingOptions}
-            renderAllowanceExhausted={renderAllowanceExhausted}
-            allowanceExhaustedLabels={allowanceExhaustedLabels}
-            // Isolated and clipped: floating navigation stays inside the timeline.
-            className="isolate min-h-0 flex-1 overflow-hidden"
-            {...(toolRegistry ? { toolRegistry } : {})}
-            {...retainedLoaders}
-            {...(onOpenSession ? { onOpenSession } : {})}
-            {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
-            events={feed.events}
-            items={conversation.timeline}
-            turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
-            renderAuthNeeded={(item) =>
-              timelineProps?.renderAuthNeeded?.(item) ??
-              (item.capability?.id === "api:connected-machine" && computerConnection ? (
-                <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
-              ) : (
-                renderStockAuthNeeded(item)
-              ))
-            }
-            emptyState={timelineProps?.emptyState}
-            renderMessageSender={timelineProps?.renderMessageSender}
-            status={status}
-            hasOlder={feed.hasOlder}
-            loadingOlder={feed.loadingOlder}
-            onLoadOlder={feed.loadOlder}
-            hasNewer={feed.hasNewer}
-            loadingNewer={feed.loadingNewer}
-            onLoadNewer={feed.loadNewer}
-            onJumpToStart={async () => {
-              await feed.loadOldest();
-            }}
-            loadingOldest={feed.loadingOldest}
-            onJumpToLatest={feed.jumpToLatest}
-            onAnnotate={importedArchive ? undefined : composer.addAnnotation}
-            // A narrow embed above a decision card has no room for the pill.
-            questionNavMinViewportHeight={320}
-          />
+          <InteractiveAnswerProvider
+            send={composer.send}
+            scope={sessionId ?? undefined}
+            store={answerStore}
+            readOnly={Boolean(importedArchive) || terminal || sessionId === null}
+          >
+            <MessageTimeline
+              renderMessageText={renderMessageText}
+              resolveLink={links}
+              renderInteractiveBlock={
+                renderInteractiveBlock === false
+                  ? undefined
+                  : (renderInteractiveBlock ?? defaultInteractiveBlock)
+              }
+              userMessageDisclosureLabels={userMessageDisclosureLabels}
+              genieLoading={loadingOptions}
+              renderAllowanceExhausted={renderAllowanceExhausted}
+              allowanceExhaustedLabels={allowanceExhaustedLabels}
+              // Isolated and clipped: floating navigation stays inside the timeline.
+              className="isolate min-h-0 flex-1 overflow-hidden"
+              {...(toolRegistry ? { toolRegistry } : {})}
+              {...retainedLoaders}
+              {...(onOpenSession ? { onOpenSession } : {})}
+              {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
+              events={feed.events}
+              items={conversation.timeline}
+              turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+              renderAuthNeeded={(item) =>
+                timelineProps?.renderAuthNeeded?.(item) ??
+                (item.capability?.id === "api:connected-machine" && computerConnection ? (
+                  <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
+                ) : (
+                  renderStockAuthNeeded(item)
+                ))
+              }
+              emptyState={timelineProps?.emptyState}
+              renderMessageSender={timelineProps?.renderMessageSender}
+              status={status}
+              hasOlder={feed.hasOlder}
+              loadingOlder={feed.loadingOlder}
+              onLoadOlder={feed.loadOlder}
+              hasNewer={feed.hasNewer}
+              loadingNewer={feed.loadingNewer}
+              onLoadNewer={feed.loadNewer}
+              onJumpToStart={async () => {
+                await feed.loadOldest();
+              }}
+              loadingOldest={feed.loadingOldest}
+              onJumpToLatest={feed.jumpToLatest}
+              onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+              // A narrow embed above a decision card has no room for the pill.
+              questionNavMinViewportHeight={320}
+            />
+          </InteractiveAnswerProvider>
         )}
         {importedArchive ? (
           <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
@@ -1095,6 +1113,7 @@ export function useComposerTranscription(
   client: unknown,
   workspaceId: string,
   capability: ClientVoiceInputConfig | null,
+  options?: ComposerVoiceInputOptions,
 ): ComposerTranscriptionControlProps | null {
   const [workspaceEnabled, setWorkspaceEnabled] = useState<{
     key: string;
@@ -1126,6 +1145,8 @@ export function useComposerTranscription(
       live = false;
     };
   }, [reader, workspaceId, supported]);
+  const language = options?.language;
+  const beforeStart = options?.beforeStart;
   return useMemo(
     () =>
       supported
@@ -1136,9 +1157,11 @@ export function useComposerTranscription(
             capability,
             workspaceEnabled:
               workspaceEnabled?.key === workspaceId ? workspaceEnabled.enabled : false,
+            ...(language !== undefined ? { language } : {}),
+            ...(beforeStart ? { beforeStart } : {}),
           }
         : null,
-    [supported, reader, workspaceId, capability, workspaceEnabled],
+    [supported, reader, workspaceId, capability, workspaceEnabled, language, beforeStart],
   );
 }
 

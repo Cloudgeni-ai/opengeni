@@ -14,6 +14,10 @@ import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
 import { loadSessionFeedback } from "../../session-feedback-model";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../../interactive-answer-model";
 import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
 import { useReadSessionInbox } from "../lib/inbox";
@@ -342,6 +346,12 @@ const LazyFailedSessionBanner = lazy(() =>
 const LazyCreditRefusalNotice = lazy(() =>
   import("../components/credits/credit-refusal-notice").then((module) => ({
     default: module.CreditRefusalNotice,
+  })),
+);
+// Add credits from the chat opens checkout here; paying returns to this chat.
+const LazyCreditTopupPrompt = lazy(() =>
+  import("../components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -2141,6 +2151,7 @@ function SessionChatPane(props: {
   // Moved to long-term storage after a long idle period: readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
   const terminal = cancelled || readOnlyArchive !== null;
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const focusEvents = useUiEventTarget("window");
@@ -2410,6 +2421,10 @@ function SessionChatPane(props: {
     context.accessContext === undefined ||
     hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
   const reloadSessionAfterMachineChange = props.onReloadSession;
+  // A saved message approved for another of the person's machines already
+  // carries that machine's consent, so moving the chat back only repoints it
+  // (no "use this machine" message); the notice rechecks and re-reads right after.
+  const moveSavedMessage = runsOnAttach;
   const moveRunsOn = useCallback(
     async (machine: MachineView): Promise<string | null> => {
       if (!isPersonalMachine(machine)) {
@@ -3388,6 +3403,24 @@ function SessionChatPane(props: {
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
+  const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  const creditTopupPrompt =
+    canBuyCredits && workspaceAccountId ? (
+      <Suspense fallback={null}>
+        {creditTopupOpen ? (
+          <LazyCreditTopupPrompt
+            purpose="topup"
+            open
+            workspaceId={props.session.workspaceId}
+            accountId={workspaceAccountId}
+            canBuyCredits
+            onOpenChange={setCreditTopupOpen}
+            beforeLeave={composer.flushDraft}
+          />
+        ) : null}
+      </Suspense>
+    ) : null;
   const canConnectModel = hasWorkspacePermission(
     context.accessContext,
     props.session.workspaceId,
@@ -3421,6 +3454,7 @@ function SessionChatPane(props: {
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={canBuyCredits}
+            onAddCredits={openCreditTopup}
             canConnectModel={canConnectModel}
             sandboxRecovery={
               needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
@@ -3503,9 +3537,16 @@ function SessionChatPane(props: {
           })}
           message={sessionCreditRefusal.message}
           workspaceId={props.session.workspaceId}
+          accountId={workspaceAccountId}
+          canReadBilling={
+            Boolean(workspaceAccountId) &&
+            hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:read")
+          }
           canBuyCredits={canBuyCredits}
           canConnectModel={canConnectModel}
+          continuing
           onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
+          onAddCredits={openCreditTopup}
           onDismiss={() => setCreditRefusal(null)}
         />
       </Suspense>
@@ -3539,6 +3580,7 @@ function SessionChatPane(props: {
     Fragment,
     null,
     reviewDetailPane,
+    creditTopupPrompt,
     createElement(
       "div",
       { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
@@ -3602,150 +3644,159 @@ function SessionChatPane(props: {
                       load={loadRecordedToolReview}
                       onViewDetails={viewToolReviewDetails}
                     >
-                      <MessageTimeline
-                        resolveLink={resolveLink}
-                        renderMessageSender={renderMessageSender}
-                        allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
-                        trailingState={
-                          <>
-                            {/* Recovery follows the failed request, only in the latest history window.
+                      <InteractiveAnswerProvider
+                        send={composer.send}
+                        scope={props.session.id}
+                        store={answerStore}
+                        readOnly={terminal}
+                      >
+                        <MessageTimeline
+                          resolveLink={resolveLink}
+                          renderMessageSender={renderMessageSender}
+                          allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                          trailingState={
+                            <>
+                              {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
-                            {failureRecovery}
-                            {props.approvals.length > 0 &&
-                              props.session.status === "requires_action" && (
-                                <ApprovalSurface
-                                  approvals={props.approvals}
-                                  selectedApprovalId={selectedApprovalId}
-                                  onSelectedApprovalChange={setSelectedApprovalId}
-                                  loadReview={loadToolReview}
-                                  onViewDetails={viewToolReviewDetails}
-                                  onApprove={(approval) => decideApproval(approval.id, "approve")}
-                                  onReject={(approval) => decideApproval(approval.id, "reject")}
-                                />
-                              )}
-                            <LazyPart fallback={null}>
-                              <SessionSkillReviews
-                                key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
-                                context={context}
-                                workspaceId={props.session.workspaceId}
-                                sessionId={props.session.id}
-                                events={props.events}
-                              />
-                            </LazyPart>
-                            {props.humanInput.requests.length > 0 &&
-                            props.session.status === "requires_action" ? (
-                              <div className="pb-1" data-human-input-timeline-surface="">
-                                <LazyPart fallback={<LoadingPanel label="Loading questions…" />}>
-                                  <HumanInputSurface
-                                    loadSkillReview={loadSkillReview}
-                                    allowedSaveTo={secretSaveTargets(
-                                      context.accessContext,
-                                      props.session.workspaceId,
-                                    )}
-                                    requests={props.humanInput.requests}
-                                    respondingRequestId={props.humanInput.respondingRequestId}
-                                    error={props.humanInput.mutationError?.message}
-                                    onSubmit={async (requestId, response) => {
-                                      // A failed send resolves null. Reject so the card
-                                      // keeps what was typed (including a secret) to retry.
-                                      if (!(await props.humanInput.respond(requestId, response))) {
-                                        throw new Error("Your answer wasn't sent. Try again.");
-                                      }
-                                    }}
+                              {failureRecovery}
+                              {props.approvals.length > 0 &&
+                                props.session.status === "requires_action" && (
+                                  <ApprovalSurface
+                                    approvals={props.approvals}
+                                    selectedApprovalId={selectedApprovalId}
+                                    onSelectedApprovalChange={setSelectedApprovalId}
+                                    loadReview={loadToolReview}
+                                    onViewDetails={viewToolReviewDetails}
+                                    onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                    onReject={(approval) => decideApproval(approval.id, "reject")}
                                   />
-                                </LazyPart>
-                              </div>
-                            ) : null}
-                          </>
-                        }
-                        turnSummary={{ rolling: true }}
-                        key={props.session.id}
-                        className="h-full"
-                        items={timelineWithStartup}
-                        searchTarget={activeSearchTarget}
-                        focusSequence={momentSequence}
-                        events={props.events}
-                        status={props.session.status}
-                        computeLabel={computeLabel}
-                        renderMessageText={renderMessageText}
-                        renderMessageActions={renderMessageActions}
-                        onAnnotate={composer.addAnnotation}
-                        draftAnnotations={composer.annotations}
-                        onDraftAnnotationSelect={composer.requestAnnotationReview}
-                        onOpenSession={props.onOpenSession}
-                        resolveSessionTitle={props.resolveSessionTitle}
-                        onMemoryClick={props.onMemoryClick}
-                        onReconnect={props.onReconnect}
-                        renderAuthNeeded={renderAuthNeeded}
-                        resolveProviderLogo={props.resolveProviderLogo}
-                        loadRetainedScreenshot={loadRetainedScreenshot}
-                        loadRetainedArtifact={loadRetainedArtifact}
-                        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                        hasOlder={props.hasOlder}
-                        loadingOlder={props.loadingOlder}
-                        onLoadOlder={props.onLoadOlder}
-                        hasNewer={props.hasNewer}
-                        loadingNewer={props.loadingNewer}
-                        onLoadNewer={props.onLoadNewer}
-                        loadingOldest={props.loadingOldest}
-                        onJumpToStart={async () => {
-                          await props.onJumpToStart();
-                        }}
-                        onJumpToLatest={props.onJumpToLatest}
-                        emptyState={
-                          // Clear view hides history, not the retained failure or retry operation.
-                          failureRecovery ??
-                          (props.queue.stoppingPreviousAttempt ? (
-                            <EmptyState
-                              className="min-h-[24rem]"
-                              icon={
-                                <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                              }
-                              title={
-                                props.queue.effectiveControl?.state === "paused"
-                                  ? "Stopping current work"
-                                  : "Stopping previous work"
-                              }
-                              description={
-                                props.queue.effectiveControl?.state === "paused"
-                                  ? "Waiting for the current command to stop safely. Queued work stays saved."
-                                  : "Your direction is saved. It starts after the previous command stops safely."
-                              }
-                            />
-                          ) : props.initialLoading ? (
-                            <div className="flex min-h-[24rem]">
-                              <LoadingPanel />
-                            </div>
-                          ) : props.historyReloadFailed ? (
-                            <ProblemPanel
-                              title="Conversation couldn't be loaded"
-                              description="Your saved messages are unchanged. Try loading them again."
-                              action={
-                                <Button
-                                  variant="outline"
-                                  onClick={() => void props.onJumpToLatest()}
-                                >
-                                  Retry conversation
-                                </Button>
-                              }
-                            />
-                          ) : (
-                            <EmptyState
-                              className="min-h-[24rem]"
-                              icon={
-                                props.session.status === "running" ||
-                                props.session.status === "recovering" ? (
+                                )}
+                              <LazyPart fallback={null}>
+                                <SessionSkillReviews
+                                  key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                                  context={context}
+                                  workspaceId={props.session.workspaceId}
+                                  sessionId={props.session.id}
+                                  events={props.events}
+                                />
+                              </LazyPart>
+                              {props.humanInput.requests.length > 0 &&
+                              props.session.status === "requires_action" ? (
+                                <div className="pb-1" data-human-input-timeline-surface="">
+                                  <LazyPart fallback={<LoadingPanel label="Loading questions…" />}>
+                                    <HumanInputSurface
+                                      loadSkillReview={loadSkillReview}
+                                      allowedSaveTo={secretSaveTargets(
+                                        context.accessContext,
+                                        props.session.workspaceId,
+                                      )}
+                                      requests={props.humanInput.requests}
+                                      respondingRequestId={props.humanInput.respondingRequestId}
+                                      error={props.humanInput.mutationError?.message}
+                                      onSubmit={async (requestId, response) => {
+                                        // A failed send resolves null. Reject so the card
+                                        // keeps what was typed (including a secret) to retry.
+                                        if (
+                                          !(await props.humanInput.respond(requestId, response))
+                                        ) {
+                                          throw new Error("Your answer wasn't sent. Try again.");
+                                        }
+                                      }}
+                                    />
+                                  </LazyPart>
+                                </div>
+                              ) : null}
+                            </>
+                          }
+                          turnSummary={{ rolling: true }}
+                          key={props.session.id}
+                          className="h-full"
+                          items={timelineWithStartup}
+                          searchTarget={activeSearchTarget}
+                          focusSequence={momentSequence}
+                          events={props.events}
+                          status={props.session.status}
+                          computeLabel={computeLabel}
+                          renderMessageText={renderMessageText}
+                          renderMessageActions={renderMessageActions}
+                          onAnnotate={composer.addAnnotation}
+                          draftAnnotations={composer.annotations}
+                          onDraftAnnotationSelect={composer.requestAnnotationReview}
+                          onOpenSession={props.onOpenSession}
+                          resolveSessionTitle={props.resolveSessionTitle}
+                          onMemoryClick={props.onMemoryClick}
+                          onReconnect={props.onReconnect}
+                          renderAuthNeeded={renderAuthNeeded}
+                          resolveProviderLogo={props.resolveProviderLogo}
+                          loadRetainedScreenshot={loadRetainedScreenshot}
+                          loadRetainedArtifact={loadRetainedArtifact}
+                          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                          hasOlder={props.hasOlder}
+                          loadingOlder={props.loadingOlder}
+                          onLoadOlder={props.onLoadOlder}
+                          hasNewer={props.hasNewer}
+                          loadingNewer={props.loadingNewer}
+                          onLoadNewer={props.onLoadNewer}
+                          loadingOldest={props.loadingOldest}
+                          onJumpToStart={async () => {
+                            await props.onJumpToStart();
+                          }}
+                          onJumpToLatest={props.onJumpToLatest}
+                          emptyState={
+                            // Clear view hides history, not the retained failure or retry operation.
+                            failureRecovery ??
+                            (props.queue.stoppingPreviousAttempt ? (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
                                   <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                                ) : (
-                                  <MessagesSquareIcon className="size-4" />
-                                )
-                              }
-                              title={timelineEmptyStateCopy.title}
-                              description={timelineEmptyStateCopy.description}
-                            />
-                          ))
-                        }
-                      />
+                                }
+                                title={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Stopping current work"
+                                    : "Stopping previous work"
+                                }
+                                description={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Waiting for the current command to stop safely. Queued work stays saved."
+                                    : "Your direction is saved. It starts after the previous command stops safely."
+                                }
+                              />
+                            ) : props.initialLoading ? (
+                              <div className="flex min-h-[24rem]">
+                                <LoadingPanel />
+                              </div>
+                            ) : props.historyReloadFailed ? (
+                              <ProblemPanel
+                                title="Conversation couldn't be loaded"
+                                description="Your saved messages are unchanged. Try loading them again."
+                                action={
+                                  <Button
+                                    variant="outline"
+                                    onClick={() => void props.onJumpToLatest()}
+                                  >
+                                    Retry conversation
+                                  </Button>
+                                }
+                              />
+                            ) : (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
+                                  props.session.status === "running" ||
+                                  props.session.status === "recovering" ? (
+                                    <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                                  ) : (
+                                    <MessagesSquareIcon className="size-4" />
+                                  )
+                                }
+                                title={timelineEmptyStateCopy.title}
+                                description={timelineEmptyStateCopy.description}
+                              />
+                            ))
+                          }
+                        />
+                      </InteractiveAnswerProvider>
                     </ToolReviewHistoryProvider>
                   </KnowledgeActivityProvider>
                 </LearningRefusalActionsProvider>
@@ -3784,6 +3835,8 @@ function SessionChatPane(props: {
                     move={moveRunsOn}
                   />
                 }
+                machines={runsOn.fleet.machines}
+                onMoveToMachine={runsOn.fleet.canAttach ? moveSavedMessage : undefined}
                 canControl={workspacePermissions.includes("sessions:control")}
                 paused={admissionControl.state === "paused"}
                 refreshRequired={admissionRefreshRequired}

@@ -1,10 +1,7 @@
-// Codex routes for organizations whose Codex cutover row exists (M3 PR 2b).
-//
-// `codexRouteDisposition` is read first by every Codex route. A missing or disabled row answers a
-// typed 503 and reads no legacy Codex table. An enabled row runs the
-// handlers below: the same paths, verbs, request fields and response shapes,
-// projected from the shared subscription core (SUB-COMPAT-02). Operations the
-// core does not serve yet answer a typed 409 instead of touching legacy state.
+// Codex routes on the shared subscription core (M3 PR 2b): the same paths,
+// verbs, request fields and response shapes, projected from the core
+// (SUB-COMPAT-02). Operations the core does not serve yet answer a typed 409
+// instead of touching legacy state.
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
@@ -22,7 +19,6 @@ import {
   getSubscriptionCoreCodexWorkspaceProjection,
   getSubscriptionCoreOrganizationCodexAccount,
   getSubscriptionCoreOrganizationCodexProjection,
-  readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
   resolveSubscriptionCoreCodexConnectionId,
   setSubscriptionCoreCodexAllocator,
@@ -48,25 +44,6 @@ import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscripti
 import { parseRequestBody } from "../http/request-body";
 
 export { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError };
-
-/**
- * Only an enabled Codex cutover admits a request. Missing and disabled rows
- * are maintenance: fail closed, never fall back to legacy state.
- */
-export async function codexRouteDisposition(
-  deps: ApiRouteDeps,
-  accountId: string,
-): Promise<"core"> {
-  const disposition = await readCodexCutoverDisposition(deps.db, accountId);
-  if (disposition === "maintenance") {
-    throw typedHttpError(
-      503,
-      SUBSCRIPTION_CORE_CUTOVER_DISABLED,
-      "Codex subscriptions are paused for maintenance in this organization",
-    );
-  }
-  return disposition;
-}
 
 function projection(
   deps: ApiRouteDeps,
