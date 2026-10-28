@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "04eea551aa9b4e02079e272230ab0bec7082c1613167f5c0612b81fcfba0bb2d"
+      "sha256": "4fec04a31137f20960484945c7207f1f9aaa801cff7a3f17f296ff8bc2d63d0f"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -943,7 +943,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "5dd25a44f594e37791be12ded1fe677be5ffc057b961d8d956c2c0253551e24c"
+      "sha256": "2462fe7e0fc9bcf3fdec68b6f5755a56116f6574f92b3f2fcd0a36df7aeb8f7c"
     },
     {
       "workflow": ".github/workflows/ci.yml",
