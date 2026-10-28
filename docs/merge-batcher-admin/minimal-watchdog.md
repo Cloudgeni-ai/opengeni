@@ -1,172 +1,92 @@
 # Minimal provider watchdog — alert-only policy
 
-## Current policy
+## Current behavior
 
-Every unhealthy observation emits a structured `held` monitoring event only.
-The watchdog never claims an OFF operation, invokes STOP/OFF, resumes a previous
-OFF, changes rules, or releases/disarms native auto-merge. Existing claims,
-receipts and rollback materials remain untouched for the owning operator.
+The watchdog is a read-only monitor. It never invokes STOP/OFF, acquires or
+resumes an OFF claim, changes rules or readiness, or releases/disarms native
+auto-merge. The provider has no control-action callbacks. Historical claims,
+locks, journals, receipts and rollback materials remain untouched.
 
-The rollout owner may pin `graceUntil` (Unix milliseconds) in the watchdog
-configuration after a deployment or control-plane landing. Before that fixed
-deadline, held events include `suppressedUntil` and INFO severity; afterwards,
-they use WARNING severity. Grace does not fabricate healthy observations and
-ticks never extend it. Configure the alert destination to page on unsuppressed
-held events; missing-run monitoring remains independent. A deployment must
-verify this alert routing using the actual Job output before claiming success.
+Every event includes `policy: "alert-only/v1"`, `outcome` and `severity`.
+Healthy observations emit `healthy`/INFO. Status, progress, binding and provider
+failures emit `held`/WARNING and exit 1, except during valid pinned grace:
+then they emit `suppressed`/INFO with the original reason and `suppressedUntil`,
+and exit 0. Suppression is not a healthy observation. Image-entrypoint and
+provider failure paths use the same event policy.
 
-The historical OFF qualification below describes retained operator evidence,
-not actions performed or authorized by the current watchdog. New qualification
-must prove that status failures and all stall reasons cause no provider writes,
-including when an old claim exists. Do not perform a live OFF drill for this change.
+`graceUntil` is an optional Unix-millisecond deadline pinned by the rollout owner
+after a deployment or control-plane landing. It must be a nonnegative safe integer
+no more than 30 minutes ahead of the configuration-load clock. Expired deadlines
+are valid but suppress nothing. Invalid values emit an unsuppressed
+`invalid-grace` WARNING and are ignored; they neither mute alerts nor prevent a
+healthy status check. Ticks never renew grace. The immutable config digest is
+verified before its grace can suppress any image-validation failure.
 
-## Historical operator contract (not automatic watchdog behavior)
+Grace deliberately suppresses *all* health reasons, including an explicit stop,
+crash loop, unavailability and deployment binding mismatch. Those reasons remain
+visible in INFO events. Use a short explicit deadline; never use grace to mask
+incompatible runtime scheduling. Missing-run monitoring remains independent.
 
-This lane deliberately excludes the expanded watchdog, new App, rules split,
-Git heartbeat refs, durable-core migration, sweep and generic hydration framework.
-The runtime remains OFF/Manual until the rollout owner relays reviewed go.
+## Observation and binding
 
-## Small boundary
+Cloud Scheduler invokes the existing Cloud Run Job on its configured five-minute
+UTC schedule. Keep one task, parallelism one and retries zero. The provider uses
+the retained cloud-auth module for authenticated read access and a 15-second
+`/status` timeout. It validates the retained plan, source hashes and exact service
+UID, URI, image digest and reconciled generation before reading status. A mismatch
+alerts, including after grace expires; it does not invoke recovery.
 
-Cloud Scheduler invokes one Cloud Run Job every five minutes. Use the existing
-OFF service-account/credential path and the exact retained `off.ts` package;
-never substitute a new restoration implementation. A fresh authenticated
-supervisor `/status` response supplies `controlObservedAt` plus the paired
-`batcher-progress/v1` cycle measurements. Stopped/draining or
-three consecutive unclassified failures triggers OFF at the next tick. A loop
-observation at least 900 seconds old triggers OFF in every running/wait state.
-Successful idle/no-work and Batch-wait cycles count as progress, not as landing
-proof. A last successful cycle at least 900 seconds old requests OFF even with
-fresh heartbeats, advancing completed-cycle counts or repeated read deferrals.
-Missing, malformed, future or unreachable observations request proven OFF, never grant Manual.
+The rollout owner **must re-pin the deployment contract and configuration digest
+after each batcher deploy**, including the new image digest and a bounded grace
+deadline. Grace alone cannot repair an obsolete binding. Keep all prior receipts
+and configuration versions as historical evidence. Legacy claim fields identify
+that historical configuration; the watchdog does not access claim storage.
 
-This deliberately conservative source currently acts on one unavailable sample,
-including a missing progress schema or any future observation timestamp. A transient error or clock skew
-can therefore end an otherwise healthy activation. It does not wait fifteen
-minutes on unavailable status. This reviewed Low finding remains a rollout risk
-to acknowledge or address with a separately reviewed bounded sampling change.
-It is not debounced. A valid null-success startup receives 120 seconds from the
-immutable `runtimeStartedAt`. A cycle begun before the startup/progress deadline
-may finish before its fixed `cycleDeadlineAt`; a cycle starting at or after that
-deadline cannot renew grace. Expired active-cycle deadlines trigger OFF even if
-the last success is recent. The outer cycle bound is at most the supported
-one-hour execution plus 185 seconds of reconciliation/control/termination;
-the default cycle bound is 1,085 seconds. Timing pairs must be consistent and
-success/deferral timestamps cannot precede this process's start. Deployment must
-pair the trigger with the reviewed supervisor supplying these immutable fields.
+Stopped/draining states, three consecutive unclassified failures, or a control
+observation at least 900 seconds old produce an alert reason. Successful idle and
+Batch-wait cycles count as progress. Without a successful cycle, startup has
+120 seconds from immutable `runtimeStartedAt`; otherwise progress expires after
+900 seconds. A cycle begun before expiry can finish within its fixed deadline;
+later cycles, heartbeats and observation deferrals never renew it. Invalid,
+future, malformed or unavailable measurements alert rather than imply health.
 
-Deployment qualification must check the configured poll interval against the
-900-second progress window, including cycle overhead; an interval of 900 seconds
-or more is incompatible even for healthy idle work. Provider-read retry backoff
-and a restored `nextAt` must also permit a cycle before the progress/startup
-deadline. Do not widen watchdog grace to mask incompatible runtime scheduling.
-Deploy the paired supervisor before this watchdog, and roll back the watchdog
-before rolling back to a supervisor without these fields.
+## Ordered no-Manual deployment and verification
 
-The trigger cannot declare safety from status flags. Only reviewed OFF may
-declare Manual after its verified STOP/drain/reconciliation and exact saved-policy
-restoration. Possible ref-write effects, failed drain, rules drift or unavailable proof keep
-protections and report held. No automatic ON, replay of a STOP, candidate
-deletion, CI cancellation or readiness edits.
+Coordinate with Jørgen's batcher owner. This change authorizes no batcher mode
+switch, CI cancellation/rerun, readiness edit or OFF drill.
 
-Explicit STOP/crash detection is next five-minute tick plus scheduler/dispatch
-delay and OFF drain duration. Stale detection is 15 minutes plus up to one normal
-tick, dispatch delay and drain. These are scheduling targets, not a 15-minute SLA.
+1. Complete exact-head VM validation and independent review; attach evidence and
+   land through `queue-ready`. Build and qualify the immutable image from landed
+   source, retaining its source manifest, digest and test output.
+2. Capture the current Job, Scheduler, binding and alert-routing configuration.
+   Confirm no Job execution is running immediately before the update. If one is
+   running, let it finish and check again; do not cancel it or pause Scheduler.
+3. Update the watchdog Job in place without pausing Scheduler or changing batcher
+   mode. Publish the image and pinned configuration/digest in the same Job update
+   so an execution cannot observe a mixed revision. Include exact current runtime
+   binding and a fixed `graceUntil` no more than 30 minutes ahead.
+4. Read back the Job image and configuration digest and confirm Scheduler remains
+   enabled. Verify the next **genuine scheduled execution**, not only a manual
+   invocation: retain execution identity, timestamps, output and exit status,
+   including `policy: "alert-only/v1"` on every event.
+5. Verify alert routing for normal and failure-path events: unsuppressed WARNING
+   events page; suppressed INFO events do not page or produce Job-failure alerts.
+   Test fixtures may exercise failures without modifying live batcher health.
+   Keep absence-of-executions monitoring separate. Do not claim deployment success
+   until actual output and routing are verified.
+6. Confirm App-only ON, unchanged runtime settings, native auto-merge state and
+   historical evidence. Report landed SHA, image digest and deployment UTC time.
 
-## Provider packaging gate
+The Job needs read access to its retained configuration and authenticated target,
+plus logging. It no longer needs ruleset-write or claim-write credentials for this
+watchdog. Inventory existing bindings with the owner; do not rotate credentials
+or remove shared operator access as an incidental deployment step.
 
-`minimal-watchdog.ts` is the bounded trigger. `minimal-watchdog-provider.ts` binds
-authenticated current service UID/image/URI to the retained OFF contract, checks
-all five existing operator hashes, calls `/status` with a 15-second timeout and
-invokes unchanged OFF. It uses the existing operator's cloud-auth module and
-credentials, not the deferred workload-identity or separate-App framework.
-The existing operator writes its deployment receipt and per-stage intents on disk.
-A Cloud Run Job's ephemeral disk is therefore **not** sufficient to reuse a VM
-directory across executions. Before provider implementation/deployment, pin the
-portable copy of the existing OFF bundle and its receipt retention. The wrapper
-uses one Cloud Storage `ifGenerationMatch=0` claim object per explicitly assigned
-activation ID and exact plan digest. Only a definitive 412 is treated as another
-owner; timeout/other errors hold without OFF. One winner may invoke STOP. Before every
-explicit STOP, OFF atomically replaces its current-attempt pointer under the existing
-plan lock; old attempt directories and outcomes remain unchanged. A subsequent tick may only
-continue that attempt: read its original exited-writer witness, verify the same
-stopped service generation/image/control twice around read-only durable-state
-reconciliation, then use the existing exact reverse stages. It never expires,
-deletes or replaces the claim, calls STOP again, or rewrites the original outcome.
-The existing plan lock excludes concurrent reverse invocations. A missing STOP
-receipt, live writer, changed generation/control, possible ref-write effect or abandoned
-lock remains held; elapsed time alone is not proof. Thus a transient reconciliation
-read failure can recover on the next five-minute tick without replaying controls.
-The tracked settlement reader uses the same authenticated `gh api` path as the
-existing stages and Git blob reads rather than the Contents API's inline-size limit.
-REST-only comment, rerun, followup-PR and auto-disable effects cannot update main,
-state or candidate refs, so their pending/unknown status does not block Manual.
-Their uncertainty remains in the ledger and they are never replayed by recovery.
-Unknown kinds or possible ref-write effects still block. Resume errors are recorded
-in the held outcome. Cloud project and region come from pinned operator config.
-The packager records both the original operator-reader hash and the substituted
-tracked reader hash in `source-manifest.json`; the STOP contract and image manifest
-must pin the substituted hash, including `resume-stop.ts` in the image file list.
-Preserve the originals and all resulting
-receipts. This must be a small provider wrapper, not the deferred generic journal
-or hydration implementation. No provider claim is qualified by the in-memory test.
+## Historical operator evidence
 
-No scheduler/job manifest is executable until that packaging boundary is reviewed.
-Expected configuration: existing project `cloudgeni-gecko`, region `europe-west1`,
-five-minute UTC schedule, one task, parallelism one, retries zero. Task parallelism
-alone does not prevent overlapping executions. Scheduler API enabling, exact
-existing identity binding and any storage access happen only under later rollout go.
-No new App or runtime administration grant is required by this lane.
-
-**Both credential paths must be explicit.** The existing operator `cloud-auth.ts`
-covers GCP only. `stage.sh` also needs an authorized GitHub ruleset-write identity
-inside the Job. The runtime App's administration-read token cannot restore rules.
-Before packaging, the rollout owner must name the existing approved OFF identity,
-its exact repository rights, secret version/storage and Job access binding. Do not
-infer that VM authentication exists in the container, copy a personal admin token,
-broaden the runtime App, or rotate the immutable workspace credential. No credential
-placement is performed by these sources or their tests.
-
-**Operator coordination is required.** The claim fences watchdog executions, not
-an independent VM operator. Before manual OFF, pause the Scheduler and reconcile
-all running Job executions, or acquire the same create-only activation claim as
-the watchdog. An existing/uncertain claim is not permission to steal ownership.
-Do not race two OFF operators or remove a claim after a timeout. After successful
-OFF, pause the schedule: later ticks otherwise reverify the retained stopped proof.
-Held outcomes need the rollout's alert destination and operator response; a stopped
-watchdog cannot announce its own absence. A missed-run sweep remains out of scope.
-
-## Qualification
-
-Independent source review precedes provider deployment. Then prove real durable
-claim exclusion, binding mismatch refusal, unknown-write/drain refusal, a clean
-idle run and controlled mid-cycle kill using the actual OFF bundle. Capture exact
-Manual readback twice and observed detection/drain timing. Report these receipts
-to the rollout owner before ordinary ON. Existing unit tests are source-only,
-not provider, complete VM CI, or kill-test evidence.
-
-## Stopped configuration lineage
-
-A stopped configuration update must not turn an old drain witness into a new
-one. The pinned operator can retain a separate lineage: pass the prior receipt
-as the sixth argument to `updateStoppedService` (the fifth is its clock). It
-preserves the genuine root proof, exact provider before/after snapshots and the
-completed etag-bound update. Without that input, no lineage proof is available.
-
-OFF accepts `lineage-reconciled-disabled` only after authenticated audit readback
-confirms each consecutive MANUAL0 update, every control version remains STOP,
-the current service matches the retained endpoint, and the exact original
-ledger and all candidate/effect records are settled. The old witness generation
-is never rewritten. This path is active-mode only, at most 16 configuration
-edges and 64 intervening control versions. Only the existing capacity settings
-may change across its safety projection; image, command, identity and routing
-changes do not qualify. Missing audit/history, gaps, START, drift, pending
-candidates and unknown effects remain held without replay or a recovery START.
-
-The operator identity needs authenticated Cloud Logging entry reads and access
-to the existing control-secret versions. Delayed or unavailable audit evidence
-holds; it does not permit inference from MANUAL0 or HTTP503 alone. Repeating OFF
-can re-read evidence, but never reset its watchdog claim or replay unknown
-writes. “Any generation” means a fully validated chain, not arbitrary unknown
-lineage. New image/contract hashes and independent review are required before
-using this updated operator; source tests do not qualify a live kill drill.
+Earlier revisions of this document described automatic OFF and stopped-lineage
+recovery. Those are historical records, **not current watchdog policy or rollout
+instructions**. The separate operator and its retained STOP/drain receipts are
+unchanged by this patch. Never replay an old STOP, delete a claim, rewrite a
+journal or infer permission for Manual from this monitor's output. Any separately
+authorized operator operation remains the owning coordinator's responsibility.

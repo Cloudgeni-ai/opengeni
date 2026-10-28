@@ -2,8 +2,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { off, resumeOff } from "./off";
-import { tick } from "./minimal-watchdog";
+import { tick, parseGrace, eventFor, exitCode, type Outcome } from "./minimal-watchdog";
 
 type Cloud = {
   api(url: string, method?: string, body?: unknown): Promise<any>;
@@ -32,27 +31,35 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 export type Dependencies = {
   read(path: string): Promise<string>;
   loadCloud(path: string): Promise<Cloud>;
-  off(
-    path: string,
-    optIn: string,
-    expectedContractSha256?: string,
-    expectedPlanSha256?: string,
-  ): Promise<void>;
   request: typeof fetch;
-  resumeOff?: Dependencies["off"];
   now(): number;
   record(event: unknown): void;
 };
 const defaults: Dependencies = {
   read: (path) => readFile(path, "utf8"),
   loadCloud: (path) => import(path),
-  off,
-  resumeOff,
   request: fetch,
   now: Date.now,
   record: (event) => console.log(JSON.stringify(event)),
 };
-export async function run(config: Configuration, deps = defaults): Promise<string> {
+export async function run(config: Configuration, deps = defaults): Promise<Outcome> {
+  const grace = parseGrace(config?.graceUntil, deps.now());
+  if (grace.invalid)
+    deps.record({ event: "minimal-watchdog", ...eventFor("invalid-grace", deps.now()) });
+  try {
+    return await runBound(config, deps, grace.until);
+  } catch {
+    const event = eventFor("provider-or-binding-failure", deps.now(), grace.until);
+    deps.record({ event: "minimal-watchdog", ...event });
+    return event.outcome;
+  }
+}
+
+async function runBound(
+  config: Configuration,
+  deps: Dependencies,
+  graceUntil?: number,
+): Promise<Outcome> {
   if (
     !/^projects\/cloudgeni-gecko\/locations\/europe-west1\/services\/[a-z0-9-]+$/.test(
       config.service,
@@ -98,7 +105,7 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
     throw Error("Missing pinned deployment identity");
   return tick({
     now: deps.now,
-    ...(config.graceUntil === undefined ? {} : { graceUntil: config.graceUntil }),
+    ...(graceUntil === undefined ? {} : { graceUntil }),
     async verifyBinding() {
       const live = await cloud.api(`https://run.googleapis.com/v2/${config.service}`);
       if (
@@ -119,50 +126,9 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
       if (!response.ok) throw Error("Status unavailable");
       return response.json();
     },
-    async claim() {
-      // JSON-data media upload with generation precondition. No expiry,
-      // deletion or automatic unlock: crash/timeout after this boundary holds.
-      try {
-        await cloud.api(
-          `https://storage.googleapis.com/upload/storage/v1/b/${config.claimBucket}/o?uploadType=media&ifGenerationMatch=0&name=${encodeURIComponent(config.claimObject)}`,
-          "POST",
-          {
-            planSha256: config.planSha256,
-            service: config.service,
-            activationId: config.activationId,
-            claimedAt: new Date(deps.now()).toISOString(),
-          },
-        );
-        return true;
-      } catch (error) {
-        if ((error as { status?: number }).status === 412) return false;
-        throw Error("Claim outcome unavailable; no OFF replay", { cause: error });
-      }
-    },
-    async off() {
-      await deps.off(
-        config.adminDirectory,
-        "--apply-after-go",
-        config.contractSha256,
-        config.planSha256,
-      );
-    },
-    ...(deps.resumeOff
-      ? {
-          resumeOff: () =>
-            deps.resumeOff!(
-              config.adminDirectory,
-              "--apply-after-go",
-              config.contractSha256,
-              config.planSha256,
-            ),
-        }
-      : {}),
     async record(event) {
       deps.record({
         event: "minimal-watchdog",
-        severity:
-          event.outcome === "held" && event.suppressedUntil === undefined ? "WARNING" : "INFO",
         ...event,
         planSha256: config.planSha256,
       });
@@ -174,13 +140,12 @@ if (import.meta.main) {
     const path = process.argv[2];
     if (!path) throw Error("Configuration path required");
     const outcome = await run(JSON.parse(await readFile(path, "utf8")));
-    if (outcome === "held") process.exitCode = 1;
+    process.exitCode = exitCode(outcome);
   } catch {
     console.error(
       JSON.stringify({
         event: "minimal-watchdog",
-        outcome: "held",
-        reason: "provider-or-binding-failure",
+        ...eventFor("provider-or-binding-failure", Date.now()),
       }),
     );
     process.exitCode = 1;

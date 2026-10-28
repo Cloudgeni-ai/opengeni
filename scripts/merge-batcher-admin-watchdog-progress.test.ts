@@ -148,28 +148,17 @@ test("deferral timestamp and count must agree in both directions", () => {
 });
 
 test("progress stalls never invoke OFF or repeat unknown effects", async () => {
-  let claimed = false;
-  let calls = 0;
   const events: string[] = [];
   const ports: Ports = {
     verifyBinding: async () => {},
     now: () => now,
     status: async () => ({ ...status, lastSuccessfulCycleAt: now - 900_000 }),
-    claim: async () => {
-      if (claimed) return false;
-      claimed = true;
-      return true;
-    },
-    off: async () => {
-      calls++;
-      throw Error("unresolved write; no restoration proof");
-    },
     record: async ({ outcome }) => {
       events.push(outcome);
     },
   };
   expect(await tick(ports)).toBe("held");
   expect(await tick(ports)).toBe("held");
-  expect(calls).toBe(0);
+  expect(events).toEqual(["held", "held"]);
   expect(events).not.toContain("manual");
 });

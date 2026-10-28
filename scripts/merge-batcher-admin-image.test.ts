@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { verifyImageInputs } from "../docs/merge-batcher-admin/minimal-watchdog-image";
+import { verifyImageInputs, runImage } from "../docs/merge-batcher-admin/minimal-watchdog-image";
+import { maxGraceMs } from "../docs/merge-batcher-admin/minimal-watchdog";
 import { off } from "../docs/merge-batcher-admin/off";
 import { mkdtemp, writeFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -112,3 +113,105 @@ test("OFF rechecks immutable contract digest before source loading, locks or eff
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("image entrypoint suppresses trusted binding failure only until fixed expiry", async () => {
+  const f = fixture(),
+    events: unknown[] = [];
+  let now = 2_000_000;
+  const config = JSON.stringify({ ...JSON.parse(f.config), graceUntil: now + 60_000 });
+  f.files.delete("/opt/batcher-operator/control.ts");
+  const deps = {
+    read: f.read,
+    now: () => now,
+    run: async (): Promise<"healthy"> => {
+      throw Error("must not execute unverified code");
+    },
+    record: (event: unknown) => {
+      events.push(event);
+    },
+  };
+  expect(await runImage(config, sha(config), deps)).toBe(0);
+  expect(events.at(-1)).toMatchObject({
+    policy: "alert-only/v1",
+    outcome: "suppressed",
+    severity: "INFO",
+    reason: "immutable-image-binding-failed",
+  });
+  now += 60_000;
+  expect(await runImage(config, sha(config), deps)).toBe(1);
+  expect(events.at(-1)).toMatchObject({
+    policy: "alert-only/v1",
+    outcome: "held",
+    severity: "WARNING",
+  });
+});
+test("untrusted config never grants image grace", async () => {
+  const f = fixture(),
+    events: unknown[] = [];
+  const config = JSON.stringify({ ...JSON.parse(f.config), graceUntil: 2_000_001 });
+  expect(
+    await runImage(config, sha(f.config), {
+      read: f.read,
+      now: () => 2_000_000,
+      run: async () => "healthy",
+      record: (event) => {
+        events.push(event);
+      },
+    }),
+  ).toBe(1);
+  expect(f.reads).toEqual([]);
+  expect(events).toEqual([
+    {
+      event: "minimal-watchdog",
+      policy: "alert-only/v1",
+      outcome: "held",
+      severity: "WARNING",
+      reason: "immutable-image-binding-failed",
+    },
+  ]);
+});
+test.each(["2000001", 2_000_000 + maxGraceMs + 1, 2_000_000_000])(
+  "image config disables invalid grace %s before reads, without failing healthy tick",
+  async (graceUntil) => {
+    const f = fixture(),
+      events: unknown[] = [];
+    const config = JSON.stringify({ ...JSON.parse(f.config), graceUntil });
+    expect(
+      await runImage(config, sha(config), {
+        now: () => 2_000_000,
+        read: async (path) => {
+          expect(events[0]).toMatchObject({ reason: "invalid-grace", severity: "WARNING" });
+          return f.read(path);
+        },
+        run: async (parsed) => {
+          expect(parsed.graceUntil).toBeUndefined();
+          return "healthy";
+        },
+        record: (event) => {
+          events.push(event);
+        },
+      }),
+    ).toBe(0);
+    expect(events).toHaveLength(1);
+  },
+);
+test.each(["healthy", "suppressed", "held"] as const)(
+  "image entrypoint returns correct exit code for %s",
+  async (outcome) => {
+    const f = fixture();
+    const config = JSON.stringify({ ...JSON.parse(f.config), graceUntil: 2_000_001 });
+    expect(
+      await runImage(config, sha(config), {
+        read: f.read,
+        now: () => 2_000_000,
+        run: async (parsed) => {
+          expect(parsed.graceUntil).toBe(2_000_001);
+          return outcome;
+        },
+        record: () => {
+          throw Error("unexpected image failure");
+        },
+      }),
+    ).toBe(outcome === "held" ? 1 : 0);
+  },
+);

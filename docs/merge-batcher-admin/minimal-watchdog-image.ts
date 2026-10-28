@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { run, type Configuration } from "./minimal-watchdog-provider";
+import { eventFor, exitCode, parseGrace, type Outcome } from "./minimal-watchdog";
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const imageDirectory = "/opt/batcher-operator";
 const names = [
@@ -12,14 +13,20 @@ const names = [
   "stopped-reconciliation.ts",
   "stopped-lineage.ts",
 ];
+function pinnedConfig(serialized: string, expectedDigest: string): Configuration {
+  if (!/^[a-f0-9]{64}$/.test(expectedDigest) || digest(serialized) !== expectedDigest)
+    throw Error("Immutable Job config digest mismatch");
+  const config = JSON.parse(serialized);
+  if (!config || typeof config !== "object" || Array.isArray(config))
+    throw Error("Invalid Job config");
+  return config as Configuration;
+}
 export async function verifyImageInputs(
   serialized: string,
   expectedDigest: string,
   read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
 ): Promise<Configuration> {
-  if (!/^[a-f0-9]{64}$/.test(expectedDigest) || digest(serialized) !== expectedDigest)
-    throw Error("Immutable Job config digest mismatch");
-  const config = JSON.parse(serialized) as Configuration;
+  const config = pinnedConfig(serialized, expectedDigest);
   if (
     config.operatorDirectory !== imageDirectory ||
     config.adminDirectory !== "/work/admin" ||
@@ -49,22 +56,43 @@ export async function verifyImageInputs(
   }
   return config;
 }
-if (import.meta.main) {
+export async function runImage(
+  serialized: string,
+  expectedDigest: string,
+  deps: {
+    read(path: string): Promise<string>;
+    now(): number;
+    run(config: Configuration): Promise<Outcome>;
+    record(event: unknown): void;
+  } = {
+    read: (path) => readFile(path, "utf8"),
+    now: Date.now,
+    run,
+    record: (event) => console.log(JSON.stringify(event)),
+  },
+): Promise<number> {
+  let graceUntil: number | undefined;
   try {
-    const config = await verifyImageInputs(
-      process.env.BATCHER_WATCHDOG_CONFIG_JSON ?? "",
-      process.env.BATCHER_WATCHDOG_CONFIG_SHA256 ?? "",
-    );
-    const outcome = await run(config);
-    if (outcome === "held") process.exitCode = 1;
+    // Only immutable, authenticated configuration can suppress an image failure.
+    const pinned = pinnedConfig(serialized, expectedDigest);
+    const grace = parseGrace(pinned.graceUntil, deps.now());
+    graceUntil = grace.until;
+    if (grace.invalid)
+      deps.record({ event: "minimal-watchdog", ...eventFor("invalid-grace", deps.now()) });
+    const config = await verifyImageInputs(serialized, expectedDigest, deps.read);
+    // Invalid optional grace must not break healthy observation or warn twice.
+    delete config.graceUntil;
+    if (graceUntil !== undefined) config.graceUntil = graceUntil;
+    return exitCode(await deps.run(config));
   } catch {
-    console.error(
-      JSON.stringify({
-        event: "minimal-watchdog",
-        outcome: "held",
-        reason: "immutable-image-binding-failed",
-      }),
-    );
-    process.exitCode = 1;
+    const event = eventFor("immutable-image-binding-failed", deps.now(), graceUntil);
+    deps.record({ event: "minimal-watchdog", ...event });
+    return exitCode(event.outcome);
   }
+}
+if (import.meta.main) {
+  process.exitCode = await runImage(
+    process.env.BATCHER_WATCHDOG_CONFIG_JSON ?? "",
+    process.env.BATCHER_WATCHDOG_CONFIG_SHA256 ?? "",
+  );
 }

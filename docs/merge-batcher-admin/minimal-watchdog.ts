@@ -84,47 +84,80 @@ export type Ports = {
   now(): number;
   /** Fixed deployment/control-plane handoff deadline; never renewed by a tick. */
   graceUntil?: number;
-  // Durable, create-only per-activation exclusion. Never release after claiming:
-  // a lost process/result must not cause automatic repeat of an unknown OFF.
-  claim(): Promise<boolean>;
-  off(): Promise<void>;
-  // Existing claim may continue proof/reverse stages only, never another STOP.
-  resumeOff?(): Promise<void>;
-  record(event: {
-    outcome: "healthy" | "held" | "manual";
-    reason?: Reason;
-    recoveryError?: string;
-    suppressedUntil?: number;
-  }): Promise<void>;
+  record(event: WatchdogEvent): Promise<void>;
 };
-export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual"> {
-  await ports.verifyBinding();
+export const policy = "alert-only/v1" as const;
+export const maxGraceMs = 30 * 60_000;
+export type Outcome = "healthy" | "held" | "suppressed";
+export type FailureReason =
+  | Reason
+  | "binding-failure"
+  | "invalid-grace"
+  | "provider-or-binding-failure"
+  | "immutable-image-binding-failed";
+export type WatchdogEvent = {
+  policy: typeof policy;
+  outcome: Outcome;
+  severity: "INFO" | "WARNING";
+  reason?: FailureReason;
+  suppressedUntil?: number;
+};
+
+/** Invalid optional grace is disabled, not allowed to suppress or break observation. */
+export function parseGrace(value: unknown, now: number): { until?: number; invalid: boolean } {
+  if (value === undefined) return { invalid: false };
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    value > now + maxGraceMs
+  )
+    return { invalid: true };
+  return { until: value, invalid: false };
+}
+
+export function eventFor(
+  cause: FailureReason | null,
+  now: number,
+  graceUntil?: number,
+): WatchdogEvent {
+  if (!cause) return { policy, outcome: "healthy", severity: "INFO" };
+  if (cause !== "invalid-grace" && graceUntil !== undefined && now < graceUntil)
+    return {
+      policy,
+      outcome: "suppressed",
+      severity: "INFO",
+      reason: cause,
+      suppressedUntil: graceUntil,
+    };
+  return { policy, outcome: "held", severity: "WARNING", reason: cause };
+}
+
+export function exitCode(outcome: Outcome): number {
+  return outcome === "held" ? 1 : 0;
+}
+
+export async function tick(ports: Ports): Promise<Outcome> {
+  const now = ports.now();
+  const grace = parseGrace(ports.graceUntil, now);
+  if (grace.invalid) await ports.record(eventFor("invalid-grace", now));
+  try {
+    await ports.verifyBinding();
+  } catch {
+    const event = eventFor("binding-failure", ports.now(), grace.until);
+    await ports.record(event);
+    return event.outcome;
+  }
   let status: unknown;
   try {
     status = await ports.status();
   } catch {
     status = null;
   }
-  const now = ports.now();
-  if (
-    ports.graceUntil !== undefined &&
-    (!Number.isSafeInteger(ports.graceUntil) || ports.graceUntil < 0)
-  )
-    throw Error("Invalid pinned watchdog grace deadline");
-  const cause = reason(status, now);
-  if (!cause) {
-    await ports.record({ outcome: "healthy" });
-    return "healthy";
-  }
-  // Keep the existing held event/exit contract for monitoring, but never claim,
-  // stop, resume an earlier OFF, or modify policy/readiness. Historical claims
-  // and receipts belong to the separately coordinated operator workflow.
-  await ports.record({
-    outcome: "held",
-    reason: cause,
-    ...(ports.graceUntil !== undefined && now < ports.graceUntil
-      ? { suppressedUntil: ports.graceUntil }
-      : {}),
-  });
-  return "held";
+  const observedAt = ports.now();
+  const event = eventFor(reason(status, observedAt), observedAt, grace.until);
+  await ports.record(event);
+  return event.outcome;
 }
