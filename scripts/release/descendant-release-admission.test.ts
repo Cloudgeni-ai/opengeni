@@ -1357,7 +1357,7 @@ describe("tested-descendant release admission", () => {
         "full-green receipt names another source or mode",
       ],
       [
-        // A Batch-attested main push skipped its test lanes: not a release source.
+        // A receipt from the former main-push attestation skipped its test lanes.
         (fixture) =>
           changeReceipt(fixture, "full-green-main-", (body) => {
             body.attestation = {
