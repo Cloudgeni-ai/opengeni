@@ -63,12 +63,25 @@ const EXIT_LINE = /##\[error\]Process completed with exit code (\d+)\./;
 /** docker/build-push-action reports its failure here instead of a process exit line. */
 const BUILDX_ERROR = /##\[error\]buildx failed with:/;
 const BUILD_STEP_EXIT = /did not complete successfully: exit code: (\d+)/;
-/** Registry, download and runner-resource failures inside an image build. */
-const BUILD_INFRA =
-  /(\btimed? ?out\b|\btimeout\b|connection (reset|refused|closed)|TLS handshake|Too Many Requests|\b429\b|Service Unavailable|Bad Gateway|Gateway Time-?out|could not resolve|name resolution|no such host|unexpected EOF|context deadline exceeded|failed to do request|no space left on device|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)/i;
+/**
+ * Registry, download and runner-resource failures inside an image build, as
+ * apt, curl, cargo, bun, Go and BuildKit (including its GitHub Actions cache
+ * backend) word them. Matched on every output
+ * line of the build, so these stay specific to network or resource failures.
+ */
+const BUILD_NETWORK =
+  /(Failed to fetch|Temporary failure resolving|Could not resolve host|Couldn't resolve host|could not resolve|name resolution|no such host|failed to download|returned error: (5\d\d|429)|\b(5\d\d|429) (Service Unavailable|Bad Gateway|Gateway Time-?out|Internal Server Error|Too Many Requests)|Service Unavailable|Bad Gateway|Gateway Time-?out|Too Many Requests|(GET|HEAD|PUT|POST) https?:\/\/\S+ - (5\d\d|429)\b|(status|status code|HTTP|HTTP error|response) (5\d\d|429)\b|connection (reset|refused|closed|timed out)|operation timed out|i\/o timeout|TLS handshake|SSL_ERROR|unexpected EOF|context deadline exceeded|failed to do request|failed to copy: (GET|HEAD|PUT|POST) https?:|RESPONSE [45]\d\d:|BlobNotFound|no space left on device|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|network is unreachable)/i;
+/** A bare timeout counts only on an error line (for example ort's `timeout: global`). */
+const BUILD_ERROR_TIMEOUT = /\b(timed out|timeout)\b/i;
 /** Deterministic Dockerfile and build-context errors. */
 const BUILD_DEFINITION =
   /(dockerfile|failed to compute cache key|failed to calculate checksum|unknown instruction|parse error|not found)/i;
+/**
+ * Step headers, BuildKit's failure summary and its Dockerfile excerpt echo the
+ * Dockerfile command, which is not build output.
+ */
+const BUILD_COMMAND_ECHO =
+  /(^(\S+Z )?(#\d+ )?\[[^\]]*\] |^(\S+Z )?\s*> \[[^\]]*\] |^(\S+Z )?\s*\d+ \| |process "\/bin\/sh -c|buildx failed with:)/;
 const BUILD_WINDOW_LINES = 200;
 
 export function isInfrastructureExit(code: number): boolean {
@@ -147,19 +160,25 @@ export async function classifyFailedJob(
 }
 
 /**
- * An image build failed inside buildx. Only error lines of the failing build
- * count: a registry, download, timeout or disk failure is infrastructure; a
- * failed Dockerfile step or a missing build input is a code failure with that
- * step's exit (137 and other signals stay infrastructure). Anything else holds
+ * An image build failed inside buildx. Any output line naming a registry,
+ * download, network, timeout or disk failure makes it infrastructure; echoed
+ * Dockerfile commands are not output. Otherwise the last failed Dockerfile
+ * step's exit decides (137 and other signals stay infrastructure), a missing
+ * build input or Dockerfile error is a code failure, and anything else holds
  * no verdict.
  */
 export function classifyBuildFailure(window: readonly string[]): {
   exitCode: number;
   reason: string;
 } {
+  const output = window.filter((line) => !BUILD_COMMAND_ECHO.test(line));
   const errors = window.filter((line) => /error/i.test(line));
-  const network = errors.find((line) => BUILD_INFRA.test(line));
-  if (network) return { exitCode: 75, reason: "registry, download or runner failure during build" };
+  if (
+    output.some(
+      (line) => BUILD_NETWORK.test(line) || (/error/i.test(line) && BUILD_ERROR_TIMEOUT.test(line)),
+    )
+  )
+    return { exitCode: 75, reason: "registry, download or runner failure during build" };
   const step = errors
     .map((line) => BUILD_STEP_EXIT.exec(line))
     .filter(Boolean)

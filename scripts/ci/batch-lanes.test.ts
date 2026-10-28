@@ -247,6 +247,52 @@ test("image build failures read buildx errors, not a process exit line", async (
       ),
     ),
   ).toBe(137);
+  // Network failures as apt, curl, cargo and bun word them, before a step exit.
+  const failedStep =
+    '#100 ERROR: process "/bin/sh -c ./install.sh" did not complete successfully: exit code: 100';
+  for (const network of [
+    "#100 12.1 E: Failed to fetch http://deb.debian.org/debian/pool/main/x.deb  503  Service Unavailable [IP: 151.101.2.132 80]",
+    "#100 3.2 curl: (6) Could not resolve host: github.com",
+    "#100 3.2 curl: (22) The requested URL returned error: 502",
+    "#100 40.0 warning: spurious network error (3 tries remaining): [6] Couldn't resolve host name",
+    "#100 41.0 error: failed to download from `https://static.crates.io/crates/x/x-1.0.0.crate`",
+    "#100 41.0 Caused by: [6] Couldn't resolve host name (Could not resolve host: static.crates.io)",
+    "#100 9.9 GET https://registry.npmjs.org/react - 503",
+  ])
+    expect(await one(buildxLog(network, failedStep))).toBe(75);
+  // The GitHub Actions cache backend losing a blob (headless sandbox job 120883492165).
+  expect(
+    await one(
+      buildxLog(
+        "ERROR: failed to build: failed to solve: failed to compute cache key: failed to copy: GET https://productionresultssa9.blob.core.windows.net/actions-cache/20e-1",
+        "RESPONSE 404: 404 The specified blob does not exist.",
+        "ERROR CODE: BlobNotFound",
+      ),
+    ),
+  ).toBe(75);
+  // Echoed Dockerfile commands are not output, so a code failure stays a code failure.
+  expect(
+    await one(
+      buildxLog(
+        "#100 [build 4/9] RUN timeout 900 cargo build || echo 'Failed to fetch'",
+        "#100 41.2 error[E0425]: cannot find value `speaker` in this scope",
+        "------",
+        " > [build 4/9] RUN timeout 900 cargo build || echo 'Failed to fetch':",
+        "Dockerfile:42",
+        "  42 | >>> RUN timeout 900 cargo build || echo 'Failed to fetch'",
+        'ERROR: failed to solve: process "/bin/sh -c timeout 900 cargo build" did not complete successfully: exit code: 101',
+      ),
+    ),
+  ).toBe(1);
+  // A source position such as `:429` is not a rate limit.
+  expect(
+    await one(
+      buildxLog(
+        "#70 2.9 src/routes/index.ts:429:7 - error TS2304: Cannot find name 'x'.",
+        '#70 ERROR: process "/bin/sh -c bun run build" did not complete successfully: exit code: 1',
+      ),
+    ),
+  ).toBe(1);
   expect(await one(buildxLog("#100 ERROR: something unexpected"))).toBe(75);
   // A buildx failure wins over an unrelated earlier exit line.
   expect(

@@ -534,13 +534,16 @@ ran, and every landed main SHA has the jobs canary admission needs
   login or upload step, a deadline (`timed_out` or exit 124), runner loss, a
   signal, an unreadable log or a fail-fast cancellation alone is
   infrastructure. Image builds (`docker/build-push-action`) write no process
-  exit line, so a `buildx failed with:` job reads the error lines of the 200
-  lines before it (`classifyBuildFailure`): a registry, download, timeout or
-  disk error is infrastructure; otherwise the last failed Dockerfile step's
-  exit decides (137 stays infrastructure), a missing build input or Dockerfile
-  error is a code failure, and anything else holds no verdict. On this week's
-  main failures this gives 75 for the `ort-sys` prebuilt download timeout and 1
-  for the broken web bundle. An aggregate (`Typecheck and unit tests`,
+  exit line, so a `buildx failed with:` job reads the 200 lines before it
+  (`classifyBuildFailure`). Any output line naming a registry, download,
+  network, cache-backend, timeout or disk failure (as apt, curl, cargo, bun and
+  BuildKit word them) is infrastructure; echoed Dockerfile commands are not
+  output. Otherwise the last failed Dockerfile step's exit decides (137 stays
+  infrastructure), a missing build input or Dockerfile error is a code
+  failure, and anything else holds no verdict. On the 14 failed image jobs in
+  recent main history, it gives 1 for the 11 broken lockfile or bundle builds,
+  75 for the `ort-sys` download timeout and the lost Actions cache blob, and 75
+  for an expired log. An aggregate (`Typecheck and unit tests`,
   `Workload image builds`, `Validation before release image`) counts only when
   no other lane failed, and only as a code failure when every other lane
   settled `success` or `skipped`; next to a cancelled or unsettled lane it is
