@@ -8,7 +8,7 @@ A bot only adds what people need to recognise it and to start another like it.
 
 ## Name, description and avatar
 
-Every chat may carry, next to its title:
+Every chat may carry, alongside its title:
 
 - a one-line **description** (up to 280 characters) of what it is for, and
 - an **avatar**: one emoji, one of a curated set of icons, one or two letters,

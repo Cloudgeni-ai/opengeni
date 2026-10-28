@@ -390,17 +390,6 @@ export function SessionHeader({
             label={startupLabel}
             always={inMenu("status")}
           />
-          {session.description && !rename.editing ? (
-            // Gives way before anything else: it truncates to nothing on a
-            // crowded row and is hidden on narrow screens.
-            <span
-              data-session-description=""
-              title={session.description}
-              className="ml-1 hidden min-w-0 max-w-[28rem] shrink-[1000000] truncate text-sm text-fg-muted md:block"
-            >
-              {session.description}
-            </span>
-          ) : null}
           {accessSlot && !inMenu("access") ? (
             <span ref={part("access")} className="flex shrink-0 items-center">
               {accessSlot}

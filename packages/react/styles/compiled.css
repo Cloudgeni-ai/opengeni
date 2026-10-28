@@ -2215,9 +2215,6 @@
 :where(.og-root).max-w-\[18rem\],:where(.og-root) .max-w-\[18rem\] {
     max-width: 18rem;
   }
-:where(.og-root).max-w-\[28rem\],:where(.og-root) .max-w-\[28rem\] {
-    max-width: 28rem;
-  }
 :where(.og-root).max-w-\[40\%\],:where(.og-root) .max-w-\[40\%\] {
     max-width: 40%;
   }
@@ -2463,9 +2460,6 @@
   }
 :where(.og-root).shrink-\[100000\],:where(.og-root) .shrink-\[100000\] {
     flex-shrink: 100000;
-  }
-:where(.og-root).shrink-\[1000000\],:where(.og-root) .shrink-\[1000000\] {
-    flex-shrink: 1000000;
   }
 :where(.og-root).grow,:where(.og-root) .grow {
     flex-grow: 1;
@@ -10333,11 +10327,6 @@
     @media (width >= 40rem) {
       font-size: var(--text-6xl);
       line-height: var(--tw-leading, var(--text-6xl--line-height));
-    }
-  }
-:where(.og-root).md\:block,:where(.og-root) .md\:block {
-    @media (width >= 48rem) {
-      display: block;
     }
   }
 :where(.og-root).md\:flex,:where(.og-root) .md\:flex {
