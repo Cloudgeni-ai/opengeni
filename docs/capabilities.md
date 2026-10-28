@@ -115,10 +115,11 @@ every catalog read, session create, approval-policy read and worker claim.
   wins, as does an organization integration policy that does not allow
   `custom:mcp`. Shared workspaces are unchanged.
 - The Connections page lists a carried connector as connected, labelled
-  **From <workspace>**; it is managed in the origin workspace.
+  **From <workspace>**; it is managed in the origin workspace. Its owner can
+  still set its approvals in Personal, stored for the Personal workspace like
+  any of its own connectors.
 
-API integration definitions, MCP event sources and per-connector tool
-permission rows are not carried yet.
+API integration definitions and MCP event sources are not carried yet.
 
 ### Credential headers
 

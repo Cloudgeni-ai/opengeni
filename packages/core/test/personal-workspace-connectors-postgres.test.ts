@@ -15,6 +15,7 @@ import {
   settingsWithEnabledCapabilityMcpServers,
 } from "../src/domain/capabilities";
 import { freezeConnectionAccounts } from "../src/domain/personal-connection-delegations";
+import { getConnectorToolPermissions } from "../src/domain/connector-tool-permissions";
 import { acceptSessionUserMessageWithOutcome } from "../src/domain/sessions";
 
 // The Personal workspace is an extension of the organization for its one
@@ -443,6 +444,39 @@ test("the Personal connector page shows carried connectors labelled with their w
   });
   expect(anonymous.items.find((item) => item.id === f.curated.id)?.enabled).toBe(false);
   expect(anonymous.items.some((item) => item.id === f.custom.id)).toBe(false);
+}, 60_000);
+
+test("the owner can open a carried connector's approvals in their Personal workspace", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const input = (subjectId: string, capabilityId: string, personalOwnerVerified = true) => ({
+    db: client.db,
+    settings,
+    workspaceId: f.miaPersonal,
+    capabilityId,
+    personalOwnerVerified,
+    grant: {
+      accountId: f.accountId,
+      workspaceId: f.miaPersonal,
+      subjectId,
+      permissions: ["capabilities:read", "capabilities:manage"],
+      metadata: {},
+    },
+  });
+  const expected = [
+    [f.custom.id, f.connections.miaAcme],
+    [f.curated.id, f.connections.miaLinear],
+  ] as const;
+  for (const [capabilityId, connectionId] of expected) {
+    const permissions = await getConnectorToolPermissions(input(f.mia, capabilityId));
+    expect(permissions.connectionId).toBe(connectionId);
+    expect(permissions.accounts.map((account) => account.connectionId)).toEqual([connectionId]);
+    expect(permissions.accounts.every((account) => account.scope === "personal")).toBe(true);
+    // Without owner verification the carried connector does not exist here.
+    await expect(
+      getConnectorToolPermissions(input(f.mia, capabilityId, false)),
+    ).rejects.toMatchObject({ status: 404 });
+  }
 }, 60_000);
 
 test("nothing crosses to another member, another organization or a shared workspace", async () => {
