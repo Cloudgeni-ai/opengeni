@@ -89,10 +89,10 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
 } from "@opengeni/contracts/atlassian-native-retirement";
 import {
+  connectOwnerStateFields,
   personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -170,9 +170,9 @@ export async function startAtlassianOAuth(
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/atlassian/callback`;
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
+    // The route admits only a managed human, so reaching here is the proof; the
+    // callback has no live principal and enforces exactly this claim.
+    ...connectOwnerStateFields(input, true),
     kind: ATLASSIAN_OAUTH_STATE_KIND,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(input.externalContinuation
@@ -183,9 +183,6 @@ export async function startAtlassianOAuth(
           ),
         }
       : {}),
-    // The route admits only a managed human, so reaching here is the proof; the
-    // callback has no live principal and enforces exactly this claim.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     returnPath: ATLASSIAN_RETURN_PATH(input.workspaceId),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });

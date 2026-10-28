@@ -100,6 +100,13 @@ export function useHostMessageContext(): (() => string | undefined) | undefined 
   return store ? read : undefined;
 }
 
+/** Reads the tools the host's context is for at send time (see MessageContextItem.tools). */
+export function useHostMessageContextTools(): (() => string[] | undefined) | undefined {
+  const store = useAppHost().messageContext;
+  const read = useCallback(() => store?.toolsForSend(), [store]);
+  return store ? read : undefined;
+}
+
 const NO_PILLS: readonly MessageContextPill[] = [];
 const noSubscription = () => () => {};
 
