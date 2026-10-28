@@ -164,6 +164,11 @@ export function OrganizationModelsSection({
         targetWorkspace,
         context.managedSelfContext,
       )}
+      canAdministerWorkspace={hasWorkspacePermission(
+        context.accessContext,
+        target,
+        "workspace:admin",
+      )}
       canManageConnections={hasWorkspacePermission(
         context.accessContext,
         target,

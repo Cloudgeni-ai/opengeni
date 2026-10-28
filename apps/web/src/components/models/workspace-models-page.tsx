@@ -116,6 +116,7 @@ import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Button } from "@opengeni/react/ui/button";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { RowButton } from "@opengeni/react/ui/page-actions";
@@ -262,6 +263,7 @@ export function WorkspaceModelsPageBody({
   organizationId,
   organizationName,
   canManageSettings,
+  canAdministerWorkspace,
   canManageConnections,
   canManageOrganizationModels,
   account,
@@ -286,6 +288,13 @@ export function WorkspaceModelsPageBody({
   organizationName: string;
   /** Workspace admins: default model, Allowed models, custom models. */
   canManageSettings: boolean;
+  /**
+   * The viewer holds `workspace:admin` here. A Personal workspace's owner
+   * manages its settings without that grant, so a regular member's own
+   * subscription there is connected as theirs (scope `user`), not as the
+   * workspace's.
+   */
+  canAdministerWorkspace: boolean;
   /** Connect, change and disconnect this workspace's own accounts. */
   canManageConnections: boolean;
   /** Organization owners and admins: connect for everyone, and manage the organization's accounts. */
@@ -598,6 +607,10 @@ export function WorkspaceModelsPageBody({
   const onlyMe = memberConnects && !personal && !canManageSettings;
   // A shared workspace's admin who isn't an organization owner or admin.
   const workspaceAdminConnects = memberConnects && !personal && !onlyMe;
+  // A Personal workspace's owner without workspace admin rights there (a
+  // regular organization member) connects a Claude subscription as their own:
+  // the API refuses the workspace's scope without `workspace:admin`.
+  const personalOwnConnect = memberConnects && personal && !canAdministerWorkspace;
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -696,7 +709,10 @@ export function WorkspaceModelsPageBody({
       </DetailPage>
     );
   } else if ((view === "connect" || view === "connect-workspace") && memberConnects) {
-    // Your own account, for this workspace.
+    // Your own account, for this workspace. A private subscription lives only
+    // in its owner's Personal workspace (the API refuses it anywhere else), so
+    // a shared workspace's member is sent there instead.
+    const personalWorkspaceId = workspaces.find((each) => each.personal)?.id;
     page = (
       <ConnectPickerPage
         target="workspace"
@@ -705,15 +721,34 @@ export function WorkspaceModelsPageBody({
           personal
             ? "It pays for models in your Personal workspace, so only you use it."
             : onlyMe
-              ? `Only work you start in ${workspaceName} uses it. Nobody else here can.`
+              ? "Only you use it."
               : `Connect a subscription or an API key for everyone in ${workspaceName}.`
         }
         codexAvailable={personal || workspaceAdminConnects}
-        // A Personal workspace can't hold its own SuperGrok account.
-        grok={grok.unavailable || personal ? "hidden" : "available"}
-        claude={claudeEnabled ? "available" : "hidden"}
+        // In a Personal workspace SuperGrok is the person's own account.
+        grok={grok.unavailable || onlyMe ? "hidden" : "available"}
+        claude={claudeEnabled && !onlyMe ? "available" : "hidden"}
         gateways={onlyMe ? undefined : gateways}
         personal={personal}
+        empty={
+          onlyMe ? (
+            <EmptyState
+              variant="inline"
+              title="Connect it in your Personal workspace"
+              description={`Your own subscription is connected there. It then also pays for chats you keep to yourself in ${workspaceName}.`}
+              action={
+                personalWorkspaceId ? (
+                  <Button
+                    variant="secondary"
+                    onClick={() => nav.openWorkspace(personalWorkspaceId, undefined, "connect")}
+                  >
+                    Open your Personal workspace
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : undefined
+        }
         backLabel={listLabel}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
@@ -940,15 +975,17 @@ export function WorkspaceModelsPageBody({
           places={grokPlaces}
           onClose={backToList}
           fields={note}
-          scope={onlyMe ? "user" : undefined}
+          // A private account is connected only in its owner's Personal
+          // workspace; a shared workspace connects its own.
+          scope={onlyMe || personal ? "user" : "workspace"}
         />
       ) : provider === "claude_subscription" ? (
         <ClaudeConnectPage
           claude={claude}
           reconnectAccountId={key?.provider === "claude" ? key.id : undefined}
-          scope={onlyMe && key?.provider !== "claude" ? "user" : undefined}
+          scope={(onlyMe || personalOwnConnect) && key?.provider !== "claude" ? "user" : undefined}
           scopeName={workspaceName}
-          allowPrivate={!personal}
+          allowPrivate={false}
           onClose={account ? () => nav.openAccount(account) : backToList}
           onConnected={(id) => (id ? claudePlaces.openAccount(id) : backToList())}
           fields={note}
@@ -1538,6 +1575,9 @@ function workspaceOwnedNote(
   if (where.personal && provider !== "supergrok" && provider !== "claude_subscription") {
     return "This key will belong to your Personal workspace, so only you use it. Organization API keys can't be used in Personal workspaces.";
   }
+  if (where.personal && provider === "supergrok") {
+    return "This account will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself.";
+  }
   return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect provider.`;
 }
 
@@ -1795,6 +1835,7 @@ export function ConnectPickerPage({
   gateways,
   workspaceKeys = NO_WORKSPACE_KEYS,
   personal = false,
+  empty,
   backLabel = "Models",
   onClose,
   onPick,
@@ -1819,6 +1860,8 @@ export function ConnectPickerPage({
   workspaceKeys?: readonly GatewayId[];
   /** In a Personal workspace, organization keys serve shared workspaces only. */
   personal?: boolean;
+  /** Shown instead of the default when there is nothing to connect here. */
+  empty?: ReactNode;
   backLabel?: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
@@ -1888,11 +1931,13 @@ export function ConnectPickerPage({
       />
       <div className="mt-6 min-w-0">
         {choices.length === 0 ? (
-          <EmptyState
-            variant="inline"
-            title="Nothing to connect."
-            description="Only people who can manage connections can add an account."
-          />
+          (empty ?? (
+            <EmptyState
+              variant="inline"
+              title="Nothing to connect."
+              description="Only people who can manage connections can add an account."
+            />
+          ))
         ) : (
           <ProviderConnectList
             choices={choices}
