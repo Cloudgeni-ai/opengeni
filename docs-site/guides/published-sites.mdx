@@ -38,6 +38,19 @@ hello.textContent = viewer?.name ?? "Welcome";
 
 `site.viewer` is `{ kind, id, name, email, signedIn }` with `kind` one of `member`, `invited`, `user` or `guest`. `id` is stable per Site and is the owner of the viewer's Site Data records. Guests have no name or email. `site.auth.signIn()` sends the visitor through Opengeni sign-in and back; the Site never sees a password or token.
 
+## Pages and links
+
+A published Site answers on every path of its address, so one Site can have `/`, `/admin` and `/unsubscribe`. Site code reads the address with `site.location` and moves between its own pages with `site.navigate`:
+
+```ts
+const at = await site.location; // { path, search, hash, href, params }
+if (at?.path === "/unsubscribe") unsubscribe(at.params.get("t"));
+site.onLocationChange((next) => render(next)); // Back, Forward and links
+await site.navigate("/admin");
+```
+
+Ordinary links to the Site's own pages work without reloading the Site, and the address, including its query and `#hash`, survives sign-in. The address is untrusted input: check a token from a link with an `everyone` Site SQL query rather than trusting it.
+
 ## Guests and Site Data
 
 Guests reach a collection only when its guest rule allows it: `none` (the default), `read`, `append` (add records and read their own) or `own` (add, read, change and delete their own). Ask Opengeni to set it when it defines the collection.

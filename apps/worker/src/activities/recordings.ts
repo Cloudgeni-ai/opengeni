@@ -199,7 +199,16 @@ export type RecordingActivityOptions = {
   startMeetingSummary?: typeof startMeetingSummary;
   /** The clock a transcript's time budget is measured with; defaults to Date.now. */
   now?: () => number;
+  /** Saves a made transcript; defaults to the database. Tests make it fail. */
+  saveTranscript?: typeof completeRecordingTranscriptVersion;
+  /**
+   * The waits between attempts to save a transcript that is already
+   * charged; defaults to one, two and four seconds.
+   */
+  saveRetryDelaysMilliseconds?: readonly number[];
 };
+
+const SAVE_RETRY_DELAYS_MILLISECONDS = [1_000, 2_000, 4_000] as const;
 
 /** The workspace's own key for the provider, else its organization's. */
 async function loadRecordingProviderApiKey(
@@ -928,7 +937,7 @@ export function createRecordingActivities(
                 attribution: job.creditAttribution ?? { kind: "unknown" },
               })
             : null;
-          const completed = await completeRecordingTranscriptVersion(db, {
+          const completed = await saveCharged({
             ...actor,
             versionId: input.versionId,
             processingOwner: input.processingOwner,
@@ -957,8 +966,10 @@ export function createRecordingActivities(
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
         // Out of time: whatever the abort broke, the reason is the budget.
-        // Once it is being charged and saved it is never failed for time: a
-        // retry saves it, and the charge is settled once by its source id.
+        // Once it is being charged and saved it is never failed for time.
+        // The save is retried here, so only a database that stays down past
+        // those retries leaves it to Temporal; past the budget that retry
+        // fails it as timed_out. The charge is settled once by its source id.
         if (budget.signal.aborted && !finishing) return await fail("timed_out", error);
         // EU-only refused the route before any audio was sent; a retry gets
         // the same answer, and the job never moves to another provider.
@@ -1207,6 +1218,34 @@ export function createRecordingActivities(
         return await work();
       } finally {
         clearInterval(timer);
+      }
+    }
+
+    /**
+     * Saves a transcript that is already charged. A brief database error
+     * is retried here, since repeating the save is safe (it is guarded by the
+     * version's state and owner): a Temporal retry past the budget would fail
+     * the charged version as timed_out instead.
+     */
+    async function saveCharged(
+      version: Parameters<typeof completeRecordingTranscriptVersion>[1],
+    ): ReturnType<typeof completeRecordingTranscriptVersion> {
+      const save = options.saveTranscript ?? completeRecordingTranscriptVersion;
+      const delays = options.saveRetryDelaysMilliseconds ?? SAVE_RETRY_DELAYS_MILLISECONDS;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await save(db, version);
+        } catch (error) {
+          if (error instanceof RecordingNotFoundError || attempt >= delays.length) throw error;
+          observability.warn("saving a charged meeting transcript failed; trying again", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            attempt: attempt + 1,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          });
+          await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+        }
       }
     }
   }

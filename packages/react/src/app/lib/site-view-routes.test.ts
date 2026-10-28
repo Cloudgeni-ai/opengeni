@@ -56,4 +56,8 @@ test("Site view links and search", () => {
   for (const asked of [true, "true", 1]) expect(siteViewSearch({ new: asked }).new).toBe(true);
   for (const other of [false, "false", 0, "yes", undefined])
     expect(siteViewSearch({ new: other }).new).toBeUndefined();
+  // The Site's own address: a path within the Site, its root when omitted.
+  expect(siteViewSearch({ page: "/unsubscribe?t=abc#done" }).page).toBe("/unsubscribe?t=abc#done");
+  for (const other of ["/", "admin", "https://example.com/", 3, undefined])
+    expect(siteViewSearch({ page: other }).page).toBeUndefined();
 });

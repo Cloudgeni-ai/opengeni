@@ -371,6 +371,9 @@ Each transcript has a time budget, counted from when it was asked for and
 including waiting and retries: half an hour plus three times the audio's
 length, at most twelve hours. Past it the version fails as `timed_out`
 rather than staying in progress, and can be transcribed again.
+A transcript that is already made and being charged and saved when the
+budget runs out is still saved, and a brief database error while saving it
+is retried at once.
 
 When a recording has computer or tab audio (a `system` track), the
 microphone track is the person recording and the system track is everyone

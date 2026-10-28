@@ -1,4 +1,16 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+export {
+  activeAttemptSecretValues,
+  installToolResultSecretMasking,
+  secretMaskedTool,
+  secretValueModelInputFilter,
+  withAttemptSecretValues,
+} from "./tool-result-secret-masking";
+import {
+  firstPartySecretValuesMeta,
+  installToolResultSecretMasking,
+  secretMaskedToolResolver,
+} from "./tool-result-secret-masking";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -134,6 +146,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_SECRET_VALUES_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -187,6 +200,7 @@ import {
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
+  type SecretValueMemory,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
@@ -2565,6 +2579,11 @@ export type BuildAgentOptions = {
    * recorded keeps the references. Omitted: references pass through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * The attempt's known secret values (docs/secrets.md, Masking). Every tool
+   * result is masked with it before the model, the run state or history sees it.
+   */
+  secretValueMemory?: SecretValueMemory | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -3471,6 +3490,10 @@ export function buildOpenGeniAgent(
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+    // Last, so it masks exactly what every other wrapper hands to the model.
+    if (options.secretValueMemory) {
+      installToolResultSecretMasking(agent, options.secretValueMemory);
+    }
     return agent;
   }
 
@@ -3607,6 +3630,10 @@ export function buildOpenGeniAgent(
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+  // Last, so it masks exactly what every other wrapper hands to the model.
+  if (options.secretValueMemory) {
+    installToolResultSecretMasking(agent, options.secretValueMemory);
+  }
   return agent;
 }
 
@@ -6920,12 +6947,19 @@ export function attemptToolCallMeta(
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
-    context.transportMeta ?? {};
+  const {
+    [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored,
+    [FIRST_PARTY_SECRET_VALUES_META_KEY]: _ignoredValues,
+    ...transportMeta
+  } = context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+    // The values this call's arguments resolved to, so the first-party server
+    // masks them in what it stores and returns (docs/secrets.md, Masking).
+    // Never logged; third-party servers never see it.
+    ...(serverId === "opengeni" ? firstPartySecretValuesMeta(context.operationId) : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
       ? {
@@ -9738,7 +9772,7 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    resolveMissingFunctionTool: mcpToolResolverForAgent(agent),
+    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
   });
 }
 
@@ -9940,6 +9974,11 @@ export type RunAgentStreamOptions = {
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
+  /**
+   * Masks known secret values in the instructions and input of every model
+   * call, after every filter that can add input (docs/secrets.md, Masking).
+   */
+  secretMaskingInputFilter?: CallModelInputFilter;
   /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
@@ -10330,6 +10369,8 @@ async function runAgentStreamInternal(
             prepared.modelInputAlreadyProjected === true,
           ),
         ),
+        // Secret masking runs after every filter that can add model input.
+        measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
         measuredModelInputFilter(
           "input_filter_context",
           deferCompactionToModelBoundary(
@@ -10497,6 +10538,8 @@ async function runAgentStreamInternal(
         "input_filter_modality",
         modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       ),
+      // Secret masking runs after every filter that can add model input.
+      measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
       measuredModelInputFilter(
         "input_filter_context",
         deferCompactionToModelBoundary(
@@ -10612,7 +10655,7 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   const runtime = lazyToolRuntimeForAgent(agent);
   return {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
-    resolveMissingFunctionTool: mcpToolResolverForAgent(agent),
+    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
   };
 }
 
