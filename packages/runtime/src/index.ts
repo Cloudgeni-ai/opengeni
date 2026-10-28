@@ -461,7 +461,6 @@ import {
   withCommandNotStartedCallProof,
   withRoutingMutationOutputRejectionFence,
   renderRoutingMutationOutcomeUnknownToolResult,
-  repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setOpenSandboxApplyDiff,
   setSelfhostedApplyDiff,
@@ -533,7 +532,6 @@ import {
   withRetainableSessionImageOutputHook,
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
-import type { ComputerToolMode } from "./legacy-computer-compat";
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
@@ -769,19 +767,9 @@ export {
   type RetainableSessionImageOutputHook,
   type RetainableSessionImageToolName,
 } from "./retained-session-image";
-export {
-  SandboxComputer,
-  ComputerUseCapability,
-  computerUse,
-  ComputerUnavailableError,
-  ScreenshotReadError,
-  ComputerReadOnlyError,
-  ComputerActionError,
-  type SandboxComputerOptions,
-  type ComputerUseArgs,
-  type ComputerToolMode,
-  type ScreenshotReadErrorCode,
-} from "./legacy-computer-compat";
+
+/** How the computer tool reaches the model: screenshots, text only, or not at all. */
+export type ComputerToolMode = "function-image" | "disabled" | "function-text";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
 // helpers + the config-owned env/port re-exports). Re-exported verbatim so the
@@ -9859,15 +9847,7 @@ export async function prepareRunInput(
       "Cannot resume an interrupted tool from leftover SDK run state; the open suffix is the resume authority.",
     );
   }
-  const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
-  if (compatibleRunState.repairs.length > 0) {
-    console.warn("[runtime] repaired incompatible RunState exposedPorts", {
-      errorClass: "RunStateCompatibilityError",
-      errorCode: "incompatible_exposed_ports",
-      origin: "runtime",
-    });
-  }
-  const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
+  const state = await restoreInterruptedRunState(agent, input.serializedRunState);
   // Pre-fix serialized states have no ownership field. Establish application
   // ownership before reading history and choosing the durable append boundary.
   state._historyOwnership = "external";

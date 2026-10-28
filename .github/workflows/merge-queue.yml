@@ -118,7 +118,7 @@ jobs:
       - name: Check impacted static contracts
         run: >-
           bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
-          --exclude publish-closure --exclude sdk-compat --exclude example-builds
+          --exclude publish-closure --exclude example-builds
 
   units:
     name: Queue unit shard ${{ matrix.index }}/${{ matrix.total }}

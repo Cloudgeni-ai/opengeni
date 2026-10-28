@@ -64,7 +64,6 @@ import {
 import { sanitizeFilename } from "./files";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
-import { routeRetired } from "../http/deprecation";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -574,21 +573,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     },
   );
 
-  for (const path of [
-    "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
-    "/v1/workspaces/:workspaceId/knowledge/search",
-  ]) {
-    app.post(path, async (c) => {
-      await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "documents:search");
-      throw routeRetired(
-        "POST /v1/workspaces/:workspaceId/knowledge/entries/search",
-        "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
-      );
-    });
-  }
-
-  // Compatibility upload endpoint. Retained originals and extracted text now
-  // enter canonical Knowledge. Agent findings use ordinary accepted turns.
+  // Upload endpoint. Retained originals and extracted text enter canonical
+  // Knowledge. Agent findings use ordinary accepted turns.
   app.post("/v1/workspaces/:workspaceId/knowledge/drops", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");

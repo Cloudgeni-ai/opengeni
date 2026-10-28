@@ -678,10 +678,6 @@ import {
 import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
 import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
-import {
-  withoutRetiredSessionCreateMetadata,
-  hasRetiredSessionCreateSelection,
-} from "./retired-session-create-metadata";
 export * from "./connect-attempts";
 export * from "./external-identities";
 export * from "./external-identity-links";
@@ -1015,7 +1011,6 @@ import {
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
-export * from "./pr-review";
 import {
   and,
   asc,
@@ -30358,9 +30353,6 @@ function assertSessionCreateReplayIdentity(
     stableJson(input.initialAgentLearning ?? {})
   )
     throw new SessionCreateIdempotencyConflictError();
-  if (hasRetiredSessionCreateSelection(existing.metadata)) {
-    throw new SessionCreateIdempotencyConflictError();
-  }
   if (
     stableJson(storedBundledSkillSelectionIdentity(existing.metadata) ?? null) !==
     stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
@@ -30605,14 +30597,12 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    withoutRetiredSessionCreateMetadata(
-      withBundledSkillSelectionMetadata(
-        metadataWithAgentConfigCreateIdentity(
-          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
-          input.agentConfig,
-        ),
-        input.bundledSkillIds,
+    withBundledSkillSelectionMetadata(
+      metadataWithAgentConfigCreateIdentity(
+        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+        input.agentConfig,
       ),
+      input.bundledSkillIds,
     ),
     selectedInstalledSkillIds,
   );
@@ -92130,7 +92120,6 @@ export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
-export * from "./transcription-recordings";
 export * from "./recordings";
 export * from "./recording-live";
 export {
@@ -92168,7 +92157,6 @@ export * from "./organization-recovery";
 export * from "./active-sandbox";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
-export * from "./automations";
 export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";

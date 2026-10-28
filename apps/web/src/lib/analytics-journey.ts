@@ -187,14 +187,9 @@ export function journeyOperation(pathname: string, method: string): JourneyOpera
     parts[1] === "workspaces" &&
     parts.length === 4 &&
     method.toUpperCase() === "POST" &&
-    (parts[3] === "transcriptions" || parts[3] === "transcription-recordings")
+    parts[3] === "transcriptions"
   ) {
-    // One dictation: a direct transcription or the start of a long recording.
-    // Recording chunks, finalize, and processing are not new dictations.
-    return {
-      operation: "dictation",
-      properties: { ...properties, mode: parts[3] === "transcriptions" ? "direct" : "recording" },
-    };
+    return { operation: "dictation", properties: { ...properties, mode: "direct" } };
   }
   if (["codex", "supergrok", "ai-gateway", "openrouter", "opper"].includes(parts[3] ?? "")) {
     // Endpoint leaf names are closed vocabulary, not account IDs or provider responses.

@@ -126,7 +126,6 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
-import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -2234,24 +2233,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         onRuntimeChanged();
                       }}
                     />
-                    {activeTab === "plugins" ? (
+                    {activeTab === "plugins" && eventTriggersEnabled ? (
                       <div className="mt-6 grid gap-4">
-                        {eventTriggersEnabled ? (
-                          <PrReviewAutomationCard workspaceId={workspaceId} />
-                        ) : null}
-                        <PrReviewSetupCard
-                          client={client}
-                          workspaceId={workspaceId}
-                          retiring={eventTriggersEnabled}
-                          canManage={
-                            canManageApiIntegrationInstances &&
-                            hasWorkspacePermission(
-                              context.accessContext,
-                              workspaceId,
-                              "secrets:write",
-                            )
-                          }
-                        />
+                        <PrReviewAutomationCard workspaceId={workspaceId} />
                       </div>
                     ) : null}
                   </div>

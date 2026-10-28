@@ -359,7 +359,7 @@ export function registerSessionAdminAccessTools(input: {
       const authority = await currentAuthority();
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       const entry = findAppAction(id);
-      if (!entry || entry.browserOnly || entry.retired) return describeActionResult(id);
+      if (!entry || entry.browserOnly) return describeActionResult(id);
       return text({
         ...describeAction(entry),
         ...(entry.path.includes(":workspaceId")

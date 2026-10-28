@@ -235,7 +235,6 @@ function createEmbedStateHost(
         headers,
         fetch: fetchImpl,
         beginSharedRead,
-        onDeprecation: false,
         apiContract: "compatible",
       }),
     fetchClientConfig: (signal, workspaceId) =>
