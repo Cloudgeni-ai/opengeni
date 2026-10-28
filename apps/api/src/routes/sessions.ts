@@ -371,6 +371,7 @@ import {
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
+  resolveMemberExecutionDefault,
   getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
   forkManagedHumanSession,
@@ -938,14 +939,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
     });
-    return c.json(
-      await getActorNewSessionDraft(
+    const [draft, memberDefault] = await Promise.all([
+      getActorNewSessionDraft(
         { settings: catalog.settings, db },
         grant,
         workspaceId,
         authorization,
       ),
-    );
+      resolveMemberExecutionDefault(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+    ]);
+    // A fresh form starts on the caller's own default when it is usable now.
+    return c.json({
+      ...draft,
+      memberDefaultExecutionTarget: memberDefault.usable ? memberDefault.target : null,
+    });
   });
 
   app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {

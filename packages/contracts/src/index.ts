@@ -3204,6 +3204,30 @@ export function machineCanBeWorkspaceDefault(
   return machine.scope !== "user" || workspace?.kind === "personal";
 }
 
+/**
+ * `GET /v1/workspaces/:workspaceId/my-default-execution-target`: the caller's
+ * own placement for the new chats they start in this workspace ("Your default
+ * machine"). Null follows the workspace default. Any active machine the caller
+ * can use qualifies, including their own Only me machine. `usable` is false
+ * when the saved machine was removed or is no longer available to them; their
+ * new chats then follow the workspace default until they choose again.
+ */
+export const MemberDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    target: WorkspaceDefaultExecutionTarget.nullable(),
+    usable: primitives.boolean,
+  }),
+);
+export type MemberDefaultExecutionTarget = z.infer<typeof MemberDefaultExecutionTarget>;
+
+/** `PUT /v1/workspaces/:workspaceId/my-default-execution-target`; null clears it. */
+export const UpdateMemberDefaultExecutionTargetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ target: WorkspaceDefaultExecutionTarget.nullable() }).strict(),
+);
+export type UpdateMemberDefaultExecutionTargetRequest = z.infer<
+  typeof UpdateMemberDefaultExecutionTargetRequest
+>;
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -10310,6 +10334,12 @@ export const NewSessionDraft = /* @__PURE__ */ defineSchema(() =>
     selectedProjectChannelId: z.string().uuid().nullable().optional(),
     options: NewSessionDraftOptions,
     selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
+    /**
+     * Read-only: the caller's own default placement for new chats here ("Your
+     * default machine") when it is usable now. A fresh form starts on it ahead
+     * of the workspace default. Never saved with the draft.
+     */
+    memberDefaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
     updatedAt: primitives.nullableString,
   }),
 );
