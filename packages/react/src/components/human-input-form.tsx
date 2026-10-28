@@ -147,7 +147,7 @@ function HumanInputRequestForm({
   const [step, setStep] = useState(0);
   const stepQuestion = request.questions[Math.min(step, Math.max(0, lastStep))] ?? null;
   const headerQuestion = singleQuestion ?? (multi ? stepQuestion : null);
-  const decision = decisionButtons ? binaryDecision(request.questions) : null;
+  const decision = binaryDecision(request.questions, { inferFromLabels: decisionButtons });
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
   // Agent-written question text renders as inline Markdown; host-provided
   // titles and messages render as given.
@@ -800,13 +800,27 @@ function firstWord(label: string): string {
  * answered with two buttons; an "Other" free-text answer has no meaning for it,
  * and the composer still accepts a different instruction.
  */
-export function binaryDecision(questions: readonly HumanInputQuestion[]): {
+export function binaryDecision(
+  questions: readonly HumanInputQuestion[],
+  { inferFromLabels = true }: { inferFromLabels?: boolean | undefined } = {},
+): {
   question: HumanInputQuestion;
   accept: HumanInputQuestion["options"][number];
   decline: HumanInputQuestion["options"][number];
 } | null {
   if (questions.length !== 1) return null;
   const question = questions[0]!;
+  // The agent asked for a yes/no decision in its own words: the action first,
+  // the way out second.
+  if (
+    question.confirm === true &&
+    question.kind === "single_select" &&
+    !question.skillReview &&
+    question.options.length === 2
+  ) {
+    return { question, accept: question.options[0]!, decline: question.options[1]! };
+  }
+  if (!inferFromLabels) return null;
   if (
     question.kind !== "single_select" ||
     question.skillReview ||
@@ -1036,10 +1050,26 @@ function QuestionControls({
                 <span className="min-w-0 flex-1">
                   <span className="block text-og-sm font-medium leading-5 [overflow-wrap:anywhere]">
                     {option.label}
+                    {option.recommended ? (
+                      <span
+                        data-human-input-recommended=""
+                        className="ml-2 inline-flex -translate-y-px items-center rounded-full bg-og-accent/12 px-2 align-middle text-og-xs font-medium leading-[1.125rem] text-og-accent"
+                      >
+                        {t("humanInputForm.recommended")}
+                      </span>
+                    ) : null}
                   </span>
                   {option.description ? (
                     <span className="mt-0.5 block text-og-xs leading-[1.125rem] text-og-fg-muted [overflow-wrap:anywhere]">
                       <InlineMarkdown>{option.description}</InlineMarkdown>
+                    </span>
+                  ) : null}
+                  {option.preview ? (
+                    <span
+                      data-human-input-preview=""
+                      className="mt-2 block max-h-40 overflow-auto whitespace-pre-wrap rounded-og-md bg-og-fg/[0.04] px-2.5 py-2 font-og-mono text-og-xs leading-[1.125rem] text-og-fg [overflow-wrap:anywhere]"
+                    >
+                      {option.preview}
                     </span>
                   ) : null}
                 </span>

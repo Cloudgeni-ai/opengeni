@@ -1868,6 +1868,7 @@ export const englishMessages = {
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
   "humanInputForm.questionOfTotal": "Question {current} of {total}",
+  "humanInputForm.recommended": "Recommended",
   "humanInputForm.retryPreview": "Retry preview",
   "humanInputForm.savingActivatesTheseExactFiles":
     "Saving activates these exact files. No additional review is required.",

@@ -19468,6 +19468,10 @@ export const HumanInputOption = /* @__PURE__ */ defineSchema(() =>
     id: z.string().min(1).max(64),
     label: z.string().min(1).max(256),
     description: z.string().max(2048).nullable().optional(),
+    /** The agent's suggestion; surfaces mark it, never pre-select it. */
+    recommended: primitives.boolean.nullable().optional(),
+    /** A short sample of what the option produces, shown as-is (monospace). */
+    preview: z.string().max(2048).nullable().optional(),
   }),
 );
 export type HumanInputOption = z.infer<typeof HumanInputOption>;
@@ -19487,6 +19491,12 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
       secret: HumanInputSecretSpec.nullable().optional(),
       required: primitives.boolean.default(true),
+      /**
+       * A yes/no decision: a single_select with exactly two options, the
+       * action first and the way out second, answered with two buttons in the
+       * agent's own words. Hosts that predate it show the two options.
+       */
+      confirm: primitives.boolean.nullable().optional(),
       // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
       // that were persisted before that became the default behavior.
@@ -19553,6 +19563,16 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
           message: "select questions require options",
         });
       }
+      if (
+        question.confirm === true &&
+        (question.kind !== "single_select" || question.options.length !== 2)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["confirm"],
+          message: "confirm questions are single_select with exactly two options",
+        });
+      }
       const validation = question.validation;
       if (
         validation?.minSelections != null &&
@@ -19582,13 +19602,19 @@ export function canonicalSkillReviewQuestion(
   )
     return null;
   const canonical = skillReviewHumanInput(question.skillReview!).questions[0]!;
+  const { confirm: _confirm, ...withoutConfirm } = question;
   const normalized = {
-    ...question,
+    ...(question.confirm ? question : withoutConfirm),
     allowOther: false,
     options: question.options.map((option) => {
-      if (option.description != null) return option;
-      const { description: _description, ...rest } = option;
-      return rest;
+      // Strict tool schemas send absent optional fields as null (or false).
+      const { description, recommended: _recommended, preview: _preview, ...rest } = option;
+      return {
+        ...rest,
+        ...(description != null ? { description } : {}),
+        ...(option.recommended ? { recommended: true } : {}),
+        ...(option.preview != null ? { preview: option.preview } : {}),
+      };
     }),
   };
   if (
