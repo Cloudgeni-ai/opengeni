@@ -58,13 +58,14 @@ export function lexicalRanker(tools: readonly Tool[]): Ranker {
 export type CostedSelector = {
   label: string;
   select: ToolSelector;
-  /** Cost and decision details since the last drain. */
-  drain(): { costUsd: number; decisions: unknown[] };
+  /** Cost, decision details and selector errors since the last drain. */
+  drain(): { costUsd: number; decisions: unknown[]; errors: string[] };
 };
 
 export function decisionToolSelector(model: DecisionModel, label: string): CostedSelector {
   let costUsd = 0;
   let decisions: unknown[] = [];
+  let errors: string[] = [];
   let candidates: readonly string[] = [];
   const choose = createToolSelector(model, {
     onUsage: (usage) => {
@@ -81,14 +82,29 @@ export function decisionToolSelector(model: DecisionModel, label: string): Coste
   });
   return {
     label,
-    select: (input) => {
+    select: async (input) => {
       candidates = input.candidates.map((candidate) => candidate.name);
-      return choose(input);
+      try {
+        return await choose(input);
+      } catch (error) {
+        // The runtime only reports that it fell back; the trace keeps why.
+        const { name, message, status, code } = error as Error & {
+          status?: number;
+          code?: string;
+        };
+        errors.push(
+          [name, status, code, message?.slice(0, 200)]
+            .filter((part) => part !== undefined)
+            .join(" "),
+        );
+        throw error;
+      }
     },
     drain() {
-      const drained = { costUsd, decisions };
+      const drained = { costUsd, decisions, errors };
       costUsd = 0;
       decisions = [];
+      errors = [];
       return drained;
     },
   };
@@ -134,6 +150,9 @@ export function runtimeStrategy(
   const servers = new Map(
     catalog.tools.flatMap((tool) => (tool.server ? [[tool.name, tool.server] as const] : [])),
   );
+  const published = new Map(
+    catalog.tools.flatMap((tool) => (tool.published ? [[tool.name, tool.published] as const] : [])),
+  );
   const serverIds = new Set(servers.values());
   const eager = new Set(catalog.tools.filter((tool) => tool.eager).map((tool) => tool.name));
   const label = `runtime ${transport}${meaning ? ` + ${meaning.label}` : ""}${selector ? ` + ${selector.label}` : ""}`;
@@ -157,6 +176,7 @@ export function runtimeStrategy(
       undefined,
       undefined,
       meaning?.ranker,
+      () => published,
     );
     runtime.refresh(catalog.functionTools);
     return {
@@ -168,8 +188,8 @@ export function runtimeStrategy(
         const started = performance.now();
         const marker = await meaningSpend.run(spend, () => runtime.prepareSearch({ query }));
         const latencyMs = performance.now() - started;
-        const drained = costed?.drain() ?? { costUsd: 0, decisions: [] };
-        const { decisions } = drained;
+        const drained = costed?.drain() ?? { costUsd: 0, decisions: [], errors: [] };
+        const { decisions, errors } = drained;
         const costUsd = drained.costUsd + spend.usd;
         const output = JSON.parse(marker.output) as {
           tools?: { name?: string }[];
@@ -195,7 +215,13 @@ export function runtimeStrategy(
           shown,
           agentText: text,
           stages: decisions.map((detail) => ({ name: "selector", detail })),
-          ...(output.fallback ? { fallback: output.fallback } : {}),
+          ...(output.fallback
+            ? {
+                fallback: errors.length
+                  ? `${output.fallback}: ${errors.join("; ")}`
+                  : output.fallback,
+              }
+            : {}),
           latencyMs,
           costUsd,
         };
