@@ -10689,10 +10689,13 @@ const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
 
 /** Resolves once work a page scheduled in response to the last key (a task
  * queued in the next animation frame, such as a React effect moving focus)
- * has run, or after 50 ms in a tab that does not animate (background). */
-const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
+ * has run. A hidden tab produces no frames, so it is waited on for 50 ms only.
+ * A visible tab's next frame can come well after 50 ms on a busy machine, and
+ * giving up early sends the next key to the old field, so it gets a longer
+ * safety cap. */
+export const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
   const done = () => resolve(true);
-  setTimeout(done, 50);
+  setTimeout(done, document.visibilityState === "hidden" ? 50 : 1000);
   requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
