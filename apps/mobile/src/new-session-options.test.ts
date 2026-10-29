@@ -8,8 +8,12 @@ let canCreatePrivate = true;
 mock.module("react", () => React);
 const { act } = React;
 let defaultVisibility = "private";
+let capabilitiesFail = false;
 const client = {
-  getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate, defaultVisibility }),
+  getSessionTenancyCreateCapabilities: async () => {
+    if (capabilitiesFail) throw new Error("unavailable");
+    return { canCreatePrivate, defaultVisibility };
+  },
   listGitHubRepositories: async () => ({ repositories: [] }),
   listMachines: async () => ({ machines: [] }),
   listChannels: async () => [],
@@ -38,12 +42,17 @@ test("privacy label, restored draft and create request agree with the server def
   try {
     await flush();
     expect(view.result.current.visibility).toBe("private");
-    expect(view.result.current.request().visibility).toBe("private");
+    // Unchosen: the server's own default applies.
+    expect(view.result.current.visibilityChosen).toBe(false);
+    expect(view.result.current.request().visibility).toBeUndefined();
     await act(async () => view.result.current.setVisibility("workspace"));
     expect(view.result.current.visibility).toBe("workspace");
+    expect(view.result.current.visibilityChosen).toBe(true);
     expect(view.result.current.request().visibility).toBe("workspace");
     await act(async () => view.result.current.reset());
     expect(view.result.current.visibility).toBe("private");
+    expect(view.result.current.visibilityChosen).toBe(false);
+    expect(view.result.current.request().visibility).toBeUndefined();
     await act(async () => view.result.current.apply({ visibility: "workspace" }));
     expect(view.result.current.choices.visibility).toBe("workspace");
     expect(view.result.current.request().visibility).toBe("workspace");
@@ -60,8 +69,23 @@ test("a workspace without private chats cannot restore an unavailable private ch
     await flush();
     await act(async () => view.result.current.apply({ visibility: "private" }));
     expect(view.result.current.visibility).toBe("workspace");
-    expect(view.result.current.request().visibility).toBe("workspace");
+    expect(view.result.current.request().visibility).toBeUndefined();
   } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed privacy capability read never widens a private server default", async () => {
+  capabilitiesFail = true;
+  const view = await renderHook(() => useNewSessionOptions("unreadable-workspace"), undefined);
+  try {
+    await flush();
+    expect(view.result.current.ready).toBe(true);
+    expect(view.result.current.request().visibility).toBeUndefined();
+    await act(async () => view.result.current.setVisibility("workspace"));
+    expect(view.result.current.request().visibility).toBeUndefined();
+  } finally {
+    capabilitiesFail = false;
     await view.unmount();
   }
 });

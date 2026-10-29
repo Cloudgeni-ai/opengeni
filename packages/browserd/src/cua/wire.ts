@@ -147,6 +147,9 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // A web <select> whose menu would bring the browser in front; nothing was
   // sent, and set_value chooses its options.
   select_menu_would_raise_window: "unsupported",
+  // An option of a dropdown with no text to choose it by, which a press in
+  // the background could open the menu with; nothing was sent.
+  popup_option_without_text: "unsupported",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
@@ -181,6 +184,9 @@ const RunStepsReport = z.object({
         hint: z.unknown().optional(),
         /** The window-change report lines of the step's action. */
         window_changes: z.array(z.string().max(65_536)).max(16).optional(),
+        /** What the step's tool could confirm about its effect: "unverifiable"
+         * is input it sent with nothing confirming the app took it. */
+        effect: z.string().max(64).optional(),
         /** The element the step's lookup found. `stand_in` is set when no
          * element had the role named and the one element of a role pressed
          * alike with that exact name was used: its own role and label. */
@@ -203,7 +209,14 @@ export type RunStepsStandIn = { step: number; role: string; name: string };
 
 /** How a CUA run_steps batch ended. */
 export type RunStepsOutcome =
-  | { kind: "completed"; windowChanges: string; standIns: RunStepsStandIn[] }
+  | {
+      kind: "completed";
+      windowChanges: string;
+      standIns: RunStepsStandIn[];
+      /** The steps, by index in the call, whose input CUA sent with nothing
+       * confirming the app took it. */
+      unconfirmed: number[];
+    }
   | {
       kind: "stopped";
       /** The actions that completed before the one the batch stopped at. */
@@ -269,6 +282,9 @@ export async function runSteps(
       kind: "completed",
       windowChanges: (report.steps.at(-1)?.window_changes ?? []).join("\n"),
       standIns: standIns(total),
+      unconfirmed: report.steps.flatMap((step, index) =>
+        step.effect === "unverifiable" ? [index] : [],
+      ),
     };
   }
   const index = report.failed_step;

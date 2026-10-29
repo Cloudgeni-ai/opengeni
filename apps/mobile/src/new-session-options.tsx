@@ -67,6 +67,8 @@ const EMPTY_CHOICES: NewSessionChoices = {
 
 export interface NewSessionOptions {
   visibility: SessionVisibility;
+  /** True once the person (or their restored draft) picked who can see the chat. */
+  visibilityChosen: boolean;
   canCreatePrivate: boolean;
   setVisibility(next: SessionVisibility): void;
   repositories: GitHubRepository[];
@@ -213,6 +215,9 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
       ? own.visibility
       : catalog.defaultVisibility
     : "workspace";
+  // Only a choice the person made is sent; otherwise the server's default
+  // applies, so a failed capability read can never widen a private default.
+  const visibilityChosen = canCreatePrivate && own.visibilityChosen;
   const targetSandboxId = machines.some((machine) => machine.sandboxId === own.targetSandboxId)
     ? own.targetSandboxId
     : null;
@@ -237,6 +242,7 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
 
   return {
     visibility,
+    visibilityChosen,
     canCreatePrivate,
     setVisibility: (next) => patch({ visibility: next }),
     repositories,
@@ -256,8 +262,8 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     choices,
     apply: (next) => patch(next),
     request: () => ({
-      // Explicit Workspace must not silently fall back to an Only me default.
-      ...(ready ? { visibility } : {}),
+      // An explicit Workspace must not silently fall back to an Only me default.
+      ...(visibilityChosen ? { visibility } : {}),
       ...(targetSandboxId ? { targetSandboxId } : {}),
       ...(channelId ? { channelId } : {}),
       ...(excludedConnectorIds.length > 0 ? { excludedMcpServerIds: excludedConnectorIds } : {}),
@@ -266,12 +272,16 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
         .map(gitHubRepositoryResource),
     }),
     // A new chat starts in the same project, as web keeps the selected project.
+    // Who can see it returns to the server's default.
     reset: () =>
-      patch({
+      setState((current) => ({
+        ...(current.workspaceId === workspaceId ? current : { workspaceId, ...EMPTY_CHOICES }),
         repositoryIds: [],
         excludedConnectorIds: [],
-        visibility: catalog.defaultVisibility,
-      }),
+        visibility: EMPTY_CHOICES.visibility,
+        visibilityChosen: false,
+        workspaceId,
+      })),
   };
 }
 

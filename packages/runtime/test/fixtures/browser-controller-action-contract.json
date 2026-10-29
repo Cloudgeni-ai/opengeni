@@ -1,5 +1,5 @@
 {
-  "agentVersion": "0.1.140",
+  "agentVersion": "0.1.144",
   "roots": [
     "BrowserActionRequest"
   ],
@@ -146,6 +146,7 @@
       "$|kind=css.kind": "const!=[\"\\\"css\\\"\"]",
       "$|kind=css.selector": "string!",
       "$|kind=label": "object",
+      "$|kind=label.exact": "boolean?",
       "$|kind=label.kind": "const!=[\"\\\"label\\\"\"]",
       "$|kind=label.text": "string!",
       "$|kind=placeholder": "object",
@@ -163,6 +164,7 @@
       "$|kind=test_id.kind": "const!=[\"\\\"test_id\\\"\"]",
       "$|kind=test_id.value": "string!",
       "$|kind=text": "object",
+      "$|kind=text.exact": "boolean?",
       "$|kind=text.kind": "const!=[\"\\\"text\\\"\"]",
       "$|kind=text.text": "string!"
     },

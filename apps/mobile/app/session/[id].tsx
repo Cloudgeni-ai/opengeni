@@ -1,3 +1,4 @@
+import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
@@ -11,6 +12,7 @@ import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
   ComposerPill,
   Icon,
+  ModelMark,
   ModelPickerSheet,
   NativeSessionScreen,
   SessionActionsButton,
@@ -316,6 +318,9 @@ function LiveSession(props: {
   });
   const policy = composer.policy ?? null;
   const model = policy?.model ?? session?.model ?? null;
+  const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
+  // The web composer's phone-width pill: compact model name, effort when it is a choice.
+  const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
   const [pendingPrompt] = useState(() =>
     readPendingPrompt(props.client, props.workspaceId, props.sessionId),
   );
@@ -592,9 +597,13 @@ function LiveSession(props: {
             },
           },
           renderLeading: () => attachMenu,
-          options: model ? (
+          options: pill ? (
             <ComposerPill
-              label="Model"
+              label={pill.name}
+              detail={pill.effort}
+              fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
+              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
+              leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy
                   ? () => {

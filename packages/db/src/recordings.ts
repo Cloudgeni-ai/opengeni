@@ -3177,7 +3177,7 @@ export type MeetingSummaryCandidate =
     }
   | {
       start: false;
-      reason: "not_a_meeting" | "not_current" | "turned_off" | "has_notes" | "own_automation";
+      reason: "not_a_meeting" | "not_current" | "turned_off" | "has_notes";
     };
 
 /**
@@ -3185,16 +3185,14 @@ export type MeetingSummaryCandidate =
  * summary: a meeting (not a dictation or an agent's browser recording) whose
  * shown transcript is this version, in a workspace that has not turned it off
  * (`settings.recordings.autoSummary: false`), with no notes saved yet. It
- * steps aside when the meeting's owner has their own active automation for
- * `recording.transcript.ready`, such as the "Meeting notes" template, which
- * then writes the notes instead (only while event triggers run).
+ * does not guess whether an automation will write notes: whatever saves notes
+ * first keeps them, because the summary only saves the first notes.
  */
 export async function meetingSummaryCandidate(
   db: Database,
   input: RecordingActor & {
     recordingId: string;
     versionId: string;
-    eventTriggersEnabled: boolean;
   },
 ): Promise<MeetingSummaryCandidate> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
@@ -3241,29 +3239,6 @@ export async function meetingSummaryCandidate(
       );
     // Any saved notes, even cleared ones: the summary only ever writes the first.
     if (notes) return { start: false, reason: "has_notes" };
-    if (input.eventTriggersEnabled) {
-      const [automation] = await tx
-        .select({ id: schema.eventTriggers.id })
-        .from(schema.eventTriggers)
-        .innerJoin(
-          schema.scheduledTasks,
-          and(
-            eq(schema.scheduledTasks.workspaceId, schema.eventTriggers.workspaceId),
-            eq(schema.scheduledTasks.id, schema.eventTriggers.taskId),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.eventTriggers.workspaceId, input.workspaceId),
-            eq(schema.eventTriggers.status, "active"),
-            eq(schema.scheduledTasks.status, "active"),
-            sql`'recording.transcript.ready' = any(${schema.eventTriggers.eventTypes})`,
-            sql`coalesce(${schema.scheduledTasks.ownerSubjectId}, ${schema.scheduledTasks.createdBySubjectId}) = ${recording.ownerSubjectId}`,
-          ),
-        )
-        .limit(1);
-      if (automation) return { start: false, reason: "own_automation" };
-    }
     return {
       start: true,
       recording: {

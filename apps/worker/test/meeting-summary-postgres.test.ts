@@ -335,7 +335,7 @@ describe("built-in meeting summary", () => {
     expect(run.policy).toMatchObject({ defaultScope: "workspace" });
   }, 180_000);
 
-  test("nothing starts when the setting is off, notes exist, or the owner's own automation writes them", async () => {
+  test("nothing starts when the setting is off or notes exist; the owner's automations don't stop it", async () => {
     if (!realDb) return;
     serveCodex();
     const off = await workspace({ subscription: true });
@@ -363,8 +363,9 @@ describe("built-in meeting summary", () => {
     });
     expect(await noted.sessionsFor(notedInput.recordingId)).toEqual([]);
 
-    // The owner's own automation for ready transcripts, such as the "Meeting
-    // notes" template, writes the notes instead, while event triggers run.
+    // An automation of the owner's for ready transcripts, such as the
+    // "Meeting notes" template, doesn't stop it: nothing can tell whether the
+    // automation writes notes, and whichever saves notes first keeps them.
     const automated = await workspace({ subscription: true });
     const space = {
       accountId: automated.accountId,
@@ -408,10 +409,14 @@ describe("built-in meeting summary", () => {
       ],
     });
     const automatedInput = await automated.meeting();
-    expect(
-      await startMeetingSummary(services({ eventTriggersEnabled: true }), automatedInput),
-    ).toEqual({ started: false, reason: "own_automation" });
-    expect(await automated.sessionsFor(automatedInput.recordingId)).toEqual([]);
+    const alongside = await startMeetingSummary(
+      services({ eventTriggersEnabled: true }),
+      automatedInput,
+    );
+    if (!alongside.started) throw new Error(JSON.stringify(alongside));
+    expect(await automated.sessionsFor(automatedInput.recordingId)).toEqual([
+      { id: alongside.sessionId },
+    ]);
   }, 180_000);
 
   test("without a subscription account that can serve it, nothing starts and no credits are spent", async () => {

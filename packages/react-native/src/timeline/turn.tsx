@@ -517,7 +517,12 @@ export function PreparingState({
     const timer = setInterval(() => setPhraseIndex((index) => index + 1), 5_000);
     return () => clearInterval(timer);
   }, [phrases]);
-  const phrase = phrases[phraseIndex % phrases.length] ?? m.working;
+  // A long start says so, rather than repeating the same status indefinitely.
+  const phrase = slow
+    ? phase === "waiting"
+      ? m.stillWaiting
+      : m.longerThanUsual
+    : (phrases[phraseIndex % phrases.length] ?? m.working);
   if (render) return <>{render({ startedAt, phase, phrase, slow })}</>;
   return (
     <View
