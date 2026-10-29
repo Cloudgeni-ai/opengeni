@@ -1586,6 +1586,13 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 1106 adds the workspace-isolated external member revocation
+          // markers: runtime read, insert and update, no delete.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1092 adds the workspace-isolated chat share links with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -2050,6 +2057,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
@@ -2066,6 +2074,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.

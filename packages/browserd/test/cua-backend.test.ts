@@ -9,7 +9,7 @@ import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
-import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
+import { callDesktop, type CuaDesktopRuntime, WINDOWS_SET_VALUE_REFUSED } from "../src/cua/wire";
 import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
@@ -1362,6 +1362,90 @@ describe("CUA desktop boundary", () => {
       retryable: false,
       message:
         "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+    });
+  });
+
+  test("Windows CUA's value-pattern refusal is a definite refusal that says to click and type", async () => {
+    const fixture = new WindowsFixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, args) => {
+      const response = await original(name, args);
+      if (name === "set_value")
+        return {
+          text: "set_value: element [1] does not implement ValuePattern or RangeValuePattern.",
+          images: [],
+          isError: true,
+          degraded: false,
+          rawJson: "{}",
+        };
+      if (name === "get_window_state") {
+        const state = JSON.parse(response.structuredJson!);
+        if (state.elements) state.elements[1].label = "Text Editor";
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "windows", { frontWindow: null });
+    try {
+      const observation = await backend.observe((await backend.targets())[0]!.id);
+      const field = observation.roots.find((node) => node.name === "Text Editor")!;
+      let unconfirmed = 0;
+      await expect(
+        backend.dispatch(
+          {
+            ...command(observation),
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: field.ref },
+              action: "set_value",
+              value: "pannekake",
+            },
+          },
+          undefined,
+          () => {
+            unconfirmed += 1;
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message:
+          "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+      });
+      expect(unconfirmed).toBe(0);
+      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+      expect(fixture.calls.some((call) => call.name === "bring_to_front")).toBe(false);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows CUA's text-only value-pattern refusal is definitely not dispatched", async () => {
+    // Windows CUA refuses set_value on Notepad's document with this text only:
+    // it disables the window for the write, and the field then refuses it.
+    const refusal =
+      "set_value: element [1] does not implement ValuePattern or RangeValuePattern. For controls with TogglePattern (CheckBox) or SelectionItemPattern (RadioButton / ComboBoxItem), use the `click` tool instead.";
+    // The refusal on its own is definite: CUA wrote nothing.
+    await expect(
+      callDesktop(
+        {
+          callTool: async () => ({
+            text: refusal,
+            images: [],
+            isError: true,
+            degraded: false,
+            rawJson: "{}",
+          }),
+          shutdown: async () => undefined,
+        },
+        "set_value",
+        {},
+        true,
+      ),
+    ).rejects.toMatchObject({
+      code: "unsupported",
+      dispatched: false,
+      cuaCode: WINDOWS_SET_VALUE_REFUSED,
     });
   });
 
