@@ -5249,6 +5249,9 @@
 :where(.og-root).whitespace-pre,:where(.og-root) .whitespace-pre {
     white-space: pre;
   }
+:where(.og-root).whitespace-pre-line,:where(.og-root) .whitespace-pre-line {
+    white-space: pre-line;
+  }
 :where(.og-root).whitespace-pre-wrap,:where(.og-root) .whitespace-pre-wrap {
     white-space: pre-wrap;
   }
