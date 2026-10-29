@@ -6,10 +6,12 @@ import {
   SKILL_CATALOG_INLINE_MAX_BYTES,
   SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES,
   SKILL_CATALOG_MAX_BYTES,
-  SKILL_CATALOG_MAX_ENTRIES,
   skillCatalogEntryIds,
   skillInstructionsBody,
 } from "../src/skill-catalog";
+
+const entryLines = (catalog: string) =>
+  catalog.split("\n").filter((line) => line.startsWith("- {"));
 
 describe("sandbox-independent Skill catalog", () => {
   test("includes management guidance and short descriptors, never bodies or paths", () => {
@@ -17,55 +19,108 @@ describe("sandbox-independent Skill catalog", () => {
       { id: "builtin:skill-management", name: "skill-management", description: "Manage Skills" },
       { id: "workspace:deploy", name: "deploy", description: "Deploy services" },
     ]);
-    expect(catalog).toContain("builtin:skill-management");
-    expect(catalog).toContain("workspace:deploy");
+    expect(entryLines(catalog)).toEqual([
+      '- {"name":"skill-management","description":"Manage Skills"}',
+      '- {"name":"deploy","description":"Deploy services"}',
+    ]);
     expect(catalog).toContain("Management tools are lazy");
     expect(catalog).not.toContain("references/");
   });
 
-  test("is deterministic, supports duplicate display names, and rejects conflicting identities", () => {
+  test("is deterministic, shows ids only for shared names, and rejects conflicting identities", () => {
     const entries = [
       { id: "b", name: "deploy", description: "Second" },
       { id: "a", name: "deploy", description: "First" },
+      { id: "c", name: "review", description: "Third" },
     ];
     expect(formatSkillCatalog(entries)).toBe(formatSkillCatalog([...entries].reverse()));
-    expect(formatSkillCatalog(entries)).toContain('"id":"a"');
-    expect(formatSkillCatalog(entries)).toContain('"id":"b"');
+    expect(entryLines(formatSkillCatalog(entries))).toEqual([
+      '- {"id":"a","name":"deploy","description":"First"}',
+      '- {"id":"b","name":"deploy","description":"Second"}',
+      '- {"name":"review","description":"Third"}',
+    ]);
     expect(() =>
       formatSkillCatalog([...entries, { id: "a", name: "other", description: "Conflict" }]),
     ).toThrow("Conflicting");
   });
 
-  test("bounds Unicode output and explicitly reports omitted entries", () => {
-    const catalog = formatSkillCatalog(
-      Array.from({ length: 250 }, (_, index) => ({
-        id: `skill-${index}`,
-        name: `skill-${index}`,
-        description: "日本語".repeat(1000),
+  test("lists several hundred typical Skills in full", () => {
+    const entries = Array.from({ length: 300 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      name: `skill-${String(index).padStart(3, "0")}`,
+      description: "Use when a typical task needs this procedure. ".repeat(6),
+    }));
+    const catalog = formatSkillCatalog(entries);
+    expect(entryLines(catalog)).toHaveLength(300);
+    expect(catalog).not.toContain("shortened");
+    expect(catalog).not.toContain("omitted");
+    expect(skillCatalogEntryIds(catalog, entries).size).toBe(300);
+  });
+
+  test("keeps every Skill listed by shortening only the longest descriptions", () => {
+    const entries = [
+      ...Array.from({ length: 400 }, (_, index) => ({
+        id: `workspace:long-${index}`,
+        name: `long-${String(index).padStart(3, "0")}`,
+        description: "日本語の説明".repeat(100),
       })),
-    );
+      { id: "workspace:short", name: "short", description: "Short and complete" },
+    ];
+    const catalog = formatSkillCatalog(entries);
     expect(Buffer.byteLength(catalog)).toBeLessThanOrEqual(SKILL_CATALOG_MAX_BYTES);
-    expect(catalog).toContain("additional Skills are omitted");
-    expect(catalog).not.toContain("builtin:skill-management");
+    expect(entryLines(catalog)).toHaveLength(401);
+    expect(catalog).toContain('{"name":"short","description":"Short and complete"}');
+    expect(catalog).toContain("…");
+    expect(catalog).toContain("Some descriptions above are shortened to fit");
+    expect(catalog).not.toContain("omitted");
+    expect(catalog).not.toContain("\uFFFD");
+  });
+
+  test("bounds output and reports omitted entries only when names alone overflow", () => {
+    const entries = Array.from({ length: 3000 }, (_, index) => ({
+      id: `workspace:${index}`,
+      name: `a-skill-with-a-rather-long-name-${String(index).padStart(4, "0")}`,
+      description: "Description",
+    }));
+    const catalog = formatSkillCatalog(entries);
+    expect(Buffer.byteLength(catalog)).toBeLessThanOrEqual(SKILL_CATALOG_MAX_BYTES);
+    const listed = entryLines(catalog);
+    expect(listed.length).toBeGreaterThan(1000);
+    expect(listed[0]).toBe('- {"name":"a-skill-with-a-rather-long-name-0000"}');
+    expect(catalog).toContain(
+      `${3000 - listed.length} additional Skills are omitted from this index`,
+    );
   });
 
   test("reads back exactly the ids a rendered catalog lists", () => {
-    const entries = Array.from({ length: SKILL_CATALOG_MAX_ENTRIES + 3 }, (_, index) => ({
-      id: `workspace:${String(index).padStart(3, "0")}`,
-      name: `skill-${String(index).padStart(3, "0")}`,
+    const entries = Array.from({ length: 3000 }, (_, index) => ({
+      id: `workspace:${String(index).padStart(4, "0")}`,
+      name: `a-skill-with-a-rather-long-name-${String(index).padStart(4, "0")}`,
       description: 'Line one\nline two with "quotes" and - { braces',
     }));
-    const catalog = formatSkillCatalog([
+    const descriptors = [
       { id: "builtin:skill-management", name: "skill-management", description: "Manage Skills" },
+      { id: "workspace:twin-a", name: "0-twin", description: "One" },
+      { id: "workspace:twin-b", name: "0-twin", description: "Two" },
       ...entries,
-    ]);
-    const ids = skillCatalogEntryIds(catalog);
-    expect(catalog).toContain("4 additional Skills are omitted");
-    expect(ids.size).toBe(SKILL_CATALOG_MAX_ENTRIES);
+    ];
+    const catalog = formatSkillCatalog(descriptors);
+    const ids = skillCatalogEntryIds(catalog, descriptors);
+    expect(catalog).toContain("additional Skills are omitted");
+    expect(ids.size).toBe(entryLines(catalog).length);
     expect(ids.has("builtin:skill-management")).toBe(true);
+    expect(ids.has("workspace:twin-a")).toBe(true);
+    expect(ids.has("workspace:twin-b")).toBe(true);
+    expect(ids.has(entries[0]!.id)).toBe(true);
     expect(ids.has(entries.at(-1)!.id)).toBe(false);
+    // Catalogs rendered before ids became conditional still read back.
+    expect([
+      ...skillCatalogEntryIds('- {"id":"workspace:old","name":"old","description":"Earlier"}'),
+    ]).toEqual(["workspace:old"]);
     expect([...skillCatalogEntryIds(formatSkillCatalog([]))]).toEqual([]);
-    expect([...skillCatalogEntryIds('- {not json\n- plain text\n- {"id":7}')]).toEqual([]);
+    expect([
+      ...skillCatalogEntryIds('- {not json\n- plain text\n- {"id":7}\n- {"name":"unknown"}', []),
+    ]).toEqual([]);
   });
 
   test("an empty host selection does not inject hidden management guidance", () => {
@@ -78,7 +133,7 @@ describe("sandbox-independent Skill catalog", () => {
     "## Skills",
     "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
     "For finding, installing, creating, or editing Skills, read the skill-management Skill. Management tools are lazy and available through tool search.",
-    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
+    "The following entries are descriptors, not the Skill instructions. Read a Skill by its name; an entry shows an id only when several Skills share that name, and then you read it by that id.",
   ];
   const management = {
     id: "builtin:skill-management",
@@ -91,14 +146,14 @@ describe("sandbox-independent Skill catalog", () => {
     expect(formatSkillCatalog([deploy, management])).toBe(
       [
         ...header,
-        '- {"id":"builtin:skill-management","name":"skill-management","description":"Manage Skills"}',
-        '- {"id":"workspace:deploy","name":"deploy","description":"Deploy services"}',
+        '- {"name":"skill-management","description":"Manage Skills"}',
+        '- {"name":"deploy","description":"Deploy services"}',
       ].join("\n"),
     );
   });
 
   test("shows short instructions in full, first, under one combined notice", () => {
-    const catalog = formatSkillCatalog([
+    const descriptors = [
       deploy,
       management,
       {
@@ -107,17 +162,18 @@ describe("sandbox-independent Skill catalog", () => {
         description: "Applies in every conversation with this user.",
         instructions: "  Always reply in Norwegian.\nKeep code and quotes as they are.\n",
       },
-    ]);
+    ];
+    const catalog = formatSkillCatalog(descriptors);
     expect(catalog).toBe(
       [
         ...header.slice(0, -1),
-        "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions: follow them whenever its description applies, without skill_read. Use the id when names are ambiguous.",
-        '- {"id":"skill-1","name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian.\\nKeep code and quotes as they are."}',
-        '- {"id":"builtin:skill-management","name":"skill-management","description":"Manage Skills"}',
-        '- {"id":"workspace:deploy","name":"deploy","description":"Deploy services"}',
+        "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions: follow them whenever its description applies, without skill_read. Read a Skill by its name; an entry shows an id only when several Skills share that name, and then you read it by that id.",
+        '- {"name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian.\\nKeep code and quotes as they are."}',
+        '- {"name":"skill-management","description":"Manage Skills"}',
+        '- {"name":"deploy","description":"Deploy services"}',
       ].join("\n"),
     );
-    expect([...skillCatalogEntryIds(catalog)].sort()).toEqual([
+    expect([...skillCatalogEntryIds(catalog, descriptors)].sort()).toEqual([
       "builtin:skill-management",
       "skill-1",
       "workspace:deploy",
@@ -140,31 +196,36 @@ describe("sandbox-independent Skill catalog", () => {
     expect(shown.length).toBe(
       SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES / SKILL_CATALOG_INLINE_MAX_BYTES,
     );
-    expect(shown.map((line) => JSON.parse(line.slice(2)).id)).toEqual([
-      "skill-0",
-      "skill-1",
-      "skill-2",
-      "skill-3",
+    expect(shown.map((line) => JSON.parse(line.slice(2)).name)).toEqual([
+      "pref-0",
+      "pref-1",
+      "pref-2",
+      "pref-3",
     ]);
-    expect(catalog).toContain('"id":"skill-5","name":"pref-5","description":"Preference 5"}');
+    expect(catalog).toContain('- {"name":"pref-5","description":"Preference 5"}');
     // Empty instructions stay a plain descriptor.
     expect(formatSkillCatalog([management, { ...deploy, instructions: "  " }])).toBe(
       formatSkillCatalog([management, deploy]),
     );
   });
 
-  test("never omits shown-in-full entries when the index is full", () => {
-    const filler = Array.from({ length: SKILL_CATALOG_MAX_ENTRIES + 10 }, (_, index) => ({
-      id: `a-${String(index).padStart(3, "0")}`,
-      name: `a-${String(index).padStart(3, "0")}`,
+  test("keeps shown-in-full entries when even names overrun the index", () => {
+    const filler = Array.from({ length: 3000 }, (_, index) => ({
+      id: `a-${String(index).padStart(4, "0")}`,
+      name: `a-${String(index).padStart(4, "0")}-${"n".repeat(40)}`,
       description: "Filler",
     }));
-    const catalog = formatSkillCatalog([
+    const descriptors = [
       ...filler,
       { id: "z", name: "zz-preference", description: "Always", instructions: "Be brief." },
-    ]);
-    expect(skillCatalogEntryIds(catalog).has("z")).toBe(true);
-    expect(catalog).toContain("11 additional Skills are omitted");
+    ];
+    const catalog = formatSkillCatalog(descriptors);
+    expect(Buffer.byteLength(catalog)).toBeLessThanOrEqual(SKILL_CATALOG_MAX_BYTES);
+    expect(skillCatalogEntryIds(catalog, descriptors).has("z")).toBe(true);
+    expect(catalog).toMatch(/\d+ additional Skills are omitted/u);
+    // Names-only entries carry no instructions, so the plain notice applies.
+    expect(catalog).not.toContain('"instructions"');
+    expect(catalog).toContain(header[3]!);
   });
 
   test("reads the SKILL.md body without its frontmatter", () => {
