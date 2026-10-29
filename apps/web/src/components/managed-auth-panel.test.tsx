@@ -390,3 +390,78 @@ test("offers no passkeys where the deployment or the browser can't use them", as
     host.remove();
   }
 });
+
+test("an uninvited address on an invite-only service gets who to ask, not a retry", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const attempts: string[] = [];
+  const setField = async (selector: string, value: string) => {
+    const input = host.querySelector<HTMLInputElement>(selector)!;
+    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+    await act(async () => {
+      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
+        target: { value },
+      });
+    });
+  };
+  const button = (name: string) =>
+    Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name);
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          initialMode="signup"
+          socialProviders={["google"]}
+          onSocialSubmit={async () => undefined}
+          onSubmit={async (_mode, input) => {
+            attempts.push(input.email);
+            throw new AuthApiError(403, "SIGNUP_NOT_INVITED", null, "signup not invited");
+          }}
+        />,
+      ),
+    );
+    await setField("#managed-auth-name", "New Person");
+    await setField("#managed-auth-email", "new@example.test");
+    await setField('input[type="password"]', "long-enough-password");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(attempts).toEqual(["new@example.test"]);
+    expect(host.querySelector('[data-testid="managed-auth-signup-not-invited"]')).not.toBeNull();
+    expect(host.textContent).toContain("new@example.test hasn't been invited yet.");
+    expect(host.textContent).toContain("by invitation only");
+    expect(host.textContent).not.toContain("Couldn't create account");
+    expect(host.textContent).not.toContain("try again");
+    // Nothing to resubmit: no form fields, submit button or provider buttons.
+    expect(host.querySelector('button[type="submit"]')).toBeNull();
+    expect(host.querySelector("#managed-auth-email")).toBeNull();
+    expect(host.textContent).not.toContain("Google");
+
+    await act(async () => button("Use a different email")!.click());
+    expect(host.querySelector('[data-testid="managed-auth-signup-not-invited"]')).toBeNull();
+    expect(host.querySelector<HTMLInputElement>("#managed-auth-email")!.value).toBe("");
+    expect(host.querySelector('button[type="submit"]')).not.toBeNull();
+
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await setField("#managed-auth-email", "other@example.test");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(attempts).toEqual(["new@example.test", "other@example.test"]);
+    await act(async () => button("Sign in to an existing account")!.click());
+    expect(host.querySelector('[data-testid="managed-auth-signup-not-invited"]')).toBeNull();
+    expect(host.querySelector('input[autocomplete="current-password"]')).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

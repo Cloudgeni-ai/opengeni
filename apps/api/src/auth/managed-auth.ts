@@ -1,6 +1,9 @@
 import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
-import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
+import {
+  MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE,
+} from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
   recordManagedAuthLoggedFailure,
@@ -109,6 +112,36 @@ export class ManagedAuthNewSignupsPausedError extends APIError {
   constructor() {
     super("FORBIDDEN", { code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, message: "signup disabled" });
   }
+}
+
+/**
+ * Thrown from the user-create hook when an invite-only deployment (one with
+ * `allowedUserEmails`) is asked to create an account for an address it has not
+ * invited. Better Auth returns it as `403 { code: "SIGNUP_NOT_INVITED" }` on
+ * email and passkey sign-up, and its OAuth callback turns the message into
+ * `error=signup_not_invited`, so the sign-in page can say who to ask instead
+ * of offering a retry that can never succeed. Allowed and refused addresses
+ * already got different responses, so this reveals nothing new.
+ */
+export class ManagedAuthSignupNotInvitedError extends APIError {
+  constructor() {
+    super("FORBIDDEN", {
+      code: MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE,
+      message: "signup not invited",
+    });
+  }
+}
+
+/** True when the user-create hook refuses only because the address isn't invited. */
+export function managedAuthSignupNotInvited(
+  settings: Pick<Settings, "allowedUserEmails"> &
+    Partial<Pick<Settings, "managedAuthNewSignupsEnabled">>,
+  email: unknown,
+): boolean {
+  return (
+    settings.managedAuthNewSignupsEnabled !== false &&
+    !managedUserEmailAllowed(settings.allowedUserEmails, email)
+  );
 }
 
 export function managedAuthUserCreateAdmission(
@@ -740,7 +773,12 @@ export function createManagedAuth(
               user,
               currentManagedAuthProviderId(),
             );
-            if (admission === false) return false;
+            if (admission === false) {
+              if (managedAuthSignupNotInvited(settings, user.email)) {
+                throw new ManagedAuthSignupNotInvitedError();
+              }
+              return false;
+            }
             if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
             return admission;
           },

@@ -25,7 +25,12 @@ import {
   verificationLinkErrorFromSearch,
   type VerificationLinkError,
 } from "@/lib/managed-auth-url";
-import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+import {
+  MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE,
+  SIGNUP_NOT_INVITED_MESSAGE,
+  SIGNUPS_PAUSED_MESSAGE,
+} from "@/lib/signups-paused";
 import {
   browserSupportsPasskeys,
   passkeyAlreadyRegistered,
@@ -143,15 +148,21 @@ export function ManagedAuthPanel(props: {
   const [passkeySignupMode, setPasskeySignupMode] = useState(false);
   const emailOnlyMode = resetMode || linkResendMode;
   const signupsPausedView = mode === "signup" && !emailOnlyMode && !newSignupsEnabled;
+  // An invite-only deployment refused this address. Retrying can't succeed, so
+  // the form gives way to who to ask, like the paused view.
+  const [notInvitedEmail, setNotInvitedEmail] = useState<string | null>(null);
+  const notInvitedView =
+    mode === "signup" && !emailOnlyMode && !signupsPausedView && notInvitedEmail !== null;
+  const signupClosedView = signupsPausedView || notInvitedView;
   const [passkeysSupported] = useState(browserSupportsPasskeys);
   const passkeysOffered = Boolean(props.onPasskeySubmit) && passkeysSupported;
-  const passkeySignupView = passkeySignupMode && mode === "signup" && !signupsPausedView;
+  const passkeySignupView = passkeySignupMode && mode === "signup" && !signupClosedView;
   const offerPasskeySignIn =
     mode === "signin" && !emailOnlyMode && passkeysOffered && props.passkeySignIn === true;
   const offerPasskeySignUp =
     mode === "signup" &&
     !emailOnlyMode &&
-    !signupsPausedView &&
+    !signupClosedView &&
     !passkeySignupView &&
     !invitation &&
     passkeysOffered &&
@@ -186,6 +197,7 @@ export function ManagedAuthPanel(props: {
     setResetMode(false);
     setLinkResendMode(false);
     setPasskeySignupMode(false);
+    setNotInvitedEmail(null);
     setFieldErrors({});
     setFormError(null);
     setFormActionMode(null);
@@ -279,6 +291,14 @@ export function ManagedAuthPanel(props: {
         error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE
       ) {
         setSignupsPausedByServer(true);
+        return;
+      }
+      if (
+        mode === "signup" &&
+        error instanceof AuthApiError &&
+        error.code === MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE
+      ) {
+        setNotInvitedEmail(input.email);
         return;
       }
       const failure = managedAuthFailure(mode, error);
@@ -393,6 +413,15 @@ export function ManagedAuthPanel(props: {
         setPasskeySignupMode(false);
         return;
       }
+      if (
+        kind === "signup" &&
+        error instanceof AuthApiError &&
+        error.code === MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE
+      ) {
+        setNotInvitedEmail("");
+        setPasskeySignupMode(false);
+        return;
+      }
       const failure = passkeyFailure(kind, error);
       setFormError(failure.message);
       setFormActionMode(failure.switchTo);
@@ -436,7 +465,7 @@ export function ManagedAuthPanel(props: {
       </Button>
     ) : null;
   const showSocial =
-    !signupsPausedView &&
+    !signupClosedView &&
     !emailOnlyMode &&
     !passkeySignupView &&
     !invitation &&
@@ -510,15 +539,19 @@ export function ManagedAuthPanel(props: {
                   ? "Enter your email to receive a password-reset link."
                   : signupsPausedView
                     ? "Existing accounts can still sign in."
-                    : passkeySignupView
-                      ? "No email or password. You'll sign in with this passkey."
-                      : invitation
-                        ? mode === "signup"
-                          ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                          : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                        : mode === "signup"
-                          ? "Start free. Set up agents in your product in minutes."
-                          : "Welcome back."}
+                    : notInvitedView
+                      ? notInvitedEmail
+                        ? `${notInvitedEmail} hasn't been invited yet.`
+                        : "New accounts here are by invitation only."
+                      : passkeySignupView
+                        ? "No email or password. You'll sign in with this passkey."
+                        : invitation
+                          ? mode === "signup"
+                            ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                            : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                          : mode === "signup"
+                            ? "It only takes a minute."
+                            : "Welcome back."}
             </p>
           </div>
         </div>
@@ -564,7 +597,24 @@ export function ManagedAuthPanel(props: {
             onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
           />
         ) : null}
-        {challengeRequired && !signupsPausedView ? (
+        {notInvitedView ? (
+          <InviteOnlyNotice
+            invitation={invitation}
+            onUseDifferentEmail={
+              invitation
+                ? undefined
+                : () => {
+                    setNotInvitedEmail(null);
+                    setEmail("");
+                    requestAnimationFrame(() =>
+                      document.getElementById("managed-auth-email")?.focus(),
+                    );
+                  }
+            }
+            onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
+          />
+        ) : null}
+        {challengeRequired && !signupClosedView ? (
           <SignupChallenge
             siteKey={props.signupChallengeSiteKey!}
             onToken={setSignupChallengeToken}
@@ -587,7 +637,7 @@ export function ManagedAuthPanel(props: {
             <ManagedAuthDivider />
           </>
         ) : null}
-        {mode === "signup" && !signupsPausedView ? (
+        {mode === "signup" && !signupClosedView ? (
           <div className="mb-3">
             <Label htmlFor="managed-auth-name">Name</Label>
             <Input
@@ -616,7 +666,7 @@ export function ManagedAuthPanel(props: {
             ) : null}
           </div>
         ) : null}
-        {signupsPausedView || passkeySignupView ? null : (
+        {signupClosedView || passkeySignupView ? null : (
           <div className="mb-3">
             <Label htmlFor="managed-auth-email">Email</Label>
             <Input
@@ -643,7 +693,7 @@ export function ManagedAuthPanel(props: {
             ) : null}
           </div>
         )}
-        {!emailOnlyMode && !signupsPausedView && !passkeySignupView ? (
+        {!emailOnlyMode && !signupClosedView && !passkeySignupView ? (
           <div>
             <Label htmlFor="managed-auth-password">Password</Label>
             <Input
@@ -730,7 +780,7 @@ export function ManagedAuthPanel(props: {
             {resendVerificationControl}
           </Notice>
         ) : null}
-        {signupsPausedView ? null : (
+        {signupClosedView ? null : (
           <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
             {busy || (passkeySignupView && passkeyBusy) ? (
               <Loader2Icon className="size-4 animate-spin" />
@@ -787,7 +837,7 @@ export function ManagedAuthPanel(props: {
             Your browser or password manager keeps the passkey. Add a second one later under
             Security so you can't get locked out.
           </p>
-        ) : mode === "signup" && !signupsPausedView ? (
+        ) : mode === "signup" && !signupClosedView ? (
           <p className="mt-2 text-center text-xs text-fg-subtle">
             {emailVerificationRequired
               ? "We'll email you a link before you can sign in."
@@ -813,6 +863,38 @@ function SignupsPausedNotice(props: {
       </Notice>
       {props.onSignIn ? (
         <Button type="button" className="mt-4 w-full" onClick={props.onSignIn}>
+          Sign in to an existing account
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function InviteOnlyNotice(props: {
+  invitation: { organizationName: string; targetEmail: string } | null;
+  onUseDifferentEmail: (() => void) | undefined;
+  onSignIn: (() => void) | undefined;
+}) {
+  return (
+    <div data-testid="managed-auth-signup-not-invited">
+      <Notice tone="info" title="You need an invitation" live="polite">
+        {SIGNUP_NOT_INVITED_MESSAGE}
+        {props.invitation
+          ? ` To join ${props.invitation.organizationName}, open the invitation link from your email.`
+          : null}
+      </Notice>
+      {props.onUseDifferentEmail ? (
+        <Button type="button" className="mt-4 w-full" onClick={props.onUseDifferentEmail}>
+          Use a different email
+        </Button>
+      ) : null}
+      {props.onSignIn ? (
+        <Button
+          type="button"
+          variant={props.onUseDifferentEmail ? "outline" : "default"}
+          className={props.onUseDifferentEmail ? "mt-2 w-full" : "mt-4 w-full"}
+          onClick={props.onSignIn}
+        >
           Sign in to an existing account
         </Button>
       ) : null}

@@ -88,6 +88,17 @@ describe("managed auth form", () => {
     });
   });
 
+  test("explains an invite-only refusal instead of asking to try again", () => {
+    const failure = managedAuthFailure(
+      "signup",
+      new AuthApiError(403, "SIGNUP_NOT_INVITED", null, "signup not invited"),
+    );
+    expect(failure).toMatchObject({ fields: {}, switchTo: "signin" });
+    expect(failure.message).toContain("by invitation only");
+    expect(failure.message).toContain("to invite you");
+    expect(failure.message).not.toContain("try again");
+  });
+
   test("explains a signup that created an account without a browser session", () => {
     expect(
       managedAuthFailure("signup", new ManagedAuthSessionUnavailableError("signup")),
