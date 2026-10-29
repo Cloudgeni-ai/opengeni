@@ -262,6 +262,7 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
         workspaceId={workspaceId}
         seed={editing?.id ?? "bot-template"}
         mode="edit"
+        canMakePrivate={editing?.viewerCanMakePrivate ?? true}
         initial={
           editing
             ? {

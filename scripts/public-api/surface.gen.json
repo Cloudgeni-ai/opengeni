@@ -31504,6 +31504,7 @@
         "$.sourceSessionId": "string! null",
         "$.updatedAt": "string!",
         "$.viewerAccess": "enum!=[\"\\\"manage\\\"\",\"\\\"use\\\"\"]",
+        "$.viewerCanMakePrivate": "boolean!",
         "$.visibility": "ref(SessionVisibility)!",
         "$.workspaceId": "string!"
       }

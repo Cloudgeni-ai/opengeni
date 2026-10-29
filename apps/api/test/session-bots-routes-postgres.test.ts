@@ -272,6 +272,7 @@ describe("bots through the API (real PostgreSQL)", () => {
       name: "SRE bot",
       createdBySubjectId: "user:alice",
       viewerAccess: "manage",
+      viewerCanMakePrivate: true,
       sourceSessionId: null,
     });
     expect((await call(reader, "POST", base, { name: "x", setupInstructions: "y" })).status).toBe(
@@ -281,10 +282,21 @@ describe("bots through the API (real PostgreSQL)", () => {
     const seenByBob = await call(bob, "GET", base);
     expect(seenByBob.json.templates).toHaveLength(1);
     // A shared template is shared work: any member who starts chats changes it.
-    expect(seenByBob.json.templates[0]).toMatchObject({ id: template.id, viewerAccess: "manage" });
+    // ...but only whoever saved it (or an admin) may make it Only me, and the
+    // template says so, so the edit dialog offers only what the server allows.
+    expect(seenByBob.json.templates[0]).toMatchObject({
+      id: template.id,
+      viewerAccess: "manage",
+      viewerCanMakePrivate: false,
+    });
     expect((await call(reader, "GET", base)).json.templates[0]).toMatchObject({
       id: template.id,
       viewerAccess: "use",
+      viewerCanMakePrivate: false,
+    });
+    expect((await call(admin, "GET", `${base}/${template.id}`)).json.template).toMatchObject({
+      viewerAccess: "manage",
+      viewerCanMakePrivate: true,
     });
     expect((await call(reader, "GET", `${base}/${template.id}`)).json.template.name).toBe(
       "SRE bot",

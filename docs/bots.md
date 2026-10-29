@@ -80,7 +80,9 @@ from an Only me chat is Only me; one saved from a shared chat is shared. People
 choose in the template dialog and can change it later. A shared template is
 shared work, like a shared Skill or Site: anyone who may start chats in the
 workspace (`sessions:create`) may change or delete it, but only whoever saved
-it or a workspace admin may make it Only me. An Only me template belongs to the
+it or a workspace admin may make it Only me; each template's
+`viewerCanMakePrivate` says whether the reader may, and the Edit dialog offers
+Only me only then. An Only me template belongs to the
 person who saved it. Routes:
 
 | Route | Needs |

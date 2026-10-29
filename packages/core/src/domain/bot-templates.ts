@@ -60,9 +60,29 @@ export function botTemplateAccess(
 ): "manage" | "use" {
   if (viewer.admin || viewer.subjectId === null) return "manage";
   if (template.visibility === "workspace" && viewer.contributor) return "manage";
-  return template.createdBySubjectId !== null && template.createdBySubjectId === viewer.subjectId
+  return viewer.contributor &&
+    template.createdBySubjectId !== null &&
+    template.createdBySubjectId === viewer.subjectId
     ? "manage"
     : "use";
+}
+
+/**
+ * Whether the viewer may make the template Only me. It then stays with
+ * whoever saved it, so only they or an admin may take a shared one away from
+ * everyone; a template a service saved has nobody to keep it.
+ */
+export function botTemplateViewerCanMakePrivate(
+  viewer: BotTemplateViewer,
+  template: Pick<BotTemplateRecord, "createdBySubjectId" | "visibility">,
+): boolean {
+  if (template.createdBySubjectId === null) return false;
+  if (botTemplateAccess(viewer, template) !== "manage") return false;
+  return (
+    template.visibility === "private" ||
+    viewer.admin ||
+    viewer.subjectId === template.createdBySubjectId
+  );
 }
 
 function forViewer(viewer: BotTemplateViewer, template: BotTemplateRecord): WorkspaceBotTemplate {
@@ -78,6 +98,7 @@ function forViewer(viewer: BotTemplateViewer, template: BotTemplateRecord): Work
     sourceSessionId: template.sourceSessionId,
     createdBySubjectId: template.createdBySubjectId,
     viewerAccess: botTemplateAccess(viewer, template),
+    viewerCanMakePrivate: botTemplateViewerCanMakePrivate(viewer, template),
     createdAt: template.createdAt.toISOString(),
     updatedAt: template.updatedAt.toISOString(),
   };
@@ -191,12 +212,7 @@ export async function updateBotTemplateForViewer(input: {
     });
   }
   // ...so only they (or an admin) can take a shared template away from everyone.
-  if (
-    request.visibility === "private" &&
-    template.visibility === "workspace" &&
-    !viewer.admin &&
-    viewer.subjectId !== template.createdBySubjectId
-  ) {
+  if (request.visibility === "private" && !botTemplateViewerCanMakePrivate(viewer, template)) {
     throw new HTTPException(403, {
       message: "Only whoever saved this bot template, or a workspace admin, can make it Only me.",
     });

@@ -169,6 +169,8 @@ export const WorkspaceBotTemplate = /* @__PURE__ */ defineSchema(() =>
     createdBySubjectId: z.string().nullable(),
     /** `manage`: the reader may rename, change or delete it. */
     viewerAccess: z.enum(["manage", "use"]),
+    /** Whether the reader may make it Only me: whoever saved it, or an admin. */
+    viewerCanMakePrivate: z.boolean(),
     createdAt: z.string(),
     updatedAt: z.string(),
   }),
