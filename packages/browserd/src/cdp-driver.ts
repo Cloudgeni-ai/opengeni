@@ -772,6 +772,22 @@ type OopifSession = {
   unsubscribe: Array<() => void>;
 };
 
+/**
+ * Dialogs (alert, confirm, prompt) only the person sees: a page that opened
+ * one before the debugger attached waits on it, and no debugger can read or
+ * answer it. The browser closes such a dialog, as Cancel, when its tab is
+ * hidden while nothing debugs it.
+ */
+export type PersonDialogs = {
+  /** Whether the tab is the one shown in its window: only there can such a
+   * dialog stay open. */
+  inFront(browserTargetId: string): Promise<boolean>;
+  /** Hide the tab for a moment, with its debugger released, so the browser
+   * closes such a dialog. "not_front" when the tab is not shown (it has no
+   * such dialog), "unavailable" when it cannot be hidden from here. */
+  hideForAMoment(browserTargetId: string): Promise<"hidden" | "not_front" | "unavailable">;
+};
+
 export type AgentBrowserDriverOptions = {
   browserSessionId: string;
   controllerGeneration: string;
@@ -833,11 +849,10 @@ export type AgentBrowserDriverOptions = {
    * counts as not responding. Unbounded beyond each command's own deadline
    * when unset. */
   attachTimeoutMs?: number;
-  /** Unblock a tab whose page did not answer while attaching, as a dialog
-   * (alert, confirm, prompt) the page opened before anything debugged it
-   * blocks it: the browser lets no debugger read or answer that dialog.
-   * Returns whether it acted, so attaching is worth one more try. */
-  dismissUnreadableDialog?: (browserTargetId: string) => Promise<boolean>;
+  /** A browser where a page can open a dialog (alert, confirm, prompt) that
+   * only the person sees: one it opened before the debugger attached, which
+   * no debugger can read or answer, and which holds every page command. */
+  personDialogs?: PersonDialogs;
   /** Headless shell has no chrome://version page. Read its real Client Hints
    * from a controller-intercepted secure-origin document instead. */
   userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
@@ -1001,9 +1016,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * has not been told of yet, by tab ID. The next observation the agent's
    * tools receive for one says so. */
   private readonly reloadedTabs = new Map<string, ReloadedBrowserTab>();
-  /** Tabs whose unreadable dialog attaching dismissed, by tab ID, until the
-   * agent is told. */
-  private readonly dismissedDialogTabs = new Set<string>();
   /** Tabs a close-tab call of this driver is closing. */
   private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
@@ -1019,9 +1031,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly permissionControl: boolean;
   private readonly browserContextId: string | undefined;
   private readonly attachTimeoutMs: number | undefined;
-  private readonly dismissUnreadableDialog:
-    | ((browserTargetId: string) => Promise<boolean>)
-    | undefined;
+  private readonly personDialogs: PersonDialogs | undefined;
+  /** Tabs in front whose page did not answer, by the browser's own ID: a
+   * dialog only the person sees may hold them. Cleared once one answers. */
+  private readonly unansweredTabs = new Set<string>();
+  /** Tabs just hidden for a moment, whose page must answer right away to
+   * count as one a dialog held. */
+  private readonly justHiddenTabs = new Set<string>();
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
@@ -1147,7 +1163,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
     this.attachTimeoutMs = options.attachTimeoutMs;
-    this.dismissUnreadableDialog = options.dismissUnreadableDialog;
+    this.personDialogs = options.personDialogs;
     this.targetAutoAttach = options.targetAutoAttach ?? this.engine === "chromium";
     this.passkeys = options.passkeys ?? null;
     this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
@@ -1922,8 +1938,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(tabId: string): Promise<BrowserTargetStateValue> {
+    const targetId = this.browserTargetIdOf(tabId);
+    try {
+      return await this.targetStateOf(targetId);
+    } catch (error) {
+      // A tab a dialog only the person sees may hold still has a state with no
+      // readable document, so that dialog can be cancelled by handle_dialog.
+      if (
+        !(error instanceof InteractionControllerError) ||
+        error.message !== PAGE_NOT_ANSWERING_MESSAGE ||
+        !this.unansweredTabs.has(targetId)
+      )
+        throw error;
+      return BrowserTargetState.parse({
+        browserSessionId: this.browserSessionId,
+        controllerGeneration: this.controllerGeneration,
+        targetId: this.tabIdOf(targetId),
+        targetGeneration: this.targetGeneration(targetId),
+        documentGeneration: null,
+        frameId: null,
+      });
+    }
+  }
+
+  private async targetStateOf(targetId: string): Promise<BrowserTargetStateValue> {
     return await this.withTarget(
-      this.browserTargetIdOf(tabId),
+      targetId,
       async (state) => {
         if (!state.dialog) {
           try {
@@ -2664,6 +2704,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // unresponsive-tab deadline must keep the action's outcome uncertain.
     let effects: { state: TargetState; before: number } | undefined;
     const targetId = this.browserTargetIdOf(command.targetId);
+    // A tab in front whose page did not answer may wait on a dialog only the
+    // person sees, which no debugger can read: cancelling it hides the tab
+    // for a moment instead.
+    if (
+      command.action.type === "handle_dialog" &&
+      command.action.response === "dismiss" &&
+      this.personDialogs &&
+      this.unansweredTabs.has(targetId) &&
+      !this.states.has(targetId) &&
+      (await this.cancelPersonDialog(command, targetId))
+    ) {
+      if (command.observationMode === "none" || command.observationMode === "input") return null;
+      return await this.observe(this.tabIdOf(targetId));
+    }
     const observation = await this.withTarget(targetId, async (state, info) => {
       effects = { state, before: state.actionEffectCount };
       if (!state.dialog) await this.refreshFrame(state);
@@ -2935,9 +2989,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return inputSent
         ? new InteractionOutcomeUnknownDriverError(
             "tab_not_responding",
-            `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
+            `${error.message} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
           )
-        : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
+        : new InteractionDefiniteDriverError("tab_not_responding", error.message);
     }
     // A tab the browser will not let us control (an attached tab Chrome
     // refuses to debug) fails before any input when nothing was sent yet,
@@ -3671,7 +3725,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // below; report the crash itself rather than the transport symptom.
       if (this.crashedTargets.has(targetId)) throw tabCrashedError();
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
-        throw tabNotRespondingError(error);
+        throw await this.notAnsweringError(targetId, error);
       // A read changes nothing, so one whose tab debugging ended under it
       // (Chrome detaches when another extension adds a frame to the page, as
       // password managers do for their inline menu) reads again on a new
@@ -3718,7 +3772,91 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async attachTarget(info: TargetInfo, dismissedDialog = false): Promise<TargetState> {
+  /**
+   * The error for a tab whose page did not answer in time. Where a dialog
+   * only the person sees may hold a tab in front, it says so and how to
+   * cancel it, and the tab is remembered until its page answers again.
+   */
+  private async notAnsweringError(
+    targetId: string,
+    cause: CdpCommandTimeoutError,
+  ): Promise<InteractionControllerError> {
+    if (!this.personDialogs || !(await this.personDialogs.inFront(targetId).catch(() => false)))
+      return tabNotRespondingError(cause);
+    this.unansweredTabs.add(targetId);
+    const failure = new InteractionControllerError(
+      "tab_not_responding",
+      PAGE_NOT_ANSWERING_MESSAGE,
+    );
+    failure.cause = cause;
+    return failure;
+  }
+
+  /**
+   * Cancel a dialog only the person sees in a tab whose page did not answer:
+   * hide the tab for a moment, which makes the browser close it as Cancel.
+   * True once the page answers again right after; false when it answered
+   * already, so there was no such dialog and the action runs as usual.
+   * Otherwise it fails without a claim of a cancelled dialog.
+   */
+  private async cancelPersonDialog(
+    command: BrowserActionCommandValue,
+    targetId: string,
+  ): Promise<boolean> {
+    const personDialogs = this.personDialogs!;
+    if (command.browserSessionId !== this.browserSessionId)
+      throw new InteractionDefiniteDriverError(
+        "resource_not_found",
+        "browser command targets another browser session",
+      );
+    if (command.controllerGeneration !== this.controllerGeneration)
+      throw new InteractionDefiniteDriverError(
+        "controller_stale",
+        "browser command targets an earlier controller",
+      );
+    // The page cannot be read, so only the tab itself is checked.
+    if (command.expectedTargetGeneration !== this.targetGeneration(targetId))
+      throw new InteractionDefiniteDriverError(
+        "target_stale",
+        "browser command targets an earlier target generation",
+      );
+    const connection = await this.ensureConnection();
+    const info = await this.requireTargetInfo(connection, targetId);
+    const answers = async () => {
+      try {
+        await this.ensureTargetState(info);
+        return true;
+      } catch (error) {
+        if (error instanceof InteractionControllerError && error.code === "tab_not_responding")
+          return false;
+        throw error;
+      }
+    };
+    // The person may have answered it meanwhile.
+    if (await answers()) return false;
+    const hidden = await personDialogs.hideForAMoment(targetId);
+    if (hidden === "unavailable")
+      throw new InteractionDefiniteDriverError(
+        "tab_not_responding",
+        DIALOG_NOT_CANCELLABLE_MESSAGE,
+      );
+    // A tab not in front holds no such dialog: the browser closes them itself
+    // there. A page such a dialog held answers right away once it closed; one
+    // that does not is busy (one whose work happens to end just then cannot
+    // be told apart).
+    if (hidden === "not_front")
+      throw new InteractionDefiniteDriverError("tab_not_responding", PAGE_STILL_BUSY_MESSAGE);
+    this.justHiddenTabs.add(targetId);
+    try {
+      if (!(await answers()))
+        throw new InteractionDefiniteDriverError("tab_not_responding", PAGE_STILL_BUSY_MESSAGE);
+    } finally {
+      this.justHiddenTabs.delete(targetId);
+    }
+    return true;
+  }
+
+  private async attachTarget(info: TargetInfo): Promise<TargetState> {
     const connection = await this.ensureConnection();
     const authorityGeneration = this.targetPhysicalGeneration(info.targetId);
     const attached = await connection.send<{ sessionId?: unknown }>("Target.attachToTarget", {
@@ -3766,7 +3904,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (viewport) await this.applyViewport(connection, sessionId, viewport);
         return await this.mainFrame(sessionId);
       })();
-      const attachTimeoutMs = this.attachTimeoutMs;
+      // A tab that did not answer before gets a shorter wait: the agent learns
+      // sooner that it still does not, and a page that a dialog only the
+      // person sees held answers within milliseconds once it closed.
+      const attachTimeoutMs =
+        this.attachTimeoutMs !== undefined && this.unansweredTabs.has(info.targetId)
+          ? Math.min(
+              this.attachTimeoutMs,
+              this.justHiddenTabs.has(info.targetId)
+                ? HIDDEN_TAB_ANSWER_TIMEOUT_MS
+                : UNANSWERED_ATTACH_TIMEOUT_MS,
+            )
+          : this.attachTimeoutMs;
       const outcome = await Promise.race([
         initialized,
         crashed,
@@ -3828,21 +3977,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await delay(RESTORED_TAB_ATTACH_INTERVAL_MS);
         return await this.attachTarget(info);
       }
-      if (error instanceof CdpCommandTimeoutError && error.sessionId) {
-        // A dialog the page opened before anything debugged it blocks the
-        // page, and the browser lets no debugger read or answer it. Unblock
-        // the tab once where the transport can, and tell the agent.
-        if (
-          !dismissedDialog &&
-          this.dismissUnreadableDialog &&
-          (await this.dismissUnreadableDialog(info.targetId).catch(() => false))
-        ) {
-          const state = await this.attachTarget(info, true);
-          this.dismissedDialogTabs.add(this.tabIdOf(info.targetId));
-          return state;
-        }
-        throw tabNotRespondingError(error);
-      }
+      if (error instanceof CdpCommandTimeoutError && error.sessionId)
+        throw await this.notAnsweringError(info.targetId, error);
       throw error;
     } finally {
       if (attachTimer !== undefined) clearTimeout(attachTimer);
@@ -3851,6 +3987,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.attachingSessions.delete(info.targetId);
     }
     this.crashedTargets.delete(info.targetId);
+    this.unansweredTabs.delete(info.targetId);
     // A reopened tab whose page this attachment started shows it once it
     // has loaded, as a tab Chrome restored itself does.
     const startedRestoredLoad = typeof this.restoredTargets.get(info.targetId) === "number";
@@ -9983,7 +10120,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private rememberGoneTarget(tabId: string, gone: GoneBrowserTarget): void {
     this.reloadedTabs.delete(tabId);
-    this.dismissedDialogTabs.delete(tabId);
     this.goneTargets.delete(tabId);
     this.goneTargets.set(tabId, gone);
     while (this.goneTargets.size > MAX_GONE_TARGETS) {
@@ -9992,17 +10128,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** The notice for an observation of this tab the agent receives, when a
-   * relaunch reloaded its page or attaching dismissed a dialog the agent
-   * could not see, and the agent was not told yet; said once. */
-  takeTabNotice(tabId: string): string | null {
+   * relaunch reloaded its page and the agent was not told yet; said once. */
+  takeReloadedTabNotice(tabId: string): string | null {
     const reloaded = this.reloadedTabs.get(tabId) ?? null;
     this.reloadedTabs.delete(tabId);
-    const dismissed = this.dismissedDialogTabs.delete(tabId);
-    const notices = [
-      ...(reloaded ? [reloadedTabNotice(reloaded)] : []),
-      ...(dismissed ? [DISMISSED_UNREADABLE_DIALOG_NOTICE] : []),
-    ];
-    return notices.length > 0 ? notices.join(" ") : null;
+    return reloaded ? reloadedTabNotice(reloaded) : null;
   }
 
   /**
@@ -10392,10 +10522,31 @@ const RESTORED_TAB_ATTACH_INTERVAL_MS = 100;
  * live page answers in well under a second. */
 const REBIND_TIMEOUT_MS = 5_000;
 
-/** The observation notice for a tab whose blocking dialog attaching
- * dismissed. */
-export const DISMISSED_UNREADABLE_DIALOG_NOTICE =
-  "This tab's page was blocked, most likely by a dialog (alert, confirm or prompt) it opened while nothing controlled the tab. Chrome lets no extension read or answer such a dialog, so it was dismissed, as Chrome does when a tab goes to the background. If a step needed that dialog, do the step again: its dialogs now show in observations and handle_dialog answers them.";
+/** How long attaching waits on a tab whose page did not answer before, while
+ * a dialog only the person sees may hold it: a page that answers at all does
+ * so in well under this, and one held by such a dialog answers within a few
+ * milliseconds of the dialog closing. */
+const UNANSWERED_ATTACH_TIMEOUT_MS = 2_000;
+
+/** How soon a page must answer once its tab was hidden for a moment to count
+ * as one a dialog only the person sees held: such a page answers within tens
+ * of milliseconds of the dialog closing, while a busy one rarely finishes its
+ * work in exactly that moment. */
+const HIDDEN_TAB_ANSWER_TIMEOUT_MS = 500;
+
+/** What a tab in front whose page does not answer says, in a browser where a
+ * dialog only the person sees may be what holds it. */
+export const PAGE_NOT_ANSWERING_MESSAGE =
+  'This tab\'s page is not answering: it is busy, or a dialog (alert, confirm or prompt) only the person can see is open. Ask them to answer it, or cancel it with browser_act action {type:"handle_dialog",response:"dismiss"}.';
+
+/** The answer to cancelling such a dialog when the page still did not answer
+ * once its tab was hidden for a moment, which closes any such dialog. */
+export const PAGE_STILL_BUSY_MESSAGE =
+  "No dialog was found: the page still did not answer after its tab was hidden for a moment, so it is busy. Nothing else changed. Try again later, or ask the person to reload the tab.";
+
+/** The answer to cancelling such a dialog where its tab cannot be hidden. */
+export const DIALOG_NOT_CANCELLABLE_MESSAGE =
+  "This tab's page is still not answering, and a dialog in it cannot be cancelled from here. Ask the person to answer it in their browser.";
 
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";

@@ -105,6 +105,8 @@ type AttachedTab = {
   controllable: boolean;
   /** Null when the extension does not say. */
   windowId: number | null;
+  /** Whether Chrome unloaded the tab's page to save memory. */
+  discarded: boolean;
 };
 
 type BridgeDebuggerEvent = {
@@ -296,10 +298,14 @@ export function createAttachedChromeDriver(
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
     // A dialog a page opened before Chrome's debugger attached blocks it and
-    // can be neither read nor answered; dismiss it the way Chrome would.
+    // can be neither read nor answered: a tab whose page does not answer says
+    // so quickly, and handle_dialog dismiss hides the tab for a moment, which
+    // makes Chrome close it.
     attachTimeoutMs: ATTACH_TIMEOUT_MS,
-    dismissUnreadableDialog: async (tabId) =>
-      await transport.connection.dismissUnreadableDialog(tabId),
+    personDialogs: {
+      inFront: async (tabId) => await transport.connection.tabInFront(tabId),
+      hideForAMoment: async (tabId) => await transport.connection.hideTabForAMoment(tabId),
+    },
     ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
     // Chrome saves downloads in the person's own downloads folder; the
     // session keeps a copy of each one its tabs start.
@@ -608,53 +614,65 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     }
   }
 
-  /**
-   * Unblock a tab in front whose page does not answer, as when it opened a
-   * dialog (alert, confirm, prompt) while nothing debugged it: Chrome lets no
-   * extension read or answer that dialog, and holds every page command until
-   * someone does. Chrome dismisses such a dialog when its tab goes to the
-   * background with no debugger attached, so release the debugger and show
-   * another tab of the same window for a moment (a new blank one, closed
-   * again, when the window has no other). Returns whether it did; a tab in
-   * the background, or one another session here is debugging, is left be.
-   */
-  async dismissUnreadableDialog(tabId: string): Promise<boolean> {
-    if (this.stopped || this.failure || this.debuggerHeldElsewhere(tabId)) return false;
+  /** Whether the tab is the one shown in its window. */
+  async tabInFront(tabId: string): Promise<boolean> {
+    if (this.stopped || this.failure) return false;
     const listed = requireTabs(
       (await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs,
     );
-    const tab = listed.find((entry) => entry.id === tabId);
-    if (!tab?.active || tab.windowId === null) return false;
-    let other = listed.find((entry) => entry.id !== tabId && entry.windowId === tab.windowId);
-    let created: string | null = null;
-    if (!other) {
-      const result = await this.bridge.request<{ tab: unknown }>({
-        type: "tabs.create",
-        url: "data:text/html,",
-      });
-      const blank = requireTab(result.tab);
-      created = blank.id;
-      if (blank.windowId !== tab.windowId) {
-        await this.bridge.request({ type: "tabs.close", tabId: blank.id }).catch(() => undefined);
-        return false;
-      }
-      other = blank;
-    }
+    return listed.find((entry) => entry.id === tabId)?.active === true;
+  }
+
+  /**
+   * Hide a tab in front for a moment with its debugger released. Chrome lets
+   * no extension read or answer a dialog (alert, confirm, prompt) a page
+   * opened while nothing debugged it, and holds every page command until
+   * someone does; it closes such a dialog, as Cancel, when the tab is hidden
+   * while nothing debugs it. The tab shown instead is a new blank one, so no
+   * page of the person's sees anything, or else another tab of the same
+   * window when the blank one opens in another window; anything created is
+   * closed again. The tab comes back to front only if the person did not
+   * show another one meanwhile. A tab not in front, or one another session
+   * here is debugging, is left be.
+   */
+  async hideTabForAMoment(tabId: string): Promise<"hidden" | "not_front" | "unavailable"> {
+    if (this.stopped || this.failure || this.debuggerHeldElsewhere(tabId)) return "unavailable";
+    const listTabs = async () =>
+      requireTabs((await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs);
+    const tab = (await listTabs()).find((entry) => entry.id === tabId);
+    if (!tab?.active) return "not_front";
+    if (tab.windowId === null) return "unavailable";
+    const blank = requireTab(
+      (
+        await this.bridge.request<{ tab: unknown }>({
+          type: "tabs.create",
+          url: "about:blank",
+        })
+      ).tab,
+    );
     try {
+      let shown: AttachedTab | undefined = blank;
+      if (blank.windowId !== tab.windowId) {
+        const siblings = (await listTabs()).filter(
+          (entry) => entry.id !== tabId && entry.id !== blank.id && entry.windowId === tab.windowId,
+        );
+        // Showing a discarded tab would load its page again.
+        shown = siblings.find((entry) => !entry.discarded) ?? siblings[0];
+      }
+      if (!shown) return "unavailable";
       if (this.attachedTabs.has(tabId)) {
         await this.bridge.request({ type: "debugger.detach", tabId });
         this.forgetReleasedAttachment(tabId);
       }
-      try {
-        await this.bridge.request({ type: "tabs.activate", tabId: other.id });
-      } finally {
+      await this.bridge.request({ type: "tabs.activate", tabId: shown.id });
+      // Give back only this switch, never one the person made meanwhile.
+      const now = await listTabs();
+      if (now.find((entry) => entry.id === shown.id)?.active === true)
         await this.bridge.request({ type: "tabs.activate", tabId });
-      }
+      return "hidden";
     } finally {
-      if (created !== null)
-        await this.bridge.request({ type: "tabs.close", tabId: created }).catch(() => undefined);
+      await this.bridge.request({ type: "tabs.close", tabId: blank.id }).catch(() => undefined);
     }
-    return true;
   }
 
   private async sendNow<T>(
@@ -1481,6 +1499,7 @@ function requireTab(value: unknown): AttachedTab {
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
     windowId: Number.isSafeInteger(tab.windowId) ? (tab.windowId as number) : null,
+    discarded: tab.discarded === true,
   };
 }
 

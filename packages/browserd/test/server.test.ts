@@ -1922,7 +1922,7 @@ function fakeDriver(
     async selectTarget() {
       return observation();
     },
-    takeTabNotice(tabId) {
+    takeReloadedTabNotice(tabId) {
       return tabId === target.id ? (options.reloadedTabNotices?.shift() ?? null) : null;
     },
     async closeTarget() {
