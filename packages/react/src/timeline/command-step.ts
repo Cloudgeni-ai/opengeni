@@ -211,7 +211,7 @@ type NamedStep =
 type FixedStep =
   | "readFile"
   | "writeFile"
-  | "listFiles"
+  | "browseFiles"
   | "searchFiles"
   | "runTests"
   | "installPackages"
@@ -249,7 +249,7 @@ const UNNAMED: Record<NamedStep, FixedStep | "editFile" | "download" | null> = {
   read: "readFile",
   write: "writeFile",
   edit: "editFile",
-  list: "listFiles",
+  list: "browseFiles",
   download: "download",
   runScript: null,
   install: "installPackages",
@@ -836,10 +836,10 @@ function classify(command: SimpleCommand, depth: number): Step | null {
         "--max-depth",
       ]),
     )[0];
-    return target && target !== "." ? named("list", target, 1) : fixed("listFiles", 1);
+    return target && target !== "." ? named("list", target, 1) : fixed("browseFiles", 1);
   }
   if (SEARCHERS.has(program) || (program === "git" && sub === "grep")) {
-    if (program === "rg" && words.includes("--files")) return fixed("listFiles", 1);
+    if (program === "rg" && words.includes("--files")) return fixed("browseFiles", 1);
     const args = operands(
       program === "git" ? words.slice(1) : words,
       new Set([
