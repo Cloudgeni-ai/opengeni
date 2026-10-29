@@ -53,6 +53,7 @@ import {
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@opengeni/react/app/lib/workspace-deletion";
 import {
+  canContributeWorkspaceContent,
   canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
@@ -298,14 +299,21 @@ function WorkspaceGeneralSettings({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const canRename =
-    activeWorkspace !== null &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const canDeleteWorkspace = hasWorkspacePermission(
+  const canAdminister = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "workspace:admin",
   );
+  // Anyone who can start chats in a shared workspace renames it; a Personal
+  // workspace keeps its name.
+  const canRename =
+    !personal &&
+    canContributeWorkspaceContent(
+      context.accessContext,
+      activeWorkspace,
+      context.managedSelfContext,
+    );
+  const canDeleteWorkspace = canAdminister;
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
   const isOnlyWorkspaceInAccount =
@@ -361,7 +369,11 @@ function WorkspaceGeneralSettings({
             // say it isn't allowed.
             personal ? undefined : (
               <DisabledReasonTooltip
-                reason={canRename ? undefined : "Only workspace admins can rename it."}
+                reason={
+                  canRename
+                    ? undefined
+                    : "Only people who can start chats here, acting as themselves, can rename it."
+                }
               >
                 <Button
                   type="button"
@@ -500,7 +512,7 @@ function WorkspaceGeneralSettings({
         <WorkspaceSandboxImageRow
           client={context.client}
           workspaceId={workspaceId}
-          canManage={canRename}
+          canManage={canAdminister}
         />
         <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />

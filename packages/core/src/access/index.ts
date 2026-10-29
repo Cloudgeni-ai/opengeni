@@ -1122,9 +1122,9 @@ export const WORKSPACE_CONTRIBUTOR_REFUSAL =
 /**
  * Ordinary shared content of a workspace that anyone who works there may
  * change for everyone, like a shared Skill or Knowledge entry: its
- * instructions and the review of the agent's proposed changes to them.
- * Whoever may change the workspace's settings may (see
- * {@link workspaceSettingsAuthorized});
+ * instructions and the review of the agent's proposed changes to them, a
+ * shared workspace's name and its custom model entries. Whoever may change
+ * the workspace's settings may (see {@link workspaceSettingsAuthorized});
  * otherwise a person of the organization who can start chats here
  * (`sessions:create`), acting as themselves: signed in, or their own chat or
  * connected agent or personal API key acting for them within what they

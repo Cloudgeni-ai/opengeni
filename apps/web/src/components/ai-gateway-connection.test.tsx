@@ -724,6 +724,36 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("a member manages custom models without the key or what it may serve", async () => {
+    listConnections.mockImplementation(async () => [gatewayConnection()]);
+    const props = {
+      client: context.client as unknown as Parameters<typeof useProviderConnection>[0]["client"],
+      workspaceId: "workspace-a",
+      config: PROVIDER_CONNECTION_CONFIGS.vercel,
+      canManageConnection: false,
+      canManageCustomModels: true,
+    };
+    const member = await renderHook(
+      () => useProviderConnection({ ...props, canManageAccess: false }),
+      undefined,
+    );
+    try {
+      await act(async () => await flush());
+      expect(member.result.current.canManageCustomModels).toBe(true);
+      expect(member.result.current.canManageConnection).toBe(false);
+      expect(member.result.current.canManageAccess).toBe(false);
+    } finally {
+      await member.unmount();
+    }
+    // Without its own flag, access follows custom models as before.
+    const admin = await renderHook(() => useProviderConnection(props), undefined);
+    try {
+      expect(admin.result.current.canManageAccess).toBe(true);
+    } finally {
+      await admin.unmount();
+    }
+  });
+
   test("ignores a slower response from the previous workspace", async () => {
     let resolveWorkspaceA: ((value: { models: WorkspaceGatewayCustomModel[] }) => void) | undefined;
     listWorkspaceGatewayCustomModels.mockImplementation(async (workspaceId) => {
