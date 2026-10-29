@@ -19,6 +19,7 @@ import {
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   activateCompanyProfileRevision,
@@ -65,7 +66,7 @@ export function requireDirectAccountAdmin(access: AccessGrantAuthorization): voi
     });
   }
   if (!access.accountGrant?.permissions.includes("account:admin")) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
 }
 

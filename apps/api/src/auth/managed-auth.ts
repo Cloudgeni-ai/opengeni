@@ -18,7 +18,9 @@ import {
   databasePasswordFileOptions,
   ensureManagedAccessForUser,
   logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   rotatingDatabasePasswordFor,
+  tagDatabaseLoginAttempt,
   withDatabaseAuthenticationRetry,
 } from "@opengeni/db";
 import {
@@ -32,7 +34,7 @@ import { betterAuth } from "better-auth";
 import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
-import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { Client, Pool, type ClientConfig, type PoolClient, type PoolConfig } from "pg";
 import { parse as parseConnectionString } from "pg-connection-string";
 
 import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
@@ -215,13 +217,9 @@ export function createManagedAuthDatabasePool(
   databaseUrl: string,
   observability?: ManagedAuthPoolObservability,
   passwordFiles?: DatabasePasswordFiles,
-  onCredentialEvent: DatabaseCredentialEventListener = logDatabaseCredentialEvent(
-    "managed-auth",
-    (message, attributes) => {
-      if (observability) observability.warn(message, attributes);
-      else console.warn(`[database] ${message}`, attributes);
-    },
-  ),
+  onCredentialEvent: DatabaseCredentialEventListener = observability
+    ? observeDatabaseCredentialEvents("managed-auth", observability)
+    : logDatabaseCredentialEvent("managed-auth"),
 ): Pool {
   const credential = rotatingDatabasePasswordFor(databaseUrl, passwordFiles, onCredentialEvent);
   const pool = new Pool(
@@ -234,6 +232,7 @@ export function createManagedAuthDatabasePool(
           // connection.
           ...(parseConnectionString(databaseUrl) as unknown as PoolConfig),
           password: () => credential.password(),
+          Client: rotatingPasswordClient(credential) as unknown as PoolConfig["Client"],
         }
       : { connectionString: databaseUrl, ...MANAGED_AUTH_DATABASE_POOL_OPTIONS },
   );
@@ -255,14 +254,52 @@ export function createManagedAuthDatabasePool(
 }
 
 /**
- * Make the pool's checkouts (and so `pool.query`, which checks out through
- * `connect`) try again after a 28P01 on the next password candidate, only
- * while another distinct candidate exists. A 28P01 is raised only while a new
- * connection authenticates, before any statement runs, so retrying a checkout
- * cannot repeat work. At most one attempt per candidate; the last 28P01
- * surfaces unchanged.
+ * A `pg` client class whose login records the file-backed password it used,
+ * and whose connect error names that login, so a 28P01 is attributed to the
+ * password this client actually tried rather than to whatever the pool
+ * selects by the time the refusal arrives. Each `pg` client logs in once.
+ * The login's identity is a private empty object, never the client: after a
+ * refused login `pg` keeps the password it tried on the client.
  */
-function retryConnectAfterAuthenticationFailure(
+export function rotatingPasswordClient(credential: RotatingDatabasePassword): typeof Client {
+  return class RotatingPasswordClient extends Client {
+    readonly #login: object = {};
+
+    constructor(config?: string | ClientConfig) {
+      super(config);
+      // `pg` asks `this.password()` once, while this client logs in.
+      (this as unknown as { password: () => Promise<string> }).password = () =>
+        credential.password(this.#login);
+    }
+
+    override connect(): Promise<Client>;
+    override connect(callback: ((err: Error) => void) | ((err: null, c: Client) => void)): void;
+    override connect(
+      callback?: ((err: Error) => void) | ((err: null, c: Client) => void),
+    ): Promise<Client> | void {
+      if (!callback) {
+        return super.connect().catch((error: unknown) => {
+          tagDatabaseLoginAttempt(error, this.#login);
+          throw error;
+        });
+      }
+      super.connect(((error: Error | null, ...rest: unknown[]) => {
+        if (error) tagDatabaseLoginAttempt(error, this.#login);
+        (callback as (error: Error | null, ...rest: unknown[]) => void)(error, ...rest);
+      }) as (err: Error) => void);
+    }
+  };
+}
+
+/**
+ * Make the pool's checkouts (and so `pool.query`, which checks out through
+ * `connect`) try again after a 28P01 on the password candidate the pool then
+ * selects (see `withDatabaseAuthenticationRetry`). A 28P01 is raised only
+ * while a new connection authenticates, before any statement runs, so
+ * retrying a checkout cannot repeat work. A single password fails fast; the
+ * last 28P01 surfaces unchanged.
+ */
+export function retryConnectAfterAuthenticationFailure(
   pool: Pool,
   credential: RotatingDatabasePassword,
 ): void {

@@ -314,7 +314,35 @@ export async function hydrateStoredModelContextSnapshot(
     refs.skills,
     ...(refs.body ?? []),
   ]);
-  const stored = row.snapshot as ModelContextSnapshot;
+  return hydrateModelContextSnapshotFromValues(row.snapshot, refs, values);
+}
+
+/** The digests a stored snapshot's content refs name, or null when it has none. */
+export function modelContextSnapshotRefDigests(contentRefs: unknown): string[] | null {
+  if (contentRefs === null || contentRefs === undefined) return null;
+  if (!isSnapshotRefs(contentRefs)) throw new TypeError("Invalid snapshot content refs");
+  return [
+    contentRefs.instructions,
+    contentRefs.layers,
+    contentRefs.tools,
+    contentRefs.skills,
+    ...(contentRefs.body ?? []),
+  ];
+}
+
+/**
+ * Rebuild a stored snapshot from blob values already read (the archive bundle
+ * keeps blobs as their own rows). Unverified, like the database form.
+ */
+export function hydrateModelContextSnapshotFromValues(
+  snapshot: unknown,
+  contentRefs: unknown,
+  values: ReadonlyMap<string, unknown>,
+): unknown {
+  if (contentRefs === null || contentRefs === undefined) return snapshot;
+  if (!isSnapshotRefs(contentRefs)) throw new TypeError("Invalid snapshot content refs");
+  const refs = contentRefs;
+  const stored = snapshot as ModelContextSnapshot;
   return {
     ...stored,
     instructions: values.get(refs.instructions),

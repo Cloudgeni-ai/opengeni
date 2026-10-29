@@ -14,7 +14,7 @@ export function commandElapsed(startedAt: string, now: number): string {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
-export function WorkspaceCommands({
+function WorkspaceCommands({
   workspaceId,
   canControl,
   now,

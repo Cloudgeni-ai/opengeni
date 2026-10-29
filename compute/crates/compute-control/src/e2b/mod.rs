@@ -39,7 +39,7 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use compute_protocol::host::Id;
+use compute_protocol::host::{Id, SandboxConfig, SleepConfig};
 use tokio::time::Instant;
 use tower::ServiceExt as _;
 
@@ -92,7 +92,7 @@ impl From<Failure> for Refused {
         let status = match &failure {
             Failure::NotFound => 404,
             Failure::Invalid(_) => 400,
-            Failure::Busy(_) | Failure::Mismatch(_) => 409,
+            Failure::Busy(_) | Failure::Exists(_) | Failure::Mismatch(_) => 409,
             Failure::Gone(_) => 410,
             Failure::NoCapacity | Failure::Unavailable(_) => 503,
             Failure::Unknown { .. } => 504,
@@ -128,12 +128,37 @@ pub struct Template {
     pub image: String,
     pub vcpus: u8,
     pub memory_mib: u32,
+    /// The memory in MiB its sandboxes are guaranteed while they run, and
+    /// the processor time in thousandths of a processor they are
+    /// guaranteed awake (see [`SandboxConfig::memory_request_mib`] and
+    /// [`SandboxConfig::cpu_request_millis`]); above them they use what
+    /// the host has free, up to `memory_mib` and `vcpus`. Omitted, all of
+    /// `memory_mib` and the default share of `vcpus`.
+    pub memory_request_mib: Option<u32>,
+    pub cpu_request_millis: Option<u32>,
     /// The disk, in MiB, its sandboxes get at least (see
     /// [`compute_protocol::host::SandboxConfig::disk_mib`]); their image's
     /// length when `None`.
     pub disk: Option<u32>,
     /// The disk size reported to callers.
     pub disk_mib: u64,
+}
+
+impl Template {
+    /// The config its sandboxes are created with, sleeping as `sleep`
+    /// says.
+    #[must_use]
+    pub fn config(&self, sleep: SleepConfig) -> SandboxConfig {
+        let config = SandboxConfig {
+            memory_request_mib: self.memory_request_mib,
+            cpu_request_millis: self.cpu_request_millis,
+            ..SandboxConfig::new(self.vcpus, self.memory_mib, sleep)
+        };
+        match self.disk {
+            Some(mib) => config.with_disk_mib(mib),
+            None => config,
+        }
+    }
 }
 
 /// How the front door runs.
@@ -166,6 +191,8 @@ impl Default for Settings {
                     image: "base".into(),
                     vcpus: 2,
                     memory_mib: 1024,
+                    memory_request_mib: None,
+                    cpu_request_millis: None,
                     disk: None,
                     disk_mib: 4096,
                 },

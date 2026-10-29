@@ -28,6 +28,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;
@@ -174,6 +175,9 @@ struct World {
     guarantees: Mutex<Vec<(String, u32, u16)>>,
     /// While set, no VM can be given new guarantees.
     refuse_guarantees: AtomicBool,
+    /// What the VMs may still take together, as an engine that limits
+    /// what they hold together reports it; `None` for no such limit.
+    memory_room: Mutex<Option<u64>>,
     /// Each VM started: its name and the memory limit it started under.
     started_limits: Mutex<Vec<(String, Option<u64>)>>,
     /// Each VM started: its name and the processor weight it started at.
@@ -999,6 +1003,10 @@ impl Engine for Fake {
 
     fn resident_bytes(&self, _: &FakeVm) -> Result<u64, EngineError> {
         Ok(100 << 20)
+    }
+
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.memory_room.lock().unwrap())
     }
 
     fn set_guarantees(

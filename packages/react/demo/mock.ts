@@ -461,7 +461,14 @@ export class MockOpenGeniClient implements SessionClientLike {
       this.bus(sessionId).status,
       "Ops channel — manager session",
     );
-    return { ...session, title: request.title, titleSource: "user" };
+    return {
+      ...session,
+      ...(request.title !== undefined
+        ? { title: request.title, titleSource: "user" as const }
+        : {}),
+      ...(request.description !== undefined ? { description: request.description || null } : {}),
+      ...(request.avatar !== undefined ? { avatar: request.avatar } : {}),
+    };
   }
 
   async updateSessionMcpApprovalPolicy(
@@ -1132,7 +1139,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       setupScript: request.setupScript ?? null,
       checks: request.checks ?? [],
       credentialHooks: request.credentialHooks ?? [],
-      defaultVariableSetIds: [],
       changelog: "Initial version",
       providerImages: {},
       createdBy: "user:demo",
@@ -1278,7 +1284,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       setupScript: base?.setupScript ?? null,
       checks: base?.checks ?? [],
       credentialHooks: base?.credentialHooks ?? [],
-      defaultVariableSetIds: base?.defaultVariableSetIds ?? [],
       changelog: "Promoted from a verified change",
       providerImages: {},
       createdBy: "user:demo",
@@ -3070,8 +3075,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       sandboxGroupId: sessionId,
       activeSandboxId: null,
       activeEpoch: 0,
-      variableSetId: null,
-      environmentId: null,
       rigId: null,
       rigVersionId: null,
       channelId: this.sessionChannelOverrides.get(sessionId) ?? null,
@@ -3994,8 +3997,6 @@ function scheduledTask(
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     targetSessionId: null,
     reusableSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: now,

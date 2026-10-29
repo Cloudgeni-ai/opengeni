@@ -11,7 +11,8 @@ on:
       - "bun.lock"
       - ".bun-version"
   push:
-    branches: [main, production]
+    # batch/** are merge batcher candidates; a batch passes only if this passes too.
+    branches: [main, production, "batch/**"]
     paths:
       - "packages/db/**"
       - "packages/testing/**"

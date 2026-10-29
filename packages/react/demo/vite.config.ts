@@ -8,6 +8,7 @@ const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD 
 const demoInputs = {
   agentRows: resolve(__dirname, "agent-rows.html"),
   approvalReview: resolve(__dirname, "approval-review.html"),
+  siteToolConsent: resolve(__dirname, "site-tool-consent.html"),
   genieLoading: resolve(__dirname, "genie-loading.html"),
   exchangeFold: resolve(__dirname, "exchange-fold.html"),
   main: resolve(__dirname, "index.html"),
@@ -17,6 +18,7 @@ const demoInputs = {
   machines: resolve(__dirname, "machines.html"),
   memberMachines: resolve(__dirname, "member-machines.html"),
   chromeSetupCard: resolve(__dirname, "chrome-setup-card.html"),
+  machineCard: resolve(__dirname, "machine-card.html"),
   workbench: resolve(__dirname, "workbench.html"),
   workbenchDock: resolve(__dirname, "workbench-dock.html"),
   workbenchEmbed: resolve(__dirname, "workbench-embed.html"),

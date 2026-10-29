@@ -30,6 +30,8 @@ import {
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "../components/load-failure-notice";
 import { ShimmerText } from "./shimmer-text";
 
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, formatElapsed };
@@ -636,14 +638,19 @@ function LiveElapsed({ since }: { since: string }) {
   );
 }
 
-class FacetRenderBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
+class FacetRenderBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean; notLoaded: boolean }
+> {
+  state = { failed: false, notLoaded: false };
 
-  static getDerivedStateFromError(): { failed: boolean } {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): { failed: boolean; notLoaded: boolean } {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   render(): ReactNode {
-    return this.state.failed ? null : this.props.children;
+    if (!this.state.failed) return this.props.children;
+    // A facet that can't render is left out; one whose code didn't download says so.
+    return this.state.notLoaded ? <LoadFailureNotice /> : null;
   }
 }

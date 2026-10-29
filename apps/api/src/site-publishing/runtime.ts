@@ -48,6 +48,7 @@ import {
 import type { SiteGatewayFields } from "./gateway-signature";
 import type { SiteAgentUnfundedReason } from "./agent-model";
 import { bindSiteSessionRequestAuthority } from "./session-request-authority";
+import { stampActionAuditProvenance } from "../http/disconnect-audit-actor";
 import { effectiveSiteLimits, siteViewerLimits, sourceSiteLimitProfile } from "./limits";
 import {
   siteLimitInputs,
@@ -908,6 +909,12 @@ export async function siteRuntimeSessionRequest(
       // including compact admin grants. The Site adds no permission ceiling.
       permissions: [...Permission.options],
       workspaceId: host.scope.workspaceId,
+    });
+    // The verified viewer, in the Site the app serves them.
+    stampActionAuditProvenance(request, {
+      source: "app",
+      principalKind: "site_viewer",
+      via: "published_site",
     });
   }
   return request;

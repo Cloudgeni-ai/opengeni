@@ -158,7 +158,7 @@ test("a continuing session whose empty tab was closed opens one and names it for
     const observation = await fixture.driver.start();
     expect(observation.target.id).toBe("opened-1");
     await expect(fixture.driver.observe("closed-1")).rejects.toThrow(
-      "browser target does not exist: this session closed this empty tab when it last released the browser; its current tab is opened-1",
+      "browser target does not exist: this session closed this empty tab after it stopped using it; its current tab is opened-1",
     );
     // Any other missing tab says how to carry on.
     await expect(fixture.driver.observe("never-seen")).rejects.toThrow(

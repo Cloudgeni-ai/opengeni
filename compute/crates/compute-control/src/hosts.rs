@@ -80,7 +80,9 @@ pub fn outcome(reply: &Reply) -> Outcome {
         | Reply::Connected { .. }
         | Reply::Status(_)
         | Reply::Preparing
-        | Reply::Prepared { .. } => Outcome::Done,
+        | Reply::Prepared { .. }
+        | Reply::Capturing
+        | Reply::Captured { .. } => Outcome::Done,
         Reply::Error { code, .. } => match code {
             ErrorCode::HostFull | ErrorCode::Unavailable | ErrorCode::Expired => Outcome::Refused,
             ErrorCode::NotFound => Outcome::NotFound,

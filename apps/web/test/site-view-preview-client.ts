@@ -508,7 +508,6 @@ export function siteViewPreviewClient(options: {
         "updateSession",
         "deleteGoal",
         "updateGoal",
-        "uploadFile",
         "updateSessionMcpApprovalPolicy",
       ].map((name) => [
         name,
@@ -522,5 +521,26 @@ export function siteViewPreviewClient(options: {
       workspaceId,
       unread: false,
     }),
+    // A file attached in the chat is stored at once, so it shows as ready.
+    uploadFile: async (
+      _workspace: string,
+      request: { filename: string; contentType: string; data: Blob },
+    ) => {
+      const at = new Date().toISOString();
+      return {
+        id: crypto.randomUUID(),
+        workspaceId,
+        status: "ready",
+        filename: request.filename,
+        safeFilename: request.filename,
+        contentType: request.contentType,
+        sizeBytes: request.data.size,
+        sha256: null,
+        bucket: "preview",
+        objectKey: "preview",
+        createdAt: at,
+        updatedAt: at,
+      };
+    },
   };
 }

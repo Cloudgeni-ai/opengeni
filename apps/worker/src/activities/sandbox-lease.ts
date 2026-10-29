@@ -97,6 +97,7 @@ import {
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   type MeterableWarmLease,
   type ReapDrainable,
   type RetainedProcessProviderProof,
@@ -126,6 +127,7 @@ import { appendSessionCommandOutput } from "@opengeni/db/session-command-output"
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
+  backgroundCommandWakeSender,
   agentConnectionCurrent,
   connectedRunnerReleaseMode,
   type ConnectedRunnerReleaseMode,
@@ -993,7 +995,8 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability, objectStorage, bus } = await services();
+      const { db, settings, observability, objectStorage, bus, wakeSessionWorkflow } =
+        await services();
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs
@@ -1018,6 +1021,7 @@ export function createSandboxLeaseActivities(
           captureAttempt,
           objectStorage,
           bus,
+          wakeSessionWorkflow,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -1091,7 +1095,15 @@ export function createSandboxLeaseActivities(
       // Connected Machine commands are not managed-sandbox lease state. Their
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
-      await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+      await reconcileConnectedMachineBackgroundCommands(
+        db,
+        settings,
+        observability,
+        service.bus,
+        undefined,
+        undefined,
+        service.wakeSessionWorkflow,
+      );
       await reconcileConnectedCommandOutputReleases(db, settings, observability, service.bus);
 
       // Disabling new lease ownership cannot strand a previously dispatched
@@ -1167,6 +1179,7 @@ export function createSandboxLeaseActivities(
         probeRetainedProcess,
         options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
         service.bus,
+        service.wakeSessionWorkflow,
       );
 
       // A request or PTY left on a Modal box whose lease epoch has ended can
@@ -1678,7 +1691,9 @@ export async function reconcileConnectedMachineBackgroundCommands(
   bus: ActivityServices["bus"],
   controlRpcOverride?: ControlRpc,
   runnerModeOverride?: typeof connectedRunnerReleaseMode,
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"],
 ): Promise<void> {
+  const wake = backgroundCommandWakeSender(wakeSessionWorkflow);
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
@@ -1875,6 +1890,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
           claim,
           proof,
           receipt,
+          wake,
           publish: async (events) => {
             try {
               await bus.publish(claim.workspaceId, claim.sessionId, events);
@@ -2409,6 +2425,20 @@ function deferEndedEpochProbe(backoff: EndedEpochProbeBackoff, key: string): voi
   });
 }
 
+/** A failed direct wake falls back to the dispatcher; say so, so a broken
+ * signaler does not silently turn every command wake into a 10 s one. */
+function wakeSignalWarning(
+  observability: ActivityServices["observability"],
+  what: string,
+): (error: unknown, wake: { sessionId: string; wakeRevision: number }) => void {
+  return (error, wake) =>
+    observability.warn(`sandbox reaper: ${what} wake signal failed; the dispatcher delivers it`, {
+      sessionId: wake.sessionId,
+      wakeRevision: wake.wakeRevision,
+      error: errorMessage(error),
+    });
+}
+
 async function reconcileTerminalRetainedProcesses(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
@@ -2416,6 +2446,7 @@ async function reconcileTerminalRetainedProcesses(
   probe: RetainedProcessProbeFn,
   inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
   bus: ActivityServices["bus"],
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"],
 ): Promise<void> {
   const claimId = crypto.randomUUID();
   let claims: Awaited<ReturnType<typeof claimTerminalRetainedProcesses>>;
@@ -2863,6 +2894,11 @@ async function reconcileTerminalRetainedProcesses(
               },
             );
           }
+          await signalBackgroundCommandWakes(
+            marked.backgroundCommandWakes,
+            backgroundCommandWakeSender(wakeSessionWorkflow),
+            { onError: wakeSignalWarning(observability, "lost-box command") },
+          );
           continue;
         }
       } catch (error) {
@@ -2904,6 +2940,11 @@ async function reconcileTerminalRetainedProcesses(
           });
         }
       }
+      await signalBackgroundCommandWakes(
+        settlement.backgroundCommandWakes,
+        backgroundCommandWakeSender(wakeSessionWorkflow),
+        { onError: wakeSignalWarning(observability, "retained command") },
+      );
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
       recordRetainedProcessReconciliation(observability, "settlement_failed");
@@ -3329,19 +3370,16 @@ export async function probeRetainedProcessAtProvider(
         throw new Error("Provider command output requires durable capture before settlement");
       return;
     }
-    const page = session.getProviderCommandOutput?.(value);
-    if (page?.command.kind === "modal-router-v1" && typeof value === "string") {
-      if (!session.captureCommandOutput || !(await session.captureCommandOutput(value)))
+    if (session.getProviderCommandOutput?.(value)) {
+      if (
+        typeof value !== "string" ||
+        !session.captureCommandOutput ||
+        !(await session.captureCommandOutput(value))
+      )
         throw new Error("Byte-offset output requires atomic capture before settlement");
       return;
     }
-    if (page) {
-      for (const chunk of page.chunks)
-        if (chunk.text)
-          await captureOutput(chunk.text, chunk.chunkId, chunk.stream, page.streamFidelity);
-    } else {
-      await captureRetainedProbeOutput(process.id, value, captureOutput);
-    }
+    await captureRetainedProbeOutput(process.id, value, captureOutput);
     if (typeof value === "string") await session.acknowledgeCommandOutput?.(value);
   };
 
@@ -4245,6 +4283,7 @@ async function terminateDrainableBox(
   attempt: SandboxDrainCaptureAttempt,
   objectStorage: ObjectStorage | null,
   bus: ActivityServices["bus"] | null = null,
+  wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"] | null = null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -4466,6 +4505,10 @@ async function terminateDrainableBox(
         // (terminateProviderBox), so it may capture around a request whose
         // owner crashed. It terminates the box right after either way.
         pointInTimeCapture: providerDrainCaptureIsPointInTime(backend, lease.resumeState),
+        // A compute sandbox whose group ended is deleted without a capture
+        // (below), so a request a dead API process or worker left open on it
+        // no longer keeps it running; the claim decides this under its lock.
+        groupEndDiscard: backend === "compute",
         deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         // An unknown-outcome setup request of a closed attempt never settles
         // on a live box; after the idle grace it no longer pins the drain.
@@ -4508,6 +4551,9 @@ async function terminateDrainableBox(
   // claim fences every arrival), and the persist CAS below re-checks it under
   // the same lock before anything is deleted. The claim stamps its own
   // `teardown_claim` rotation, which is not a rotation of the workspace.
+  // A request whose owner died (an API process during a rollout, a crashed
+  // worker) does not hold the delete up: the claim was taken around it, and
+  // the cold commit settles it only once the box is gone.
   const dispositionLease = captureClaimLease ?? lease;
   if (
     captureDisposition === "capture_required" &&
@@ -4787,9 +4833,8 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(
-    db,
-    {
+  const { wentCold, unpublishedProviderLost, backgroundCommandEvents, backgroundCommandWakes } =
+    await confirmDrainCold(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
@@ -4808,8 +4853,7 @@ async function terminateDrainableBox(
       // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
       providerStopped:
         managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
-    },
-  );
+    });
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
   await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
@@ -4818,6 +4862,11 @@ async function terminateDrainableBox(
       error: errorMessage(error),
     });
   });
+  await signalBackgroundCommandWakes(
+    backgroundCommandWakes,
+    backgroundCommandWakeSender(wakeSessionWorkflow),
+    { onError: wakeSignalWarning(observability, "contained command") },
+  );
   if (wentCold) {
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another

@@ -24,12 +24,14 @@ import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markd
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import type { OpenGeniLinkTarget } from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
 import * as Haptics from "expo-haptics";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Linking, Pressable, Text, View } from "react-native";
+import { Alert, Linking, Platform, Pressable, Share, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
@@ -109,6 +111,12 @@ function fullAccessMenuAction(access: SessionFullAccess | null): MenuAction[] {
       ]
     : [];
 }
+
+/** Interactive answers remember picks and what was sent across app launches. */
+const answerStore: InteractiveAnswerStore = {
+  get: (key) => AsyncStorage.getItem(key),
+  set: (key, value) => AsyncStorage.setItem(key, value),
+};
 
 export default function SessionScreen() {
   const { id, at, workspace } = useLocalSearchParams<{
@@ -197,6 +205,12 @@ function inChatConnectOptions(
     returnUrl: desktopAppReturnUrl(conversation, origin),
     openUrl: (url) => void Linking.openURL(url),
     attemptHints: connectAttemptHints,
+    // A computer connects from the computer itself: send this chat there.
+    // iOS shares a URL as a link; Android shares text.
+    shareConversation: () =>
+      void Share.share(
+        Platform.OS === "ios" ? { url: conversation } : { message: conversation },
+      ).catch(() => {}),
   };
 }
 
@@ -532,6 +546,7 @@ function LiveSession(props: {
         client={props.client}
         models={props.models}
         renderMarkdown={renderMarkdown}
+        answerStore={answerStore}
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
@@ -582,7 +597,6 @@ function LiveSession(props: {
           hasImageAttachments={controller.attachments.attachments.some(
             (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
           )}
-          codexOnly={session?.codexCompactionMode === "remote_v2"}
           groupPresentation={{
             opengeni_credits: {
               label: "Opengeni",

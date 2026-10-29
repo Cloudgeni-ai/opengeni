@@ -71,6 +71,7 @@ import { DialogOverlay, DialogPortal } from "../../../ui/dialog";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
 import { WorkspaceTag } from "./workspace-tag";
+import { SessionAvatar } from "../session/session-avatar";
 import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
 import { currentChatStatus, type ChatStatus } from "../../lib/actions/chat-status";
 
@@ -242,8 +243,11 @@ function useServerTitleSearch(
         }));
       };
       targets.forEach((workspaceId, index) => {
-        client
-          .listSessionPage(workspaceId, {
+        // The menu needs list rows, not each session's full tool/configuration payload.
+        // Older embedded clients may not expose the optional summary method yet.
+        const listPage = client.listSessionSummaryPage ?? client.listSessionPage;
+        listPage
+          .call(client, workspaceId, {
             search: trimmed,
             archiveStatus: "all",
             // This workspace first and fullest; a few from each of the others.
@@ -251,6 +255,7 @@ function useServerTitleSearch(
             signal: controller.signal,
           })
           .then((page) => {
+            if (controller.signal.aborted) return;
             const rows = [...(page.pinned ?? []), ...page.sessions];
             rememberChats(subjectId, rows);
             settle(rows);
@@ -1166,7 +1171,15 @@ function CommandMenuDialog(props: {
                             selected ? "bg-hover text-fg" : null,
                           )}
                         >
-                          {item.tile ? (
+                          {item.chat?.avatar ? (
+                            <SessionAvatar
+                              avatar={item.chat.avatar}
+                              name={item.chat.title}
+                              workspaceId={item.chat.workspaceId}
+                              seed={item.chat.id}
+                              size="xs"
+                            />
+                          ) : item.tile ? (
                             <span
                               aria-hidden="true"
                               className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted"

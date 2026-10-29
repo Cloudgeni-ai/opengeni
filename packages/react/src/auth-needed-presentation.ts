@@ -57,6 +57,8 @@ export function authNeededPresentation(
   // An agent's request to set something up is a first connection: never
   // "reconnect", which only fits an account that was connected before.
   const request = recommendation ?? item.setupRequest ?? null;
+  // A plugin is installed for the workspace, not connected to an account.
+  const plugin = recommendation?.kind === "plugin";
   const actionLabel = recommendation
     ? recommendation.action === "connect"
       ? t("messageTimeline.connect")
@@ -65,11 +67,13 @@ export function authNeededPresentation(
       ? t("messageTimeline.connect")
       : t("messageTimeline.reconnect");
   const title = recommendation
-    ? recommendation.action === "connect"
-      ? t("messageTimeline.connectProvider", { provider })
-      : recommendation.action === "add_credentials"
-        ? t("messageTimeline.setUpProvider", { provider })
-        : t("messageTimeline.enableProvider", { provider })
+    ? plugin
+      ? t("messageTimeline.installProvider", { provider })
+      : recommendation.action === "connect"
+        ? t("messageTimeline.connectProvider", { provider })
+        : recommendation.action === "add_credentials"
+          ? t("messageTimeline.setUpProvider", { provider })
+          : t("messageTimeline.enableProvider", { provider })
     : item.setupRequest
       ? t("messageTimeline.setUpProvider", { provider })
       : unavailable
@@ -96,7 +100,12 @@ export function authNeededPresentation(
     footnote: unavailable
       ? null
       : request && options.setupUnavailable
-        ? t("messageTimeline.setupUnavailableHere", { provider })
+        ? t(
+            plugin
+              ? "messageTimeline.pluginSetupUnavailableHere"
+              : "messageTimeline.setupUnavailableHere",
+            { provider },
+          )
         : request
           ? t("messageTimeline.noAccessHasBeenGranted")
           : t(

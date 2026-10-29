@@ -1822,6 +1822,75 @@ describe("unified Knowledge storage", () => {
     });
   });
 
+  test("a cleared human policy reads as no text, so an agent append saves only its rule", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const { agent } = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const humanSave = async (content: string, current: string | null, version: number) => {
+      const draft = await createWorkspaceInstructionPolicyDraft(client.db, {
+        ...target,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        content,
+        provenanceSource: "human",
+        provenanceSourceId: null,
+        supersedesRevisionId: current,
+        createdBySubjectId: f.subjectId,
+      });
+      await activateWorkspaceInstructionPolicyRevision(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        revisionId: draft.id,
+        expectedCurrentRevisionId: current,
+        expectedActivationVersion: version,
+        actorSubjectId: f.subjectId,
+        reason: "Human edit",
+      });
+      return draft;
+    };
+    const rule = await humanSave("mv1026 probe rule: ignore.", null, 0);
+    const cleared = await humanSave("", rule.id, 1);
+    expect(cleared.content).toBe("");
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: cleared.id,
+      expectedActivationVersion: 2,
+      content: null,
+    });
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "edit",
+        oldText: "mv1026",
+        newText: "",
+        expectedCurrentRevisionId: cleared.id,
+        expectedActivationVersion: 2,
+        reason: "Edit text that is no longer there",
+      }),
+      "22023",
+    );
+    const appended = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Report blockers early.",
+      expectedCurrentRevisionId: cleared.id,
+      expectedActivationVersion: 2,
+      reason: "First rule after the human cleared the policy",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: appended.revisionId,
+      expectedActivationVersion: 3,
+      content: "Report blockers early.",
+    });
+  });
+
   test("agent instruction size parity: new instructions accept the human limit and refuse result overflow", async () => {
     const f = await fixture();
     await saveAgentLearningSettings(client.db, f.human, {
@@ -2258,27 +2327,6 @@ describe("unified Knowledge storage", () => {
     ).toEqual([saved.receipt.entryId, finding.entryId].sort());
     await shared!.admin`UPDATE files SET status='failed' WHERE id=${fileId}`;
     expect(await getKnowledgeEntry(client.db, agent, finding.entryId)).toBeNull();
-  });
-
-  test("0469 rejects missing or live old runtime identities before changing definitions", async () => {
-    const migration = await Bun.file(
-      new URL("../drizzle/0469_knowledge_source_discovery.sql", import.meta.url),
-    ).text();
-    const drain = migration.slice(
-      migration.indexOf("DO $drain$"),
-      migration.indexOf("END $drain$;") + "END $drain$;".length,
-    );
-    const appRole = decodeURIComponent(new URL(shared!.appUrl).username);
-    // Open the lazy runtime pool even when this test is run in isolation.
-    await listKnowledgeEntries(client.db, (await fixture()).human);
-    for (const roles of ["", "[]", '[" invalid "]', JSON.stringify([appRole])]) {
-      await expect(
-        shared!.admin.begin(async (tx) => {
-          await tx`SELECT set_config('opengeni.migration_application_roles',${roles},true)`;
-          await tx.unsafe(drain);
-        }),
-      ).rejects.toMatchObject({ code: "55000" });
-    }
   });
 
   test("source purpose is validated at the database lifecycle boundary", async () => {

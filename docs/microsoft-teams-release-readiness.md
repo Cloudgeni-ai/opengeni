@@ -10,8 +10,8 @@ below in staging before approving a production rollout.
 
 ## Two independent integrations
 
-The pilot targets personal conversations and standard team channels. The current
-activity parser distinguishes personal conversations from channels, but cannot
+The pilot supports personal conversations and explicitly approved group chats.
+The existing channel route remains separately gated. The activity parser cannot
 distinguish standard, private and shared channel types. The separate exact channel
 allowlist denies every unapproved channel, even with broad bot rollout enabled.
 An operator must verify a channel is standard before adding it; the allowlist is
@@ -142,12 +142,11 @@ python3 -m zipfile -c ../opengeni-teams.zip manifest.json color.png outline.png
 python3 -m zipfile -l ../opengeni-teams.zip
 ```
 
-The package advertises personal conversations and team channels only. It makes
-no group-chat, file-transfer, tab, SSO, RSC, shared/private-channel, or Graph
-permission claim. Do not add one merely to satisfy a validator: implement and
-verify that capability first. Manifest 1.25 meets the documented minimum schema
-for channel-enabled Store submissions from July 2026; it does not by itself prove
-all current channel-specific Store policies are met.
+The package defaults to personal conversations. Explicitly set
+`OPENGENI_TEAMS_APP_GROUP_CHATS=true` to include group chats. It makes no team,
+file-transfer, tab, SSO, RSC, or Graph permission claim. Do not add unsupported
+channel capabilities merely to satisfy a validator: implement and verify them
+first. Manifest 1.25 does not by itself prove Store policy compliance.
 
 Validate the generated ZIP in Teams Developer Portal and retain its report.
 Local unit tests verify identity separation, safe metadata, least-capability
@@ -219,6 +218,11 @@ Required acceptance cases:
    exercise read operations with known fixtures. Sending messages needs explicit
    test authorization and a disposable conversation; never post to real users
    merely as a connectivity probe.
+   The connector also searches chat and channel messages (Microsoft Search limited
+   to `chatMessage`) and looks up colleagues with `User.Read.All`, which needs
+   administrator consent. Verify a search finds a known fixture message, that a
+   request for other entity types is refused, and that the colleague lookup
+   returns a known user's manager and direct reports.
 9. Verify onboarding, help/error states, uninstall/disconnect and reconnect on
    Teams desktop, web and mobile. Record any unsupported behavior honestly.
 
@@ -288,3 +292,44 @@ Disconnect disables the existing tenant/workspace binding and cancels pending wo
 Reconnect uses that same binding. Moving a Teams organization to a different
 workspace, or replacing the Teams organization bound to a workspace, is not supported.
 The retained binding preserves existing conversation and delivery history.
+
+## Approved group chats
+
+Group chats are opt-in through `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS`:
+exact tenant UUID and conversation ID pairs, separated by commas. Tenant admission
+alone never enables a group. Set `OPENGENI_TEAMS_APP_GROUP_CHATS=true` when generating
+an internal package to advertise personal and groupchat scopes. Default packages
+advertise personal chats only; no unsupported all-channel feature is claimed.
+
+Only explicit bot mentions are admitted. Each participant must link their own
+Opengeni account in a direct chat and hold current read access to the connected
+workspace. The sender also needs permission to create sessions. Connector chat
+membership supplies the complete roster (up to 250 humans); missing identities,
+unknown bots, foreign tenants, oversized rosters, and failed lookup refuse work.
+No Graph/RSC all-message permission is needed. Identity proof links are never
+posted to the group.
+
+Group work is workspace-visible, not a private group ACL. It receives a distinct
+native session and keeps the accepted sender's native turn authority. Personal
+chat history is never reused. Changed membership or account mapping retires the
+old route; returning to an earlier roster creates fresh history. Every outbound
+part checks the current roster and live account mappings again. Old pending
+replies are refused after an audience change.
+
+Microsoft membership lookup and message delivery are separate operations, so
+there remains a provider-side race between the last lookup and sending. Teams
+may also expose already-posted chat history to members added later. Use approved
+internal groups whose participants may share this workspace's content; this is
+not a replacement for Teams history-sharing policy.
+
+Authenticated inbound diagnostics record fixed rejection reasons, bounded schema
+paths and attachment counts (including the count of HTML representations), without
+message content, provider identifiers, URLs or credentials. These records run only
+after Connector authentication and help distinguish ignored activity shape from
+rollout, bot identity and installer-policy denials. They do not prove a reply was
+delivered. Unsupported attachments remain rejected.
+
+Teams inline `text/html` representations accompanying canonical `activity.text`
+are accepted, matching Microsoft's [receive-message payload](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/build-conversational-capability#receive-a-message-activity).
+Only the canonical text is consumed. HTML is never parsed or fetched; URL-backed
+HTML, files, images, and mixed attachment arrays remain rejected.

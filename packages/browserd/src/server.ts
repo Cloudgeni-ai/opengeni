@@ -964,6 +964,11 @@ export class BrowserControlServer {
           "cache-control": "no-store",
           "content-type": frame.mediaType,
           "x-opengeni-browser-frame": encodeBrowserFrameMetadataHeader(frame),
+          ...(frame.inexactScrollbars
+            ? // A separate header: older readers reject unknown metadata fields
+              // but ignore unknown headers.
+              { "x-opengeni-browser-frame-note": "inexact-scrollbars" }
+            : {}),
         },
       });
     }

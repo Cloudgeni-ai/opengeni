@@ -11,7 +11,7 @@
 //! Lifecycle ops (`ping`, `hello`, `resume`, `metrics`, `update_may_proceed`) are
 //! answered by the agent itself rather than the platform: they are about the
 //! connection/identity, not the host. The platform-backed ops are exec, the
-//! filesystem family, git, and the M8 pty/desktop seams (which return a typed
+//! filesystem family, and the M8 pty/desktop seams (which return a typed
 //! `Unsupported` until M8).
 //!
 //! ## Epoch fencing
@@ -220,7 +220,6 @@ async fn dispatch_future<P: Platform>(
             platform.fs_remove(&req).await,
             RespResult::FsRemove,
         ),
-        Op::Git(req) => result(request_id, platform.git(&req).await, RespResult::Git),
 
         // --- M8 stream ops: pty + desktop over the relay --------------------
         Op::PtyOpen(req) => result(
@@ -702,14 +701,6 @@ mod tests {
             _req: &v1::FsRemoveRequest,
         ) -> PlatformResult<v1::FsRemoveResponse> {
             Ok(v1::FsRemoveResponse::default())
-        }
-        async fn git(&self, _req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
-            Ok(v1::GitResponse {
-                exit_code: 0,
-                stdout: prost::bytes::Bytes::from_static(b"On branch main"),
-                stderr: prost::bytes::Bytes::new(),
-                status: None,
-            })
         }
     }
 

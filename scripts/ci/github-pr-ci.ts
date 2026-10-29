@@ -60,21 +60,14 @@ export function mainReleaseApprovalOnly(run: Run, jobs: Job[]): boolean {
   }
   return waiting === 1;
 }
-export function priorityHold(
-  lane: "pr" | "batch",
-  runs: { run: Run; jobs: Job[] }[],
-  ownRun: number,
-): string | null {
+/** Version validation yields to main CI and merge batcher candidate CI. */
+export function priorityHold(runs: { run: Run; jobs: Job[] }[], ownRun: number): string | null {
   for (const { run, jobs } of runs) {
     if (run.id === ownRun || run.status === "completed") continue;
     const path = run.path.split("@")[0];
     const main =
       path === ".github/workflows/ci.yml" && run.event === "push" && run.head_branch === "main";
-    const batch =
-      path === ".github/workflows/batch-ci.yml" &&
-      run.event === "push" &&
-      run.head_branch.startsWith("queue/");
-    if (!main && !(lane === "pr" && batch)) continue;
+    if (!main && !isBatchRun(run)) continue;
     if (main && mainReleaseApprovalOnly(run, jobs)) continue;
     // Completed testing plus only environment-approval waits is not runner demand.
     // An empty/pre-fanout or unknown job observation is not proof of spare capacity.
@@ -83,11 +76,16 @@ export function priorityHold(
   }
   return null;
 }
-export function docsOnly(paths: string[]): boolean {
+/** Merge batcher candidate CI: ci.yml pushed on batch/<id>. */
+function isBatchRun(run: Pick<Run, "path" | "event" | "head_branch">): boolean {
   return (
-    paths.length > 0 &&
-    paths.every((p) => /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md)$/.test(p))
+    run.event === "push" &&
+    run.path.split("@")[0] === ".github/workflows/ci.yml" &&
+    run.head_branch.startsWith("batch/")
   );
+}
+export function docsOnly(paths: string[]): boolean {
+  return paths.length > 0 && paths.every((p) => /^(?:docs\/.+\.mdx?|[^/]+\.md)$/.test(p));
 }
 export function supersededVersionValidationRuns(
   runs: Run[],
@@ -230,13 +228,11 @@ export async function runPrCiCommand(
     if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `${name}=${value}\n`);
   };
   if (action === "priority") {
-    const lane = laneArgument;
-    if (lane !== "pr" && lane !== "batch") throw Error("Invalid priority lane");
+    if (laneArgument !== "pr") throw Error("Invalid priority lane");
     while (timing.now() < deadline) {
       const raw: Run[] = [];
       try {
-        raw.push(...(await activeRuns("ci.yml", "&branch=main&event=push")));
-        if (lane === "pr") raw.push(...(await activeRuns("batch-ci.yml", "&event=push")));
+        raw.push(...(await activeRuns("ci.yml", "&event=push")));
       } catch (error) {
         if (!(error instanceof IncompleteInventory)) throw error;
         // Status-filtered inventories can change while GitHub computes a page.
@@ -252,10 +248,7 @@ export async function runPrCiCommand(
           ((r.path.split("@")[0] === ".github/workflows/ci.yml" &&
             r.event === "push" &&
             r.head_branch === "main") ||
-            (lane === "pr" &&
-              r.path.split("@")[0] === ".github/workflows/batch-ci.yml" &&
-              r.event === "push" &&
-              r.head_branch.startsWith("queue/"))),
+            isBatchRun(r)),
       );
       const observations = [];
       for (const run of unique)
@@ -268,7 +261,7 @@ export async function runPrCiCommand(
               ? await pages(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, "jobs")
               : [],
         });
-      const hold = priorityHold(lane, observations, Number(env.GITHUB_RUN_ID));
+      const hold = priorityHold(observations, Number(env.GITHUB_RUN_ID));
       if (!hold) {
         console.log("Higher-priority observed demand clear; repository admission granted");
         return;
@@ -277,7 +270,7 @@ export async function runPrCiCommand(
       // bounded courtesy, not a provider scheduling guarantee: continuous main
       // pushes must not starve the PRs that repair main. Only a complete known
       // inventory reaches this branch; unknown demand still holds above.
-      if (lane === "pr" && timing.now() >= prPriorityYieldDeadline) {
+      if (timing.now() >= prPriorityYieldDeadline) {
         console.log("PR priority yield reached 15 minutes; admitting one serialized fast fanout");
         return;
       }

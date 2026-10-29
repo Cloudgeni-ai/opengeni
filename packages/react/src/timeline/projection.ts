@@ -37,6 +37,7 @@ import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
 import { presentTurnFailureText } from "./compaction-copy";
 import { startupPhaseTitle } from "./platform-activity-presentation";
+import { parseHumanInputDelegation } from "../human-input-delegation";
 import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
@@ -475,6 +476,11 @@ export function buildTimeline(
       if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
         item.status = disposition;
       }
+      // A call that was still waiting for approval when its turn ended never ran.
+      if (item.kind === "tool-call" && item.awaitingApproval) {
+        item.status = disposition;
+        delete item.awaitingApproval;
+      }
       if (item.kind === "sandbox" && item.status === "running") {
         item.status = disposition;
       }
@@ -628,6 +634,7 @@ export function buildTimeline(
         }
         const voiceMessage = realtimeVoiceMessage(payload);
         const sender = messageSender(payload.initiator);
+        const humanInputDelegation = parseHumanInputDelegation(payload.modelContext);
         const userMessage: UserMessageItem = {
           kind: "user-message",
           id: event.id,
@@ -648,6 +655,7 @@ export function buildTimeline(
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           ...(sender ? { sender } : {}),
+          ...(humanInputDelegation ? { humanInputDelegation } : {}),
           occurredAt: event.occurredAt,
         };
         items.push(userMessage);
@@ -1041,6 +1049,7 @@ export function buildTimeline(
               }
             : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
+        delete target.awaitingApproval;
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
           : truncation && typeof payload.preview === "string"
@@ -1376,6 +1385,13 @@ export function buildTimeline(
 
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
+        // The calls named here have not run: they wait for the person.
+        for (const callId of approvalCallIds(payload)) {
+          const call = callsById.get(callId);
+          if (call?.kind === "tool-call" && call.status === "complete" && call.output == null) {
+            call.awaitingApproval = true;
+          }
+        }
         rememberPresentationWait(
           {
             kind: "notice",
@@ -2073,7 +2089,9 @@ function humanInputItemFromResponse(
                 .filter((answer): answer is HumanInputAnswer => answer !== null)
             : [],
         }
-      : { outcome };
+      : outcome === "skipped" && response.agentDecides === true
+        ? { outcome, agentDecides: true }
+        : { outcome };
   const questionsById = new Map(questions.map((question) => [question.id, question]));
   const answers =
     normalizedResponse.outcome === "answered"
@@ -3576,10 +3594,12 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
 
   const firstOccurredAt = groupStartedAt(body[0]) ?? turnEnd.occurredAt;
   const prior = startIndex > 0 ? groups[startIndex - 1] : undefined;
+  // The one-time rebuild for a new model has its own note; no facet repeats it.
   const contextCompactionCount =
     prior?.kind === "item" &&
     prior.item.kind === "context-compaction" &&
-    prior.item.phase === "compacted"
+    prior.item.phase === "compacted" &&
+    prior.item.implementation !== "portable_model_switch"
       ? 1
       : 0;
   const turnGroup: TimelineGroup = {
@@ -3718,6 +3738,21 @@ function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
     case "turn":
       return group.startedAt;
   }
+}
+
+/** The tool call ids a `session.requiresAction` payload asks a person to approve. */
+function approvalCallIds(payload: Record<string, unknown>): string[] {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const ids: string[] = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (id) ids.push(id);
+  }
+  return ids;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

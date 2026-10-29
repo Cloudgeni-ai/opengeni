@@ -5,6 +5,7 @@ import {
   createTranscriptionService,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextModelFor,
   transcriptText,
 } from "../src/transcription-service";
@@ -13,6 +14,8 @@ import {
   type RecordingTranscriptionProvider,
 } from "../src/recording-transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
+import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
+import { createOpenAiTranscriptionProvider } from "../src/transcription-service/providers/openai";
 
 const azure = {
   recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
@@ -143,6 +146,9 @@ describe("speech-to-text deployment", () => {
     const deployment = createSpeechToTextDeployment(
       { settings: testSettings({}) },
       {
+        // Without a database the EU-only setting cannot be read (fail closed);
+        // this workspace is not EU-only.
+        isEuOnly: async () => false,
         loadWorkspaceKey: async (_provider, scope) => (scope.workspaceId === "keyed" ? "el" : null),
       },
     );
@@ -303,6 +309,9 @@ describe("the model a workspace's meetings run", () => {
       },
       {
         providers: [subscription(input.signedIn ?? [])],
+        // Without a database the EU-only setting cannot be read (fail closed);
+        // these workspaces are not EU-only.
+        isEuOnly: async () => false,
         loadWorkspaceKey: async (_provider, { workspaceId }) =>
           (input.keyed ?? []).includes(workspaceId) ? "el" : null,
       },
@@ -344,6 +353,30 @@ describe("the model a workspace's meetings run", () => {
     });
     expect(await meetingModelFor(pinned, null, scope)).toEqual(pinned.pinned!);
   });
+
+  test("a refused deployment model gives way to one the payer doesn't pay credits for", async () => {
+    // The deployment's own Azure account is the default and charges credits.
+    const signedIn = deploymentWith({ signedIn: ["w"], settings: azure });
+    expect(signedIn.meetingDefault.providerId).toBe("azure-speech");
+    expect(await meetingModelWithoutCreditsFor(signedIn, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+    // The workspace's own key counts too, in the deployment's order.
+    expect(
+      await meetingModelWithoutCreditsFor(deploymentWith({ keyed: ["w"], settings: azure }), scope),
+    ).toEqual({ providerId: "elevenlabs", model: "scribe_v2" });
+    // Nothing connected: nothing to switch to, so the refusal stands.
+    expect(await meetingModelWithoutCreditsFor(deploymentWith({ settings: azure }), scope)).toBe(
+      null,
+    );
+    // A pinned deployment sends audio to its one model only.
+    const pinned = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
+    });
+    expect(await meetingModelWithoutCreditsFor(pinned, scope)).toBe(null);
+  });
 });
 
 describe("dictation over the shared providers", () => {
@@ -357,14 +390,20 @@ describe("dictation over the shared providers", () => {
   };
 
   test("a key provider hears dictation with the workspace's key and is never charged", async () => {
-    const heard: Array<{ model: string; key: unknown; scope: unknown }> = [];
+    const heard: Array<{ model: string; key: unknown; scope: unknown; language?: string }> = [];
     const settings = testSettings({ voiceInputProviderOrder: "openai", billingMode: "stripe" });
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
+        isEuOnly: async () => false,
         providers: [
           fakeTextProvider("elevenlabs", "workspace_key", async (input, credentials) => {
-            heard.push({ model: input.model, key: credentials, scope: input.scope });
+            heard.push({
+              model: input.model,
+              key: credentials,
+              scope: input.scope,
+              ...(input.language ? { language: input.language } : {}),
+            });
             return {
               languages: ["en"],
               audioMilliseconds: null,
@@ -404,6 +443,60 @@ describe("dictation over the shared providers", () => {
         },
       },
     ]);
+    // The language a dictation names reaches the provider.
+    await service.transcribe({ ...request, preferredProvider: "elevenlabs", language: "nb" });
+    expect(heard.at(-1)?.language).toBe("nb");
+  });
+
+  test("the vocabulary reaches a model that takes keyterms, and no other", async () => {
+    const heard: Array<readonly string[] | undefined> = [];
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    const listening = fakeTextProvider("elevenlabs", "workspace_key", async (input) => {
+      heard.push(input.keyterms);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    });
+    listening.models[0]!.capabilities = { ...listening.models[0]!.capabilities, keyterms: true };
+    const deaf = fakeTextProvider("xai_subscription", "workspace_key", async (input) => {
+      heard.push(input.keyterms);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    });
+    const service = createTranscriptionService({
+      settings,
+      db: {} as never,
+      deployment: createSpeechToTextDeployment(
+        { settings },
+        {
+          providers: [listening, deaf],
+          loadWorkspaceKey: async () => "workspace-key",
+          isEuOnly: async () => false,
+        },
+      ),
+    });
+    const keyterms = ["Kubernetes", "Ada Lovelace"];
+    await service.transcribe({ ...request, preferredProvider: "elevenlabs", keyterms });
+    await service.transcribe({ ...request, preferredProvider: "xai_subscription", keyterms });
+    expect(heard).toEqual([keyterms, undefined]);
+  });
+
+  test("OpenAI hears the vocabulary as its prompt", async () => {
+    const forms: FormData[] = [];
+    const provider = createOpenAiTranscriptionProvider({
+      apiKey: "key",
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4o-transcribe",
+      fetch: (async (_url: string, init: RequestInit) => {
+        forms.push(init.body as FormData);
+        return Response.json({ text: "Kubernetes" });
+      }) as unknown as typeof fetch,
+    });
+    expect(provider.models[0]!.capabilities.keyterms).toBe(true);
+    const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/wav", fileName: "a.wav" };
+    await provider.transcribe(
+      { audio, model: "gpt-4o-transcribe", diarize: false, keyterms: ["Kubernetes", " Ada "] },
+      {},
+    );
+    await provider.transcribe({ audio, model: "gpt-4o-transcribe", diarize: false }, {});
+    expect(forms.map((form) => form.get("prompt"))).toEqual(["Kubernetes, Ada", null]);
   });
 
   test("an unauthorized provider falls back to the next one before any text", async () => {
@@ -411,6 +504,7 @@ describe("dictation over the shared providers", () => {
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
+        isEuOnly: async () => false,
         providers: [
           fakeTextProvider("first", "workspace_subscription", async () => {
             throw new RecordingTranscriptionError("signed out", "unauthorized", false);
@@ -459,7 +553,7 @@ describe("dictation over the shared providers", () => {
     const service = createTranscriptionService({
       settings,
       db: {} as never,
-      deployment: createSpeechToTextDeployment({ settings }),
+      deployment: createSpeechToTextDeployment({ settings }, { isEuOnly: async () => false }),
     });
     expect(await service.availableProviderIds?.({ workspaceId: "w" })).toEqual(["azure-speech"]);
     expect(await service.selectProvider?.({ workspaceId: "w", preferredProvider: "openai" })).toBe(
@@ -472,6 +566,27 @@ describe("dictation over the shared providers", () => {
 });
 
 describe("transcript text", () => {
+  test("OpenAI models hear ISO 639-1 codes, with Bokmål and Nynorsk as Norwegian", () => {
+    expect(
+      ["nb", "nn", "nob", "nor", "no", "en", "eng", "en-US", "sv_SE", "zzzz", "", undefined].map(
+        (tag) => openAiLanguage(tag),
+      ),
+    ).toEqual([
+      "no",
+      "no",
+      "no",
+      "no",
+      "no",
+      "en",
+      "en",
+      "en",
+      "sv",
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   test("a result's text is the model's own, else its words joined", () => {
     expect(
       transcriptText({

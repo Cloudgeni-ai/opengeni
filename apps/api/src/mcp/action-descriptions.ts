@@ -310,6 +310,36 @@ const RULES: Rule[] = [
     pattern: /\/sessions\/:sessionId\/realtime\/supergrok$/,
     text: () => "Start a SuperGrok realtime voice connection for a session.",
   },
+  // Buying credits: "add $20 to my account" should find these first time.
+  {
+    method: "GET",
+    pattern: /^\/v1\/billing$/,
+    text: () => "Read the organization's credit balance: how much money is left to spend.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/billing\/checkout$/,
+    text: () =>
+      "Buy credits: add money to the organization's balance, for example amountUsd 20 (5 to 10,000). Returns a secure payment page; creating it charges nothing, the person pays on the page.",
+  },
+  {
+    method: "GET",
+    pattern: /^\/v1\/billing\/checkout\/:checkoutSessionId$/,
+    text: () =>
+      "Check whether a credits payment went through, with the new balance once its credits are added.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/billing\/portal$/,
+    text: () =>
+      "Open the billing portal, where the person sees invoices and changes their payment method.",
+  },
+  {
+    method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/allowance\/grants$/,
+    text: () =>
+      "Give a workspace extra allowance credits under its spending limit. This doesn't add money to the organization's balance; to buy credits use createBillingCheckout.",
+  },
   {
     method: "GET",
     pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
@@ -320,7 +350,7 @@ const RULES: Rule[] = [
     method: "PATCH",
     pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
     text: () =>
-      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools"), one action of a tool (target "action" with toolName and actionName) or the default for tools without their own approval (target "default"); permission null clears that approval. A Site\'s own tool calls can\'t ask, so a tool set to Ask fails there until it is set to Allow.',
+      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools"), one action of a tool (target "action" with toolName and actionName) or the default for tools without their own approval (target "default"); permission null clears that approval. In Opengeni a Site\'s tool call set to Ask asks the viewer to confirm; on a published Site address it can\'t ask, so it fails there until it is set to Allow.',
   },
   {
     method: "GET",

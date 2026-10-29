@@ -104,6 +104,11 @@ export function CustomApiSection({
                     <p className="mt-1 break-all text-2xs text-fg-subtle">
                       {instance.providerDomain} · {instance.toolCount} enabled tools
                     </p>
+                    {instance.personalExtension ? (
+                      <p className="mt-1 text-2xs text-fg-muted">
+                        From {instance.personalExtension.originWorkspaceName}
+                      </p>
+                    ) : null}
                   </div>
                   {busyKey === instance.instanceKey ? (
                     <Loader2Icon
@@ -144,43 +149,46 @@ export function CustomApiSection({
                   />
                 </dl>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {instance.requiresConnection ? (
+                {/* An instance carried in from another workspace is managed there. */}
+                {instance.personalExtension ? null : (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {instance.requiresConnection ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        className="pointer-coarse:min-h-11"
+                        disabled={!canManage || busyKey !== null}
+                        onClick={() => onReconnect(instance)}
+                      >
+                        <RotateCwIcon />
+                        Reconnect
+                      </Button>
+                    ) : null}
                     <Button
                       type="button"
                       variant="outline"
                       size="xs"
                       className="pointer-coarse:min-h-11"
                       disabled={!canManage || busyKey !== null}
-                      onClick={() => onReconnect(instance)}
+                      onClick={() => onUpdate(instance)}
                     >
-                      <RotateCwIcon />
-                      Reconnect
+                      <RefreshCwIcon />
+                      Check for updates
                     </Button>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="xs"
-                    className="pointer-coarse:min-h-11"
-                    disabled={!canManage || busyKey !== null}
-                    onClick={() => onUpdate(instance)}
-                  >
-                    <RefreshCwIcon />
-                    Check for updates
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    className="pointer-coarse:min-h-11"
-                    disabled={!canManage || busyKey !== null}
-                    onClick={() => onRemove(instance)}
-                  >
-                    <Trash2Icon />
-                    Remove
-                  </Button>
-                </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      className="pointer-coarse:min-h-11"
+                      disabled={!canManage || busyKey !== null}
+                      onClick={() => onRemove(instance)}
+                    >
+                      <Trash2Icon />
+                      Remove
+                    </Button>
+                  </div>
+                )}
               </article>
             );
           })}

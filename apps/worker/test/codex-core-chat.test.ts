@@ -22,16 +22,10 @@ import {
   CODEX_CORE_TURN_PROVIDER,
   prepareCoreCodexTurnEntitlements,
 } from "../src/activities/agent-turn/codex-core-capacity";
+import { readSubscriptionLeaseBusyChain } from "../src/activities/agent-turn/codex-core-claim";
 import {
-  claimCodexActiveFromCutover,
-  readClaimCodexCutoverState,
-  readSubscriptionLeaseBusyChain,
-} from "../src/activities/agent-turn/codex-core-claim";
-import {
-  SubscriptionCoreCodexTurnError,
   subscriptionCoreAccountRefusedFailure,
   subscriptionCoreCapacityFailure,
-  subscriptionCoreCutoverDisabledFailure,
   subscriptionCoreFailoverExhaustedFailure,
   subscriptionCoreLeaseBusyChain,
   subscriptionCoreLeaseBusyDelayMs,
@@ -237,12 +231,11 @@ function capacityDeps(
   return deps as unknown as CapacityPhaseDeps & { acknowledged: () => number };
 }
 
-function gate(state: "not_configured" | "disabled" | "enabled") {
+function scopedDb() {
   spy(db, "withRlsContext").mockImplementation(
     async (_db: unknown, _context: unknown, callback: (scoped: never) => Promise<unknown>) =>
       await callback({} as never),
   );
-  spy(db, "readSubscriptionProviderCutoverState").mockResolvedValue(state);
 }
 
 describe("accepted-turn entitlement preparation", () => {
@@ -327,35 +320,9 @@ describe("accepted-turn entitlement preparation", () => {
   });
 });
 
-describe("Codex cutover gate dispositions", () => {
-  test("no cutover row fails closed and never touches either selector", async () => {
-    gate("not_configured");
-    const sentinel = new Error("legacy selector reached");
-    const legacy = spy(db, "acquireCodexCredentialLease").mockRejectedValue(sentinel);
-    const core = spy(db, "placeSubscriptionCoreCodexTurn");
-    await expect(selectCodexTurnCapacity(capacityDeps())).rejects.toMatchObject({
-      code: "subscription_core_cutover_disabled",
-    });
-    expect(legacy).not.toHaveBeenCalled();
-    expect(core).not.toHaveBeenCalled();
-  });
-
-  test("a disabled cutover fails closed with typed copy and reads neither selector", async () => {
-    gate("disabled");
-    const legacy = spy(db, "acquireCodexCredentialLease");
-    const core = spy(db, "placeSubscriptionCoreCodexTurn");
-    const error = await selectCodexTurnCapacity(capacityDeps()).catch((caught) => caught);
-    expect(error).toBeInstanceOf(SubscriptionCoreCodexTurnError);
-    expect(error.payload).toMatchObject({
-      code: "subscription_core_cutover_disabled",
-      retryable: false,
-    });
-    expect(legacy).not.toHaveBeenCalled();
-    expect(core).not.toHaveBeenCalled();
-  });
-
-  test("an enabled cutover places, leases and records the selection on the core", async () => {
-    gate("enabled");
+describe("Codex capacity on the shared core", () => {
+  test("a Codex turn places, leases and records the selection on the core", async () => {
+    scopedDb();
     const legacy = spy(db, "acquireCodexCredentialLease");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const place = spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
@@ -475,7 +442,7 @@ describe("Codex cutover gate dispositions", () => {
   }
 
   test("a core wait parks the turn on the durable core waiter and hands the workflow its reference", async () => {
-    gate("enabled");
+    scopedDb();
     const resetAt = new Date(Date.now() + 3_600_000);
     const { waiter, armed, evaluate, reconcile } = coreWaitMocks(resetAt);
     evaluate.mockResolvedValue({
@@ -528,7 +495,7 @@ describe("Codex cutover gate dispositions", () => {
   test.each(["pinned_account_unavailable", "no_eligible_capacity"] as const)(
     "accepted recovery with no live funding reaches %s instead of a credit/access terminal",
     async (reason) => {
-      gate("enabled");
+      scopedDb();
       const resetAt = new Date(Date.now() + 3_600_000);
       const { waiter, armed, evaluate, reconcile } = coreWaitMocks(resetAt);
       const unavailable = {
@@ -593,7 +560,7 @@ describe("Codex cutover gate dispositions", () => {
   );
 
   test("a Steer waiting for the next model step replaces a new core wait", async () => {
-    gate("enabled");
+    scopedDb();
     const { armed, evaluate, reconcile, waitingSteer } = coreWaitMocks(
       new Date(Date.now() + 60_000),
     );
@@ -611,7 +578,7 @@ describe("Codex cutover gate dispositions", () => {
   });
 
   test("a core wait whose re-evaluation can already run resumes the same turn", async () => {
-    gate("enabled");
+    scopedDb();
     const { evaluate, reconcile } = coreWaitMocks(new Date(Date.now() + 60_000));
     evaluate.mockResolvedValue({ kind: "run", connectionId: "connection-1", switch: "initial" });
     reconcile.mockResolvedValue({ action: "resumed", events: [] });
@@ -623,7 +590,7 @@ describe("Codex cutover gate dispositions", () => {
   });
 
   test("a core wait that exhausted its false-resumption budget stops the turn", async () => {
-    gate("enabled");
+    scopedDb();
     const { armed } = coreWaitMocks(new Date(Date.now() + 60_000));
     armed.mockResolvedValue({ action: "stopped", sessionStatus: "failed", events: [] });
     const deps = capacityDeps();
@@ -633,7 +600,7 @@ describe("Codex cutover gate dispositions", () => {
   });
 
   test("an older attempt's live lease is a retryable typed failure", async () => {
-    gate("enabled");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
       kind: "lease_busy",
@@ -645,7 +612,7 @@ describe("Codex cutover gate dispositions", () => {
   });
 
   test("a binding conflict past its retries is retried like a busy lease, with its own copy", async () => {
-    gate("enabled");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
       kind: "lease_busy",
@@ -662,7 +629,7 @@ describe("Codex cutover gate dispositions", () => {
   });
 
   test("a fenced attempt exits cancelled and acknowledges lost ownership", async () => {
-    gate("enabled");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({ kind: "attempt_fenced" });
     const deps = capacityDeps();
@@ -672,16 +639,8 @@ describe("Codex cutover gate dispositions", () => {
     expect(deps.acknowledged()).toBe(1);
   });
 
-  test("a cutover switched off between the gate and placement fails closed", async () => {
-    gate("enabled");
-    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
-    spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({ kind: "cutover_not_enabled" });
-    const error = await selectCodexTurnCapacity(capacityDeps()).catch((caught) => caught);
-    expect(error.payload).toMatchObject({ code: "subscription_core_cutover_disabled" });
-  });
-
   test("a compaction turn places on the core like a chat turn and never reads the legacy selector", async () => {
-    gate("enabled");
+    scopedDb();
     const legacy = spy(db, "acquireCodexCredentialLease");
     const { armed } = coreWaitMocks(new Date(Date.now() + 60_000));
     const settled: unknown[] = [];
@@ -2441,7 +2400,6 @@ describe("core Codex failure settlement", () => {
       subscriptionCoreCapacityFailure("no_eligible_capacity", null, displayName),
       subscriptionCoreAccountRefusedFailure("forbidden", displayName),
       subscriptionCoreUnsupportedFailure("Image generation", displayName),
-      subscriptionCoreCutoverDisabledFailure(displayName),
       subscriptionCoreLeaseBusyFailure(null, undefined, displayName),
       subscriptionCoreLeaseBusyFailure(null, "binding_conflict", displayName),
     ];
@@ -2601,56 +2559,6 @@ describe("core Codex lease-busy pacing", () => {
     expect(subscriptionCoreLeaseBusyDelayMs(new Date(now - 5_000).toISOString(), now, 0)).toBe(
       1_000,
     );
-  });
-});
-
-describe("claim-time Codex cutover handling", () => {
-  test("only an explicitly enabled cutover permits Codex claim authority", () => {
-    for (const state of ["not_configured", "disabled", "enabled"] as const) {
-      expect(claimCodexActiveFromCutover(state)).toBe(state === "enabled");
-    }
-  });
-
-  test("missing and disabled cutovers do not read an active-credential flag", () => {
-    expect(claimCodexActiveFromCutover("not_configured")).toBe(false);
-    expect(claimCodexActiveFromCutover("enabled")).toBe(true);
-    expect(claimCodexActiveFromCutover("disabled")).toBe(false);
-  });
-
-  test("the cutover read retries a thrown read with the legacy bound, then surfaces it", async () => {
-    let calls = 0;
-    spy(db, "withRlsContext").mockImplementation(
-      async (_db: unknown, _context: unknown, callback: (scoped: never) => Promise<unknown>) =>
-        await callback({} as never),
-    );
-    spy(db, "readSubscriptionProviderCutoverState").mockImplementation(async () => {
-      calls += 1;
-      if (calls < 3) throw new Error("transient read");
-      return "enabled";
-    });
-    expect(
-      await readClaimCodexCutoverState(
-        {} as db.Database,
-        { accountId: "account-1", workspaceId: "workspace-1" },
-        { retryMs: 1 },
-      ),
-    ).toBe("enabled");
-    expect(calls).toBe(3);
-
-    calls = 0;
-    const persistent = new Error("persistent read outage");
-    spy(db, "readSubscriptionProviderCutoverState").mockImplementation(async () => {
-      calls += 1;
-      throw persistent;
-    });
-    await expect(
-      readClaimCodexCutoverState(
-        {} as db.Database,
-        { accountId: "account-1", workspaceId: "workspace-1" },
-        { retryMs: 1 },
-      ),
-    ).rejects.toBe(persistent);
-    expect(calls).toBe(3);
   });
 });
 

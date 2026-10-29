@@ -13,6 +13,13 @@ import {
 } from "./credit-balances";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 
+/** A route's residency claim (never evidence), as `usage_events.processing_residency` stores it. */
+type UsageEventProcessingResidency = {
+  geography: string;
+  deploymentType: string;
+  regions: readonly string[];
+};
+
 export type GeneratedImageSourceStrategy = "native_hosted" | "provider_adapter";
 export type GeneratedImageArtifactStatus = "pending" | "ready";
 export type ImageGenerationOperationStatus =
@@ -376,14 +383,19 @@ export async function completeImageGenerationOperation(
     workspaceId: string;
     operationId: string;
     operationKey: string;
+    /** Where the image route processed the request, recorded on its usage event. */
+    processingResidency?: UsageEventProcessingResidency;
   },
 ): Promise<ImageGenerationOperation> {
-  return await mutateImageGenerationOperation(db, input, completeImageGenerationOperationTx);
+  return await mutateImageGenerationOperation(db, input, (tx, current) =>
+    completeImageGenerationOperationTx(tx, current, input.processingResidency),
+  );
 }
 
 async function completeImageGenerationOperationTx(
   tx: Database,
   current: ImageGenerationOperation,
+  processingResidency?: UsageEventProcessingResidency,
 ): Promise<ImageGenerationOperation> {
   if (current.status === "completed") return current;
   if (
@@ -425,7 +437,7 @@ async function completeImageGenerationOperationTx(
   // admitted image is charged even if the balance changed since admission.
   const creditState =
     current.creditState === "pending"
-      ? await debitImageGenerationCredits(tx, current)
+      ? await debitImageGenerationCredits(tx, current, processingResidency)
       : current.creditState;
   const now = new Date();
   const [row] = await tx
@@ -1043,6 +1055,7 @@ async function admitImageGenerationCredits(
 async function debitImageGenerationCredits(
   tx: Database,
   operation: ImageGenerationOperation,
+  processingResidency?: UsageEventProcessingResidency,
 ): Promise<"debited"> {
   if (operation.pricedCostMicros <= 0) {
     throw new Error("Image generation credit debit has an invalid price");
@@ -1107,6 +1120,15 @@ async function debitImageGenerationCredits(
       turnId: operation.turnId,
       turnAttemptId: operation.attemptId,
       idempotencyKey: `usage:image_generation.cost:${operation.id}`,
+      ...(processingResidency
+        ? {
+            processingResidency: {
+              geography: processingResidency.geography,
+              deploymentType: processingResidency.deploymentType,
+              regions: [...processingResidency.regions],
+            },
+          }
+        : {}),
       occurredAt: now,
     })
     .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });

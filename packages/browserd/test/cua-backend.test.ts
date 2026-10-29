@@ -10,6 +10,7 @@ import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
+import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
   ComputerBackendActionCommand,
@@ -391,6 +392,211 @@ describe("CUA desktop boundary", () => {
       } finally {
         await backend.close();
       }
+    }
+  });
+
+  test("a macOS window named by its id is a target while its app lists it on any level", async () => {
+    // A dialog an app raises above the levels of its working windows (a
+    // sign-in dialog) is left out of the listing of every app, while CUA reads
+    // it by its id, and its app's own listing has it.
+    class RaisedDialogFixture extends Fixture {
+      dialog = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "list_windows" && args.pid === 42) {
+          this.calls.push({ name, args });
+          const listed = await super.callTool("list_windows", "{}");
+          this.calls.pop();
+          const { windows } = JSON.parse(listed.structuredJson!) as { windows: unknown[] };
+          return result({
+            windows: [
+              ...windows,
+              ...(this.dialog
+                ? [
+                    {
+                      pid: 42,
+                      window_id: 7,
+                      title: "Sign in",
+                      app_name: "Fixture",
+                      bounds: { x: 80, y: 80, width: 120, height: 60 },
+                      layer: 20,
+                      is_on_screen: true,
+                    },
+                  ]
+                : []),
+            ],
+          });
+        }
+        if (name === "get_window_state") {
+          const read = await super.callTool(name, argumentsJson);
+          const state = JSON.parse(read.structuredJson!) as Record<string, unknown>;
+          read.structuredJson = JSON.stringify({ ...state, window_id: args.window_id });
+          return read;
+        }
+        return await super.callTool(name, argumentsJson);
+      }
+    }
+    const fixture = new RaisedDialogFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
+      const observed = await backend.observe("cua:window:42:7");
+      expect(observed.target).toMatchObject({ id: "cua:window:42:7", title: "Sign in" });
+      expect(
+        fixture.calls.some((call) => call.name === "get_window_state" && call.args.window_id === 7),
+      ).toBe(true);
+      // It stays a target while its app lists it, and is never the focused one.
+      const targets = await backend.targets();
+      expect(targets.map((target) => target.id)).toEqual(["cua:window:42:1", "cua:window:42:7"]);
+      expect(targets.find((target) => target.id === "cua:window:42:7")?.focused).toBe(false);
+      // Once its app no longer lists it, it is gone, and only its own pid was asked.
+      fixture.dialog = false;
+      expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
+      await expect(backend.observe("cua:window:42:7")).rejects.toMatchObject({
+        code: "target_not_found",
+      });
+      expect(
+        fixture.calls
+          .filter((call) => call.name === "list_windows" && call.args.pid !== undefined)
+          .every((call) => call.args.pid === 42),
+      ).toBe(true);
+      // An id that is not a window this app lists is still refused at once.
+      await expect(backend.observe("cua:window:43:9")).rejects.toMatchObject({
+        code: "target_not_found",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("macOS listings and observations say when a person used the computer within a minute", async () => {
+    let seconds: number | null = 12.7;
+    let read = (): number | null => seconds;
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      personInput: () => read(),
+    });
+    try {
+      const listed = await backend.targets();
+      expect(listed.map((target) => target.personInputSecondsAgo)).toEqual([12]);
+      expect((await backend.observe(listed[0]!.id)).target.personInputSecondsAgo).toBe(12);
+      // Through the driver, as the contract carries it.
+      const driver = new ComputerDriver({
+        computerSessionId: "2d3cfcc6-0b8c-4a69-9c62-6f84b8c5c9a1",
+        controllerGeneration: "generation",
+        client: backend,
+      });
+      expect((await driver.listTargets())[0]).toMatchObject({ personInputSecondsAgo: 12 });
+      expect((await driver.observe(listed[0]!.id)).target.personInputSecondsAgo).toBe(12);
+      // Input a minute or more ago, a reading that says nothing and one that
+      // fails are not mentioned, and the stored target never keeps a reading.
+      for (const reading of [60, null]) {
+        seconds = reading;
+        expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+        expect((await backend.observe(listed[0]!.id)).target).not.toHaveProperty(
+          "personInputSecondsAgo",
+        );
+      }
+      read = () => {
+        throw new Error("unreadable");
+      };
+      expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("other platforms never read person input", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux", { personInput: () => 1 });
+    try {
+      expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("macOS focus is refused before anything is sent while someone else uses the computer", async () => {
+    let seconds: number | null = 3.4;
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      personInput: () => seconds,
+    });
+    try {
+      const focus = async () =>
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "focus", targetId: "cua:window:42:1" },
+        });
+      await expect(focus()).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Someone other than Opengeni used this computer's keyboard, mouse or trackpad 3 s ago, so this window was not brought to the front: ask them first, or keep working in the background",
+      });
+      expect(fixture.calls.filter((call) => call.name === "bring_to_front")).toEqual([]);
+      // Input a minute or more ago, or none the reading can tell, leaves
+      // focus as it was.
+      fixture.mutation = result({ status: "activated", activated: true, pid: 42, window_id: 1 });
+      for (const reading of [60, null]) {
+        seconds = reading;
+        expect((await focus())?.target.id).toBe("cua:window:42:1");
+      }
+      expect(fixture.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("input an agent sent in the foreground is not reported as a person's, in any session", async () => {
+    // The HID timers the reading comes from see input sent in the foreground
+    // as they see a person's; input sent to an app in the background they
+    // do not see.
+    let now = 100_000;
+    let lastInputAt = now - 12_000;
+    class InputFixture extends Fixture {
+      override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "press_key" && args.delivery_mode === "foreground") lastInputAt = now;
+        if (name !== "press_key") return await super.callTool(name, argumentsJson);
+        now += 200;
+        return { ...result({ effect: "unverifiable" }), rawJson: JSON.stringify({ content: [] }) };
+      }
+    }
+    const agentInput = new AgentInput(() => now);
+    const personInput = () => (now - lastInputAt) / 1000;
+    const fixture = new InputFixture();
+    fixture.listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
+    const backend = await CuaComputerBackend.open(fixture, "macos", { personInput, agentInput });
+    const other = await CuaComputerBackend.open(new Fixture(), "macos", {
+      personInput,
+      agentInput,
+    });
+    const press = (args: Record<string, unknown>) =>
+      backend.callNative({
+        operationId: crypto.randomUUID(),
+        tool: "press_key",
+        arguments: { pid: 42, key: "tab", ...args },
+      });
+    try {
+      const id = (await backend.targets())[0]!.id;
+      // Input sent to the app in the background leaves the person's reading.
+      await press({});
+      expect((await backend.targets())[0]!.personInputSecondsAgo).toBe(12);
+      await press({ delivery_mode: "foreground" });
+      now += 100;
+      expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+      expect((await backend.observe(id)).target).not.toHaveProperty("personInputSecondsAgo");
+      // Nor does another session of this process take it for a person's.
+      expect((await other.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+      // Input that came clearly after it is reported.
+      now += 3_000;
+      lastInputAt = now - 1_000;
+      expect((await backend.targets())[0]!.personInputSecondsAgo).toBe(1);
+      expect((await other.targets())[0]!.personInputSecondsAgo).toBe(1);
+    } finally {
+      await backend.close();
+      await other.close();
     }
   });
 
@@ -849,7 +1055,7 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("a click or key press CUA only sent is reported as unconfirmed, unlike confirmed or semantic actions", async () => {
+  test("a click, key press or element press CUA only sent is reported as unconfirmed, unlike confirmed ones", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture);
     try {
@@ -877,12 +1083,19 @@ describe("CUA desktop boundary", () => {
         undefined,
         () => reported.push("key"),
       );
-      await backend.dispatch(command(await backend.observe(target.id)), undefined, () =>
-        reported.push("invoke"),
-      );
+      // An app in the background can take a press through accessibility and
+      // do nothing, as a toolbar button that opens a menu only while its app
+      // is active does.
+      const invoke = async (label: string) =>
+        await backend.dispatch(command(await backend.observe(target.id)), undefined, () =>
+          reported.push(label),
+        );
+      fixture.mutation = result({ effect: "unverifiable", route: "accessibility" });
+      await invoke("invoke");
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       await click("confirmed click");
-      expect(reported).toEqual(["click", "key"]);
+      await invoke("confirmed invoke");
+      expect(reported).toEqual(["click", "key", "invoke"]);
     } finally {
       await backend.close();
     }
@@ -1176,7 +1389,7 @@ describe("CUA desktop boundary", () => {
       try {
         const target = (await backend.targets())[0]!;
         await expect(backend.capture(target.id)).rejects.toMatchObject({
-          code: "driver_failed",
+          code: "unavailable",
           dispatched: false,
         });
         expect(
@@ -1283,6 +1496,71 @@ describe("CUA desktop boundary", () => {
       expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
         element_token: "s1:0",
       });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("refuses keys based on a reading the app did not answer, even after a later answered one", async () => {
+    const fixture = new Fixture();
+    fixture.applyFocused = true;
+    const original = fixture.callTool.bind(fixture);
+    let busy = false;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && busy) {
+        const state = JSON.parse(response.structuredJson!);
+        delete state.snapshot_id;
+        Object.assign(state, {
+          elements: [],
+          tree_markdown: "",
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_pending: 1,
+          degraded: true,
+          degraded_reason: "ax_app_unresponsive: pid 42 did not answer accessibility",
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const first = await backend.observe(target.id);
+      expect(first.focusedRef).not.toBeNull();
+      busy = true;
+      const unanswered = await backend.observe(target.id);
+      expect(unanswered.focusedRef).toBeNull();
+      busy = false;
+      // The app answers again, with the same element focused as before.
+      const answered = await backend.observe(target.id);
+      expect(answered.focusedRef).toBe(first.focusedRef);
+      // The caller saw no focused element in the reading it names: its keys
+      // would go to one it never saw.
+      await expect(
+        backend.dispatch({
+          ...command(first),
+          expectedObservationId: unanswered.observationId,
+          action: { type: "keyboard", action: "type", value: "Hello" },
+        }),
+      ).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message: "CUA action requires the current semantic observation",
+      });
+      expect(fixture.calls.filter((call) => call.name === "type_text")).toEqual([]);
+      // The answered reading, or the one before the unanswered one, still
+      // fences them.
+      for (const reading of [answered, first]) {
+        await backend.dispatch({
+          ...command(first),
+          expectedObservationId: reading.observationId,
+          action: { type: "keyboard", action: "type", value: "Hello" },
+        });
+      }
+      expect(fixture.calls.filter((call) => call.name === "type_text")).toHaveLength(2);
     } finally {
       await backend.close();
     }
@@ -1971,6 +2249,15 @@ describe("CUA desktop boundary", () => {
         message:
           "Keys reach only the focused window of a background app, and another of its windows has focus (one of cua:window:42:3), so none were sent: act on that window, or close it first",
       });
+      // The app named no focused window (or did not answer in time): no
+      // other window is said to have focus.
+      fixture.mutation = refused("key_focus_unknown");
+      await expect(keys("text", await backend.observe("cua:window:42:1"))).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Keys reach only the focused window of a background app, and the app did not say which of its windows has focus, so none were sent: observe this window and try again, or use its controls instead",
+      });
       // An element CUA places in another window of the app that is a target
       // here: point at that target.
       fixture.mutation = result(
@@ -1992,16 +2279,160 @@ describe("CUA desktop boundary", () => {
         message:
           "That element is in another window of this app (cua:window:42:3), not in cua:window:42:1, so nothing was done: observe cua:window:42:3 and act on its refs there",
       });
-      // There is no focus action; work happens in the background.
+      // A focus action brings the window to the front and leaves it there,
+      // once CUA confirms it as the front app's focused window.
+      fixture.mutation = result({ status: "activated", activated: true, pid: 42, window_id: 1 });
+      const before = fixture.calls.length;
+      const focused = await backend.dispatch({
+        ...command(await backend.observe("cua:window:42:1")),
+        action: { type: "focus", targetId: "cua:window:42:1" },
+      });
+      expect(fixture.calls.slice(before).filter((call) => call.name === "bring_to_front")).toEqual([
+        { name: "bring_to_front", args: { pid: 42, window_id: 1 } },
+      ]);
+      expect(focused?.target.id).toBe("cua:window:42:1");
+      // macOS took the request but did not confirm the window in front.
+      fixture.mutation = result({ status: "partial", activated: false }, true);
       await expect(
         backend.dispatch({
           ...command(await backend.observe("cua:window:42:1")),
           action: { type: "focus", targetId: "cua:window:42:1" },
         }),
       ).rejects.toMatchObject({
-        code: "unsupported",
-        message: expect.stringContaining("it has no focus action"),
+        code: "outcome_unknown",
+        dispatched: true,
+        message:
+          "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
       });
+      // A window that is no longer on screen takes nothing, and the refusal
+      // says where to act instead.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "off_space_or_ax_unresolved",
+            message:
+              "Background input refused (off_space_or_ax_unresolved): window 1 is not among the process's current AXWindows (another Space, or its AX surface is unresolved); background input is refused so a sibling window cannot receive it. Observation (capture/list_windows) remains available",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe("cua:window:42:1"))),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a macOS sheet that could not be read stops counting as one once it goes away or reads", async () => {
+    class PanelFixture extends Fixture {
+      panel: "unreadable" | "readable" = "unreadable";
+      onScreen = true;
+      panelBounds = { x: 101, y: 60, width: 100, height: 60 };
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "list_windows") {
+          this.calls.push({ name, args });
+          return result({
+            windows: [
+              {
+                pid: 42,
+                window_id: 1,
+                title: "Untitled",
+                app_name: "TextEdit",
+                bounds: { x: 50, y: 50, width: 200, height: 100 },
+              },
+              {
+                pid: 42,
+                window_id: 2,
+                title: "Open",
+                app_name: "TextEdit",
+                bounds: this.panelBounds,
+                ...(this.onScreen ? {} : { is_on_screen: false, space_ids: [1] }),
+              },
+            ],
+          });
+        }
+        if (name === "get_window_state" && args.window_id === 2 && this.panel === "unreadable") {
+          if (!args.include_accessibility_tree)
+            return {
+              text: "No content produced (neither AX tree nor screenshot succeeded)",
+              images: [],
+              isError: true,
+              degraded: false,
+              rawJson: "{}",
+            };
+          return result({
+            pid: 42,
+            window_id: 2,
+            degraded_reason:
+              "ax_window_unresolved: window_id 2 exists and is owned by pid 42, but none of the AXWindow elements reports it",
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "get_window_state" && args.window_id === 2 && response.structuredJson) {
+          const state = JSON.parse(response.structuredJson);
+          response.structuredJson = JSON.stringify({
+            ...state,
+            window_id: 2,
+            window_bounds: this.panelBounds,
+          });
+        }
+        return response;
+      }
+    }
+    const fixture = new PanelFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    const unreadable =
+      "Keys reach only the focused window of a background app, and that window (one of cua:window:42:2) cannot be read through accessibility, so no keys were sent: use another way the app offers, or ask the person to finish it at the computer";
+    const otherFocused =
+      "Keys reach only the focused window of a background app, and another of its windows has focus (one of cua:window:42:2), so none were sent: act on that window, or close it first";
+    const keysRefusedWith = async (message: string) => {
+      fixture.mutation = result(
+        { effect: "refused", code: "window_not_key", reason: "CUA's own reason" },
+        true,
+      );
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        }),
+      ).rejects.toMatchObject({ dispatched: false, message });
+    };
+    const provenUnreadable = async () => {
+      fixture.panel = "unreadable";
+      await backend.targets();
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message: expect.stringContaining("cannot be read through accessibility"),
+      });
+      await keysRefusedWith(unreadable);
+    };
+    try {
+      await provenUnreadable();
+      // Closed, though AppKit keeps the panel's window off screen for reuse.
+      fixture.onScreen = false;
+      await backend.targets();
+      await keysRefusedWith(otherFocused);
+      // Back on screen and unreadable again, then moved off the window it
+      // lay within: it is no longer that window's sheet.
+      fixture.onScreen = true;
+      await provenUnreadable();
+      fixture.panelBounds = { x: 400, y: 60, width: 100, height: 60 };
+      await backend.targets();
+      await keysRefusedWith(otherFocused);
+      // Unreadable once more, then a reading of it binds.
+      fixture.panelBounds = { x: 101, y: 60, width: 100, height: 60 };
+      await provenUnreadable();
+      fixture.panel = "readable";
+      await backend.observe("cua:window:42:2");
+      await keysRefusedWith(otherFocused);
     } finally {
       await backend.close();
     }
@@ -2262,10 +2693,12 @@ describe("CUA desktop boundary", () => {
 
   test("a press macOS did not confirm, which closed its window, reads the window it opened", async () => {
     // Excel's start gallery: pressing "Blank Workbook" closes the gallery and
-    // opens the workbook, and macOS answers the press with -25205.
+    // opens the workbook, and macOS answers the press with -25205. A dialog
+    // button that closes its dialog can get "cannot complete" (-25204).
     class GalleryFixture extends Fixture {
       pressed = false;
       opens = true;
+      code = -25205;
       override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
         if (name === "click" && args.element_token !== undefined) {
@@ -2275,7 +2708,7 @@ describe("CUA desktop boundary", () => {
             {
               error: {
                 code: "ax_action_failed",
-                message: "AX action failed: AXUIElementPerformAction(AXPress) returned -25205",
+                message: `AX action failed: AXUIElementPerformAction(AXPress) returned ${this.code}`,
               },
             },
             true,
@@ -2309,9 +2742,15 @@ describe("CUA desktop boundary", () => {
         return response;
       }
     }
-    for (const opens of [true, false]) {
+    for (const [code, opens] of [
+      [-25205, true],
+      [-25205, false],
+      [-25204, true],
+      [-25204, false],
+    ] as const) {
       const fixture = new GalleryFixture();
       fixture.opens = opens;
+      fixture.code = code;
       const backend = await CuaComputerBackend.open(fixture, "macos");
       try {
         const target = (await backend.targets())[0]!;
@@ -2999,13 +3438,49 @@ describe("CUA desktop boundary", () => {
       // Back on screen, it is read again.
       fixture.onScreen = true;
       expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
-      // The same failure for a window on screen stays a driver failure.
+      // The same failure for a window still listed on screen is tried once
+      // more (CUA can fail the first read of a window that is changing
+      // size), for the elements and for the pixels alike.
       const original = fixture.callTool.bind(fixture);
-      fixture.callTool = async (name, argumentsJson) =>
-        name === "get_window_state"
-          ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
-          : original(name, argumentsJson);
-      await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "driver_failed" });
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)]) {
+        let failures = 1;
+        fixture.callTool = async (name, argumentsJson) =>
+          name === "get_window_state" && failures-- > 0
+            ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
+            : original(name, argumentsJson);
+        await read();
+        expect(failures).toBe(-1);
+      }
+      // A second failure is refused with what to do next, never a driver
+      // failure (which callers see as an internal error).
+      let failed = 0;
+      fixture.callTool = async (name, argumentsJson) => {
+        if (name !== "get_window_state") return await original(name, argumentsJson);
+        failed += 1;
+        return { ...result({}, true), structuredJson: null, text: "No content" } as never;
+      };
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)]) {
+        const tries = failed;
+        await expect(read()).rejects.toMatchObject({
+          code: "unavailable",
+          retryable: false,
+          dispatched: false,
+          message: `${target.id} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+        });
+        expect(failed - tries).toBe(2);
+      }
+      // A window that closed meanwhile is gone, not unreadable.
+      fixture.callTool = async (name, argumentsJson) => {
+        if (name === "get_window_state")
+          return { ...result({}, true), structuredJson: null, text: "No content" } as never;
+        const response = await original(name, argumentsJson);
+        if (name === "list_windows") response.structuredJson = JSON.stringify({ windows: [] });
+        return response;
+      };
+      await expect(backend.observe(target.id)).rejects.toMatchObject({
+        code: "target_not_found",
+        dispatched: false,
+      });
     } finally {
       await backend.close();
     }
@@ -4305,6 +4780,42 @@ describe("CUA desktop boundary", () => {
             dispatched: true,
             message:
               "CUA stopped the batch at action 2: That element is in another window of this app, not in cua:window:42:1, so nothing was done",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // A later action's window was closed or hidden by an earlier one, and
+        // CUA refused before sending anything: the earlier actions ran, this
+        // one did not, and the failure says where to act instead.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "off_space_or_ax_unresolved",
+            message:
+              "Background input refused (off_space_or_ax_unresolved): window 1 is not among the process's current AXWindows (another Space, or its AX surface is unresolved); background input is refused so a sibling window cannot receive it. Observation (capture/list_windows) remains available",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // A later step named by role and name found its window closed by an
+        // earlier one while waiting for its element, which will never appear:
+        // it fails at once with the same line.
+        {
+          reply: step(1, {
+            phase: "wait_for",
+            code: "window_not_on_screen",
+            message:
+              'menuitem "Minimize" is shown, enabled did not hold: window 1 is closed or not on screen, so nothing in it can be found',
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },

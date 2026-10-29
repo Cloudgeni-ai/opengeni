@@ -181,6 +181,18 @@ the composer (its `detail` in the tooltip), and the person can leave it out of
 their messages; a new label brings it back. Pass a new value whenever the
 context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
+An item may also name the first-party `tools` it is for, such as the tool that
+reaches the open document it describes. A new chat that starts with that item
+loads those tools before its first model request, as a tool search by name
+would, so the agent can call them in its first step without searching. The
+chat's instructions and tool list stay the same as any other chat's, and its
+timeline shows that tool search. On Claude models (Anthropic Messages) nothing
+is loaded ahead and the agent searches as usual. This is decided once, when
+the chat is created: context that arrives later never loads tools, and names
+outside the chat's tool selection are ignored, so it grants nothing. Through
+the HTTP API, send the same names as `modelContextTools` next to
+`modelContext` when creating a session; the session proxy forwards them only
+with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
 Links in agent messages to Opengeni objects (files, Sites, editable
@@ -262,6 +274,17 @@ permissions and sign-in/consent are not bypassed. Without host configuration the
 default offer explains that computer setup is unavailable. It never substitutes
 an Opengeni download, setup token, shell command, or model-supplied setup URL.
 
+On the web, once a computer is connected the card still offers **Connect another
+computer** as a secondary action when the host supplied `onConnect`,
+`downloads`, `openAppUrl` or `downloadUrl`, so a person whose connected computer
+isn't the one they meant can add another. With `onConnect` it calls the host;
+otherwise it opens in place and says the steps happen on the computer they want
+to connect, with this device's links under "If it's this computer:". The phone
+timeline from `@opengeni/react-native` can't connect the phone itself; give
+`useNativeInChatConnect` a `shareConversation` callback and its computer offer
+adds **Share link to this chat** so the person can open the chat on the computer
+they want to connect.
+
 ### Capability connection offers
 
 When the agent asks the person to connect a catalog OAuth integration (its
@@ -319,7 +342,7 @@ precedence, and host-managed connections (`authoritySource: "host"`) keep their
 own row.
 
 The agent's cards for the deployment's reviewed Microsoft integrations
-(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
+(Outlook Mail, Calendar and Contacts, OneDrive, SharePoint and Teams) render the same way,
 with `SessionIntegrationCapabilityCard`. Each person connects their own
 Microsoft account, which installs the integration's reviewed tools for that
 account alone, so these cards need `sessions:control` plus

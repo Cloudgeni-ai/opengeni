@@ -16,6 +16,16 @@
 //! frozen (the host's guard freezes every VM once the host's lease runs
 //! out, until it is renewed) the VMM cannot answer, and a request that
 //! failed for that would end a VM that was only paused with the rest.
+//!
+//! Nor does time the host keeps the VMM waiting for memory count, up to
+//! [`MEMORY_WAIT_LIMIT`] of it a request. Once the VMs together pass the
+//! memory the host leaves them (`memory.high` on their parent group), the
+//! kernel slows every VMM thread that takes more, the ones that answer
+//! requests and write snapshots included, while relief saves VMs to bring
+//! them back under it. A request that failed for that would lose a VM the
+//! host was only slowing, often the very one relief was saving. The limit
+//! still catches a VMM that is stuck while its group waits for memory for
+//! good, such as under a limit of its own its guest keeps pushing against.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,6 +53,12 @@ const SNAPSHOT_LIMIT: Duration = Duration::from_secs(600);
 /// the time since the last look counts toward its deadline only if
 /// neither look found it so.
 const FROZEN_LOOK: Duration = Duration::from_millis(100);
+
+/// How much of one request's time its VMM may spend waiting for memory
+/// without that counting toward the deadline. The kernel holds a thread
+/// it slows for at most two seconds at a time, so a VMM still answering
+/// gets through a few such waits per request well within it.
+pub(crate) const MEMORY_WAIT_LIMIT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -73,11 +89,12 @@ pub struct Api {
     socket: PathBuf,
     /// The process that must serve the socket, in the host's PID namespace.
     server: Option<i32>,
-    /// The group whose freezer holds that process; time it spends frozen
-    /// does not count toward a deadline.
+    /// The group whose freezer holds that process; time it spends frozen,
+    /// or waiting for memory, does not count toward a deadline.
     group: Option<Cgroup>,
     control_limit: Duration,
     snapshot_limit: Duration,
+    memory_wait_limit: Duration,
 }
 
 impl Api {
@@ -88,6 +105,7 @@ impl Api {
             group: None,
             control_limit: CONTROL_LIMIT,
             snapshot_limit: SNAPSHOT_LIMIT,
+            memory_wait_limit: MEMORY_WAIT_LIMIT,
         }
     }
 
@@ -100,7 +118,8 @@ impl Api {
     }
 
     /// The same client, not counting toward a deadline the time `group`,
-    /// the VMM's cgroup, is held frozen.
+    /// the VMM's cgroup, is held frozen or (up to [`MEMORY_WAIT_LIMIT`] a
+    /// request) waits for memory.
     pub fn held_by(self, group: Cgroup) -> Self {
         Self {
             group: Some(group),
@@ -114,6 +133,16 @@ impl Api {
         Self {
             control_limit: control,
             snapshot_limit: snapshot,
+            ..self
+        }
+    }
+
+    /// The same client with another allowance for waiting for memory, for
+    /// tests.
+    #[cfg(test)]
+    pub fn with_memory_wait_limit(self, limit: Duration) -> Self {
+        Self {
+            memory_wait_limit: limit,
             ..self
         }
     }
@@ -141,8 +170,12 @@ impl Api {
     ) -> Result<Vec<u8>, ApiError> {
         let limit = self.limit(path);
         // The time the VMM may run before the request fails, over both
-        // the connect and the exchange.
-        let mut left = limit;
+        // the connect and the exchange, and the time it may wait for memory
+        // without that counting.
+        let mut left = Left {
+            run: limit,
+            memory_wait: self.memory_wait_limit,
+        };
         let body = body.map(serde_json::Value::to_string).unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\
@@ -183,50 +216,70 @@ impl Api {
         }
     }
 
-    /// Runs `work` for at most `left` of the time the VMM can run, taking
-    /// what it uses off `left`; `None` once that is spent first. Time
-    /// counts unless the VMM's group is found held frozen at either end of
-    /// it, however late a look comes (the executor may be busy), and the
-    /// time is only found spent by a look that finds the group not held.
+    /// Runs `work` for at most `left.run` of the time the VMM can run,
+    /// taking what it uses off `left`; `None` once that is spent first.
+    /// Time counts unless the VMM's group is found held frozen at either
+    /// end of it, however late a look comes (the executor may be busy), and
+    /// the time is only found spent by a look that finds the group not
+    /// held. Of time it counts, what the group's processes spent waiting
+    /// for memory comes off `left.memory_wait` instead while that lasts.
     /// The caller pins `work`, so it is held once, not again in here.
     async fn until<T>(
         &self,
-        left: &mut Duration,
+        left: &mut Left,
         mut work: Pin<&mut impl Future<Output = T>>,
     ) -> Option<T> {
         // A freezer it cannot read is not known to hold the VMM.
         let held = |group: &Cgroup| group.is_held_frozen().unwrap_or(false);
+        // Nor pressure it cannot read to have kept it waiting.
+        let waited = |group: &Cgroup| group.memory_waited().ok().flatten().unwrap_or_default();
         let Some(group) = &self.group else {
             let started = Instant::now();
-            let done = timeout_at(started + *left, work).await.ok();
-            *left = left.saturating_sub(started.elapsed());
+            let done = timeout_at(started + left.run, work).await.ok();
+            left.run = left.run.saturating_sub(started.elapsed());
             return done;
         };
-        let (mut looked, mut was_held) = (Instant::now(), held(group));
+        let (mut looked, mut was_held, mut memory_before) =
+            (Instant::now(), held(group), waited(group));
         loop {
             // While held, nothing is spent before the next look.
             let wait = if was_held {
                 FROZEN_LOOK
             } else {
-                (*left).min(FROZEN_LOOK)
+                left.run.min(FROZEN_LOOK)
             };
             let done = tokio::select! {
                 biased;
                 done = work.as_mut() => Some(done),
                 () = tokio::time::sleep_until(looked + wait) => None,
             };
-            let (now, is_held) = (Instant::now(), held(group));
+            let (now, is_held, memory_now) = (Instant::now(), held(group), waited(group));
             if !(was_held || is_held) {
-                *left = left.saturating_sub(now - looked);
+                let passed = now - looked;
+                let for_memory = memory_now
+                    .saturating_sub(memory_before)
+                    .min(passed)
+                    .min(left.memory_wait);
+                left.memory_wait -= for_memory;
+                left.run = left.run.saturating_sub(passed.saturating_sub(for_memory));
             }
             // Work that finished is charged its last stretch too, for the
             // part of the request still to come.
-            if done.is_some() || (left.is_zero() && !is_held) {
+            if done.is_some() || (left.run.is_zero() && !is_held) {
                 return done;
             }
-            (looked, was_held) = (now, is_held);
+            (looked, was_held, memory_before) = (now, is_held, memory_now);
         }
     }
+}
+
+/// What is left of one request's time; see [`Api::until`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Left {
+    /// Time the VMM may run before the request fails.
+    run: Duration,
+    /// Time it may yet spend waiting for memory without that counting.
+    memory_wait: Duration,
 }
 
 /// Reads one response: the status code and the body, sized by
@@ -349,16 +402,21 @@ mod tests {
             Api::new("unused"),
             Api::new("unused").held_by(Cgroup::at(&own)),
         ] {
-            let mut left = Duration::from_millis(200);
+            let mut left = Left {
+                run: Duration::from_millis(200),
+                memory_wait: MEMORY_WAIT_LIMIT,
+            };
             let first = pin!(tokio::time::sleep(Duration::from_millis(80)));
             assert_eq!(api.until(&mut left, first).await, Some(()));
             assert!(
-                left <= Duration::from_millis(125),
+                left.run <= Duration::from_millis(125),
                 "{left:?} left after 80 ms of 200"
             );
             let second = pin!(std::future::pending::<()>());
             assert_eq!(api.until(&mut left, second).await, None);
-            assert_eq!(left, Duration::ZERO);
+            assert_eq!(left.run, Duration::ZERO);
+            // No pressure to read, so nothing was taken for memory.
+            assert_eq!(left.memory_wait, MEMORY_WAIT_LIMIT);
         }
     }
 

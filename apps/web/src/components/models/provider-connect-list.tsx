@@ -43,6 +43,8 @@ export function ProviderConnectList({
   panel,
   disabled = false,
   leadingRows,
+  groupRow,
+  groupChoices,
 }: {
   choices: readonly ProviderConnectChoice[];
   onOpen: (choice: ProviderConnectChoice) => void;
@@ -59,39 +61,52 @@ export function ProviderConnectList({
   disabled?: boolean;
   /** Rows before the providers in the same list, such as Opengeni credits. */
   leadingRows?: ReactNode;
+  /**
+   * A row after the providers that opens a group of more providers, such as
+   * pay-per-token accounts. The group's rows follow it in the same list,
+   * indented under it, so a connect step opened from one loses only that
+   * small indent of width.
+   */
+  groupRow?: ReactNode;
+  /** The group's providers, shown under `groupRow`; empty while the group is closed. */
+  groupChoices?: readonly ProviderConnectChoice[];
 }) {
   const expandable = expanded !== undefined;
+  const row = (choice: ProviderConnectChoice, nested = false) =>
+    choice.unavailable ? (
+      <ListRow
+        key={choice.id}
+        nested={nested}
+        disabled
+        leading={<ProviderTile provider={choice.id} size="lg" />}
+        title={choice.title}
+        meta={[choice.summary]}
+        indicator={{ kind: "unavailable", label: choice.unavailable }}
+      />
+    ) : (
+      <ListRow
+        key={choice.id}
+        nested={nested}
+        leading={<ProviderTile provider={choice.id} size="lg" />}
+        title={choice.title}
+        meta={[choice.summary, choice.connected ? "Already connected" : choice.note]}
+        indicator={expandable ? "expand" : "open"}
+        disabled={disabled}
+        onOpen={() => onOpen(choice)}
+        {...(expandable
+          ? {
+              expanded: expanded === choice.id,
+              panel: expanded === choice.id ? panel?.(choice) : null,
+            }
+          : {})}
+      />
+    );
   return (
     <RowList label={label} flush={flush}>
       {leadingRows}
-      {choices.map((choice) =>
-        choice.unavailable ? (
-          <ListRow
-            key={choice.id}
-            disabled
-            leading={<ProviderTile provider={choice.id} size="lg" />}
-            title={choice.title}
-            meta={[choice.summary]}
-            indicator={{ kind: "unavailable", label: choice.unavailable }}
-          />
-        ) : (
-          <ListRow
-            key={choice.id}
-            leading={<ProviderTile provider={choice.id} size="lg" />}
-            title={choice.title}
-            meta={[choice.summary, choice.connected ? "Already connected" : choice.note]}
-            indicator={expandable ? "expand" : "open"}
-            disabled={disabled}
-            onOpen={() => onOpen(choice)}
-            {...(expandable
-              ? {
-                  expanded: expanded === choice.id,
-                  panel: expanded === choice.id ? panel?.(choice) : null,
-                }
-              : {})}
-          />
-        ),
-      )}
+      {choices.map((choice) => row(choice))}
+      {groupRow}
+      {groupChoices?.map((choice) => row(choice, true))}
     </RowList>
   );
 }

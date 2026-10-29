@@ -132,6 +132,8 @@ Expo autolinking picks up this package's call module. Add the config plugin to t
 - **`alternativeAppNames`:** extra names Siri accepts for the app (`INAlternativeAppNames`), for example the agent's own name, so "Call Agent" works in an app called something else.
 - Set `"appIntents": false` inside `call` to skip the generated intent.
 
+For meetings that keep recording with the screen locked, add `"recording": true`: it adds the `audio` background mode on iOS and the microphone foreground service on Android. An entry with only `recording` sets up nothing for calls, so a meetings-only app gets no `voip` mode, call activity or Siri intents. Add `call` as well to set up both, or pass `"call": false` to leave calls out of any entry.
+
 Without the plugin, set the keys yourself:
 
 ```json

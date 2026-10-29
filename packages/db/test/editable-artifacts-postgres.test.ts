@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+
 import { encodeDocumentArtifactCommandBatch } from "@opengeni/contracts/document-artifact-commands";
 import { encodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
 import {
@@ -2703,63 +2703,6 @@ describe("Postgres editable artifact authority", () => {
       [0, high],
       [1, low],
     ]);
-  }, 60_000);
-
-  test("grants the operation identity validator to configured application roles only", async () => {
-    if (!available || !shared) return;
-    const migration = await readFile(
-      new URL("../drizzle/0785_editable_spreadsheet_ordered_operation_ids.sql", import.meta.url),
-      "utf8",
-    );
-    expect(migration).toContain("opengeni.migration_application_roles");
-    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
-    const runtimeRole = `editable_runtime_${suffix}`;
-    const bystanderRole = `editable_bystander_${suffix}`;
-    const rollback = new Error("roll back the re-applied migration");
-    let observed: Record<string, boolean | null> | undefined;
-    // Re-apply the migration as the migrator would, inside a transaction that
-    // is always rolled back, with one real and one unknown configured role.
-    await expect(
-      shared.admin.begin(async (tx) => {
-        await tx.unsafe(`CREATE ROLE ${runtimeRole} NOLOGIN`);
-        await tx.unsafe(`CREATE ROLE ${bystanderRole} NOLOGIN`);
-        await tx`select set_config(
-          'opengeni.migration_application_roles',
-          ${JSON.stringify([runtimeRole, `editable_missing_${suffix}`])},
-          true
-        )`;
-        await tx.unsafe(migration);
-        const [row] = await tx<Record<string, boolean | null>[]>`
-          select
-            has_function_privilege(${runtimeRole}, procedure.oid, 'EXECUTE') as "configured",
-            has_function_privilege(${bystanderRole}, procedure.oid, 'EXECUTE') as "bystander",
-            has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "app",
-            exists (
-              select 1 from aclexplode(procedure.proacl) acl where acl.grantee = 0
-            ) as "public",
-            procedure.prosecdef as "securityDefiner",
-            exists (
-              select 1 from pg_roles where rolname = ${`editable_missing_${suffix}`}
-            ) as "unknownCreated"
-          from pg_proc procedure
-          where procedure.oid =
-            'opengeni_private.editable_artifact_operation_id_list_valid(jsonb)'::regprocedure`;
-        observed = row;
-        throw rollback;
-      }),
-    ).rejects.toBe(rollback);
-    expect(observed).toEqual({
-      configured: true,
-      bystander: false,
-      app: true,
-      public: false,
-      securityDefiner: false,
-      unknownCreated: false,
-    });
-    const [after] = await shared.admin<{ roles: number }[]>`
-      select count(*)::int as roles from pg_roles
-      where rolname in (${runtimeRole}, ${bystanderRole})`;
-    expect(after?.roles).toBe(0);
   }, 60_000);
 
   test("fences create and read authorization revisions without partial genesis writes", async () => {

@@ -1,6 +1,6 @@
 import type { AccessGrant, KnowledgeEntryScope, Permission } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
-import { hasPermission, type AccessGrantAuthorization } from "../access";
+import { hasPermission, MissingPermissionRefusal, type AccessGrantAuthorization } from "../access";
 import { requireLiveAgentAttemptAuthorization } from "../session-authorization";
 import type { ApiRouteDeps } from "../dependencies";
 import { HTTPException } from "hono/http-exception";
@@ -12,7 +12,7 @@ export async function knowledgeContextForGateway(
   grant: AccessGrant,
 ): Promise<KnowledgeContext> {
   if (!hasPermission(grant.permissions, "documents:search"))
-    throw new HTTPException(403, { message: "Missing permission: documents:search" });
+    throw new MissingPermissionRefusal("documents:search");
   if (grant.principalKind === "agent_attempt") {
     const sessionId = grant.metadata?.sessionId;
     if (typeof sessionId !== "string")
@@ -52,7 +52,7 @@ export async function knowledgeContextForAccess(
 ): Promise<KnowledgeContext> {
   const { grant } = access;
   if (!hasPermission(grant.permissions, permission)) {
-    throw new HTTPException(403, { message: `Missing permission: ${permission}` });
+    throw new MissingPermissionRefusal(permission);
   }
   if (grant.principalKind === "agent_attempt") {
     const sessionId = grant.metadata?.sessionId;

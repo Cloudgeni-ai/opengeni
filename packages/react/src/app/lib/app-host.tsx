@@ -85,8 +85,9 @@ export function useEmbedded(): boolean {
 }
 
 /** Tells the host the open chat's state each time it changes. */
-export function useReportSessionState(state: SessionViewState): void {
-  const report = useAppHost().onSessionState;
+export function useReportSessionState(state: SessionViewState, enabled = true): void {
+  const hostReport = useAppHost().onSessionState;
+  const report = enabled ? hostReport : undefined;
   const { sessionId, status, events, initialLoading } = state;
   useEffect(() => {
     report?.({ sessionId, status, events, initialLoading });
@@ -97,6 +98,13 @@ export function useReportSessionState(state: SessionViewState): void {
 export function useHostMessageContext(): (() => string | undefined) | undefined {
   const store = useAppHost().messageContext;
   const read = useCallback(() => store?.forSend(), [store]);
+  return store ? read : undefined;
+}
+
+/** Reads the tools the host's context is for at send time (see MessageContextItem.tools). */
+export function useHostMessageContextTools(): (() => string[] | undefined) | undefined {
+  const store = useAppHost().messageContext;
+  const read = useCallback(() => store?.toolsForSend(), [store]);
   return store ? read : undefined;
 }
 

@@ -107,8 +107,10 @@ export { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "./timeline/genie
 export {
   answersFromDrafts,
   defaultHumanInputFormMessages,
+  mergeHumanInputFormMessages,
   emptyDraft,
   formatDeadline,
+  humanInputAgentMayDecide,
   humanInputHeading,
   initialDrafts,
   resolveSecretSaveTo,
@@ -167,6 +169,7 @@ export {
   annotationDisplayOrdinal,
   annotationFromSelection,
   annotationHasNote,
+  annotationQuoteText,
   bestQuoteOccurrence,
   matchingQuoteInSource,
   occurrenceOffsets,

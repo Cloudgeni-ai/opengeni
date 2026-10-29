@@ -67,7 +67,8 @@ test("Knowledge preparation retains the current collection map with bounded cata
     });
     expected.push({ id: receipt.entryId, title, description: content });
   }
-  expected.sort((a, b) => a.id.localeCompare(b.id));
+  // The catalog lists the most recently updated collection first.
+  expected.reverse();
   const secret = "knowledge-preparation-batch-secret";
   const app = new Hono();
   registerKnowledgeRoutes(app, {
@@ -118,7 +119,9 @@ test("Knowledge preparation retains the current collection map with bounded cata
     durationsMs.push(performance.now() - start);
   }
   console.info("knowledge-preparation-work", JSON.stringify({ transactions, durationsMs }));
-  // Authorization, two searches, two catalog pages and one current-view batch.
-  // The scalar catalog path needed 25 transactions for these same 20 entries.
-  expect(transactions).toEqual([6, 6, 6]);
+  // Authorization, two searches (each reading the workspace's EU-only setting
+  // before its query may reach the embedder), two catalog pages and one
+  // current-view batch. The scalar catalog path needed 25 transactions for
+  // these same 20 entries.
+  expect(transactions).toEqual([8, 8, 8]);
 }, 180_000);

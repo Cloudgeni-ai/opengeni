@@ -33,9 +33,12 @@ export type ConnectAudience =
 
 export const EVERYONE: ConnectAudience = { kind: "everyone" };
 
-/** Which providers' organization accounts can serve Personal workspaces. */
+/**
+ * Which providers' organization accounts can serve Personal workspaces: the
+ * subscriptions on the shared core (the access route reports the same).
+ */
 export function personalWorkspacesSupported(kind: ConnectionAccessKind): boolean {
-  return kind === "codex" || kind === "supergrok";
+  return kind === "codex" || kind === "supergrok" || kind === "claude_subscription";
 }
 
 /** Why an organization API key can't be offered to Personal workspaces. */
@@ -159,16 +162,12 @@ export function ConnectAudienceFields({
   disabled?: boolean;
 }) {
   const personalSupported = personalWorkspacesSupported(kind);
-  const personalReason =
-    kind === "claude_subscription"
-      ? "Organization Claude subscriptions can't be used in Personal workspaces."
-      : PERSONAL_KEYS_REASON;
   const selected = value.kind === "selected" ? value : null;
   const everyoneDescription = personalSupported
     ? "Every workspace, including new ones and everyone's Personal workspace."
     : here?.personal
-      ? `Every shared workspace, including new ones. Not this one: ${personalReason}`
-      : `Every shared workspace, including new ones. ${personalReason}`;
+      ? `Every shared workspace, including new ones. Not this one: ${PERSONAL_KEYS_REASON}`
+      : `Every shared workspace, including new ones. ${PERSONAL_KEYS_REASON}`;
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <ChoiceCards
@@ -237,14 +236,7 @@ export function ConnectAudienceFields({
           )}
           <CheckboxField
             label="Personal workspaces"
-            {...(personalSupported
-              ? {}
-              : {
-                  description:
-                    kind === "claude_subscription"
-                      ? "Organization Claude subscriptions can't be used there."
-                      : PERSONAL_KEYS_SHORT_REASON,
-                })}
+            {...(personalSupported ? {} : { description: PERSONAL_KEYS_SHORT_REASON })}
             disabled={disabled || !personalSupported}
             checked={personalSupported && selected.personalWorkspaces}
             onCheckedChange={(checked) => onChange({ ...selected, personalWorkspaces: checked })}

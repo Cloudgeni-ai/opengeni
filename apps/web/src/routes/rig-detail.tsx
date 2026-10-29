@@ -59,6 +59,7 @@ import {
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
+import { usePersonName } from "@opengeni/react/app/lib/use-person-name";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
 import type { Rig } from "@opengeni/react/app/types";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
@@ -93,6 +94,8 @@ export function RigDetailRoute({
   const rig = useRig(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const versions = useRigVersions(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const changes = useRigChanges(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
+  // Who made each version or change, by name.
+  const personName = usePersonName(workspaceId, canView);
 
   const [tab, setTab] = useState<Tab>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -261,7 +264,8 @@ export function RigDetailRoute({
         <DetailAsideItem label="Active version">
           Version {active.version}
           <span className="block text-xs leading-4.5 text-fg-muted">
-            {rigActorLabel(active.createdBy)} · <RelativeTime date={active.createdAt} inSentence />
+            {rigActorLabel(active.createdBy, personName)} ·{" "}
+            <RelativeTime date={active.createdAt} inSentence />
           </span>
         </DetailAsideItem>
       ) : null}
@@ -406,6 +410,7 @@ export function RigDetailRoute({
                   <RigVersionsTimeline
                     versions={versions.versions}
                     activeVersionId={active?.id ?? null}
+                    personName={personName}
                     canManage={canManage}
                     mutating={rig.mutating}
                     onActivate={async (versionId) => {
@@ -432,6 +437,7 @@ export function RigDetailRoute({
                   <RigChangesQueue
                     changes={changes.changes}
                     versionLabel={versionLabel}
+                    personName={personName}
                     canManage={canManage}
                     mutating={rig.mutating}
                     onVerify={async (changeId) => {
