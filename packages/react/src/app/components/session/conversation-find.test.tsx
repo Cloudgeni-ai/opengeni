@@ -85,25 +85,38 @@ async function mountFind(initial: SessionSearchRoute) {
   const root = createRoot(host);
   const targets: Array<TimelineSearchTarget | null> = [];
   const jumps: number[] = [];
-  await act(async () =>
-    root.render(
-      <ConversationFind
-        workspaceId="workspace"
-        sessionId="session"
-        open
-        focusRevision={0}
-        initial={initial}
-        showBackToSessionSearch={false}
-        onTarget={(target) => targets.push(target)}
-        onJump={async (sequence) => {
-          jumps.push(sequence);
-          return true;
-        }}
-        onClose={() => {}}
-      />,
-    ),
-  );
-  const counter = () => host.querySelector('[role="status"]')?.textContent?.trim() ?? "";
+  const onTarget = (target: TimelineSearchTarget | null) => targets.push(target);
+  const onJump = async (sequence: number) => {
+    jumps.push(sequence);
+    return true;
+  };
+  const onClose = () => {};
+  const render = (open: boolean) =>
+    act(async () =>
+      root.render(
+        <ConversationFind
+          workspaceId="workspace"
+          sessionId="session"
+          open={open}
+          focusRevision={0}
+          initial={initial}
+          showBackToSessionSearch={false}
+          onTarget={onTarget}
+          onJump={onJump}
+          onClose={onClose}
+        />,
+      ),
+    );
+  await render(true);
+  // The visible counter; a spoken alternative, when present, is separate.
+  const counter = () => {
+    const status = host.querySelector('[role="status"]');
+    return (
+      status?.querySelector('[aria-hidden="true"]')?.textContent ??
+      status?.textContent ??
+      ""
+    ).trim();
+  };
   const settle = async (until: () => boolean) => {
     for (let attempt = 0; attempt < 400 && !until(); attempt++)
       await act(async () => {
@@ -127,6 +140,7 @@ async function mountFind(initial: SessionSearchRoute) {
     settle,
     press,
     click,
+    render,
     unmount: async () => {
       await act(async () => root.unmount());
       host.remove();
@@ -499,16 +513,88 @@ test("in a very long history the newest match comes first and the oldest stays r
   try {
     // Background counting stops after many matches; the place is not known yet.
     await find.settle(() => find.counter() === "? / 2050+");
+    expect(find.host.querySelector('[role="status"]')?.textContent).toContain(
+      "More than 2050 matches, still counting",
+    );
     expect(find.targets.at(-1)?.sequence).toBe(2_100);
     await find.press("Enter", true);
     await find.settle(() => find.targets.at(-1)?.sequence === 2_099);
     await find.press("Enter");
     await find.settle(() => find.targets.at(-1)?.sequence === 2_100);
-    // Next from the newest still reaches the oldest match, loading the rest.
+    // Next from the newest wraps to the oldest match with one oldest-first
+    // request, without paging through the history in between.
+    const newestPages = server.requests.length;
     await find.press("Enter");
-    await find.settle(() => find.counter() === "1 / 2100");
+    await find.settle(() => find.counter() === "1 / 2050+");
     expect(find.targets.at(-1)?.sequence).toBe(1);
+    expect(server.requests.slice(newestPages)).toEqual([
+      { query: "needle", sessionId: "session", order: "oldest", limit: 1 },
+    ]);
+    // Previous from the oldest wraps back to the newest, and Next returns.
+    await find.press("Enter", true);
+    await find.settle(() => find.targets.at(-1)?.sequence === 2_100);
+    await find.press("Enter");
+    await find.settle(() => find.targets.at(-1)?.sequence === 1);
+    expect(server.requests.length).toBe(newestPages + 1);
+    // Next from the oldest loads the history it skipped, then knows its place.
+    await find.press("Enter");
+    await find.settle(() => find.counter() === "2 / 2100");
+    expect(find.targets.at(-1)?.sequence).toBe(2);
     expect(server.requests.at(-1)?.cursor).toBe("2050");
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("closing and reopening Find lands on the newest match and highlights it again", async () => {
+  search = pagedSearch(
+    Array.from({ length: 5 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  ).respond;
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "5 / 5");
+    await find.press("Enter", true);
+    await find.settle(() => find.counter() === "4 / 5");
+    await find.render(false);
+    expect(find.targets.at(-1)).toBeNull();
+    await find.render(true);
+    await find.settle(() => find.counter() === "5 / 5");
+    expect(find.targets.at(-1)).toMatchObject({ sequence: 5, query: "needle" });
+    expect(find.jumps.at(-1)).toBe(5);
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("a failed load during a move releases the arrows and Retry continues", async () => {
+  const server = pagedSearch(
+    Array.from({ length: 2_100 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  );
+  let failures = 1;
+  search = async (workspaceId, request) => {
+    if (request.order === "oldest" && failures-- > 0) throw new Error("network");
+    return server.respond(workspaceId, request);
+  };
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "? / 2050+");
+    await find.press("Enter");
+    await find.settle(() => !!find.host.querySelector('[role="alert"]'));
+    // The move is dropped: no endless "Searching…", and the arrows work.
+    await find.settle(() => find.counter() === "? / 2050+");
+    expect(
+      find.host.querySelector<HTMLButtonElement>('[aria-label="Previous match"]')!.disabled,
+    ).toBe(false);
+    expect(find.targets.at(-1)?.sequence).toBe(2_100);
+    await act(async () =>
+      [...find.host.querySelectorAll("button")]
+        .find((button) => button.textContent === "Retry")!
+        .click(),
+    );
+    await find.settle(() => !find.host.querySelector('[role="alert"]'));
+    await find.press("Enter");
+    await find.settle(() => find.counter() === "1 / 2050+");
+    expect(find.targets.at(-1)?.sequence).toBe(1);
   } finally {
     await find.unmount();
   }

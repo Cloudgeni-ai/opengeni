@@ -53,7 +53,7 @@ export default function ConversationFind(props: {
     query: committedQuery,
     enabled: props.open,
   });
-  const { matches, exhausted, total, load } = search;
+  const { matches, exhausted, total, first, load } = search;
   const choose = useCallback(
     async (target: TimelineSearchTarget) => {
       const generation = ++navigationLifetime.current.generation;
@@ -94,6 +94,13 @@ export default function ConversationFind(props: {
       navigationLifetime.current.controller?.abort();
       setNavigating(false);
       onTarget(null);
+      // Closing clears the highlight, so forget the place too: reopening
+      // searches again and lands on the newest match, highlighted.
+      desired.current = null;
+      setCurrent(null);
+      setPending(null);
+      setSeeking(false);
+      setNavigationError(null);
       return;
     }
     input.current?.focus();
@@ -157,8 +164,13 @@ export default function ConversationFind(props: {
   ]);
   useEffect(() => {
     if (!pending) return;
+    // A failed page cannot answer the move; Retry or the arrows start again.
+    if (search.error) {
+      setPending(null);
+      return;
+    }
     const target = resolveSessionFindMove(
-      { matches, exhausted, total },
+      { matches, exhausted, total, first },
       pending.from,
       pending.direction,
     );
@@ -166,8 +178,8 @@ export default function ConversationFind(props: {
     else if (typeof target === "object") {
       setPending(null);
       selectMatch(target);
-    } else if (!search.error) load(target);
-  }, [pending, search.error, matches, exhausted, total, selectMatch, load]);
+    } else load(target);
+  }, [pending, search.error, matches, exhausted, total, first, selectMatch, load]);
   const lastIdentity = useRef({ scope, query: committedQuery, client });
   useEffect(() => {
     const sameAuthority =
@@ -196,7 +208,7 @@ export default function ConversationFind(props: {
   }, [scope, committedQuery, client, search.accessDenied, onTarget]);
   function move(direction: -1 | 1) {
     if (!current || seeking || pending) return;
-    const target = resolveSessionFindMove({ matches, exhausted, total }, current, direction);
+    const target = resolveSessionFindMove({ matches, exhausted, total, first }, current, direction);
     if (target === null) return;
     if (typeof target === "object") selectMatch(target);
     else {
@@ -208,21 +220,30 @@ export default function ConversationFind(props: {
   const position = current
     ? matches.findIndex((match) => compareSessionFindMatch(match, current) === 0)
     : -1;
-  const counter =
+  const atFirst = !!current && !!first && compareSessionFindMatch(current, first) === 0;
+  // While older history is still being counted, a place is known only at the
+  // oldest match; elsewhere it shows as "?" and is read out in words.
+  const counter: { text: string; spoken?: string } =
     seeking || pending || (search.loading && !current)
-      ? "Searching…"
+      ? { text: "Searching…" }
       : navigating
-        ? "Loading…"
-        : current
+        ? { text: "Loading…" }
+        : current && (matches.length || first)
           ? exhausted && position >= 0
-            ? `${position + 1} / ${matches.length}`
-            : // Older history is still being counted: the place is not known yet.
-              `? / ${exhausted ? matches.length : `${total}+`}`
+            ? { text: `${position + 1} / ${matches.length}` }
+            : atFirst
+              ? { text: `1 / ${total}+`, spoken: `First of more than ${total} matches` }
+              : {
+                  text: `? / ${exhausted ? matches.length : `${total}+`}`,
+                  spoken: exhausted
+                    ? `${matches.length} matches`
+                    : `More than ${total} matches, still counting`,
+                }
           : search.error
-            ? "Unavailable"
+            ? { text: "Unavailable" }
             : committedQuery.trim() && exhausted
-              ? "No matches"
-              : "";
+              ? { text: "No matches" }
+              : { text: "" };
   const canMove = !!current && !seeking && !pending && (!exhausted || matches.length > 0);
   return (
     <section
@@ -261,7 +282,14 @@ export default function ConversationFind(props: {
           className="min-w-12 whitespace-nowrap text-right text-xs text-fg-muted empty:min-w-0"
           role="status"
         >
-          {counter}
+          {counter.spoken ? (
+            <>
+              <span aria-hidden="true">{counter.text}</span>
+              <span className="sr-only">{counter.spoken}</span>
+            </>
+          ) : (
+            counter.text
+          )}
           {query !== committedQuery && committedQuery ? (
             <span className="sr-only"> Showing matches for “{committedQuery}”</span>
           ) : null}

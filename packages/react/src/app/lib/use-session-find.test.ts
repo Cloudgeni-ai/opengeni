@@ -27,8 +27,14 @@ test("moves step through settled matches and ask for what is still unknown", () 
   expect(resolveSessionFindMove(progress, at(5), 1)).toEqual(at(8));
   // Older than message 5 is message 3, which may still gain later occurrences.
   expect(resolveSessionFindMove(progress, at(5), -1)).toBe("more");
-  // Next from the newest wraps to the oldest match, which needs all history.
-  expect(resolveSessionFindMove(progress, at(8), 1)).toBe("all");
+  // Next from the newest wraps to the oldest match, asked for on its own.
+  expect(resolveSessionFindMove(progress, at(8), 1)).toBe("first");
+  const withFirst = { ...progress, first: at(1, 2) };
+  expect(resolveSessionFindMove(withFirst, at(8), 1)).toEqual(at(1, 2));
+  // Previous from the oldest wraps back to the newest settled match.
+  expect(resolveSessionFindMove(withFirst, at(1, 2), -1)).toEqual(at(8));
+  // Next from the oldest needs the history between it and what was reached.
+  expect(resolveSessionFindMove(withFirst, at(1, 2), 1)).toBe("more");
   // A linked occurrence older than anything reached waits for older pages.
   expect(resolveSessionFindMove(progress, at(2), 1)).toBe("more");
   expect(resolveSessionFindMove({ matches: [], exhausted: false, total: 0 }, at(2), -1)).toBe(
