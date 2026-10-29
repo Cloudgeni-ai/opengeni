@@ -73,6 +73,13 @@ export type TranscriptionBillingContext = {
    * provider reports no usage this deployment has a price for.
    */
   trustedDurationSeconds?: number | undefined;
+  /**
+   * Audio duration a client reported, for audio that never passes through
+   * the server (the live transcript streams from the device straight to the
+   * provider). Bills only without provider usage or a trusted duration, and
+   * the ledger names it `client_reported_duration`.
+   */
+  clientReportedDurationSeconds?: number | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {

@@ -655,8 +655,21 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       connecting = false;
       const status = (error as { status?: number }).status;
       const code = (error as { details?: { code?: string } }).details?.code;
-      // Not found is retried: the recording may not have reached the server yet.
-      if (status === 400 || status === 403 || status === 409 || code === "quota_exceeded") {
+      // A refusal stands until someone acts (no credits, a limit, a model not
+      // served here), so it isn't retried all meeting. Not found is retried:
+      // the recording may not have reached the server yet.
+      const final =
+        status === 400 ||
+        status === 402 ||
+        status === 403 ||
+        status === 409 ||
+        status === 429 ||
+        code === "quota_exceeded" ||
+        (typeof status === "number" &&
+          status !== 401 &&
+          status !== 404 &&
+          (error as { retryable?: unknown }).retryable === false);
+      if (final) {
         unavailable(
           code ?? "unavailable",
           error instanceof Error ? error.message : "The live transcript isn't available.",

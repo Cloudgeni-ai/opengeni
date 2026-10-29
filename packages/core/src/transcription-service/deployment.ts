@@ -1,8 +1,10 @@
 import {
   deploymentAzureEntraCredential,
+  isLegacyBillingAccount,
   resolveVoiceInputProviderRegistry,
   sideFeatureProcessingResidency,
   sideFeatureRouteAllowed,
+  voiceInputCreditBillingActive,
   type Settings,
   type SideFeatureProcessingResidency,
   type SideFeatureTarget,
@@ -125,6 +127,12 @@ export type SpeechToTextDeployment = {
     scope: { accountId?: string; workspaceId: string },
     feature: SpeechToTextRegionFeature,
   ): Promise<void>;
+  /**
+   * A model the deployment pays for that has no credit price while credits
+   * are billed: it would run free, so it isn't served to this account.
+   * Accounts on legacy billing (CloudGeni) keep it, as before credits.
+   */
+  unpriced(providerId: string, model: string, accountId: string | undefined): boolean;
 };
 
 export type SpeechToTextRegionFeature = Extract<
@@ -376,6 +384,14 @@ export function createSpeechToTextDeployment(
     meetingDefault,
     liveDefault,
     wordAlignment: settings.recordingWordAlignment,
+    unpriced(providerId, model, accountId) {
+      const provider = registry.get(providerId);
+      if (provider?.funding !== "deployment" || !voiceInputCreditBillingActive(settings)) {
+        return false;
+      }
+      if (accountId !== undefined && isLegacyBillingAccount(settings, accountId)) return false;
+      return !provider.models.find((spec) => spec.model === model)?.creditPricing;
+    },
     async credentials(providerId, scope) {
       const provider = registry.get(providerId);
       if (!provider) return "missing";
@@ -538,8 +554,10 @@ export function speechToTextModelFor(
  * this workspace can use it, else the first model in the deployment's order
  * that serves meetings and that this workspace can use. A workspace signed in
  * to a subscription, or holding its own key, transcribes with it without
- * picking it first. When none is usable it is still the default, so the
- * failure names the provider to connect.
+ * picking it first. A deployment-paid model with no credit price isn't usable
+ * while credits are billed (`unpriced`), so the choice moves on to one that
+ * can run, priced deployment models included. When none is usable it is
+ * still the default, so the failure names the provider to connect.
  */
 export async function meetingModelFor(
   deployment: SpeechToTextDeployment,
@@ -565,6 +583,7 @@ export async function meetingModelFor(
     ) {
       continue;
     }
+    if (deployment.unpriced(candidate.providerId, candidate.model, scope.accountId)) continue;
     let available = checked.get(candidate.providerId);
     if (!available) {
       available = deployment.available(candidate.providerId, scope).catch(() => false);

@@ -298,6 +298,7 @@ describe("the model a workspace's meetings run", () => {
     keyed?: readonly string[];
     wordAlignment?: boolean;
     settings?: Parameters<typeof testSettings>[0];
+    providers?: readonly RecordingTranscriptionProvider[];
   }) {
     return createSpeechToTextDeployment(
       {
@@ -308,7 +309,7 @@ describe("the model a workspace's meetings run", () => {
         }),
       },
       {
-        providers: [subscription(input.signedIn ?? [])],
+        providers: [subscription(input.signedIn ?? []), ...(input.providers ?? [])],
         // Without a database the EU-only setting cannot be read (fail closed);
         // these workspaces are not EU-only.
         isEuOnly: async () => false,
@@ -376,6 +377,44 @@ describe("the model a workspace's meetings run", () => {
       settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
     });
     expect(await meetingModelWithoutCreditsFor(pinned, scope)).toBe(null);
+  });
+
+  test("while credits are billed an unpriced deployment model isn't chosen, except for a legacy billing account", async () => {
+    // The deployment's Azure Speech account is the default and has no credit price.
+    const billed = { ...azure, usageLimitsMode: "managed" as const };
+    const defaultModel = { providerId: "azure-speech", model: "MAI-Transcribe-2" };
+    // A workspace signed in to a subscription runs it instead.
+    const signedIn = deploymentWith({ signedIn: ["w"], settings: billed });
+    expect(signedIn.meetingDefault).toEqual(defaultModel);
+    expect(signedIn.unpriced("azure-speech", "MAI-Transcribe-2", "a")).toBe(true);
+    expect(await meetingModelFor(signedIn, null, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+    // A deployment model with a price can run, so it is chosen.
+    const base = fakeTextProvider("priced", "deployment", async () => {
+      throw new Error("not called");
+    });
+    const priced: RecordingTranscriptionProvider = {
+      ...base,
+      models: base.models.map((spec) => ({ ...spec, creditPricing: { microsPerMinute: 100 } })),
+    };
+    const withPriced = deploymentWith({ settings: billed, providers: [priced] });
+    expect(withPriced.unpriced("priced", "priced-model", "a")).toBe(false);
+    expect(await meetingModelFor(withPriced, null, scope)).toEqual({
+      providerId: "priced",
+      model: "priced-model",
+    });
+    // CloudGeni's legacy account, or credits not billed: the default as before.
+    const legacy = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...billed, billingLegacyAccountIds: ["a"] },
+    });
+    expect(legacy.unpriced("azure-speech", "MAI-Transcribe-2", "a")).toBe(false);
+    expect(await meetingModelFor(legacy, null, scope)).toEqual(defaultModel);
+    const unbilled = deploymentWith({ signedIn: ["w"], settings: azure });
+    expect(unbilled.unpriced("azure-speech", "MAI-Transcribe-2", "a")).toBe(false);
+    expect(await meetingModelFor(unbilled, null, scope)).toEqual(defaultModel);
   });
 });
 

@@ -46,6 +46,7 @@ export type VoiceInputBillingBasis =
   | "provider_tokens"
   | "provider_duration"
   | "server_duration"
+  | "client_reported_duration"
   | "reconciled_receipt";
 
 /**
@@ -53,13 +54,14 @@ export type VoiceInputBillingBasis =
  * price it (token usage with token rates, or a reported duration). Otherwise
  * the duration the server measured from WAV bytes it produced bills. Every
  * deployment-funded call carries that server duration, so an unpriced usage
- * shape never leaves a call unbillable. A client-reported duration is never a
- * billing input.
+ * shape never leaves a call unbillable. A client-reported duration bills only
+ * audio the server never sees (the live transcript), and is labelled as such.
  */
 export function voiceInputBillableUsage(input: {
   pricing: VoiceInputPricing;
   usage: VoiceInputUsage | null;
   trustedDurationSeconds?: number | undefined;
+  clientReportedDurationSeconds?: number | undefined;
 }): { usage: VoiceInputUsage; basis: VoiceInputBillingBasis } {
   if (input.usage?.kind === "tokens" && voiceInputPricingHasTokenRates(input.pricing)) {
     return { usage: input.usage, basis: "provider_tokens" };
@@ -75,6 +77,16 @@ export function voiceInputBillableUsage(input: {
     return {
       usage: { kind: "duration", seconds: input.trustedDurationSeconds },
       basis: "server_duration",
+    };
+  }
+  if (
+    input.clientReportedDurationSeconds !== undefined &&
+    Number.isFinite(input.clientReportedDurationSeconds) &&
+    input.clientReportedDurationSeconds >= 0
+  ) {
+    return {
+      usage: { kind: "duration", seconds: input.clientReportedDurationSeconds },
+      basis: "client_reported_duration",
     };
   }
   throw new TranscriptionServiceError({
@@ -215,6 +227,7 @@ export function createVoiceInputBilling(deps: {
         pricing: input.pricing,
         usage: input.usage,
         trustedDurationSeconds: input.billing.trustedDurationSeconds,
+        clientReportedDurationSeconds: input.billing.clientReportedDurationSeconds,
       });
       const cost = calculateVoiceInputCost(
         input.pricing,

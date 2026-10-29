@@ -341,7 +341,7 @@ describe("meeting tools", () => {
       recordingId: live,
       trackNumber: 0,
       streamedMilliseconds: 5_000,
-      costUsdMicros: null,
+      pricing: () => ({ chargedInCredits: false, costUsdMicros: null }),
       segments: [
         { segmentNumber: 0, startMilliseconds: 1_000, endMilliseconds: 3_000, text: "Hello all." },
         {
@@ -369,7 +369,7 @@ describe("meeting tools", () => {
       recordingId: live,
       trackNumber: 0,
       streamedMilliseconds: 1_200_000,
-      costUsdMicros: null,
+      pricing: () => ({ chargedInCredits: false, costUsdMicros: null }),
       segments: later,
     });
     const tools = toolsFor(scope.grantFor(scope.owner));

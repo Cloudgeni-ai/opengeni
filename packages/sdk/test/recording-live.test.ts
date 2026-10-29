@@ -6,6 +6,7 @@ import {
   resamplePcm16,
   type LiveFetch,
   type LiveMediaTrack,
+  type LiveTranscriptState,
   type LiveWebSocket,
 } from "../src/recording-live";
 
@@ -280,6 +281,49 @@ describe("live transcriber", () => {
     expect(live.snapshot.error?.code).toBe("credential_unavailable");
     expect(api.grants()).toBe(1);
     expect(FakeSocket.opened).toHaveLength(0);
+  });
+
+  test("no credits, a limit or a model not served here is final; a passing failure is retried", async () => {
+    const refusal = (status: number, code: string, retryable?: boolean) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({
+          error: {
+            code,
+            message: "The live transcript isn't available.",
+            ...(retryable === undefined ? {} : { retryable }),
+            details: { code },
+          },
+        }),
+      );
+    const cases: { error: OpenGeniApiError; state: LiveTranscriptState }[] = [
+      { error: refusal(402, "insufficient_credits", false), state: "unavailable" },
+      { error: refusal(429, "monthly_model_cost_limit", false), state: "unavailable" },
+      // A live model the deployment can't price while credits are billed.
+      { error: refusal(503, "unavailable", false), state: "unavailable" },
+      { error: refusal(503, "unavailable", true), state: "reconnecting" },
+      // The recording may not have reached the server yet.
+      { error: refusal(404, "not_found", false), state: "reconnecting" },
+    ];
+    for (const { error, state } of cases) {
+      FakeSocket.opened = [];
+      const api = client({ failFirstGrant: error });
+      const live = createLiveTranscriber({
+        client: api,
+        workspaceId: "w",
+        recordingId: "r",
+        trackNumber: 0,
+        WebSocket: FakeSocket,
+      });
+      live.push(tenth(), 16_000, 0);
+      await settle();
+      expect({ status: error.status, state: live.snapshot.state }).toEqual({
+        status: error.status,
+        state,
+      });
+      if (state === "unavailable") expect(live.snapshot.error?.code).toBe(error.code!);
+      live.abort();
+    }
   });
 
   test("a dropped connection holds audio and reconnects with a new grant", async () => {

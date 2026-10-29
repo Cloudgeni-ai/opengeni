@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
-import { FeatureUnavailableReason } from "./inference-residency";
+import { REGION_RESTRICTED } from "./inference-residency";
 import * as primitives from "./primitives";
 
 /**
@@ -864,6 +864,19 @@ export const RecordingTranscriptionFunding = /* @__PURE__ */ defineSchema(() =>
 );
 export type RecordingTranscriptionFunding = z.infer<typeof RecordingTranscriptionFunding>;
 
+/**
+ * Why a transcription model is switched off when the reason is not setup:
+ * `region_restricted` (EU-only workspace, no EU route: "Not supported in
+ * EU"), or `unpriced` (a model the deployment pays for that has no credit
+ * price while credits are billed, so it isn't served).
+ */
+export const RecordingTranscriptionUnavailableReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([REGION_RESTRICTED, "unpriced"]),
+);
+export type RecordingTranscriptionUnavailableReason = z.infer<
+  typeof RecordingTranscriptionUnavailableReason
+>;
+
 export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     providerId: z.string(),
@@ -875,9 +888,10 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     /**
      * Why `available` is false when the reason is not setup: `region_restricted`
      * when the workspace is EU-only and this provider has no EU route (show
-     * "Not supported in EU").
+     * "Not supported in EU"); `unpriced` when the deployment pays for it but
+     * has no credit price for it while credits are billed.
      */
-    unavailableReason: FeatureUnavailableReason.nullable().optional(),
+    unavailableReason: RecordingTranscriptionUnavailableReason.nullable().optional(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
     /**

@@ -33,6 +33,7 @@ import {
   RecordingTranscriptionError,
   requireAccessGrant,
   TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -59,6 +60,7 @@ import {
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
+  markRecordingLiveCharged,
   recordAuditEvent,
   RecordingConflictError,
   rememberRecordingPersonVoice,
@@ -71,7 +73,9 @@ import {
   updateRecording,
   updateRecordingSegments,
   updateRecordingSpeakers,
+  voiceTranscriptionReceiptRecorded,
   type CreditDebitAttribution,
+  type RecordingLiveModel,
 } from "@opengeni/db";
 import {
   isLegacyBillingAccount,
@@ -468,10 +472,8 @@ export function registerRecordingRoutes(
     // transcribed free while credits are billed, so it isn't served; legacy
     // billing accounts (CloudGeni) keep today's behaviour.
     const unpriced =
-      creditsBilled &&
       recording.purpose !== "dictation" &&
-      !spec?.creditPricing &&
-      !isLegacyBillingAccount(deps.settings, actor.accountId);
+      deployment.unpriced(choice.providerId, choice.model, actor.accountId);
     const refused = unpriced
       ? new ApiHttpError(503, {
           code: "upstream_unavailable",
@@ -536,6 +538,17 @@ export function registerRecordingRoutes(
       await admit();
       return null;
     } catch (error) {
+      // Credits turned off in the workspace, or a payer that can't be
+      // identified: a policy refusal, final until that changes (403).
+      if (error instanceof TranscriptionServiceError && error.code === "policy_blocked") {
+        return new ApiHttpError(403, {
+          code: "forbidden",
+          message: error.message,
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "policy_blocked" },
+        });
+      }
       if (!(error instanceof TranscriptionBillingRefusedError)) throw error;
       return new ApiHttpError(error.status, {
         code:
@@ -568,52 +581,81 @@ export function registerRecordingRoutes(
   }
 
   /**
-   * Charge the audio one live-segments call added to a track. The audio goes
-   * from the recorder straight to the provider, so the track's stored
-   * streamed total (it never shrinks) is the measure; each new total is its
-   * own charge, settled once. A failed charge is logged and the receipt
-   * reconciled at the next voice admission; the text is already saved.
+   * Charge a track's live audio from its charged mark to its stored streamed
+   * total. The audio goes from the recorder straight to the provider, so the
+   * total the recorder reports (it never shrinks) is the measure, labelled
+   * `client_reported_duration` on the ledger. Each range is its own unit,
+   * named by both ends, and the mark moves only once its charge is durable
+   * (settled, or its usage receipt committed for the next admission to
+   * debit): a failed charge is charged again, grown, by the next save. The
+   * text is already saved, so a failure is logged, never an error response.
    */
   async function chargeLiveAudio(
-    actor: { accountId: string; workspaceId: string; creditAttribution: CreditDebitAttribution },
+    actor: {
+      accountId: string;
+      workspaceId: string;
+      subjectId: string;
+      creditAttribution: CreditDebitAttribution;
+    },
     input: {
       recordingId: string;
       trackNumber: number;
-      providerId: string;
-      model: string;
-      pricing: VoiceInputPricing | null;
-      streamedMilliseconds: number;
-      addedMilliseconds: number;
+      live: RecordingLiveModel;
+      pricing: VoiceInputPricing;
+      charge: { fromMilliseconds: number; toMilliseconds: number };
     },
   ): Promise<void> {
     const billing = deps.transcription?.billing;
-    if (
-      !liveChargedInCredits(registry.get(input.providerId), actor.accountId) ||
-      !billing ||
-      !input.pricing
-    ) {
-      return;
-    }
+    if (!billing) return;
+    const { fromMilliseconds, toMilliseconds } = input.charge;
+    const sourceId = `${input.recordingId}:live:${input.trackNumber}:${fromMilliseconds}-${toMilliseconds}`;
+    let charged: boolean;
     try {
       await billing.settle({
         accountId: actor.accountId,
         workspaceId: actor.workspaceId,
-        providerId: input.providerId,
-        model: input.model,
+        providerId: input.live.providerId,
+        model: input.live.model,
         pricing: input.pricing,
         usage: null,
         billing: {
-          sourceId: `${input.recordingId}:live:${input.trackNumber}:${input.streamedMilliseconds}`,
+          sourceId,
           attribution: actor.creditAttribution,
-          trustedDurationSeconds: input.addedMilliseconds / 1_000,
+          clientReportedDurationSeconds: (toMilliseconds - fromMilliseconds) / 1_000,
         },
       });
+      charged = true;
     } catch (error) {
+      charged = await voiceTranscriptionReceiptRecorded(db, {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        sourceId,
+      }).catch(() => false);
       observability?.error("live transcript charge is unsettled", {
         workspaceId: actor.workspaceId,
         recordingId: input.recordingId,
         trackNumber: input.trackNumber,
-        providerId: input.providerId,
+        providerId: input.live.providerId,
+        sourceId,
+        receiptRecorded: charged,
+        error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+      });
+    }
+    if (!charged) return;
+    try {
+      await markRecordingLiveCharged(db, {
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+        recordingId: input.recordingId,
+        trackNumber: input.trackNumber,
+        toMilliseconds,
+      });
+    } catch (error) {
+      observability?.error("live transcript charge mark is unsaved", {
+        workspaceId: actor.workspaceId,
+        recordingId: input.recordingId,
+        trackNumber: input.trackNumber,
+        sourceId,
         error: error instanceof Error ? error.message.slice(0, 500) : String(error),
       });
     }
@@ -1340,11 +1382,16 @@ export function registerRecordingRoutes(
         const meetingRegion = meeting && state?.region !== false;
         const liveRegion = live && state?.liveRegion !== false;
         const restricted = !meetingRegion && !liveRegion;
-        // The same test the worker charges by.
+        // A deployment-paid model with no credit price isn't served while
+        // credits are billed (legacy billing accounts excepted).
+        const unpriced = deployment.unpriced(provider.id, spec.model, actor.accountId);
+        // The same test the worker charges meetings by; a live-only model is
+        // never charged to a legacy billing account.
         const chargedInCredits = Boolean(
           provider.funding === "deployment" &&
           voiceInputCreditBillingActive(deps.settings) &&
-          spec.creditPricing,
+          spec.creditPricing &&
+          (meeting || liveChargedInCredits(provider, actor.accountId)),
         );
         return [
           {
@@ -1352,10 +1399,15 @@ export function registerRecordingRoutes(
             providerName: provider.name,
             model: spec.model,
             name: spec.name,
-            available: restricted
-              ? false
-              : ((meetingRegion ? state?.available : state?.liveAvailable) ?? false),
-            ...(restricted ? { unavailableReason: REGION_RESTRICTED } : {}),
+            available:
+              restricted || unpriced
+                ? false
+                : ((meetingRegion ? state?.available : state?.liveAvailable) ?? false),
+            ...(restricted
+              ? { unavailableReason: REGION_RESTRICTED }
+              : unpriced
+                ? { unavailableReason: "unpriced" as const }
+                : {}),
             funding: provider.funding,
             capabilities: restricted
               ? { ...spec.capabilities, batch: meeting, live }
@@ -1513,35 +1565,45 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, AppendRecordingLiveSegmentsRequest);
-    const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const live = recording.tracks.find((track) => track.trackNumber === body.trackNumber)?.live;
-    const spec = live
-      ? findRecordingTranscriptionModel(registry, live.providerId, live.model, "live")?.spec
-      : undefined;
-    const { addedMilliseconds, ...result } = await guard(() =>
+    const liveSpec = (live: RecordingLiveModel) =>
+      findRecordingTranscriptionModel(registry, live.providerId, live.model, "live")?.spec;
+    const { live, addedMilliseconds, charge, ...result } = await guard(() =>
       appendRecordingLiveSegments(db, {
         ...actor,
         recordingId,
         trackNumber: body.trackNumber,
         streamedMilliseconds: body.streamedMilliseconds,
-        costUsdMicros: spec
-          ? estimateRecordingTranscriptionCostMicros(spec, body.streamedMilliseconds)
-          : null,
+        // Audio charged in credits stores no list-price cost: an allowance
+        // that prices unbilled use would otherwise count it a second time.
+        pricing: (current) => {
+          const spec = liveSpec(current);
+          const chargedInCredits = Boolean(
+            spec?.creditPricing &&
+            deps.transcription?.billing &&
+            liveChargedInCredits(registry.get(current.providerId), actor.accountId),
+          );
+          return {
+            chargedInCredits,
+            costUsdMicros:
+              spec && !chargedInCredits
+                ? estimateRecordingTranscriptionCostMicros(spec, body.streamedMilliseconds)
+                : null,
+          };
+        },
         segments: body.segments,
       }),
     );
-    if (live && addedMilliseconds > 0) {
+    const spec = live ? liveSpec(live) : undefined;
+    if (live && charge && spec?.creditPricing) {
       await chargeLiveAudio(actor, {
         recordingId,
         trackNumber: body.trackNumber,
-        providerId: live.providerId,
-        model: live.model,
-        pricing: spec?.creditPricing ?? null,
-        streamedMilliseconds: body.streamedMilliseconds,
-        addedMilliseconds,
+        live,
+        pricing: spec.creditPricing,
+        charge,
       });
     }
-    const streamedSeconds = (body.streamedMilliseconds - (live?.streamedMilliseconds ?? 0)) / 1_000;
+    const streamedSeconds = addedMilliseconds / 1_000;
     if (live && streamedSeconds > 0) {
       const provider = registry.get(live.providerId);
       const labels = {

@@ -85,8 +85,18 @@ export type AppendRecordingLiveSegmentsInput = RecordingActor & {
   trackNumber: number;
   /** All audio streamed for this track so far; the stored total never shrinks. */
   streamedMilliseconds: number;
-  /** Estimated cost of `streamedMilliseconds` at the live model's list price. */
-  costUsdMicros: number | null;
+  /**
+   * How the track's live model is paid, asked under the recording lock with
+   * the model the track streams to: whether its audio is charged in credits,
+   * and otherwise the estimated cost of `streamedMilliseconds` at its list
+   * price (which counts toward a usage allowance that prices unbilled use).
+   * Audio charged in credits stores no list-price cost, so it never counts
+   * against an allowance twice.
+   */
+  pricing: (live: RecordingLiveModel) => {
+    chargedInCredits: boolean;
+    costUsdMicros: number | null;
+  };
   segments: ReadonlyArray<{
     segmentNumber: number;
     startMilliseconds: number;
@@ -95,45 +105,91 @@ export type AppendRecordingLiveSegmentsInput = RecordingActor & {
   }>;
 };
 
+export type RecordingLiveModel = { providerId: string; model: string };
+
+export type AppendRecordingLiveSegmentsResult = {
+  saved: number;
+  ended: boolean;
+  /** The model the track streams to, read under the lock; null once the preview ended. */
+  live: RecordingLiveModel | null;
+  /** How far this call moved the track's stored streamed total. */
+  addedMilliseconds: number;
+  /**
+   * The streamed audio not yet charged, from the track's charged mark to its
+   * stored total, when it is charged in credits. Charge it, then move the
+   * mark with {@link markRecordingLiveCharged}; until then every save
+   * returns it again (grown by what streamed since).
+   */
+  charge: { fromMilliseconds: number; toMilliseconds: number } | null;
+};
+
 /**
  * Save finished live text. A segment number already saved keeps its first
  * copy. Once a transcript is ready the preview is over and nothing is saved.
- * `addedMilliseconds` is how far this call moved the track's stored streamed
- * total: the recording row lock orders a recording's appends, so each
- * millisecond is counted by exactly one call however often a client retries.
+ * The recording row lock orders a recording's appends, so the stored total
+ * only grows and `addedMilliseconds` counts each millisecond once however
+ * often a client retries.
  */
 export async function appendRecordingLiveSegments(
   db: Database,
   input: AppendRecordingLiveSegmentsInput,
-): Promise<{ saved: number; ended: boolean; addedMilliseconds: number }> {
+): Promise<AppendRecordingLiveSegmentsResult> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const recording = await lockOwnRecording(tx, input);
     if (recording.state !== "capturing" && recording.state !== "processing") {
-      return { saved: 0, ended: recording.state === "ready", addedMilliseconds: 0 };
+      return {
+        saved: 0,
+        ended: recording.state === "ready",
+        live: null,
+        addedMilliseconds: 0,
+        charge: null,
+      };
     }
     const [before] = await tx
-      .select({ streamed: schema.recordingTracks.liveStreamedMilliseconds })
-      .from(schema.recordingTracks)
-      .where(trackWhere(input));
-    const [track] = await tx
-      .update(schema.recordingTracks)
-      .set({
-        liveStreamedMilliseconds: sql`greatest(${schema.recordingTracks.liveStreamedMilliseconds}, ${input.streamedMilliseconds})`,
-        liveCostUsdMicros: sql`case when ${input.streamedMilliseconds} >= ${schema.recordingTracks.liveStreamedMilliseconds} then ${input.costUsdMicros}::bigint else ${schema.recordingTracks.liveCostUsdMicros} end`,
+      .select({
+        providerId: schema.recordingTracks.liveProviderId,
+        model: schema.recordingTracks.liveModel,
+        streamed: schema.recordingTracks.liveStreamedMilliseconds,
+        charged: schema.recordingTracks.liveChargedMilliseconds,
       })
-      .where(and(trackWhere(input), sql`${schema.recordingTracks.liveModel} is not null`))
-      .returning({ trackNumber: schema.recordingTracks.trackNumber });
-    if (!track) {
+      .from(schema.recordingTracks)
+      .where(trackWhere(input))
+      // The charged mark moves outside this lock (markRecordingLiveCharged),
+      // so the track row is read locked: a mark being moved is seen moved.
+      .for("update");
+    if (!before?.providerId || !before.model) {
       throw new RecordingConflictError(
         "This track has no live transcript; start a live session first",
         "no_live_session",
       );
     }
-    const addedMilliseconds = Math.max(
-      0,
-      input.streamedMilliseconds - Number(before?.streamed ?? 0),
-    );
-    if (input.segments.length === 0) return { saved: 0, ended: false, addedMilliseconds };
+    const live = { providerId: before.providerId, model: before.model };
+    const { chargedInCredits, costUsdMicros } = input.pricing(live);
+    const streamedBefore = Number(before.streamed);
+    const streamed = Math.max(streamedBefore, input.streamedMilliseconds);
+    // Nothing charged yet: charging starts at what had streamed before it
+    // (an older release's or a time credits weren't billed).
+    const chargedUpTo = before.charged ?? streamedBefore;
+    await tx
+      .update(schema.recordingTracks)
+      .set({
+        liveStreamedMilliseconds: streamed,
+        ...(chargedInCredits
+          ? { liveChargedMilliseconds: chargedUpTo }
+          : input.streamedMilliseconds >= streamedBefore
+            ? { liveCostUsdMicros: costUsdMicros }
+            : {}),
+      })
+      .where(trackWhere(input));
+    const result = {
+      live,
+      addedMilliseconds: streamed - streamedBefore,
+      charge:
+        chargedInCredits && streamed > chargedUpTo
+          ? { fromMilliseconds: chargedUpTo, toMilliseconds: streamed }
+          : null,
+    };
+    if (input.segments.length === 0) return { saved: 0, ended: false, ...result };
     const saved = await tx
       .insert(schema.recordingLiveSegments)
       .values(
@@ -150,7 +206,25 @@ export async function appendRecordingLiveSegments(
       )
       .onConflictDoNothing()
       .returning({ segmentNumber: schema.recordingLiveSegments.segmentNumber });
-    return { saved: saved.length, ended: false, addedMilliseconds };
+    return { saved: saved.length, ended: false, ...result };
+  });
+}
+
+/**
+ * Note that a track's streamed audio up to `toMilliseconds` is charged. The
+ * mark only moves forward, so a late or repeated call changes nothing.
+ */
+export async function markRecordingLiveCharged(
+  db: Database,
+  input: RecordingActor & { recordingId: string; trackNumber: number; toMilliseconds: number },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    await tx
+      .update(schema.recordingTracks)
+      .set({
+        liveChargedMilliseconds: sql`greatest(coalesce(${schema.recordingTracks.liveChargedMilliseconds}, 0), ${input.toMilliseconds}::integer)`,
+      })
+      .where(trackWhere(input));
   });
 }
 
