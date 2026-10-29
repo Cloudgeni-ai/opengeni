@@ -913,11 +913,10 @@ export function requireAccountAdminAuthorizationStamp(
 
 /**
  * Organization administration: the organization's owner or one of its admins.
- * It covers the organization's own resources (organization Knowledge,
- * documents and Skills, the company profile, vaults, machines, Sandbox
- * Environments, integrations, API keys and service accounts, and the
- * organization session list). Billing, roles, ownership and deleting the
- * organization stay with `account:admin`, which only the owner holds.
+ * It covers the organization's own resources that opt into it: organization
+ * Knowledge, documents and Skills, the company profile and the organization
+ * session list. Billing, roles, ownership and deleting the organization stay
+ * with `account:admin`, which only the owner holds.
  *
  * True for a literal `account:admin` grant on this organization (the owner,
  * the single local administrator, an administering organization key), or for

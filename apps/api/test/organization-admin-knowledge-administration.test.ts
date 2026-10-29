@@ -18,7 +18,7 @@ import { createApp } from "../src/app";
    the owner, manages the organization's own Knowledge, Skills, documents,
    company profile and session list; a member does not, and being an admin in
    one organization grants nothing in another where the same person is a
-   member. Billing stays with the owner. */
+   member. Billing, roles and ownership stay with the owner. */
 
 const origin = "http://opengeni.test";
 const skillMarkdown = `---
@@ -280,5 +280,37 @@ describe("organization admins administer the organization", () => {
       (await app.request(path, { headers: { authorization: `Bearer ${token}` } })).status;
     expect(await asKey(full, sessions(acme.accountId))).toBe(200);
     expect(await asKey(limited, sessions(acme.accountId))).toBe(403);
+
+    // Billing and roles stay with the owner: the admin can't set a usage
+    // allowance, change someone's role, or make anyone an owner.
+    expect(
+      await status(admin, at(acme.workspaceId, "/allowance"), {
+        method: "PUT",
+        body: JSON.stringify({ expectedVersion: 0, includedCredits: 1_000, period: "month" }),
+      }),
+    ).toBe(403);
+    const [memberMembership] = await shared.admin<{ id: string; authorization_revision: number }[]>`
+      select id, authorization_revision from organization_memberships
+      where account_id = ${acme.accountId} and subject_id = ${member.subjectId}`;
+    const changeRole = (person: Person, role: "admin" | "owner") =>
+      app.request(`/v1/organizations/${acme.accountId}/members/${memberMembership!.id}`, {
+        method: "PATCH",
+        headers: browser(person.cookie),
+        body: JSON.stringify({
+          kind: "change_role",
+          role,
+          expectedAuthorizationRevision: Number(memberMembership!.authorization_revision),
+          operationId: crypto.randomUUID(),
+        }),
+      });
+    // PostgreSQL refuses the admin's role changes without revealing why; the
+    // owner's identical request (same revision) succeeds.
+    for (const role of ["admin", "owner"] as const) {
+      expect((await changeRole(admin, role)).status).toBe(409);
+    }
+    const [unchanged] = await shared.admin<{ role: string }[]>`
+      select role from organization_memberships where id = ${memberMembership!.id}`;
+    expect(unchanged!.role).toBe("member");
+    expect((await changeRole(owner, "admin")).status).toBe(200);
   });
 });
