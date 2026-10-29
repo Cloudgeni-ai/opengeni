@@ -47,9 +47,11 @@ inherit the origin of the chat they run in, never the credential's.
 - `event_sources.secret_billing_origin` is `api` once an API caller set or
   received a webhook source's signing secret: created the source with one
   (a standard webhook's generated secret is in the create response), rotated
-  it, or pasted one with `PATCH`. It is written in the same statement as the
-  secret, and never turned back, even when a person later rotates or pastes
-  a secret. Whoever holds the secret can sign deliveries to the public URL,
+  it, or pasted one with `PATCH`. A custom webhook's `format`, which says how
+  deliveries are verified and read, counts the same: an API caller creating
+  or changing it marks the source. It is written in the same statement as the
+  secret or format, and never turned back, even when a person later rotates
+  or pastes a secret. Whoever holds the secret can sign deliveries to the public URL,
   so the intake records every delivery it verifies for such a source as API
   (`receiveEventWebhook`), which marks the automations it fires API use in
   the delivery's own transaction, exactly as an API caller's test event or
@@ -57,6 +59,11 @@ inherit the origin of the chat they run in, never the credential's.
   window between marking and the new secret: the secret and its holder are
   read from one row. A person's own secrets leave the source alone, and
   CloudGeni's legacy account stays app (`fundedBillingOrigin` at intake).
+  A custom format can't read its event type, delivery id or an event id part
+  from the header its signature is in (compared without case), which would
+  put the signature, or a `token` scheme's secret itself, into events and the
+  delivery log; create and `PATCH` refuse such a format, and intake reads that
+  header as absent for one stored before the refusal.
 - `credit_ledger_entries.usage_origin` records the origin each usage debit was
   charged under. The debit writers resolve it from the explicit input, the
   attribution metadata, the turn, then the ambient request scope.
@@ -171,3 +178,9 @@ expiry, and the scheduled-task execution digest and personal-resource fence,
 which now ignore `billing_origin`) and two widened `NOT VALID` billing-record
 checks. The previous release
 never writes the columns; null keeps today's behaviour.
+
+During the rolling deploy an old pod neither sets nor reads
+`event_sources.secret_billing_origin`: an API caller's secret or format
+write handled by an old pod leaves the source unmarked, and an old pod's
+intake doesn't mark the automations a delivery fires. Such a source stays app
+until its next API secret or format write on a new pod.

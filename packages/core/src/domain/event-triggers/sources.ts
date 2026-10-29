@@ -52,7 +52,7 @@ import { eventMatchesTrigger } from "./matching";
 import { boundEvent, type NormalizedEventInput } from "./normalize";
 import { slackEventTypeCatalog } from "./slack-events";
 import { createSlackEventSource } from "./slack-source";
-import { webhookAdapterFor } from "./webhook-adapters";
+import { webhookAdapterFor, withoutSecretHeaders } from "./webhook-adapters";
 import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
 import { createWorkspaceEventSource } from "./workspace-source";
 import {
@@ -268,11 +268,10 @@ export async function createEventSourceForViewer(
     // Linear, Sentry and many other apps show their secret only once they have
     // the URL, so a source without one waits, blocked, until it is pasted.
     ...(secret
-      ? {
-          secretEncrypted: encryptEnvironmentValue(key, secret),
-          ...secretHolder(input.billingOrigin),
-        }
+      ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
       : { status: "blocked" as const, statusReason: awaitingSecretReason(format) }),
+    // A secret, or the format that says how deliveries are verified and read.
+    ...(secret || format !== null ? secretHolder(input.billingOrigin) : {}),
   });
   return {
     source: eventSourceForClient(source, input.baseUrl),
@@ -282,9 +281,10 @@ export async function createEventSourceForViewer(
 
 /**
  * Whoever holds a webhook's signing secret can sign deliveries to its public
- * URL. An API caller that sets or receives it marks the source, with the
- * secret in the same write, so every delivery it verifies is API use (see
- * `receiveEventWebhook`). A person's write never clears the mark.
+ * URL. An API caller that sets or receives it, or sets the format that says
+ * how deliveries are verified and read, marks the source in the same write,
+ * so every delivery it verifies is API use (see `receiveEventWebhook`). A
+ * person's write never clears the mark.
  */
 function secretHolder(origin: BillingOrigin | undefined): { secretBillingOrigin?: "api" } {
   return origin === "api" ? { secretBillingOrigin: "api" } : {};
@@ -472,7 +472,7 @@ export async function updateEventSourceForViewer(input: {
   source: EventSourceRecord;
   request: UpdateEventSourceRequest;
   baseUrl: string;
-  /** Who changes it: an API caller pasting a secret makes its deliveries API use. */
+  /** Who changes it: an API caller pasting a secret or a format makes its deliveries API use. */
   billingOrigin?: BillingOrigin;
 }): Promise<EventSource> {
   const { source, request } = input;
@@ -535,7 +535,9 @@ export async function updateEventSourceForViewer(input: {
   const updated = await updateEventSource(input.db, source.workspaceId, source.id, {
     ...(request.name !== undefined ? { name: request.name } : {}),
     ...(request.visibility !== undefined ? { visibility: request.visibility } : {}),
-    ...(request.format !== undefined ? { format: request.format } : {}),
+    ...(request.format !== undefined
+      ? { format: request.format, ...secretHolder(input.billingOrigin) }
+      : {}),
     ...(status !== undefined
       ? {
           status,
@@ -639,12 +641,12 @@ export async function receiveEventWebhook(input: {
   const bodySha256 = sha256Hex(input.body);
   // Before its secret is pasted, a delivery is refused but still logged, so
   // the person setting it up sees the app is sending.
-  const verification = source.secretEncrypted
+  const secret = source.secretEncrypted
+    ? decryptEnvironmentValue(requireEncryptionKey(input.settings), source.secretEncrypted)
+    : null;
+  const verification = secret
     ? webhookAdapterFor(source).verify({
-        secret: decryptEnvironmentValue(
-          requireEncryptionKey(input.settings),
-          source.secretEncrypted,
-        ),
+        secret,
         headers: input.headers,
         body: input.body,
         ...(input.query ? { query: input.query } : {}),
@@ -672,20 +674,28 @@ export async function receiveEventWebhook(input: {
     });
     return { outcome: "rejected", reason: verification.reason };
   }
+  // The secret never reaches what is kept and readable: not a header that
+  // carries it (a proxy's copy of an address holding `?token=<secret>`), not
+  // an app's echo of it in the body, not an id read from either.
+  const headers = withoutSecretHeaders(input.headers, secret);
+  const body = withoutSecret(input.body, secret);
   const outcome = readDelivery({
     source,
     settings: input.settings,
-    headers: input.headers,
-    body: input.body,
+    headers,
+    body,
     receivedAt,
     refire: false,
   });
   const recorded = await recordEventDelivery(input.db, {
     ...base,
     ...outcome,
-    dedupeKey: verification.deliveryKey ?? `sha256:${bodySha256}`,
-    body: input.body,
-    headers: retainedSourceHeaders(source, input.headers),
+    dedupeKey:
+      verification.deliveryKey && !(secret && verification.deliveryKey.includes(secret))
+        ? verification.deliveryKey
+        : `sha256:${bodySha256}`,
+    body,
+    headers: retainedSourceHeaders(source, headers),
     // The secret and its holder come from the same row: a delivery verified
     // with a secret an API caller set or received fires its automations as
     // API use. CloudGeni's legacy account stays app.
@@ -698,6 +708,14 @@ export async function receiveEventWebhook(input: {
     delivery: recorded.delivery,
     duplicate: recorded.duplicate,
   };
+}
+
+/** The body with every copy of the secret replaced, for an app that echoes its address. */
+function withoutSecret(body: Uint8Array, secret: string | null): Uint8Array {
+  if (!secret) return body;
+  const text = new TextDecoder().decode(body);
+  if (!text.includes(secret)) return body;
+  return new TextEncoder().encode(text.split(secret).join("[secret]"));
 }
 
 /** Sources whose stored deliveries can be read again. */

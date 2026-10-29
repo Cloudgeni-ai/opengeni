@@ -642,6 +642,38 @@ describe("webhook adapters", () => {
       expect(reading.events[0]).toMatchObject({ type: "user.created", externalId: "user_1" });
     });
 
+    test("a format stored reading the signature header reads it as absent", () => {
+      // Requests refuse such formats; one stored before that must never put
+      // the secret in an event, an id or the kept headers.
+      const secret = "glpat-0123456789";
+      const adapter = custom({
+        signature: { scheme: "token", header: "X-Gitlab-Token" },
+        type: { header: "x-gitlab-token" },
+        deliveryId: { header: "X-GITLAB-TOKEN" },
+        eventId: { parts: [{ path: "id" }, { header: "X-Gitlab-Token" }] },
+      });
+      expect(adapter.retainedHeaders).toEqual([]);
+      const headers = headersOf({ "x-gitlab-token": secret });
+      const body = encoder.encode(JSON.stringify({ id: 7 }));
+      expect(adapter.verify({ secret, headers, body })).toEqual({ ok: true, deliveryKey: null });
+      expect(() => adapter.read({ headers, body, receivedAt })).toThrow(
+        "The delivery has no x-gitlab-token header for its event type",
+      );
+      const typed = custom({
+        signature: { scheme: "token", header: "X-Gitlab-Token" },
+        type: { path: "kind" },
+        eventId: { parts: [{ path: "id" }, { header: "x-gitlab-token" }] },
+      });
+      const reading = typed.read({
+        headers,
+        body: encoder.encode(JSON.stringify({ kind: "push", id: 7 })),
+        receivedAt,
+      });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events[0]).toMatchObject({ type: "push", externalId: null });
+      expect(JSON.stringify(reading)).not.toContain(secret);
+    });
+
     test("a custom source without a format refuses every delivery", () => {
       const adapter = webhookAdapterFor({ adapter: "custom", format: null });
       expect(

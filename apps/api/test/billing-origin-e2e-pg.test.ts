@@ -315,9 +315,49 @@ async function eventSourceHarness(options: { legacy?: boolean } = {}) {
     });
     expect(response.status).toBe(200);
   };
+  // A GitLab-style shared token: the secret itself travels in a header.
+  const tokenFormat = (type: Record<string, string>) => ({
+    signature: { scheme: "token", header: "X-Gitlab-Token" },
+    type,
+  });
+  const customSource = async (signingSecret: string) =>
+    (
+      (await send("POST", "/event-sources", {
+        kind: "webhook",
+        adapter: "custom",
+        name: "GitLab",
+        format: tokenFormat({ path: "object_kind" }),
+        signingSecret,
+      })) as { source: { id: string; webhookUrl: string } }
+    ).source;
+  const deliverToken = async (webhookUrl: string, secret: string, kind = "push") =>
+    await app.request(new URL(webhookUrl).pathname, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-gitlab-token": secret,
+        "x-gitlab-event": "Push Hook",
+      },
+      body: JSON.stringify({ object_kind: kind, event_name: kind, id: crypto.randomUUID() }),
+    });
+  const patchStatus = async (sourceId: string, body: unknown, authorization?: string) =>
+    (
+      await app.request(`${workspacePath}/event-sources/${sourceId}`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          ...(authorization ? { authorization } : {}),
+        },
+        body: JSON.stringify(body),
+      })
+    ).status;
   return {
     api,
     send,
+    tokenFormat,
+    customSource,
+    deliverToken,
+    patchStatus,
     standardSource,
     linearSource,
     automation,
@@ -442,3 +482,68 @@ async function legacyAccountStaysApp(pg: SharedTestDatabase) {
   await h.deliverStandard(created.source.webhookUrl, created.signingSecret);
   expect(await h.origin(createdTask)).toBe("app");
 }
+
+test("an API caller that changes only a webhook's format makes deliveries fire its automations as API use", async () => {
+  if (!client || !shared) return;
+  const h = await eventSourceHarness();
+  const secret = "glpat-person-0123456789";
+  const source = await h.customSource(secret);
+  const taskId = await h.automation(source.id, "push");
+  // A person changing the format leaves the source and its automations app.
+  await h.send("PATCH", `/event-sources/${source.id}`, {
+    format: h.tokenFormat({ path: "event_name" }),
+  });
+  expect(await h.sourceHolder(source.id)).toBeNull();
+  expect((await h.deliverToken(source.webhookUrl, secret)).status).toBe(200);
+  expect(await h.origin(taskId)).toBe("app");
+  // The format says how deliveries are verified and read: an API caller
+  // writing it is treated as holding the secret.
+  await h.send(
+    "PATCH",
+    `/event-sources/${source.id}`,
+    { format: h.tokenFormat({ path: "object_kind" }) },
+    h.api,
+  );
+  expect(await h.sourceHolder(source.id)).toBe("api");
+  expect((await h.deliverToken(source.webhookUrl, secret)).status).toBe(200);
+  expect(await h.origin(taskId)).toBe("api");
+}, 180_000);
+
+test("a webhook format can't read its event type or ids from the header the secret is in", async () => {
+  if (!client || !shared) return;
+  const h = await eventSourceHarness();
+  const secret = "glpat-person-abcdefghij";
+  const source = await h.customSource(secret);
+  // Any spelling of the signature header, for the type, delivery id or an event id part.
+  for (const authorization of [undefined, h.api]) {
+    for (const format of [
+      h.tokenFormat({ header: "x-gitlab-token" }),
+      { ...h.tokenFormat({ path: "object_kind" }), deliveryId: { header: "X-GITLAB-TOKEN" } },
+      {
+        ...h.tokenFormat({ path: "object_kind" }),
+        eventId: { parts: [{ path: "id" }, { header: "X-Gitlab-Token" }] },
+      },
+    ]) {
+      expect(await h.patchStatus(source.id, { format }, authorization)).toBe(400);
+    }
+  }
+  expect(await h.sourceHolder(source.id)).toBeNull();
+
+  // A format stored before the refusal reads that header as absent: the
+  // secret never becomes an event type, an id or a kept header.
+  await shared.admin`update event_sources set webhook_format = ${shared.admin.json({
+    signature: { scheme: "token", header: "X-Gitlab-Token", prefix: "" },
+    type: { header: "X-Gitlab-Token" },
+    deliveryId: { header: "x-gitlab-token" },
+  })} where id = ${source.id}::uuid`;
+  const response = await h.deliverToken(source.webhookUrl, secret);
+  expect(response.status).toBe(400);
+  expect(await response.text()).not.toContain(secret);
+  const stored = await shared.admin<{ text: string }[]>`
+    select row_to_json(delivery)::text as text from event_deliveries delivery
+      where source_id = ${source.id}::uuid
+    union all
+    select row_to_json(event)::text from inbound_events event where source_id = ${source.id}::uuid`;
+  expect(stored.length).toBeGreaterThan(0);
+  for (const row of stored) expect(row.text).not.toContain(secret);
+}, 180_000);

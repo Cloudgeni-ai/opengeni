@@ -8,6 +8,7 @@ import {
   type WebhookSignatureFormat,
   type WebhookTextPaths,
   type WebhookValueSource,
+  webhookSignatureHeader,
 } from "@opengeni/contracts";
 import {
   verifyBodyHmac,
@@ -264,6 +265,16 @@ function typeSources(type: WebhookFormat["type"]) {
  * list of events.
  */
 function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
+  // The signature header (a `token` scheme's is the secret itself) is never
+  // read as a value. Formats that do are refused, but one stored before that
+  // reads it as absent, so it never reaches events or the delivery log.
+  const signed = webhookSignatureHeader(format.signature);
+  const valueHeaders = (headers: Headers): Headers => {
+    if (signed === null || !headers.has(signed)) return headers;
+    const readable = new Headers(headers);
+    readable.delete(signed);
+    return readable;
+  };
   // Headers the events are read from are kept with the delivery, so a replay
   // reads the same events.
   const eventIdParts =
@@ -271,7 +282,10 @@ function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
       ? format.eventId.parts
       : [];
   const headerNames = [...typeSources(format.type), format.deliveryId, ...eventIdParts].flatMap(
-    (source) => (source && "header" in source ? [source.header.toLowerCase()] : []),
+    (source) =>
+      source && "header" in source && source.header.toLowerCase() !== signed
+        ? [source.header.toLowerCase()]
+        : [],
   );
   return {
     retainedHeaders: [...new Set(headerNames)],
@@ -291,7 +305,9 @@ function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
       // the body's hash does.
       const id = format.deliveryId
         ? "header" in format.deliveryId
-          ? headers.get(format.deliveryId.header)?.trim() || null
+          ? valueHeaders(withoutSecretHeaders(headers, secret))
+              .get(format.deliveryId.header)
+              ?.trim() || null
           : textAt(parseJsonOrNull(body), format.deliveryId.path)
         : null;
       return {
@@ -320,12 +336,29 @@ function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
           `The delivery holds ${items.length} events; at most ${CUSTOM_WEBHOOK_EVENTS_MAX} are read`,
         );
       }
+      const readable = valueHeaders(headers);
       return {
         kind: "events",
-        events: items.map((item) => customEvent(format, item, headers, receivedAt)),
+        events: items.map((item) => customEvent(format, item, readable, receivedAt)),
       };
     },
   };
+}
+
+/**
+ * The headers without any whose value carries the secret, such as a proxy's
+ * copy of an address holding `?token=<secret>`. Intake reads and keeps only
+ * these, so no format can store the secret in an event, an id or the log.
+ */
+export function withoutSecretHeaders(headers: Headers, secret: string | null): Headers {
+  if (!secret) return headers;
+  let readable: Headers | null = null;
+  for (const [name, value] of headers) {
+    if (!value.includes(secret)) continue;
+    readable ??= new Headers(headers);
+    readable.delete(name);
+  }
+  return readable ?? headers;
 }
 
 function parseJsonOrNull(body: Uint8Array): unknown {

@@ -162,8 +162,9 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       source,
       request,
       baseUrl: baseUrl(c),
-      // An API caller pasting a secret makes the source's deliveries API use.
-      ...(request.signingSecret !== undefined
+      // An API caller pasting a secret, or a format (how deliveries are
+      // verified and read), makes the source's deliveries API use.
+      ...(request.signingSecret !== undefined || request.format !== undefined
         ? { billingOrigin: await resolveTurnBillingOrigin(db, { grant }) }
         : {}),
     });
