@@ -310,12 +310,20 @@ organizations are uncapped.
 SQLSTATE `P0S01` maps through `rethrowMembershipError` and the common error
 middleware to HTTP 402 using `ErrorEnvelope`:
 `{ error: { status: 402, code: "seat_limit_reached", message, retryable: false,
-requestId, details: { action: { type: "upgrade", href: "/billing" } } } }`.
-The message is "Organization seat limit reached. Upgrade your plan to add people."
+requestId, details: { seatLimit, seatsUsed, upgradePlan?, upgradePlanLabel?,
+action: { type: "upgrade", href: "/billing" } } } }`.
+The refusal names one fix: the cheapest self-service plan above the current one
+with room for one more person, else Enterprise (`seatUpgradePlan` in
+`@opengeni/contracts/seat-upgrade`). The message is "Upgrade to Pro to add more
+people." (or Max), "Talk to us about Enterprise to add more people.", or, when
+subscription plans are off or no plan adds the seat, "Organization seat limit
+reached. Upgrade your plan to add people."
 The SDK exposes `code`, `details.action` and the request reference on
 `OpenGeniApiError`; this is a known, non-retryable refusal, not an unknown outcome.
 The people UI also recognizes the historical flat refusal and a generic 402
-when the verified plan's seat usage is at its limit.
+when the verified plan's seat usage is at its limit. The invite page shows the
+same named plan as soon as the plan is full, with one Upgrade button for people
+who manage billing; everyone else is told to ask an organization owner.
 
 ## Billing/UI contract
 

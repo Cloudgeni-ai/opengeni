@@ -5,7 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
-import { isSeatLimitError, subscriptionAction } from "@opengeni/react/app/lib/subscription-plans";
+import {
+  isSeatLimitError,
+  planSeatsFull,
+  seatUpgradeFor,
+  seatUpgradeFromError,
+  subscriptionAction,
+} from "@opengeni/react/app/lib/subscription-plans";
 
 GlobalRegistrator.register();
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -396,10 +402,76 @@ test("seat refusal recognizes current and legacy bodies and offers exactly one u
     isSeatLimitError(new OpenGeniApiError(402, JSON.stringify({ code: "insufficient_credit" }))),
   ).toBe(false);
   const upgrade = mock(() => {});
-  await mount(<SeatLimitNotice canManage onUpgrade={upgrade} />);
+  await mount(<SeatLimitNotice canManage upgrade={null} onUpgrade={upgrade} />);
   expect(document.querySelectorAll("button").length).toBe(1);
   await click("View upgrade options");
   expect(upgrade).toHaveBeenCalledTimes(1);
+});
+
+// Bendik's limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
+const seatPlans = previewPlans.map((plan) => ({
+  ...plan,
+  seatLimit: ({ free: 1, pro: 2, max: 10 } as Record<string, number | undefined>)[plan.key] ?? null,
+}));
+function seatPlan(key: string, seatsUsed: number) {
+  const seatLimit = seatPlans.find((plan) => plan.key === key)!.seatLimit;
+  return { ...previewPlan(key), seatsUsed, seatLimit };
+}
+
+test("the seat fix is the cheapest plan with room, else Enterprise, and nothing above Enterprise", () => {
+  expect(seatUpgradeFor(seatPlan("free", 1), seatPlans)).toEqual({ key: "pro", label: "Pro" });
+  // Two more people do not fit Pro's two seats, so the fix is Max.
+  expect(seatUpgradeFor(seatPlan("free", 1), seatPlans, 2)).toEqual({ key: "max", label: "Max" });
+  expect(seatUpgradeFor(seatPlan("pro", 2), seatPlans)).toEqual({ key: "max", label: "Max" });
+  expect(seatUpgradeFor(seatPlan("max", 10), seatPlans)).toEqual({
+    key: "enterprise",
+    label: "Enterprise",
+  });
+  expect(seatUpgradeFor(seatPlan("enterprise", 40), seatPlans)).toBeNull();
+  expect(seatUpgradeFor(seatPlan("free", 1), [])).toBeNull();
+  expect(planSeatsFull(seatPlan("pro", 2))).toBe(true);
+  expect(planSeatsFull(seatPlan("pro", 1))).toBe(false);
+  expect(planSeatsFull(seatPlan("enterprise", 40))).toBe(false);
+  expect(
+    seatUpgradeFromError(
+      new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Max to add more people.",
+            details: { upgradePlan: "max", upgradePlanLabel: "Max" },
+          },
+        }),
+      ),
+    ),
+  ).toEqual({ key: "max", label: "Max" });
+  expect(seatUpgradeFromError(new Error("plain"))).toBeNull();
+});
+
+test("a seat refusal names one plan with one button, and members are told to ask an owner", async () => {
+  const upgrade = mock(() => {});
+  const owner = await mount(
+    <SeatLimitNotice canManage upgrade={{ key: "pro", label: "Pro" }} onUpgrade={upgrade} />,
+  );
+  expect(owner.textContent).toBe("Upgrade to Pro to add more peopleUpgrade to Pro");
+  expect(document.querySelectorAll("button").length).toBe(1);
+  await click("Upgrade to Pro");
+  expect(upgrade).toHaveBeenCalledTimes(1);
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  const member = await mount(
+    <SeatLimitNotice
+      canManage={false}
+      upgrade={{ key: "max", label: "Max" }}
+      onUpgrade={upgrade}
+    />,
+  );
+  expect(member.textContent).toContain("Upgrade to Max to add more people");
+  expect(member.textContent).toContain("Ask an organization owner to upgrade to Max.");
+  expect(document.querySelectorAll("button").length).toBe(0);
 });
 
 test("status-only seat fallback needs a full finite plan and never masks another typed refusal", () => {

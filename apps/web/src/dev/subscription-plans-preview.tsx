@@ -8,6 +8,7 @@ import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import type { BillingSummary } from "@opengeni/react/app/types";
+import { seatUpgradeFor } from "@opengeni/react/app/lib/subscription-plans";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */
 export const previewPlans: BillingSubscriptionCatalog["plans"] = [
@@ -146,9 +147,16 @@ export function SubscriptionPlansPreview() {
                 <PlanSeats plan={plan} />
                 <SeatLimitNotice
                   canManage
+                  upgrade={seatUpgradeFor(plan, previewPlans)}
                   onUpgrade={() => {
                     window.location.search = "?plan=free";
                   }}
+                />
+                <p className="text-xs text-fg-muted">Without billing access:</p>
+                <SeatLimitNotice
+                  canManage={false}
+                  upgrade={seatUpgradeFor(plan, previewPlans)}
+                  onUpgrade={() => undefined}
                 />
               </>
             ) : (

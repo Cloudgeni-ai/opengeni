@@ -91,6 +91,38 @@ describe("brand-neutral error presentation", () => {
     }
   });
 
+  test("seat refusals name the one plan that adds the seat when the server sends it", () => {
+    const refusal = (details: Record<string, unknown>) =>
+      formatErrorMessage(
+        new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "seat_limit_reached",
+              message: "Upgrade to Pro to add more people.",
+              retryable: false,
+              requestId: "seat-refusal",
+              details: { ...details, action: { type: "upgrade", href: "/billing" } },
+            },
+          }),
+          { mutation: true },
+        ),
+      );
+    expect(refusal({ upgradePlan: "pro", upgradePlanLabel: "Pro" })).toBe(
+      "Upgrade to Pro to add more people. Reference: seat-refusal.",
+    );
+    expect(refusal({ upgradePlan: "max", upgradePlanLabel: "Max" })).toBe(
+      "Upgrade to Max to add more people. Reference: seat-refusal.",
+    );
+    expect(refusal({ upgradePlan: "enterprise", upgradePlanLabel: "Enterprise" })).toBe(
+      "Talk to us about Enterprise to add more people. Reference: seat-refusal.",
+    );
+    expect(refusal({ upgradePlanLabel: " " })).toBe(
+      "Your organization has reached its seat limit. Upgrade the plan to add people. Reference: seat-refusal.",
+    );
+  });
+
   test("Site refusals are friendly before a conversation exists too", () => {
     for (const [code, status, text] of [
       ["not_available_for_viewer", 403, "not available for this viewer"],

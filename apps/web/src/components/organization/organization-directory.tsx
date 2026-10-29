@@ -1,6 +1,11 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { BillingPlanBalance } from "@opengeni/sdk";
-import { isSeatLimitError } from "@opengeni/react/app/lib/subscription-plans";
+import {
+  isSeatLimitError,
+  seatUpgradeFromError,
+  type CatalogPlan,
+  type SeatUpgrade,
+} from "@opengeni/react/app/lib/subscription-plans";
 import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
   createContext,
@@ -66,11 +71,19 @@ type Pending<Request> = Request & { operationId: string };
 
 export interface InviteResult {
   sent: OrganizationInvitation[];
-  failed: { email: string; message: string; seatLimitReached?: boolean }[];
+  failed: {
+    email: string;
+    message: string;
+    seatLimitReached?: boolean;
+    /** The plan the seat refusal names, when the server sent one. */
+    upgrade?: SeatUpgrade | null;
+  }[];
 }
 
 export interface OrganizationDirectory {
   plan: BillingPlanBalance | null;
+  /** The live plan catalog, for naming the plan that adds seats. */
+  plans: readonly CatalogPlan[];
   identity: OrganizationAdminIdentity;
   /** How the signed-in person is named when the server has no name ("Local dev"). */
   youLabel: string | null;
@@ -210,13 +223,15 @@ export function OrganizationDirectoryProvider({
   const [invitations, setInvitations] = useState<
     Owned<{ invitations: OrganizationInvitation[]; nextCursor: string | null }>
   >({ ownerKey: "", value: EMPTY_INVITATIONS, loading: true, error: null });
-  const [planState, setPlanState] = useState<{ ownerKey: string; plan: BillingPlanBalance | null }>(
-    { ownerKey: "", plan: null },
-  );
+  const [planState, setPlanState] = useState<{
+    ownerKey: string;
+    plan: BillingPlanBalance | null;
+    plans: readonly CatalogPlan[];
+  }>({ ownerKey: "", plan: null, plans: [] });
   // Both reads are necessary: existing plan rows can remain while the feature is off.
   useEffect(() => {
     let active = true;
-    setPlanState({ ownerKey: identityKey, plan: null });
+    setPlanState({ ownerKey: identityKey, plan: null, plans: [] });
     if (!peopleEnabled) return;
     void (async () => {
       try {
@@ -225,7 +240,8 @@ export function OrganizationDirectoryProvider({
         const catalog = await client.getBillingSubscriptionPlans({
           accountId: identity.organizationId,
         });
-        if (active && catalog.plan) setPlanState({ ownerKey: identityKey, plan: catalog.plan });
+        if (active && catalog.plan)
+          setPlanState({ ownerKey: identityKey, plan: catalog.plan, plans: catalog.plans });
       } catch {
         /* Billing details are optional for people administrators. */
       }
@@ -704,7 +720,7 @@ export function OrganizationDirectoryProvider({
                 ? { ...planState.plan, seatsUsed: planState.plan.seatsUsed + sent.length }
                 : null,
             )
-              ? { seatLimitReached: true }
+              ? { seatLimitReached: true, upgrade: seatUpgradeFromError(error) }
               : {}),
           });
         }
@@ -823,6 +839,7 @@ export function OrganizationDirectoryProvider({
     const visibleMembers = visible(members, []);
     return {
       plan: planState.ownerKey === identityKey ? planState.plan : null,
+      plans: planState.ownerKey === identityKey ? planState.plans : [],
       identity,
       youLabel,
       actorRole,

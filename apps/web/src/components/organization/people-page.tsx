@@ -54,6 +54,11 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { cn } from "@opengeni/react/app/lib/utils";
+import {
+  planSeatsFull,
+  seatUpgradeFor,
+  type SeatUpgrade,
+} from "@opengeni/react/app/lib/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
@@ -106,11 +111,14 @@ export function OrganizationPeoplePage({
   person,
   invitation,
   view,
+  canManageBilling,
 }: {
   workspaceId: string;
   person?: string;
   invitation?: string;
   view?: "invite";
+  /** Whether the signed-in person can change the plan; defaults to owners. */
+  canManageBilling?: boolean;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
@@ -118,8 +126,14 @@ export function OrganizationPeoplePage({
   const actions = usePeopleActions(directory, setConfirm);
 
   let page;
-  if (view === "invite") page = <InvitePage nav={nav} />;
-  else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
+  if (view === "invite") {
+    page = (
+      <InvitePage
+        nav={nav}
+        canManageBilling={canManageBilling ?? directory.actorRole === "owner"}
+      />
+    );
+  } else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
   else if (invitation) {
     page = <InvitationPage key={invitation} id={invitation} nav={nav} actions={actions} />;
   } else page = <PeopleList nav={nav} actions={actions} />;
@@ -1063,15 +1077,32 @@ function InvitationPage({
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function InvitePage({ nav }: { nav: OrganizationNavigation }) {
+function InvitePage({
+  nav,
+  canManageBilling,
+}: {
+  nav: OrganizationNavigation;
+  canManageBilling: boolean;
+}) {
   const directory = useOrganizationDirectory();
   const [emails, setEmails] = useState<string[]>([]);
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
-  const [seatLimitError, setSeatLimitError] = useState<string | null>(null);
+  const [seatLimitError, setSeatLimitError] = useState<{
+    message: string;
+    upgrade: SeatUpgrade | null;
+    seats: number;
+  } | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
+  // A refusal names the plan the server chose; otherwise the catalog picks the
+  // plan with room for everyone still waiting. A full plan says so up front.
+  const seatUpgrade = seatLimitError
+    ? (seatLimitError.upgrade ??
+      seatUpgradeFor(directory.plan, directory.plans, seatLimitError.seats))
+    : seatUpgradeFor(directory.plan, directory.plans);
+  const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
 
   const members = new Map(
     directory.members.value
@@ -1135,7 +1166,11 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
           setEmails(result.failed.map((each) => each.email));
           const seatFailure = result.failed.find((each) => each.seatLimitReached);
           if (seatFailure) {
-            setSeatLimitError(seatFailure.message);
+            setSeatLimitError({
+              message: seatFailure.message,
+              upgrade: seatFailure.upgrade ?? null,
+              seats: result.failed.filter((each) => each.seatLimitReached).length,
+            });
             return false;
           }
           throw new Error(
@@ -1150,14 +1185,15 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
     >
       <FieldStack>
         <PlanSeats plan={directory.plan} />
-        {seatLimitError && directory.plan ? (
+        {seatsFull && directory.plan ? (
           <SeatLimitNotice
-            canManage={directory.actorRole === "owner"}
+            canManage={canManageBilling}
+            upgrade={seatUpgrade}
             onUpgrade={() => nav.openSection("billing")}
           />
         ) : seatLimitError ? (
           <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
-            {seatLimitError}
+            {seatLimitError.message}
           </Notice>
         ) : null}
         <Field

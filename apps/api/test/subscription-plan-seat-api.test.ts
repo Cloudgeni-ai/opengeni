@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { BillingBalance, ErrorEnvelope, OPENGENI_CORRELATION_HEADER } from "@opengeni/contracts";
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
 import {
   completeSelfServiceOrganizationSetup,
   createDb,
   createOrganizationInvitation,
+  readSubscriptionPlanCatalog,
   upsertOrganizationPlan,
   type DbClient,
 } from "@opengeni/db";
@@ -19,6 +20,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
 let accountId = "";
+let settings: ApiRouteDeps["settings"] | null = null;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("subscription-plan-seat-api");
   if (!shared) {
@@ -56,13 +58,14 @@ beforeAll(async () => {
     });
   }
   await upsertOrganizationPlan(client.db, { accountId, planKey: "free", status: "active" });
+  settings = testSettings({
+    productAccessMode: "managed",
+    publicBaseUrl: "http://opengeni.test",
+    betterAuthSecret: "plan-seat-api-secret-at-least-thirty-two-bytes",
+  });
   const deps = {
     db: client.db,
-    settings: testSettings({
-      productAccessMode: "managed",
-      publicBaseUrl: "http://opengeni.test",
-      betterAuthSecret: "plan-seat-api-secret-at-least-thirty-two-bytes",
-    }),
+    settings,
     managedAuth: {
       api: {
         getSession: async () => ({
@@ -109,8 +112,9 @@ test("seat-limit errors are actionable HTTP 402 responses", async () => {
     code: "seat_limit_reached",
     message: "Organization seat limit reached. Upgrade your plan to add people.",
     retryable: false,
-    details: { action: { type: "upgrade", href: "/billing" } },
+    details: { seatLimit: 5, seatsUsed: 5, action: { type: "upgrade", href: "/billing" } },
   });
+  expect(envelope.error.details).not.toHaveProperty("upgradePlan");
   expect(envelope.error.requestId).toBe(response.headers.get(OPENGENI_CORRELATION_HEADER));
   const sdkError = new OpenGeniApiError(response.status, body, { mutation: true });
   expect(sdkError.code).toBe("seat_limit_reached");
@@ -130,4 +134,54 @@ test("billing routes expose the shared optional plan projection without changing
     balanceMicros: 0,
     plan: { key: "free", creditRemainingMicros: 0, seatsUsed: 5, seatLimit: 5 },
   });
+}, 180_000);
+
+test("with subscription plans on, the seat refusal names the one plan that adds the seat", async () => {
+  if (!app || !client || !shared || !settings) return;
+  const initial = await readSubscriptionPlanCatalog(client.db);
+  // Bendik's limits: Free 1, Pro 2, Max 10, Enterprise unlimited. Five people
+  // need six seats, so Pro's two are not the fix; Max is.
+  const limits: Record<string, number | null> = { free: 1, pro: 2, max: 10, enterprise: null };
+  const catalog = initial.plans.map((plan) => ({
+    ...plan,
+    seatLimit: limits[plan.key] ?? null,
+    ...(plan.key === "pro" || plan.key === "max" ? { stripePriceId: `price_${plan.key}` } : {}),
+  }));
+  const previous = {
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+    billingMode: settings.billingMode,
+  };
+  await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(catalog)}, 'seat-api-test', 'Name the upgrade in seat refusals')`;
+  Object.assign(settings, { subscriptionPlansEnabled: true, billingMode: "stripe" });
+  try {
+    const response = await app.request(`http://x/v1/organizations/${accountId}/invitations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: "session=present" },
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        email: "named-upgrade@example.test",
+        role: "member",
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      }),
+    });
+    expect(response.status).toBe(402);
+    const body = await response.text();
+    expect(ErrorEnvelope.parse(JSON.parse(body)).error).toMatchObject({
+      code: "seat_limit_reached",
+      message: "Upgrade to Max to add more people.",
+      details: {
+        seatLimit: 1,
+        seatsUsed: 5,
+        upgradePlan: "max",
+        upgradePlanLabel: "Max",
+        action: { type: "upgrade", href: "/billing" },
+      },
+    });
+    expect(
+      formatErrorMessage(new OpenGeniApiError(response.status, body, { mutation: true })),
+    ).toStartWith("Upgrade to Max to add more people.");
+  } finally {
+    Object.assign(settings, previous);
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}, 'seat-api-test', 'Restore fixture catalog')`;
+  }
 }, 180_000);

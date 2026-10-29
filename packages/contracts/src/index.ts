@@ -6571,6 +6571,7 @@ export {
   SubscriptionPlanCatalog,
   BillingPlanBalance,
 } from "./subscription-plans";
+export { seatUpgradePlan, type SeatUpgradeCandidate } from "./seat-upgrade";
 export {
   BillingSubscriptionCatalog,
   CreateSubscriptionCheckoutRequest,
