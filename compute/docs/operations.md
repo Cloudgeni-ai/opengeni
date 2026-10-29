@@ -878,6 +878,36 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     unsavable need a person.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
+  - `compute.memory.stalled` above zero in its `severe` bucket (40 % and
+    up) for ten minutes: sandboxes that spend most of their time waiting
+    on memory. Two alarms belong to the memory rule
+    ([ADR 24](adr/0024-busy-sandboxes-are-slowed-never-frozen.md)):
+    `ended_for_memory`, a VM ended because its guest could not be shrunk
+    while the host was short, and `oom_killed`, the kernel ending VM
+    processes at the VMs' wall. Either should be rare; repeated ones mean
+    requests too low for the work or a host packed too tightly.
+- **Tune requests and packing from the memory metrics.** With the memory
+  rule on (4 KiB pages, zswap and a swap device), each host reports what
+  running sandboxes requested, borrowed above that, compressed and keep
+  out of RAM (`compute.memory.requested`, `.borrowed`, `.compressed`,
+  `.swapped`), how many stall on memory by how much
+  (`compute.memory.stalled`), the level of borrowed memory idle and busy
+  sandboxes may keep and how many it holds back (`compute.memory.level`,
+  `.held_back`), how many the kernel cannot hold to their bound while the
+  host is pressed, such as sandboxes full of data that does not compress
+  (`compute.memory.over_bound`), what sandboxes being put to sleep and
+  spares ending are giving back (`compute.memory.relief`, which the levels
+  count as available), the shortfall even with everyone at their request
+  and that counted, which guests are shrunk for
+  (`compute.memory.shortfall`), and the guest shrinks by answer,
+  what they freed and the programs they ended (`compute.memory.shrink.*`,
+  `compute.memory.processes.ended`). Each shrink is a `compute.memory.shrink`
+  event naming its sandbox and the programs ended, and each running
+  sandbox's summary carries its peak use, request, compressed and swapped
+  memory and its stall: a kind of job that keeps peaking far above its
+  request, or stalling, wants a larger request. A sandbox that only stalls
+  itself is never shrunk for it: the severe-stall alert names the host,
+  and the sandbox summaries there show which one.
 - **Find a slow sandbox** by querying `compute.step` and `compute.request`
   events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
   cause and the host-side pressure the sandbox saw since its previous
@@ -1170,9 +1200,30 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 - **Bursting sandboxes stop short of the host's own memory.** On 4 KiB
   pages with relief, the agent sets `memory.high` on the VMs' group
   (`--cgroup`) to the host's memory less the high watermark, and logs it
-  (`memory the VMs may hold together`) as it starts. Sandboxes above
-  their request that reach it together are slowed while relief pauses and
-  saves them, instead of taking the agent's and the guard's memory.
+  (`memory the VMs may hold together`) as it starts, and `memory.max` to
+  the host's memory less the midpoint of the two watermarks, the wall
+  they never pass together. Relief pushes idle sandboxes out and asks balloons; a sandbox
+  in use is never paused for memory
+  ([ADR 24](adr/0024-busy-sandboxes-are-slowed-never-frozen.md)). With
+  zswap and a swap device (never written to: writeback is off), each
+  running VM keeps its request protected and gets its own `memory.high`,
+  so the sandboxes that borrowed the most are compressed and slowed
+  first, then shrunk from inside (their largest programs end), and only
+  as a last resort ended. A sandbox the kernel cannot hold to its
+  `memory.high` while the host is pressed (memory that does not compress,
+  a full pool) is shrunk after 10 s as if the host were short. The agent
+  never sets a VM's `memory.high` below what it holds, so such a VM's
+  `memory.high` stays where the kernel could bring it, above its bound;
+  `cat /sys/fs/cgroup/compute/<sandbox id>/memory.high` shows it. A sandbox
+  guaranteed all of its memory is never compressed. Give the host swap of at least a quarter of its
+  memory and a zswap pool of at least 20 %; the agent warns at start when
+  either is smaller, and on a host without swap running sandboxes are
+  never compressed. On a host shared with VMs or services beyond compute,
+  `--memory-total-mib` says how much of its memory compute may use: the
+  capacity, the watermarks, both limits and the levels come from that
+  share, so sandboxes never take memory promised to the rest. Keep the
+  `MemoryMin=` the agent's unit ships with, so host-wide reclaim never
+  takes its pages first.
   A warning at start says the memory capacity is above the limit, which
   the defaults never do (their headroom is the high watermark): with
   `--memory-capacity-mib`, `--memory-headroom-mib` or the watermarks

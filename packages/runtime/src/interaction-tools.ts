@@ -110,6 +110,7 @@ import {
   BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
+  NO_OWN_TAB_IN_PERSONS_BROWSER,
   expandRefShorthand,
   type ResolvedBrowserSession,
   type ResolvedBrowserTarget,
@@ -1075,6 +1076,9 @@ const ComputerActionBatchReceipt = z
     /** Actions that acted on an element of another role than the one named,
      * by their index in the batch. */
     roleStandIns: ComputerActionReceipt.shape.roleStandIns,
+    /** An action of the batch delivered raw input (a key press, a click)
+     * with nothing confirming that the app acted on it. */
+    unconfirmedInput: ComputerActionReceipt.shape.unconfirmedInput,
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -1318,6 +1322,9 @@ export function createInteractionAttemptToolDefinitions(
       ),
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
+    personsBrowser: async (browserSessionId) =>
+      (await input.transport.getBrowserSession(input.workspaceId, browserSessionId)).placement
+        .kind === "attached_device",
   });
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
@@ -1642,6 +1649,19 @@ export function createInteractionAttemptToolDefinitions(
       if (tab && isGoneBrowserTabError(error))
         currentTab.forgetTarget(tab.browserSessionId, tab.targetId);
       else if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      // The tab the agent was working in is gone. In the person's own
+      // browser, with no other tab of its own left, say so plainly rather
+      // than that an ID the agent never named does not exist.
+      if (tab?.implicitTarget && isMissingBrowserTabError(error)) {
+        const next = await currentTab
+          .target({ browserSessionId: tab.browserSessionId })
+          .catch((resolution: unknown) => resolution);
+        if (
+          next instanceof BrowserTargetResolutionError &&
+          next.message === NO_OWN_TAB_IN_PERSONS_BROWSER
+        )
+          throw next;
+      }
       if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) {
         throw await explainMissingSession(error, "BrowserSession", value.browserSessionId);
       }
@@ -2213,7 +2233,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. viewport_reset returns the tab to its window's own size and scale. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. viewport_reset returns the tab to its window's own size and scale. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a web permission for this tab's exact current top-level origin; in the person's own Chrome, only camera, microphone, geolocation and notifications, in a tab this session opened, once they allow it. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
@@ -4010,6 +4030,7 @@ async function actInComputerBatch(
   let observedAfterLastAction = true;
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
   const roleStandIns: NonNullable<z.output<typeof ComputerActionBatchReceipt>["roleStandIns"]> = [];
+  let unconfirmedInput = false;
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
@@ -4102,6 +4123,7 @@ async function actInComputerBatch(
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
     for (const standIn of receipt.roleStandIns ?? [])
       roleStandIns.push({ ...standIn, actionIndex: index });
+    if (receipt.unconfirmedInput) unconfirmedInput = true;
     if (receipt.observation) observation = receipt.observation;
     if (receipt.state !== "completed") {
       observedAfterLastAction = receipt.observation !== null;
@@ -4130,6 +4152,7 @@ async function actInComputerBatch(
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
     ...(roleStandIns.length ? { roleStandIns } : {}),
+    ...(unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -4244,6 +4267,7 @@ async function actInComputerNativeBatch(
     observation,
     observationPrecedesStop: false,
     ...(receipt.roleStandIns?.length ? { roleStandIns: receipt.roleStandIns } : {}),
+    ...(receipt.unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -4325,6 +4349,18 @@ async function openBrowser(
     // reused for an omitted/default headed request: OAuth providers such as
     // Google reject that automation-shaped login surface.
     const requestedHeadless = value.headless ?? false;
+    // Without a deviceId, a session on a profile that has since disconnected
+    // is not reusable: its calls would all fail while another profile is
+    // connected. The open then chooses among the connected profiles.
+    const connectedProfileIds = attachedInventory
+      ? new Set(
+          attachedInventory.devices
+            .filter(
+              (device) => device.state === "connected" && device.capabilities.debuggerAttachment,
+            )
+            .map((device) => device.id),
+        )
+      : null;
     const reusable =
       value.mode === "new"
         ? null
@@ -4338,6 +4374,9 @@ async function openBrowser(
                   value.placement,
                   currentPlacement,
                 ) &&
+                (connectedProfileIds === null ||
+                  (candidate.placement.kind === "attached_device" &&
+                    connectedProfileIds.has(candidate.placement.deviceId))) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
                   candidate.baseRevisionId === value.baseRevisionId) &&
@@ -6232,6 +6271,17 @@ function isGoneBrowserTabError(error: unknown): boolean {
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
     /(?:^|: )browser target does not exist\b/u.test(error.message)
+  );
+}
+
+/** Either way a controller says a tab it was asked for does not exist: the
+ * driver's "browser target does not exist…", or the controller's own check,
+ * which names the tab ("browser target \"10\" does not exist…"). */
+function isMissingBrowserTabError(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    /(?:^|: )browser target (?:"[^"]*" )?does not exist\b/u.test(error.message)
   );
 }
 

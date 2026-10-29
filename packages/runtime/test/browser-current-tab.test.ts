@@ -9,6 +9,7 @@ import {
 function tabs(
   sessions: Array<{ id: string; lastUsedAt: string }>,
   targets: Record<string, Array<{ id: string; kind: string; selected: boolean }>>,
+  personsBrowsers: ReadonlySet<string> = new Set(),
 ) {
   const calls: string[] = [];
   const tab = new CurrentBrowserTab({
@@ -20,6 +21,7 @@ function tabs(
       calls.push(`targets:${id}`);
       return targets[id] ?? [];
     },
+    personsBrowser: async (id) => personsBrowsers.has(id),
   });
   return { tab, calls };
 }
@@ -83,6 +85,47 @@ describe("current browser tab", () => {
     tab.failed({ browserSessionId: "b-1", implicit: true });
     expect(await tab.target({})).toMatchObject({ browserSessionId: "b-2", targetId: "t-4" });
     expect(calls).toEqual(["targets:b-1", "sessions", "targets:b-2"]);
+  });
+
+  test("never picks one of the person's tabs in their own browser", async () => {
+    const noTab =
+      "This browser session has no tab of its own in the person's browser. Open one with browser_tabs operation=open, or pass targetId to use one of the person's tabs.";
+    for (const theirs of [
+      [{ id: "t-1", kind: "page", selected: false }],
+      [
+        { id: "t-1", kind: "page", selected: false },
+        { id: "t-2", kind: "page", selected: false },
+      ],
+      [],
+    ]) {
+      const { tab } = tabs(
+        [{ id: "b-1", lastUsedAt: "2026-10-16T11:00:00.000Z" }],
+        { "b-1": theirs },
+        new Set(["b-1"]),
+      );
+      await expect(tab.target({})).rejects.toMatchObject({
+        code: "browser_target_required",
+        message: noTab,
+      });
+      // A tab the agent names, or the one it selected, is still used.
+      expect(await tab.target({ targetId: "t-1" })).toMatchObject({ targetId: "t-1" });
+    }
+    const selected = tabs(
+      [{ id: "b-1", lastUsedAt: "2026-10-16T11:00:00.000Z" }],
+      {
+        "b-1": [
+          { id: "t-1", kind: "page", selected: false },
+          { id: "t-2", kind: "page", selected: true },
+        ],
+      },
+      new Set(["b-1"]),
+    ).tab;
+    expect(await selected.target({})).toMatchObject({ targetId: "t-2" });
+    // A browser of the session's own still uses its only tab.
+    const managed = tabs([{ id: "b-1", lastUsedAt: "2026-10-16T11:00:00.000Z" }], {
+      "b-1": [{ id: "t-1", kind: "page", selected: false }],
+    }).tab;
+    expect(await managed.target({})).toMatchObject({ targetId: "t-1" });
   });
 
   test("names what to pass when it cannot choose", async () => {

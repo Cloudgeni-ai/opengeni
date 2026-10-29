@@ -253,17 +253,22 @@ export async function runBoundedTestProcesses<T>(
   tasks: readonly T[],
   concurrency: number,
   execute: (task: T, index: number) => Promise<number>,
+  options: { keepGoing?: boolean } = {},
 ): Promise<number> {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
     throw new Error("unit process concurrency must be a positive integer");
   }
+  const keepGoing = options.keepGoing === true;
   let next = 0;
   let failure = 0;
   const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
-    while (failure === 0) {
+    // Fail-fast (the default, and what CI uses) stops admitting new work after
+    // the first failure. Keep-going admits every task and reports the first
+    // failing status once all of them have settled.
+    while (next < tasks.length) {
+      if (failure !== 0 && !keepGoing) return;
       const index = next;
       next += 1;
-      if (index >= tasks.length) return;
       const task = tasks[index]!;
       const status = await execute(task, index);
       if (status !== 0 && failure === 0) failure = status;
@@ -271,6 +276,103 @@ export async function runBoundedTestProcesses<T>(
   });
   await Promise.all(workers);
   return failure;
+}
+
+export type UnitTestPhase = {
+  name: string;
+  processes: readonly UnitTestProcess[];
+  concurrency: number;
+  execute: (task: UnitTestProcess) => Promise<number>;
+};
+
+export type UnitTestRunResult = {
+  status: number;
+  plannedFiles: number;
+  ranFiles: number;
+  // Failures are known per Bun process. With the default of one file per
+  // process each entry names exactly the failing file; a larger batch names
+  // every file that shared the failing process.
+  failedProcesses: string[][];
+  // The phase whose failure ended a fail-fast run.
+  stoppedInPhase?: string;
+};
+
+/**
+ * Runs the unit phases in order and accounts for every planned file. Without
+ * keepGoing the first failing phase ends the run, exactly as before; with it
+ * every phase and file runs and the first failing status is returned.
+ */
+export async function runUnitTestPhases(
+  phases: readonly UnitTestPhase[],
+  options: { keepGoing?: boolean } = {},
+): Promise<UnitTestRunResult> {
+  const keepGoing = options.keepGoing === true;
+  const plannedFiles = phases.reduce(
+    (total, phase) => total + phase.processes.reduce((count, task) => count + task.files.length, 0),
+    0,
+  );
+  let ranFiles = 0;
+  const failedProcesses: string[][] = [];
+  let status = 0;
+  let stoppedInPhase: string | undefined;
+  for (const phase of phases) {
+    const phaseStatus = await runBoundedTestProcesses(
+      phase.processes,
+      phase.concurrency,
+      async (task) => {
+        const exitCode = await phase.execute(task);
+        ranFiles += task.files.length;
+        if (exitCode !== 0) failedProcesses.push([...task.files]);
+        return exitCode;
+      },
+      { keepGoing },
+    );
+    if (phaseStatus !== 0 && status === 0) status = phaseStatus;
+    if (status !== 0 && !keepGoing) {
+      stoppedInPhase = phase.name;
+      break;
+    }
+  }
+  failedProcesses.sort((left, right) => left.join("\0").localeCompare(right.join("\0")));
+  return {
+    status,
+    plannedFiles,
+    ranFiles,
+    failedProcesses,
+    ...(stoppedInPhase === undefined ? {} : { stoppedInPhase }),
+  };
+}
+
+export function describeUnitTestRun(
+  result: UnitTestRunResult,
+  options: { keepGoing: boolean; shard: string },
+): string {
+  const { status, plannedFiles, ranFiles, failedProcesses } = result;
+  const skipped = plannedFiles - ranFiles;
+  if (status === 0 && skipped === 0) {
+    return `[unit-shard] shard ${options.shard} passed (${plannedFiles} files)\n`;
+  }
+  const batched = failedProcesses.some((files) => files.length > 1);
+  const failureCount = batched
+    ? `${failedProcesses.length} failing test process(es); files that shared a process are listed together`
+    : `${failedProcesses.length} failing file(s)`;
+  const lines = [
+    "",
+    "[unit-shard] ================================================================",
+    `[unit-shard] FAILED: ${failureCount}; ran ${ranFiles} of ${plannedFiles} planned files.`,
+    ...failedProcesses.map((files) => `[unit-shard]   failed: ${files.join(", ")}`),
+  ];
+  if (skipped > 0) {
+    const where = result.stoppedInPhase ? ` (in the ${result.stoppedInPhase} phase)` : "";
+    lines.push(
+      `[unit-shard] INCOMPLETE RUN: ${skipped} of ${plannedFiles} planned files were SKIPPED because the run stops at the first failure${where}.`,
+      "[unit-shard] This is NOT full coverage. To run every file locally: bun run test:unit:all (or append --keep-going).",
+    );
+  } else if (options.keepGoing) {
+    lines.push("[unit-shard] Keep-going run: every planned file ran.");
+  }
+  lines.push("[unit-shard] ================================================================", "");
+  return lines.join("\n");
 }
 
 async function run(
@@ -344,17 +446,20 @@ export function deterministicUnitTestShards(
 export function resolveUnitTestSelection(
   root: string,
   args: readonly string[],
-): { selected: string[]; index: number; count: number } {
+): { selected: string[]; index: number; count: number; keepGoing: boolean } {
+  // --keep-going is an opt-in local mode; it never changes which files run.
+  const keepGoing = args.includes("--keep-going");
+  args = args.filter((argument) => argument !== "--keep-going");
   if (args.includes("--all")) {
     if (args.length !== 1) throw new Error("--all cannot be combined with shard arguments");
-    return { selected: discoverTestFiles(root).unit, index: 0, count: 1 };
+    return { selected: discoverTestFiles(root).unit, index: 0, count: 1, keepGoing };
   }
   const planIndex = args.indexOf("--plan");
   const shardIndex = args.indexOf("--shard");
   const countIndex = args.indexOf("--shards");
   if (planIndex < 0 || shardIndex < 0 || countIndex < 0) {
     throw new Error(
-      "usage: run-unit-shard.ts --all | --plan <json> --shard <index> --shards <count>",
+      "usage: run-unit-shard.ts [--keep-going] --all | --plan <json> --shard <index> --shards <count>",
     );
   }
   const planPath = args[planIndex + 1];
@@ -374,11 +479,14 @@ export function resolveUnitTestSelection(
     throw new Error("unsupported or malformed impact plan");
   }
   const selected = deterministicUnitTestShards(root, plan.unitTests, count)[index] ?? [];
-  return { selected, index, count };
+  return { selected, index, count, keepGoing };
 }
 
 async function main(): Promise<void> {
-  const { selected, index, count } = resolveUnitTestSelection(process.cwd(), process.argv.slice(2));
+  const { selected, index, count, keepGoing } = resolveUnitTestSelection(
+    process.cwd(),
+    process.argv.slice(2),
+  );
   const batch = selected.filter((path) => !fileUsesProcessGlobalTestState(process.cwd(), path));
   const isolated = selected.filter((path) => fileUsesProcessGlobalTestState(process.cwd(), path));
   // One file per Bun process is the measured safe default: larger batches keep
@@ -389,41 +497,56 @@ async function main(): Promise<void> {
   const budget = testConcurrencyBudget();
   const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
   process.stdout.write(
-    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} cpuSaturating=${processes.cpuSaturating.length} wallClockSensitive=${processes.wallClockSensitive.length} sharedPostgresExclusive=${processes.sharedPostgresExclusive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
+    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} cpuSaturating=${processes.cpuSaturating.length} wallClockSensitive=${processes.wallClockSensitive.length} sharedPostgresExclusive=${processes.sharedPostgresExclusive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length} mode=${keepGoing ? "keep-going" : "fail-fast"}\n`,
   );
-  const parallelStatus = await runBoundedTestProcesses(
-    processes.parallel,
-    budget.concurrency,
-    (task) => run(task, budget, budget.concurrency, 1),
+  const serial = (task: UnitTestProcess): Promise<number> => run(task, budget, 1, 1);
+  const result = await runUnitTestPhases(
+    [
+      {
+        name: "parallel",
+        processes: processes.parallel,
+        concurrency: budget.concurrency,
+        execute: (task) => run(task, budget, budget.concurrency, 1),
+      },
+      {
+        name: "explicitConcurrency",
+        processes: processes.explicitConcurrency,
+        concurrency: 1,
+        execute: (task) => run(task, budget, 1, budget.concurrency),
+      },
+      {
+        name: "cpuSaturating",
+        processes: processes.cpuSaturating,
+        concurrency: 1,
+        execute: serial,
+      },
+      {
+        name: "wallClockSensitive",
+        processes: processes.wallClockSensitive,
+        concurrency: 1,
+        execute: serial,
+      },
+      {
+        name: "sharedPostgresExclusive",
+        processes: processes.sharedPostgresExclusive,
+        concurrency: 1,
+        execute: serial,
+      },
+      {
+        name: "clusterRoleSensitive",
+        processes: processes.clusterRoleSensitive,
+        concurrency: 1,
+        execute: serial,
+      },
+    ],
+    { keepGoing },
   );
-  if (parallelStatus !== 0) process.exit(parallelStatus);
-  const explicitStatus = await runBoundedTestProcesses(processes.explicitConcurrency, 1, (task) =>
-    run(task, budget, 1, budget.concurrency),
-  );
-  if (explicitStatus !== 0) process.exit(explicitStatus);
-  const cpuSaturatingStatus = await runBoundedTestProcesses(processes.cpuSaturating, 1, (task) =>
-    run(task, budget, 1, 1),
-  );
-  if (cpuSaturatingStatus !== 0) process.exit(cpuSaturatingStatus);
-  const wallClockStatus = await runBoundedTestProcesses(processes.wallClockSensitive, 1, (task) =>
-    run(task, budget, 1, 1),
-  );
-  if (wallClockStatus !== 0) process.exit(wallClockStatus);
-  const sharedPostgresStatus = await runBoundedTestProcesses(
-    processes.sharedPostgresExclusive,
-    1,
-    (task) => run(task, budget, 1, 1),
-  );
-  if (sharedPostgresStatus !== 0) process.exit(sharedPostgresStatus);
-  const clusterRoleStatus = await runBoundedTestProcesses(
-    processes.clusterRoleSensitive,
-    1,
-    (task) => run(task, budget, 1, 1),
-  );
-  if (clusterRoleStatus !== 0) process.exit(clusterRoleStatus);
-  process.stdout.write(
-    `[unit-shard] shard ${index + 1}/${count} passed (${selected.length} files)\n`,
-  );
+  const summary = describeUnitTestRun(result, { keepGoing, shard: `${index + 1}/${count}` });
+  if (result.status !== 0) {
+    process.stderr.write(summary);
+    process.exit(result.status);
+  }
+  process.stdout.write(summary);
 }
 
 if (import.meta.main) await main();

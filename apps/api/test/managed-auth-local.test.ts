@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   managedAuthRequiresEmailVerification,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthSignupEmailNotAllowed,
   managedAuthSocialSignupOptions,
   managedAuthUserCreateAdmission,
   managedAuthUserCreateOverride,
@@ -286,6 +287,21 @@ describe("managed user allowlist", () => {
       ).toBeUndefined();
     });
   }
+
+  test("names an unlisted address as the reason, but not while sign-ups are paused", () => {
+    const settings = { allowedUserEmails: ["staff@example.com"] };
+    expect(managedAuthSignupEmailNotAllowed(settings, "outsider@example.com")).toBe(true);
+    expect(managedAuthSignupEmailNotAllowed(settings, " STAFF@example.com")).toBe(false);
+    expect(
+      managedAuthSignupEmailNotAllowed({ allowedUserEmails: undefined }, "anyone@x.test"),
+    ).toBe(false);
+    expect(
+      managedAuthSignupEmailNotAllowed(
+        { ...settings, managedAuthNewSignupsEnabled: false },
+        "outsider@example.com",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("paused new account sign-ups", () => {

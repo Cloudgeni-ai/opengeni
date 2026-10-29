@@ -1,8 +1,8 @@
 //! Sandbox images built from OCI images (ADR 19) under the host agent and
 //! real Firecracker: `compute-guest` as PID 1, envd answering through the
 //! gateway port, each sandbox's own environment and token across sleep,
-//! templates and reboots, the image's command under its user, and a clean
-//! shutdown.
+//! templates and reboots, the image's command under its user, a clean
+//! shutdown, and sandboxes that borrow memory on a host short of it.
 //!
 //! Runs as root when `COMPUTE_TEST_LAB` names a lab directory (see the lab
 //! test) and `COMPUTE_TEST_GUEST` the directory `guest/build.sh` made. The
@@ -32,6 +32,7 @@ use compute_host::protocol::{
 use tokio::time::{Instant, sleep};
 
 mod envd;
+mod memory;
 #[path = "../support/required.rs"]
 mod required;
 #[path = "../support/state.rs"]
@@ -160,7 +161,11 @@ impl Host {
         state::private_dir(&root);
         let socket = root.join("agent.sock");
         let log = std::fs::File::create(root.join("agent.log")).unwrap();
+        // A test that needs one profile names it in `extra`; the others
+        // run on the one the gate picked.
         let profile = std::env::var("COMPUTE_TEST_PROFILE")
+            .ok()
+            .filter(|_| !extra.contains(&"--memory-profile"))
             .map(|name| vec!["--memory-profile".to_owned(), name])
             .unwrap_or_default();
         let child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
@@ -323,8 +328,24 @@ impl Drop for Host {
                 );
             }
             if let Ok(vms) = std::fs::read_dir(CGROUP) {
-                for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
-                    let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
+                let vms: Vec<PathBuf> = vms
+                    .flatten()
+                    .map(|vm| vm.path())
+                    .filter(|vm| vm.is_dir())
+                    .collect();
+                for vm in &vms {
+                    let _ = std::fs::write(vm.join("cgroup.kill"), "1");
+                }
+                // The next test's VMs take the same names and taps, which
+                // are busy until these processes are gone.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while std::time::Instant::now() < deadline
+                    && vms.iter().any(|vm| {
+                        std::fs::read_to_string(vm.join("cgroup.events"))
+                            .is_ok_and(|events| events.contains("populated 1"))
+                    })
+                {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
             }
             let _ = std::fs::remove_dir_all(&self.root);

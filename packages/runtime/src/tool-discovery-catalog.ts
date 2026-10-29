@@ -1,4 +1,5 @@
 import type { Tool } from "@openai/agents";
+import { descriptionPreview } from "./tool-discovery-ranking";
 
 export function toolDescriptor(tool: Tool & { name: string }): {
   name: string;
@@ -7,7 +8,7 @@ export function toolDescriptor(tool: Tool & { name: string }): {
   const description =
     "description" in tool && typeof tool.description === "string" ? tool.description : "";
   // Share the existing tool_list preview, never summarize or alter a schema.
-  return { name: tool.name, description: Array.from(description).slice(0, 160).join("") };
+  return { name: tool.name, description: descriptionPreview(description, 160) };
 }
 
 /** A directory key is a filter over this pool, never an authorization identity. */

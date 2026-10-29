@@ -59,6 +59,9 @@ export interface ProviderPasskey {
   privateKey: string;
   /** The provider's signature counter; 0 when it does not keep one. */
   signCount: number;
+  /** WebAuthn backup flags, when known by the provider. BE must not change after registration. */
+  backupEligibility?: boolean;
+  backupState?: boolean;
 }
 export interface ProviderItemMeta {
   externalItemId: string;

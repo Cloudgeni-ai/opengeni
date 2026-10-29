@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, BalloonRequest, HoldId, Host, Input, Level, LoanId, MemoryPolicy, OpId, Outcome,
-    Priority, Resource, SandboxId, Size, SleepPolicy, State, Step,
+    Priority, Resource, SandboxId, ShrinkRequest, Size, SleepPolicy, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, MemoryStats, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
@@ -484,6 +484,13 @@ enum Event<V> {
         id: Id,
         request: BalloonRequest,
     },
+    /// The guest of `id` answered the shrink of `request` (ADR 24), or
+    /// could not be asked or did not answer: `None`.
+    Shrunk {
+        id: Id,
+        request: ShrinkRequest,
+        answer: Option<crate::restore_notice::Shrunk>,
+    },
     /// A ready sandbox's fill ended.
     Filled {
         host: Id,
@@ -567,8 +574,12 @@ struct Slot<V> {
     /// Whether its running guest still takes connections (see [`check`]).
     check: Option<check::Check>,
     /// The incarnation of the running VM and its memory statistics when
-    /// last sampled running; see [`HostAgent::check_uncompressed`].
+    /// last sampled running; see [`HostAgent::memory_use`].
     stats: Option<(u64, MemoryStats)>,
+    /// The most memory its running VM used since its last summary, what it
+    /// compressed or swapped at its original size: what it would hold in
+    /// RAM were it all touched again.
+    peak: u64,
     /// The reading the last event about the sandbox's pressure counted up
     /// to.
     reported: Option<(u64, MemoryStats)>,
@@ -747,6 +758,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Running sandboxes whose activity could not be read over their last
     /// window, so they count as busy; see [`HostAgent::sample_busy`].
     unseen_activity: usize,
+    /// How many VM processes the kernel's out-of-memory killer had ended
+    /// at the last sample; see [`HostAgent::check_oom_kills`].
+    oom_kills: Option<u64>,
     sample_every: Duration,
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
@@ -1005,6 +1019,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             stats: [StepStats::default(); Step::COUNT],
             available_memory: None,
             unseen_activity: 0,
+            oom_kills: None,
             sample_every: config.sample_every,
             disk_gauge: config.disk_reading,
             processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
@@ -1161,6 +1176,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 usage: usage::Usage::default(),
                 check: None,
                 stats: None,
+                peak: 0,
                 reported: None,
                 summarized: Instant::now(),
                 asked: None,
