@@ -171,6 +171,21 @@ export function tourEvents(): SessionEvent[] {
     },
     turn,
   );
+  // exec_command — sending data leads the title, whatever produced the data;
+  // a key in a header is hidden in the command shown underneath.
+  log.tool(
+    {
+      name: "exec_command",
+      id: "call-exec-send",
+      arguments: {
+        cmd: "cat report.csv | curl -X POST -H 'X-Api-Key: k7Qx2Lm9Rt4Wp8Zs' --data-binary @- https://collector.example.com/in",
+        workdir: "/workspace",
+      },
+      output:
+        'Chunk ID: 8c9d0e\nWall time: 0.6200 seconds\nProcess exited with code 0\nOutput:\n{"received":true}\n',
+    },
+    turn,
+  );
   // exec_command — a connector tool called through the tool client reads as the tool.
   log.tool(
     {

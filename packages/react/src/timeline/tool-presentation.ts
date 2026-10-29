@@ -16,7 +16,8 @@ import {
   v4aToGitFileDiff,
   type ApplyPatchOperation,
 } from "./parsers";
-import { commandStepTitle, redactSignedUrls, signedValues } from "./command-step";
+import { commandStepTitle } from "./command-step";
+import { redactDeep, redactSignedUrls, signedValuesDeep } from "./credential-redaction";
 import { invokedToolCall } from "./invoked-tool";
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
@@ -1921,22 +1922,8 @@ export function toolRowPresentation(
  * found anywhere in the call's arguments or output.
  */
 function redactRow(row: ToolRowPresentation, item: ToolCallItem): ToolRowPresentation {
-  const source = [item.arguments, item.output]
-    .map((value) => (typeof value === "string" ? value : stringifyPayload(value)))
-    .join("\n");
-  return redactStrings(row, signedValues(source), 0) as ToolRowPresentation;
-}
-
-function redactStrings(value: unknown, values: readonly string[], depth: number): unknown {
-  if (typeof value === "string")
-    return redactSignedUrls(value, [...values, ...signedValues(value)]);
-  if (depth > 12 || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((entry) => redactStrings(entry, values, depth + 1));
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [key, redactStrings(entry, values, depth + 1)]),
-  );
+  const values = signedValuesDeep([item.arguments, item.output, item.raw, row]);
+  return redactDeep(row, values);
 }
 
 /** A call waiting for the person's approval has not run: say so, never "Done". */

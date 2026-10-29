@@ -9,108 +9,9 @@
  */
 
 import type { OpenGeniText } from "../messages/runtime";
+import { redactSignedUrls } from "./credential-redaction";
 import { toolDisplayName } from "./tool-display-name";
 import { toolStepLabel, type ToolStepPhase } from "./tool-steps";
-
-/* ---- signed links ---------------------------------------------------------- */
-
-/**
- * Parameters whose value is a credential: storage signatures (Azure SAS, S3,
- * Google Cloud Storage, CloudFront) and access tokens, keys and codes.
- */
-const SECRET_PARAM_NAMES =
-  "sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|googleaccessid|key-pair-id|policy|token|access_token|id_token|refresh_token|auth_token|client_secret|api_key|apikey|key|code|password|secret";
-/**
- * What can stand before a parameter: `?`, `&`, `#`, `;`, and the same
- * separators escaped in JSON (`\u0026`), HTML (`&amp;`) or a link nested in
- * another link (`%26`, `%3F`, `%23`).
- */
-const PARAM_SEPARATOR = String.raw`(?:[?&#;]|\\+u0026|&amp;|%26|%3[Ff]|%23)`;
-const PARAM_EQUALS = String.raw`(?:=|%3[Dd])`;
-/** A parameter value: runs until the next separator, quote, space or bracket. */
-const PARAM_VALUE = String.raw`(?:\\\/|(?!%26)[^&\s'"\x60<>#\\,;()[\]{}|])+`;
-const SECRET_PARAM_SOURCE = `(${PARAM_SEPARATOR})(${SECRET_PARAM_NAMES})(${PARAM_EQUALS})(${PARAM_VALUE})`;
-const HAS_SECRET_PARAM = new RegExp(SECRET_PARAM_SOURCE, "i");
-/**
- * `Authorization: Bearer …`, `Basic …` and `token …` credentials. The value must
- * look like a token (a digit or token punctuation in it), so prose such as
- * "Basic configuration" is left alone.
- */
-const AUTH_HEADER_VALUE =
-  /\b([Bb]earer|Basic|(?<=[Aa]uthorization:\s*)token)(\s+)((?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,})/g;
-
-const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>()]+/gi;
-
-/** Replaces the query of a signed or token-bearing link, so the credential is never shown. */
-export const SIGNED_LINK_QUERY_PLACEHOLDER = "?[signature hidden]";
-const SIGNED_LINK_FRAGMENT_PLACEHOLDER = "#[signature hidden]";
-/** Replaces a credential value found outside a whole link. */
-const SECRET_VALUE_PLACEHOLDER = "[hidden]";
-/** Values this short are too likely to be ordinary words to hide everywhere they occur. */
-const MIN_SPREAD_VALUE_LENGTH = 8;
-
-/**
- * The credential values in `text` (signature, token and key parameter values,
- * `Bearer` tokens), raw and URL-decoded, so the same value can be hidden
- * wherever else it shows up, such as in a command's output.
- */
-export function signedValues(text: string): string[] {
-  const values = new Set<string>();
-  const add = (value: string) => {
-    if (value.length < MIN_SPREAD_VALUE_LENGTH) return;
-    values.add(value);
-    try {
-      const decoded = decodeURIComponent(value);
-      if (decoded.length >= MIN_SPREAD_VALUE_LENGTH) values.add(decoded);
-    } catch {
-      // Not URL-encoded.
-    }
-  };
-  for (const match of text.matchAll(new RegExp(SECRET_PARAM_SOURCE, "gi"))) add(match[4]!);
-  for (const match of text.matchAll(AUTH_HEADER_VALUE)) add(match[3]!);
-  return [...values];
-}
-
-function redactLink(url: string): string {
-  const cut = url.search(/[?#]/);
-  if (cut < 0) return url;
-  // A trailing backslash belongs to an escaped quote in JSON text, not the link.
-  const trailing = /\\+$/.exec(url)?.[0] ?? "";
-  const tail = url.slice(cut, url.length - trailing.length);
-  if (!HAS_SECRET_PARAM.test(tail)) return url;
-  const placeholder =
-    url[cut] === "?" ? SIGNED_LINK_QUERY_PLACEHOLDER : SIGNED_LINK_FRAGMENT_PLACEHOLDER;
-  return `${url.slice(0, cut)}${placeholder}${trailing}`;
-}
-
-/**
- * Hide every credential in `text`, whatever shape it takes: a signed or
- * token-bearing link loses its query or fragment (keeping the host and path so
- * it is still recognisable); a signature, token or key parameter anywhere else
- * (`GET /a.json?sv=…&sig=…`, `\u0026token=…` in JSON, `#access_token=…`) and an
- * `Authorization` token keep their name and lose their value; and any of
- * `values` (see `signedValues`, by default those found in `text`) is hidden
- * wherever it occurs. Text without credentials is returned unchanged.
- */
-export function redactSignedUrls(
-  text: string,
-  values: readonly string[] = signedValues(text),
-): string {
-  let out = text.includes("://") ? text.replace(URL_PATTERN, redactLink) : text;
-  out = out.replace(
-    new RegExp(SECRET_PARAM_SOURCE, "gi"),
-    (_match, separator: string, name: string, equals: string) =>
-      `${separator}${name}${equals}${SECRET_VALUE_PLACEHOLDER}`,
-  );
-  out = out.replace(
-    AUTH_HEADER_VALUE,
-    (_match, scheme: string, space: string) => `${scheme}${space}${SECRET_VALUE_PLACEHOLDER}`,
-  );
-  for (const value of [...values].sort((a, b) => b.length - a.length)) {
-    if (out.includes(value)) out = out.split(value).join(SECRET_VALUE_PLACEHOLDER);
-  }
-  return out;
-}
 
 /* ---- shell reading ---------------------------------------------------------- */
 
@@ -339,7 +240,9 @@ type Step =
   | { kind: "host"; step: "fetch" | "send"; host: string; weight: number }
   | { kind: "code"; language: string; weight: number }
   | { kind: "tool"; name: string; weight: number }
-  | { kind: "toolStep"; step: "findTools" | "checkProgress" | "wait"; weight: number };
+  | { kind: "toolStep"; step: "findTools" | "checkProgress" | "wait"; weight: number }
+  /** A risky step with nothing safe to name (data sent to an unknown address): "Ran a command". */
+  | { kind: "opaque"; weight: number };
 
 /** What a step says when its file has no name worth showing; null falls back to "Ran a command". */
 const UNNAMED: Record<NamedStep, FixedStep | "editFile" | "download" | null> = {
@@ -524,6 +427,8 @@ const TEST_RUNNERS = new Set(["pytest", "jest", "vitest", "mocha"]);
  * those steps outweigh everything else a command does, so the title names them.
  */
 const DOWNLOADED_CODE_WEIGHT = 100;
+/** Sending data somewhere (`curl -d @- …`) outweighs whatever produced the data. */
+const SEND_WEIGHT = 60;
 const DELETE_WEIGHT = 50;
 /** Clearing a dependency or cache folder that a tool rebuilds is routine, not the headline. */
 const REGENERABLE_DELETE_WEIGHT = 0.8;
@@ -618,6 +523,151 @@ function flagValue(words: readonly string[], flags: readonly string[]): string |
     }
   }
   return undefined;
+}
+
+/* ---- downloaders ------------------------------------------------------------- */
+
+/** Short options that take a value, so `-sSLo out.json` and `-qO-` read their value right. */
+const CURL_VALUE_LETTERS = new Set("dFTXHuoAebcmrwxKEDUYyzCPQt");
+const WGET_VALUE_LETTERS = new Set("OoaPtTwUeilARDIXQB");
+const LONG_VALUE_OPTIONS = new Set([
+  "--output",
+  "--out",
+  "--output-document",
+  "--output-file",
+  "--data",
+  "--data-raw",
+  "--data-binary",
+  "--data-ascii",
+  "--data-urlencode",
+  "--json",
+  "--form",
+  "--form-string",
+  "--upload-file",
+  "--request",
+  "--method",
+  "--header",
+  "--user",
+  "--password",
+  "--user-agent",
+  "--referer",
+  "--cookie",
+  "--cookie-jar",
+  "--config",
+  "--cert",
+  "--key",
+  "--max-time",
+  "--connect-timeout",
+  "--retry",
+  "--post-data",
+  "--post-file",
+  "--body-data",
+  "--body-file",
+  "--directory-prefix",
+  "--tries",
+  "--timeout",
+]);
+const SEND_OPTIONS = [
+  "-d",
+  "--data",
+  "--data-raw",
+  "--data-binary",
+  "--data-ascii",
+  "--data-urlencode",
+  "--json",
+  "-F",
+  "--form",
+  "--form-string",
+  "-T",
+  "--upload-file",
+  "--post-data",
+  "--post-file",
+  "--body-data",
+  "--body-file",
+];
+const SENDING_METHODS = /^(?:POST|PUT|PATCH|DELETE)$/i;
+
+type DownloaderCall = {
+  url: string | undefined;
+  /** Where the body is saved: a file, `-` for standard output, or undefined when not set. */
+  file: string | undefined;
+  /** Saved under the link's own file name (`curl -O`, wget's default). */
+  remoteName: boolean;
+  /** Uploads or posts data. */
+  sends: boolean;
+};
+
+function readDownloader(program: string, words: readonly string[]): DownloaderCall {
+  const valueLetters = program === "wget" ? WGET_VALUE_LETTERS : CURL_VALUE_LETTERS;
+  const options = new Map<string, string | true>();
+  let url: string | undefined;
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i]!;
+    if (word === "--") {
+      url ??= words.slice(i + 1).find((rest) => /^https?:\/\//i.test(rest));
+      break;
+    }
+    if (word.startsWith("--")) {
+      const equals = word.indexOf("=");
+      if (equals > 0) options.set(word.slice(0, equals), word.slice(equals + 1));
+      else if (LONG_VALUE_OPTIONS.has(word)) options.set(word, words[++i] ?? "");
+      else options.set(word, true);
+      continue;
+    }
+    if (/^-[A-Za-z]/.test(word)) {
+      for (let j = 1; j < word.length; j++) {
+        const letter = word[j]!;
+        if (valueLetters.has(letter)) {
+          options.set(`-${letter}`, j + 1 < word.length ? word.slice(j + 1) : (words[++i] ?? ""));
+          break;
+        }
+        options.set(`-${letter}`, true);
+      }
+      continue;
+    }
+    if (!url && /^https?:\/\//i.test(word)) url = word;
+  }
+  const text = (name: string) => {
+    const value = options.get(name);
+    return typeof value === "string" ? value : undefined;
+  };
+  const method = text("-X") ?? text("--request") ?? text("--method") ?? "";
+  const sends = SEND_OPTIONS.some((name) => options.has(name)) || SENDING_METHODS.test(method);
+  if (program === "wget") {
+    const file = text("-O") ?? text("--output-document");
+    return { url, file, remoteName: file === undefined, sends };
+  }
+  if (program === "aria2c") {
+    const file = text("-o") ?? text("--out");
+    return { url, file, remoteName: file === undefined, sends };
+  }
+  return {
+    url,
+    file: text("-o") ?? text("--output"),
+    remoteName:
+      options.has("-O") || options.has("--remote-name") || options.has("--remote-name-all"),
+    sends,
+  };
+}
+
+/** The program a command runs, after wrappers such as `sudo` and `timeout`. */
+function programOf(command: SimpleCommand | null): string {
+  return command ? basename(unwrap(command.words)[0] ?? "") : "";
+}
+
+/** Names of the files a command runs as a program: `./setup.sh`, `bash setup.sh`, `source env.sh`. */
+function filesRun(command: SimpleCommand): string[] {
+  const words = unwrap(command.words);
+  const first = words[0];
+  if (!first) return [];
+  if (/^\.{0,2}\//.test(first)) return [basename(first)];
+  const program = basename(first);
+  if (!INTERPRETERS[program] && program !== "source" && program !== ".") return [];
+  const script = operands(
+    words,
+    new Set(["-W", "-X", "-r", "--require", "--import", "--loader"]),
+  )[0];
+  return script ? [basename(script)] : [];
 }
 
 const WRAPPERS = new Set(["sudo", "time", "nice", "nohup", "exec", "stdbuf", "caffeinate"]);
@@ -726,24 +776,19 @@ function classify(command: SimpleCommand, depth: number): Step | null {
   if (program === "sleep") return { kind: "toolStep", step: "wait", weight: 0.5 };
 
   if (program === "curl" || program === "wget" || program === "aria2c") {
-    const url = words.find((word) => /^https?:\/\//i.test(word));
-    const file =
-      flagValue(
-        words,
-        program === "wget" ? ["-O", "--output-document"] : ["-o", "--output", "-O"],
-      ) ?? output;
-    const remoteName =
-      url && (program === "wget" || words.includes("-O") || words.includes("--remote-name"))
-        ? pathOf(url)
-        : undefined;
+    const call = readDownloader(program, words);
+    const host = call.url ? hostOf(call.url) : null;
+    // Sending data leads the title; with no address worth naming it is just "Ran a command".
+    if (call.sends) {
+      return host
+        ? { kind: "host", step: "send", host, weight: SEND_WEIGHT }
+        : { kind: "opaque", weight: SEND_WEIGHT };
+    }
+    const file = call.file ?? output;
     if (file && file !== "-" && file !== "/dev/null") return named("download", file, 4);
+    const remoteName = call.url && call.remoteName && file !== "-" ? pathOf(call.url) : undefined;
     if (remoteName && displayName(remoteName)) return named("download", remoteName, 4);
-    const host = url ? hostOf(url) : null;
-    const sends =
-      words.some((word) =>
-        /^(?:-d|--data(?:-\w+)?|--json|-F|--form|-T|--upload-file)(?:=|$)/.test(word),
-      ) || /^(?:POST|PUT|PATCH|DELETE)$/i.test(flagValue(words, ["-X", "--request"]) ?? "");
-    return host ? { kind: "host", step: sends ? "send" : "fetch", host, weight: 4 } : null;
+    return host ? { kind: "host", step: "fetch", host, weight: 4 } : null;
   }
 
   if (program === "cat") {
@@ -965,12 +1010,14 @@ function classify(command: SimpleCommand, depth: number): Step | null {
 
 /**
  * A command later in a pipeline only matters to the title when it deletes
- * (`… | xargs rm`) or runs what flows into it as a program (`curl … | sh`).
+ * (`… | xargs rm`), sends data (`cat .env | curl -d @- …`), runs what flows
+ * into it as a program (`curl … | sh`) or saves a download (`curl … | tee a.json`).
  */
 function classifyPiped(command: SimpleCommand, depth: number): Step | null {
   const words = unwrap(command.words);
   const program = basename(words[0] ?? "");
   const language = INTERPRETERS[program];
+  const headProgram = programOf(command.pipelineHead);
   if (language) {
     // `python3 -c '…'` and `bash -lc '…'` run their own code and only read the piped text.
     // (`bash -e` only stops on errors: it still runs the piped text.)
@@ -979,8 +1026,6 @@ function classifyPiped(command: SimpleCommand, depth: number): Step | null {
     const inline = words.some((word) => inlineFlag.test(word));
     const script = operands(words).find((word) => /\.[A-Za-z0-9]+$/.test(word));
     if (inline || script) return null;
-    const head = command.pipelineHead;
-    const headProgram = head ? basename(unwrap(head.words)[0] ?? "") : "";
     if (DOWNLOADERS.has(headProgram)) {
       return { kind: "fixed", step: "runDownloadedCode", weight: DOWNLOADED_CODE_WEIGHT };
     }
@@ -989,7 +1034,27 @@ function classifyPiped(command: SimpleCommand, depth: number): Step | null {
     return { kind: "code", language: display, weight: 3.5 };
   }
   const step = classify(command, depth);
-  return step && step.weight >= DELETE_WEIGHT ? step : null;
+  if (step && step.weight >= DELETE_WEIGHT) return step;
+  if (DOWNLOADERS.has(headProgram)) {
+    // A download saved further down the pipe: `curl … | tee a.json`, `curl … | jq . > a.json`.
+    const saved =
+      program === "tee"
+        ? operands(words, new Set(["-p"]))[0]
+        : command.redirects.find(
+            (r) => (r.op === ">" || r.op === ">>" || r.op === "1>") && r.target !== "/dev/null",
+          )?.target;
+    if (saved && displayName(saved)) {
+      return { kind: "named", step: "download", name: displayName(saved), weight: 4.5 };
+    }
+  }
+  return null;
+}
+
+function isDeletion(step: Step): boolean {
+  return (
+    (step.kind === "named" && step.step === "delete") ||
+    (step.kind === "fixed" && step.step === "deleteFiles")
+  );
 }
 
 function pick(commands: readonly SimpleCommand[], depth: number): Step | null {
@@ -998,17 +1063,28 @@ function pick(commands: readonly SimpleCommand[], depth: number): Step | null {
   let readCount = 0;
   const deletions = new Set<string>();
   let regenerableDeletion = false;
+  /** Files fetched by a downloader so far: running one later runs downloaded code. */
+  const downloaded = new Set<string>();
   for (const command of commands) {
-    const step = command.pipelineHead ? classifyPiped(command, depth) : classify(command, depth);
+    let step = command.pipelineHead ? classifyPiped(command, depth) : classify(command, depth);
+    if (downloaded.size && filesRun(command).some((name) => downloaded.has(name))) {
+      step = { kind: "fixed", step: "runDownloadedCode", weight: DOWNLOADED_CODE_WEIGHT };
+    }
     if (!step) continue;
+    if (
+      step.kind === "named" &&
+      step.step === "download" &&
+      step.name &&
+      DOWNLOADERS.has(programOf(command.pipelineHead ?? command))
+    ) {
+      downloaded.add(step.name);
+    }
     if (step.kind === "named" && step.step === "read" && step.name) {
       reads.add(step.name);
       readCount++;
     }
     if (step.kind === "readFiles") readCount += step.count;
-    const deletes =
-      (step.kind === "named" && step.step === "delete") ||
-      (step.kind === "fixed" && step.step === "deleteFiles");
+    const deletes = isDeletion(step);
     if (deletes && step.weight < DELETE_WEIGHT) regenerableDeletion = true;
     else if (deletes) {
       // Several deletions read as "Deleted files", never as just the first one.
@@ -1017,7 +1093,7 @@ function pick(commands: readonly SimpleCommand[], depth: number): Step | null {
     if (!best || step.weight > best.weight) best = step;
   }
   if (!best) return null;
-  if (best.weight >= DELETE_WEIGHT && best.weight < DOWNLOADED_CODE_WEIGHT && deletions.size > 1) {
+  if (isDeletion(best) && best.weight >= DELETE_WEIGHT && deletions.size > 1) {
     return { kind: "fixed", step: "deleteFiles", weight: best.weight };
   }
   const installs =
@@ -1078,5 +1154,7 @@ export function commandStepTitle(
     }
     case "toolStep":
       return toolStepLabel(t, step.step, phase);
+    case "opaque":
+      return null;
   }
 }

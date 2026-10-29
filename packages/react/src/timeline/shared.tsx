@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
-import { redactSignedUrls } from "./command-step";
+import { redactSignedUrls } from "./credential-redaction";
 import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
