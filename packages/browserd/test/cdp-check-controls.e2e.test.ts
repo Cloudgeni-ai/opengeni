@@ -240,6 +240,9 @@ const LABELS = `<!doctype html><meta charset="utf-8"><title>Labels, hidden input
 <p><label id="vhl"><input type="checkbox" id="vhin" style="visibility: hidden; position: absolute"><span class="box"></span> Visibility hidden</label></p>
 <p><label id="srl"><input type="checkbox" id="srin" class="sr"><span class="box"></span> Screen reader only</label></p>
 <p><input type="checkbox" id="srlink" class="sr"><label for="srlink">I accept the <a href="#elsewhere">terms of service and the privacy policy of this site</a></label></p>
+<p style="position: relative; z-index: 0"><input type="checkbox" id="under" style="position: absolute; left: 0; top: 0; z-index: -1; width: 16px; height: 16px; margin: 0">
+  <label for="under" style="position: relative; display: inline-block; padding-left: 24px; line-height: 18px"><span class="box" style="position: absolute; left: 0; top: 0; background: #fff"></span>Under its box</label></p>
+<p><input type="checkbox" id="offpage" style="position: absolute; left: -9999px"><label for="offpage"><span class="box"></span> Off the page</label></p>
 <p><input type="checkbox" id="ind"><label for="ind">Indeterminate native</label></p>
 <p><input type="checkbox" id="ind2"><label for="ind2">Indeterminate on</label></p>
 <p><div role="checkbox" aria-checked="mixed" aria-label="Tri-state" id="tri" tabindex="0" class="box"
@@ -288,8 +291,16 @@ e2e(
     expect(await check(byCss("#srin"), false)).toEqual(done);
     expect(await read("[hidin.checked, vhin.checked, srin.checked]")).toEqual([false, true, false]);
     const linked = (await check(byCss("#srlink"), true)) as { outcome: string };
-    expect(linked.outcome.startsWith("completed")).toBe(false);
+    expect(linked.outcome).toBe(
+      "failed: this checkbox does not show, and a click on its label would land on a link or other control in it; find the box the page draws for it and click that",
+    );
     expect(await read("[srlink.checked, location.hash]")).toEqual([false, ""]);
+    // An input under the box its label draws, and one placed off the page,
+    // are checked on what the label shows.
+    expect(await check(byCss("#under"), true)).toEqual(done);
+    expect(await check(byCss("#offpage"), true)).toEqual(done);
+    expect(await check(byText("Off the page"), false)).toEqual(done);
+    expect(await read("[under.checked, offpage.checked]")).toEqual([true, false]);
   }),
   90_000,
 );

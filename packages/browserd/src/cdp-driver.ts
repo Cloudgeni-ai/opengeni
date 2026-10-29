@@ -6548,13 +6548,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         // clicked itself.
         const frameId = node.frameId ?? state.frame.id;
         const click = async (located: number | null) => {
-          const part =
+          let part =
             (await this.relatedNode(state, located, CHECK_CLICK_FUNCTION, []).catch(() => null)) ??
             target;
+          if (part === target) {
+            // A native input under a box its own label draws on top of it (a
+            // style library's checkbox) is clicked on that box, where a
+            // person clicks; it is measured once scrolled into view.
+            await this.actionPoint(state, target, false, frameId);
+            part =
+              (await this.relatedNode(state, target, CHECK_COVERING_LABEL_FUNCTION, []).catch(
+                () => null,
+              )) ?? target;
+          }
           if (part !== target) {
             await this.actionPoint(state, part, false, frameId);
             if ((await this.callOnNode(state, part, CHECK_LABEL_SPOT_FUNCTION, [])) !== true) {
-              throw elementUnrendered();
+              throw new InteractionDefiniteDriverError(
+                "invalid_action",
+                `this ${typeof current.kind === "string" ? current.kind : "checkbox"} does not show, and a click on its label would land on a link or other control in it; find the box the page draws for it and click that`,
+              );
             }
           }
           await this.clickNode(state, part, "left", 1, frameId);
@@ -8749,8 +8762,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ]);
   }
 
-  /** The element a function run on a node returns, as a node ID, or null when
-   * it returns none. */
   /** A control's checked state as the accessibility tree gives it, for one
    * whose role and state the page sets where its markup does not show them
    * (a custom element's own role and state); null when the tree has no
@@ -8813,6 +8824,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     };
   }
 
+  /** The element a function run on a node returns, as a node ID, or null when
+   * it returns none. */
   private async relatedNode(
     state: TargetState,
     backendDOMNodeId: number | null,
@@ -11884,19 +11897,20 @@ const CHECKABLE_FUNCTION = `function() {${CHECKABLE_HELPERS}
 
 /** Where check clicks for the control a node stands for (see
  * CHECKABLE_HELPERS), or null: the control itself, unless it is a native
- * input a person cannot see or reach (not rendered, hidden, or clipped to
- * nothing, as a box a label draws instead), which is clicked through its
- * label as a person does: at the located part of the label, else at a label
- * on the page. */
+ * input a person cannot see or reach (not rendered, hidden, clipped to
+ * nothing, or placed off the page where no scroll reaches it, as a box a
+ * label draws instead), which is clicked through its label as a person does:
+ * at the located part of the label, else at a label on the page. */
 const CHECK_CLICK_FUNCTION = `function() {${CHECKABLE_HELPERS}
   const control = checkable(this);
   if (!control) return null;
   if (!(control instanceof HTMLInputElement) || !control.labels) return control;
   const style = getComputedStyle(control);
   const box = control.getBoundingClientRect();
+  const offPage = box.right + window.scrollX <= 0 || box.bottom + window.scrollY <= 0;
   const reachable = control.getClientRects().length > 0 && style.visibility === "visible" &&
     box.width > 1 && box.height > 1 && (style.clip === "auto" || style.clip === "") &&
-    style.clipPath === "none";
+    style.clipPath === "none" && !offPage;
   if (reachable) return control;
   const start = this instanceof Element ? this : this.parentElement;
   const labels = Array.from(control.labels);
@@ -11904,6 +11918,20 @@ const CHECK_CLICK_FUNCTION = `function() {${CHECKABLE_HELPERS}
   if (own) return start === control ? own : start;
   return labels.find((label) => label.getClientRects().length > 0 &&
     getComputedStyle(label).visibility === "visible") || control;
+}`;
+
+/** For a native input in view, what of its own label is on top of it at its
+ * center (a box the label draws over it), or null when the input itself, or
+ * anything not in one of its labels, is there. */
+const CHECK_COVERING_LABEL_FUNCTION = `function() {
+  if (!(this instanceof HTMLInputElement) || !this.labels || this.labels.length === 0) return null;
+  const box = this.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) return null;
+  const root = this.getRootNode();
+  const hit = (typeof root.elementFromPoint === "function" ? root : document).elementFromPoint(
+    box.left + box.width / 2, box.top + box.height / 2);
+  if (!hit || hit === this || this.contains(hit)) return null;
+  return Array.from(this.labels).some((label) => label.contains(hit)) ? hit : null;
 }`;
 
 /** Whether a form control takes no pointer input itself (pointer-events:
