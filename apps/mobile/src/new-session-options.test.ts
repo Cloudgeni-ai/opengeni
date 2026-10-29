@@ -1,11 +1,17 @@
 import { expect, mock, test } from "bun:test";
 import * as React from "../../../packages/react/node_modules/react";
+import * as JsxDevRuntime from "../../../packages/react/node_modules/react/jsx-dev-runtime";
+import * as JsxRuntime from "../../../packages/react/node_modules/react/jsx-runtime";
 import { flush, registerDom, renderHook } from "../../../packages/react/test/render-hook";
 
 let canCreatePrivate = true;
 // The standalone Expo app has its own React installation; use the renderer's
 // instance for this DOM hook test, just as Metro resolves one React on device.
+// CI does not install the app's own packages, so the JSX runtime the compiled
+// .tsx imports must come from the same React too.
 mock.module("react", () => React);
+mock.module("react/jsx-dev-runtime", () => JsxDevRuntime);
+mock.module("react/jsx-runtime", () => JsxRuntime);
 const { act } = React;
 let defaultVisibility = "private";
 let capabilitiesFail = false;
