@@ -20349,11 +20349,12 @@ export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
 export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as const;
 
 /**
- * Error code returned (HTTP 403, `{ code, message }`) when an invite-only
- * deployment refuses to create an account for an address it has not invited.
- * OAuth sign-up refusals redirect with `error=signup_not_invited` instead.
+ * Error code returned (HTTP 403, `{ code, message }`) when a deployment that
+ * restricts accounts to listed email addresses (`allowedUserEmails`) refuses to
+ * create an account for an address that isn't on the list.
+ * OAuth sign-up refusals redirect with `error=signup_email_not_allowed` instead.
  */
-export const MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE = "SIGNUP_NOT_INVITED" as const;
+export const MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE = "SIGNUP_EMAIL_NOT_ALLOWED" as const;
 
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always

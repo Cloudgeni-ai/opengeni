@@ -27,8 +27,8 @@ import {
 } from "@/lib/managed-auth-url";
 import {
   MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
-  MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE,
-  SIGNUP_NOT_INVITED_MESSAGE,
+  MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+  SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE,
   SIGNUPS_PAUSED_MESSAGE,
 } from "@/lib/signups-paused";
 import {
@@ -148,12 +148,13 @@ export function ManagedAuthPanel(props: {
   const [passkeySignupMode, setPasskeySignupMode] = useState(false);
   const emailOnlyMode = resetMode || linkResendMode;
   const signupsPausedView = mode === "signup" && !emailOnlyMode && !newSignupsEnabled;
-  // An invite-only deployment refused this address. Retrying can't succeed, so
-  // the form gives way to who to ask, like the paused view.
-  const [notInvitedEmail, setNotInvitedEmail] = useState<string | null>(null);
-  const notInvitedView =
-    mode === "signup" && !emailOnlyMode && !signupsPausedView && notInvitedEmail !== null;
-  const signupClosedView = signupsPausedView || notInvitedView;
+  // This deployment only lets approved email addresses sign up, and this one
+  // isn't approved. Retrying can't succeed, so the form gives way to who to
+  // ask, like the paused view.
+  const [notAllowedEmail, setNotAllowedEmail] = useState<string | null>(null);
+  const notAllowedView =
+    mode === "signup" && !emailOnlyMode && !signupsPausedView && notAllowedEmail !== null;
+  const signupClosedView = signupsPausedView || notAllowedView;
   const [passkeysSupported] = useState(browserSupportsPasskeys);
   const passkeysOffered = Boolean(props.onPasskeySubmit) && passkeysSupported;
   const passkeySignupView = passkeySignupMode && mode === "signup" && !signupClosedView;
@@ -197,7 +198,7 @@ export function ManagedAuthPanel(props: {
     setResetMode(false);
     setLinkResendMode(false);
     setPasskeySignupMode(false);
-    setNotInvitedEmail(null);
+    setNotAllowedEmail(null);
     setFieldErrors({});
     setFormError(null);
     setFormActionMode(null);
@@ -296,9 +297,9 @@ export function ManagedAuthPanel(props: {
       if (
         mode === "signup" &&
         error instanceof AuthApiError &&
-        error.code === MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE
+        error.code === MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE
       ) {
-        setNotInvitedEmail(input.email);
+        setNotAllowedEmail(input.email);
         return;
       }
       const failure = managedAuthFailure(mode, error);
@@ -416,9 +417,9 @@ export function ManagedAuthPanel(props: {
       if (
         kind === "signup" &&
         error instanceof AuthApiError &&
-        error.code === MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE
+        error.code === MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE
       ) {
-        setNotInvitedEmail("");
+        setNotAllowedEmail("");
         setPasskeySignupMode(false);
         return;
       }
@@ -539,10 +540,10 @@ export function ManagedAuthPanel(props: {
                   ? "Enter your email to receive a password-reset link."
                   : signupsPausedView
                     ? "Existing accounts can still sign in."
-                    : notInvitedView
-                      ? notInvitedEmail
-                        ? `${notInvitedEmail} hasn't been invited yet.`
-                        : "New accounts here are by invitation only."
+                    : notAllowedView
+                      ? notAllowedEmail
+                        ? `${notAllowedEmail} isn't on this service's list of approved email addresses.`
+                        : "This email address isn't approved for this service yet."
                       : passkeySignupView
                         ? "No email or password. You'll sign in with this passkey."
                         : invitation
@@ -597,14 +598,14 @@ export function ManagedAuthPanel(props: {
             onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
           />
         ) : null}
-        {notInvitedView ? (
-          <InviteOnlyNotice
+        {notAllowedView ? (
+          <EmailNotAllowedNotice
             invitation={invitation}
             onUseDifferentEmail={
               invitation
                 ? undefined
                 : () => {
-                    setNotInvitedEmail(null);
+                    setNotAllowedEmail(null);
                     setEmail("");
                     requestAnimationFrame(() =>
                       document.getElementById("managed-auth-email")?.focus(),
@@ -870,18 +871,19 @@ function SignupsPausedNotice(props: {
   );
 }
 
-function InviteOnlyNotice(props: {
+function EmailNotAllowedNotice(props: {
   invitation: { organizationName: string; targetEmail: string } | null;
   onUseDifferentEmail: (() => void) | undefined;
   onSignIn: (() => void) | undefined;
 }) {
   return (
-    <div data-testid="managed-auth-signup-not-invited">
-      <Notice tone="info" title="You need an invitation" live="polite">
-        {SIGNUP_NOT_INVITED_MESSAGE}
+    <div data-testid="managed-auth-signup-email-not-allowed">
+      <Notice tone="info" title="Ask for your email to be allowed" live="polite">
         {props.invitation
-          ? ` To join ${props.invitation.organizationName}, open the invitation link from your email.`
-          : null}
+          ? // A team invitation doesn't approve the address for the service, so
+            // sending the person back to the link they just used can't help.
+            `Only approved email addresses can create an account here, and an invitation to ${props.invitation.organizationName} doesn't approve ${props.invitation.targetEmail} on its own. Ask whoever runs this service to allow ${props.invitation.targetEmail}, then open your invitation link again.`
+          : SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE}
       </Notice>
       {props.onUseDifferentEmail ? (
         <Button type="button" className="mt-4 w-full" onClick={props.onUseDifferentEmail}>

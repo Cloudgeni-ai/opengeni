@@ -1,8 +1,8 @@
 import { AuthApiError } from "@/api";
 import {
   MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
-  MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE,
-  SIGNUP_NOT_INVITED_MESSAGE,
+  MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+  SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE,
   SIGNUPS_PAUSED_MESSAGE,
 } from "@/lib/signups-paused";
 
@@ -73,10 +73,10 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         canResendVerification: false,
       };
     }
-    if (error.code === MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE) {
+    if (error.code === MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE) {
       return {
         fields: {},
-        message: `${SIGNUP_NOT_INVITED_MESSAGE} If you already have an account, sign in instead.`,
+        message: `${SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE} If you already have an account, sign in instead.`,
         switchTo: "signin",
         canResendVerification: false,
       };

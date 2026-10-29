@@ -63,10 +63,10 @@ test("a refused social sign-up while new accounts are paused says so and points 
   expect(message).toContain("sign in with the method you used before");
 });
 
-test("a refused social sign-up on an invite-only service says who to ask", () => {
-  const message = readSignInCallbackError("?error=signup_not_invited");
-  expect(message).toContain("by invitation only");
-  expect(message).toContain("to invite you");
+test("a refused social sign-up for an unapproved address says who to ask", () => {
+  const message = readSignInCallbackError("?error=signup_email_not_allowed");
+  expect(message).toContain("Only approved email addresses");
+  expect(message).toContain("Ask whoever runs this service to allow your email address");
   expect(message).not.toContain("Try again");
 });
 

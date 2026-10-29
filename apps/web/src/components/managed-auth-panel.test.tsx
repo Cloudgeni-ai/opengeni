@@ -249,6 +249,61 @@ test("a tab opened before an operator paused sign-ups switches to the paused vie
   }
 });
 
+test("a team invitation for an unapproved address says the invitation alone can't help", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const setField = async (selector: string, value: string) => {
+    const input = host.querySelector<HTMLInputElement>(selector);
+    if (!input) return;
+    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+    await act(async () => {
+      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
+        target: { value },
+      });
+    });
+  };
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          initialMode="signup"
+          invitation={{ organizationName: "Acme Labs", targetEmail: "new@example.test" }}
+          onSubmit={async () => {
+            throw new AuthApiError(
+              403,
+              "SIGNUP_EMAIL_NOT_ALLOWED",
+              null,
+              "signup email not allowed",
+            );
+          }}
+        />,
+      ),
+    );
+    await setField("#managed-auth-name", "New Person");
+    await setField("#managed-auth-email", "new@example.test");
+    await setField('input[type="password"]', "long-enough-password");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    const notice = host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]');
+    expect(notice).not.toBeNull();
+    expect(notice!.textContent).toContain("Ask for your email to be allowed");
+    expect(notice!.textContent).toContain(
+      "an invitation to Acme Labs doesn't approve new@example.test on its own",
+    );
+    expect(notice!.textContent).toContain(
+      "Ask whoever runs this service to allow new@example.test",
+    );
+    expect(notice!.textContent).not.toContain("open the invitation link from your email");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
 function withPasskeyBrowser<T>(run: () => Promise<T>): Promise<T> {
   const scope = globalThis as unknown as Record<string, unknown>;
   const previous = scope.PublicKeyCredential;
@@ -391,7 +446,7 @@ test("offers no passkeys where the deployment or the browser can't use them", as
   }
 });
 
-test("an uninvited address on an invite-only service gets who to ask, not a retry", async () => {
+test("an address that is not approved for the service gets who to ask, not a retry", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -416,7 +471,12 @@ test("an uninvited address on an invite-only service gets who to ask, not a retr
           onSocialSubmit={async () => undefined}
           onSubmit={async (_mode, input) => {
             attempts.push(input.email);
-            throw new AuthApiError(403, "SIGNUP_NOT_INVITED", null, "signup not invited");
+            throw new AuthApiError(
+              403,
+              "SIGNUP_EMAIL_NOT_ALLOWED",
+              null,
+              "signup email not allowed",
+            );
           }}
         />,
       ),
@@ -430,9 +490,13 @@ test("an uninvited address on an invite-only service gets who to ask, not a retr
         .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
     );
     expect(attempts).toEqual(["new@example.test"]);
-    expect(host.querySelector('[data-testid="managed-auth-signup-not-invited"]')).not.toBeNull();
-    expect(host.textContent).toContain("new@example.test hasn't been invited yet.");
-    expect(host.textContent).toContain("by invitation only");
+    expect(
+      host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]'),
+    ).not.toBeNull();
+    expect(host.textContent).toContain(
+      "new@example.test isn't on this service's list of approved email addresses.",
+    );
+    expect(host.textContent).toContain("Ask whoever runs this service to allow your email address");
     expect(host.textContent).not.toContain("Couldn't create account");
     expect(host.textContent).not.toContain("try again");
     // Nothing to resubmit: no form fields, submit button or provider buttons.
@@ -441,7 +505,7 @@ test("an uninvited address on an invite-only service gets who to ask, not a retr
     expect(host.textContent).not.toContain("Google");
 
     await act(async () => button("Use a different email")!.click());
-    expect(host.querySelector('[data-testid="managed-auth-signup-not-invited"]')).toBeNull();
+    expect(host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]')).toBeNull();
     expect(host.querySelector<HTMLInputElement>("#managed-auth-email")!.value).toBe("");
     expect(host.querySelector('button[type="submit"]')).not.toBeNull();
 
@@ -458,7 +522,7 @@ test("an uninvited address on an invite-only service gets who to ask, not a retr
     );
     expect(attempts).toEqual(["new@example.test", "other@example.test"]);
     await act(async () => button("Sign in to an existing account")!.click());
-    expect(host.querySelector('[data-testid="managed-auth-signup-not-invited"]')).toBeNull();
+    expect(host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]')).toBeNull();
     expect(host.querySelector('input[autocomplete="current-password"]')).not.toBeNull();
   } finally {
     await act(async () => root.unmount());

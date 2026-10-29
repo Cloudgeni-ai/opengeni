@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE } from "@opengeni/contracts";
+import { MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE } from "@opengeni/contracts";
 import type { ManagedEmailMessage, ManagedEmailTransport } from "@opengeni/core";
 import { createDb, type DbClient } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -9,7 +9,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
 
-// An invite-only deployment (allowedUserEmails) refuses an uninvited address
+// A deployment restricted to allowedUserEmails refuses an unlisted address
 // with a typed reason, so the sign-in page can say who to ask instead of a
 // generic "try again" that can never succeed.
 
@@ -19,9 +19,9 @@ let clientAddress = 10;
 const INVITED = `invited-${crypto.randomUUID()}@example.test`;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("managed-auth-signup-not-invited");
+  shared = await acquireSharedTestDatabase("managed-auth-signup-email-not-allowed");
   if (!shared && process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
-    throw new Error("invite-only sign-up tests require PostgreSQL");
+    throw new Error("allowed-email sign-up tests require PostgreSQL");
   }
   if (shared) client = createDb(shared.appUrl, { max: 8, rlsStrategy: "force" });
 }, 900_000);
@@ -34,7 +34,7 @@ afterAll(async () => {
 const mail: ManagedEmailMessage[] = [];
 const transport: ManagedEmailTransport = {
   sender: "auth@example.test",
-  idempotency: { scope: "test:signup-not-invited", retentionSeconds: 86_400 },
+  idempotency: { scope: "test:signup-email-not-allowed", retentionSeconds: 86_400 },
   send: async (message) => {
     mail.push(message);
     return { status: "sent" as const, providerMessageId: null };
@@ -71,7 +71,7 @@ async function harness() {
     databaseUrl: shared!.appUrl,
     productAccessMode: "managed",
     publicBaseUrl: "http://opengeni.test",
-    betterAuthSecret: "managed-signup-not-invited-test-secret-at-least-32-bytes",
+    betterAuthSecret: "managed-signup-email-not-allowed-test-secret-at-least-32-bytes",
     managedAuthGoogleClientId: "google-test",
     managedAuthGoogleClientSecret: "google-secret",
     managedAuthSessionSetMode: "legacy",
@@ -103,8 +103,8 @@ async function harness() {
   };
 }
 
-describe("invite-only sign-up", () => {
-  test("email sign-up for an uninvited address is refused with a typed reason", async () => {
+describe("sign-up restricted to allowed emails", () => {
+  test("email sign-up for an unlisted address is refused with a typed reason", async () => {
     if (!shared || !client) return;
     const h = await harness();
     const email = `uninvited-${crypto.randomUUID()}@example.test`;
@@ -116,7 +116,7 @@ describe("invite-only sign-up", () => {
     });
     expect(refused.status).toBe(403);
     expect(((await refused.json()) as { code?: string }).code).toBe(
-      MANAGED_AUTH_SIGNUP_NOT_INVITED_CODE,
+      MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
     );
     expect(mail.length).toBe(mailBefore);
     expect(await authUserCount(email)).toBe(0);
@@ -130,7 +130,7 @@ describe("invite-only sign-up", () => {
     expect(await authUserCount(INVITED)).toBe(1);
   }, 120_000);
 
-  test("Google sign-up for an uninvited address redirects with signup_not_invited", async () => {
+  test("Google sign-up for an unlisted address redirects with signup_email_not_allowed", async () => {
     if (!shared || !client) return;
     const h = await harness();
     const id = crypto.randomUUID();
@@ -155,7 +155,7 @@ describe("invite-only sign-up", () => {
     expect(callback.status).toBe(302);
     const location = new URL(callback.headers.get("location")!);
     expect(location.origin).toBe("http://opengeni.test");
-    expect(location.searchParams.get("error")).toBe("signup_not_invited");
+    expect(location.searchParams.get("error")).toBe("signup_email_not_allowed");
     expect(callback.headers.getSetCookie().some((value) => value.includes("session_token="))).toBe(
       false,
     );
