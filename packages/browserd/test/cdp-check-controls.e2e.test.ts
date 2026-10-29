@@ -2,7 +2,11 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserActionCommand, BrowserObservation } from "@opengeni/contracts";
+import type {
+  BrowserActionCommand,
+  BrowserObservation,
+  InteractionSemanticNodeValue,
+} from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
 import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection } from "../src/cdp";
@@ -46,6 +50,36 @@ const SERVED = `<!doctype html><meta charset="utf-8"><title>Labels and replaceme
   onclick="const next = this.cloneNode(true); next.setAttribute('aria-checked', 'true'); this.replaceWith(next)">Re-rendered</button></p>
 <p><input type="radio" name="size" id="small" checked onclick="window.radioClicks = (window.radioClicks || 0) + 1"><label for="small">Small</label>
   <input type="radio" name="size" id="large"><label for="large">Large</label></p>`;
+
+// Checkable controls whose markup the earlier ones do not cover: a hidden
+// input beside a label that draws its box (as Fluent UI's checkbox), a label
+// wrapping a box drawn with an ARIA role, ARIA roles and states in other
+// cases or after a role the browser does not know, and a custom element that
+// sets its own role and state. Each shows in observe as a checkbox or switch.
+const MORE = `<!doctype html><meta charset="utf-8"><title>More checkable controls</title>
+<style>body { font: 14px sans-serif; margin: 20px } p { margin: 12px 0 } .box { display: inline-block; width: 16px; height: 16px; border: 1px solid; vertical-align: middle }</style>
+<p style="position: relative"><input type="checkbox" id="policies" style="position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0">
+  <label for="policies"><span class="box"></span> <span>I agree to the platform policies</span></label></p>
+<p><label><span class="box" role="checkbox" tabindex="0" aria-checked="false" id="wrapped" ${toggle}></span> Remember this device</label></p>
+<p><div role="Switch" tabindex="0" aria-checked="false" aria-label="Upper case role" id="upper" class="box" ${toggle}></div></p>
+<p><div role="custom-box checkbox" tabindex="0" aria-checked="false" aria-label="Fallback role" id="fallback" class="box" ${toggle}></div></p>
+<p><div role="checkbox" tabindex="0" aria-checked="TRUE" aria-label="Upper case state" id="caps" class="box"
+  onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked').toLowerCase() === 'true' ? 'false' : 'true')"></div></p>
+<p><x-check id="custom" tabindex="0" aria-label="Custom element" class="box"></x-check></p>
+<p><button aria-pressed="false" id="pressed" onclick="this.setAttribute('aria-pressed', String(this.getAttribute('aria-pressed') !== 'true'))">Bold</button></p>
+<script>
+customElements.define("x-check", class extends HTMLElement {
+  constructor() {
+    super();
+    this.internals = this.attachInternals();
+    this.internals.role = "checkbox";
+    this.internals.ariaChecked = "false";
+    this.addEventListener("click", () => {
+      this.internals.ariaChecked = this.internals.ariaChecked === "true" ? "false" : "true";
+    });
+  }
+});
+</script>`;
 
 e2e(
   "check and click work on checkboxes and switches as people see them",
@@ -186,7 +220,97 @@ e2e(
 type Page = {
   act: (action: BrowserActionCommand["action"]) => ReturnType<BrowserInteractionController["run"]>;
   read: (expression: string) => Promise<unknown>;
+  observe: () => Promise<BrowserObservation>;
 };
+
+e2e(
+  "check works on whatever observe shows as a checkbox, switch or radio button",
+  async () => {
+    await withPage(
+      `data:text/html;charset=utf-8,${encodeURIComponent(MORE)}`,
+      async ({ act, read, observe }) => {
+        const roles = new Map<string, string>();
+        const walk = (nodes: readonly InteractionSemanticNodeValue[]) => {
+          for (const node of nodes) {
+            if (node.name && node.role !== "text") roles.set(node.name, node.role);
+            walk(node.children ?? []);
+          }
+        };
+        const observation = await observe();
+        walk(observation.semantic?.kind === "snapshot" ? observation.semantic.roots : []);
+        expect({
+          policies: roles.get("I agree to the platform policies"),
+          upper: roles.get("Upper case role"),
+          fallback: roles.get("Fallback role"),
+          caps: roles.get("Upper case state"),
+          custom: roles.get("Custom element"),
+        }).toEqual({
+          policies: "checkbox",
+          upper: "switch",
+          fallback: "checkbox",
+          caps: "checkbox",
+          custom: "checkbox",
+        });
+        const text = (value: string) => ({ kind: "text", text: value, exact: true }) as const;
+        const role = (name: string, kind = "checkbox") =>
+          ({ kind: "role", role: kind, name, exact: true }) as const;
+        const check = async (
+          locator: Extract<BrowserActionCommand["action"], { type: "check" }>["locator"],
+          checked: boolean,
+        ) => {
+          const result = await act({ type: "check", locator, checked });
+          return result.state === "completed"
+            ? "completed"
+            : `${result.state}: ${result.error?.message}`;
+        };
+
+        // The text of a label beside a hidden input stands for its control.
+        expect(await check(text("I agree to the platform policies"), true)).toBe("completed");
+        expect(await read("policies.checked")).toBe(true);
+        expect(await check(role("I agree to the platform policies"), false)).toBe("completed");
+        expect(await read("policies.checked")).toBe(false);
+
+        // A label wrapping a box drawn with an ARIA role stands for the box.
+        expect(await check(text("Remember this device"), true)).toBe("completed");
+        expect(await read("wrapped.getAttribute('aria-checked')")).toBe("true");
+
+        // ARIA roles and states in any case, and a role after one the browser
+        // does not know.
+        expect(await check(role("Upper case role", "switch"), true)).toBe("completed");
+        expect(await read("upper.getAttribute('aria-checked')")).toBe("true");
+        expect(await check(role("Fallback role"), true)).toBe("completed");
+        expect(await read("fallback.getAttribute('aria-checked')")).toBe("true");
+        expect(await check(role("Upper case state"), false)).toBe("completed");
+        expect(await read("caps.getAttribute('aria-checked')")).toBe("false");
+
+        // A custom element's own role and state, which its markup does not show.
+        expect(await check(role("Custom element"), true)).toBe("completed");
+        expect(await read("custom.internals.ariaChecked")).toBe("true");
+        expect(await check(role("Custom element"), true)).toBe("completed");
+        expect(await read("custom.internals.ariaChecked")).toBe("true");
+
+        // Anything else is refused without a click, saying what to do instead.
+        const pressed = await act({
+          type: "check",
+          locator: { kind: "css", selector: "#pressed" },
+          checked: true,
+        });
+        expect({
+          state: pressed.state,
+          code: pressed.error?.code,
+          message: pressed.error?.message,
+        }).toEqual({
+          state: "failed",
+          code: "invalid_action",
+          message:
+            "browser locator is not a checkbox, switch or radio button; to toggle something else, click it and then look at it",
+        });
+        expect(await read("pressed.getAttribute('aria-pressed')")).toBe("false");
+      },
+    );
+  },
+  90_000,
+);
 
 async function withPage(url: string, body: (page: Page) => Promise<void>): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-check-controls-");
@@ -194,7 +318,7 @@ async function withPage(url: string, body: (page: Page) => Promise<void>): Promi
   const controllerGeneration = `controller-${randomUUID()}`;
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
-    headed: false,
+    headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
       : {}),
@@ -215,6 +339,7 @@ async function withPage(url: string, body: (page: Page) => Promise<void>): Promi
       flatten: true,
     });
     await body({
+      observe: async () => await driver.observe(start.target.id),
       act: async (action) =>
         await controller.run(command(await driver.observe(start.target.id), action)),
       read: async (expression) =>
