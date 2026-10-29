@@ -1,3 +1,4 @@
+import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import type {
   BillingBalance,
   BillingOrigin,
@@ -29,6 +30,9 @@ export async function getBillingBalance(
       decision: NonNullable<BillingBalance["promotionDecision"]>;
       enforcement: boolean;
       apiSpent: string;
+      paidFunding: string;
+      feesFromCredits: string;
+      feesThisMonth: string;
     }>(
       tx,
       sql`
@@ -40,7 +44,17 @@ export async function getBillingBalance(
         -- One pass: the balance, and what API work has spent (negative
         -- credits up to this are API debt).
         select coalesce(sum(amount_micros), 0)::text as balance,
-          greatest(0, coalesce(sum(-amount_micros) filter (where usage_origin = 'api'), 0))::text as "apiSpent"
+          greatest(0, coalesce(sum(-amount_micros) filter (where usage_origin = 'api'), 0))::text as "apiSpent",
+          -- Paid-for funding (top-ups and operator grants net of refunds and
+          -- disputes); what own-key fees drew from paid credits; this
+          -- calendar month's (UTC) own-key fees.
+          coalesce(sum(amount_micros) filter (where type in ('credit_topup', 'manual_credit_grant',
+            'credit_refund', 'credit_dispute_hold', 'credit_dispute_release')), 0)::text as "paidFunding",
+          coalesce(sum(coalesce((metadata->>'creditPaidMicros')::bigint, -amount_micros))
+            filter (where type = ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as "feesFromCredits",
+          coalesce(sum(-amount_micros) filter (where type = ${BYOK_PLATFORM_FEE_TYPE}
+            and created_at >= date_trunc('month', statement_timestamp() at time zone 'UTC') at time zone 'UTC'),
+            0)::text as "feesThisMonth"
         from ${schema.creditLedgerEntries} where account_id = ${accountId}
       )
       select
@@ -50,6 +64,9 @@ export async function getBillingBalance(
         read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
         (select balance from totals) as balance,
         (select "apiSpent" from totals) as "apiSpent",
+        (select "paidFunding" from totals) as "paidFunding",
+        (select "feesFromCredits" from totals) as "feesFromCredits",
+        (select "feesThisMonth" from totals) as "feesThisMonth",
         coalesce((select jsonb_agg(jsonb_build_object(
           'grantId', g.id,
           'label', coalesce(g.metadata->>'creditOfferLabel', 'Promotional credits'),
@@ -109,6 +126,14 @@ export async function getBillingBalance(
         creditsOutsidePlan(generalBalanceMicros, row?.plan ?? null),
         Number(row?.apiSpent ?? 0),
       ),
+      ...paidCredit(
+        creditsOutsidePlan(generalBalanceMicros, row?.plan ?? null),
+        row?.plan ?? null,
+        Number(row?.paidFunding ?? 0) - Number(row?.feesFromCredits ?? 0),
+      ),
+      ...(Number(row?.feesThisMonth ?? 0) > 0
+        ? { byokPlatformFeeMonthMicros: Number(row?.feesThisMonth) }
+        : {}),
       heldGeneralCreditMicros,
       heldCreditMicros:
         heldGeneralCreditMicros +
@@ -148,6 +173,46 @@ function apiDebt(creditsMicros: number, apiSpentMicros: number) {
 /** General credit app work may use: API debt never shrinks the plan allowance. */
 function appGeneralMicros(balance: BillingBalance): number {
   return (balance.generalBalanceMicros ?? balance.balanceMicros) + (balance.apiDebtMicros ?? 0);
+}
+
+/**
+ * Paid credit, the only funding a bring-your-own-key fee may use: a paid
+ * plan's remaining unrestricted credit, and credits up to what was paid for
+ * (top-ups, operator grants) and not already spent on fees. Free plan,
+ * signup and promotional credit never count.
+ */
+function paidCredit(
+  creditsMicros: number,
+  plan: BillingPlanBalance | null,
+  unspentPaidFundingMicros: number,
+) {
+  return {
+    paidPlanCreditMicros:
+      plan && plan.key !== "free" && !plan.creditScoped
+        ? Math.max(0, plan.creditRemainingMicros)
+        : 0,
+    paidCreditsMicros: Math.max(0, Math.min(creditsMicros, unspentPaidFundingMicros)),
+  };
+}
+
+/** What a bring-your-own-key fee may draw: paid plan credit (app use only), then paid credits. */
+export function byokFeeSpendableMicros(balance: BillingBalance, origin: BillingOrigin): number {
+  return (
+    (origin === "app" ? (balance.paidPlanCreditMicros ?? 0) : 0) + (balance.paidCreditsMicros ?? 0)
+  );
+}
+
+/** Admission read for a bring-your-own-key call: its spendable paid credit. */
+export async function getByokFeeSpendableBalance(
+  db: Database,
+  accountId: string,
+  origin?: BillingOrigin | null,
+): Promise<CreditBalanceSnapshot> {
+  const balance = await getBillingBalance(db, accountId);
+  return {
+    ...balance,
+    balanceMicros: byokFeeSpendableMicros(balance, chargeBillingOrigin(origin)),
+  };
 }
 
 /** Credits only: what API-origin work may spend (never plan or promotional credit). */

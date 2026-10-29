@@ -1,16 +1,19 @@
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
+  BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
   type BillingOrigin,
   type EntitlementsPort,
 } from "@opengeni/contracts";
 import {
   chargeBillingOrigin,
   checkWorkspaceAllowance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
+import { byokPlatformFeeActive } from "./byok-platform-fee";
 
 export type ModelCallAdmissionDenial =
   | "insufficient_credits"
@@ -26,6 +29,8 @@ export type ModelCallAdmission =
       message: string;
       /** API work found no credits: plan credit never pays for it. */
       apiCreditsRequired?: true;
+      /** The person's own key needs paid credit for its platform fee. */
+      byokPaidCreditRequired?: true;
     };
 
 /**
@@ -49,11 +54,24 @@ export async function admitModelCall(
     subjectId: string | null;
     /** Who pays: API work needs credits; plan credit never pays for it. */
     billingOrigin?: BillingOrigin | null;
+    /** Served by the person's own key or subscription (pays the platform fee). */
+    byok?: boolean;
   },
 ): Promise<ModelCallAdmission> {
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
+  if (!input.chargesOpenGeniCredits && input.byok && byokPlatformFeeActive(settings)) {
+    const balance = await getByokFeeSpendableBalance(db, input.accountId, input.billingOrigin);
+    if (balance.balanceMicros <= 0) {
+      return {
+        allowed: false,
+        denial: "insufficient_credits",
+        message: BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
+        byokPaidCreditRequired: true,
+      };
+    }
+  }
   if (input.chargesOpenGeniCredits && metered) {
     if (services.entitlements) {
       const decision = await services.entitlements.admitRun({

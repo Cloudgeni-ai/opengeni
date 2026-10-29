@@ -884,6 +884,8 @@ export async function recordModelUsageAndDebitCredits(
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
+    /** Served by the person's own key or subscription; omitted resolves from the model. */
+    byok?: boolean;
     creditPolicyRevision?: number | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
@@ -906,6 +908,7 @@ export async function recordModelUsageAndDebitCredits(
     model: input.model,
     chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
     countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    ...(input.byok !== undefined ? { byok: input.byok } : {}),
     creditPolicyRevision: input.creditPolicyRevision,
     ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
     normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),

@@ -38,3 +38,12 @@ export const UPGRADE_PLAN_ACTION = Object.freeze({
   type: "upgrade_plan",
   href: "/billing",
 } as const);
+/**
+ * Bring-your-own-key use (the person's own provider keys, or their own
+ * Claude, Codex or SuperGrok subscription) pays a platform fee on the
+ * list-price equivalent of each call. The fee is payable only from paid
+ * credit: a paid plan's credit (app use) and credits that were paid for.
+ */
+export const BYOK_PLATFORM_FEE_TYPE = "byok_platform_fee";
+export const BYOK_PAID_CREDIT_REQUIRED_CODE = "byok_paid_credit_required";
+export const BYOK_PAID_CREDIT_REQUIRED_MESSAGE = "Add credits to use your own key.";

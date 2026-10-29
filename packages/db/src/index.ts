@@ -106,8 +106,10 @@ import {
 } from "./credit-balances";
 export {
   apiSpendableCreditMicros,
+  byokFeeSpendableMicros,
   chargeBillingOrigin,
   getBillingBalance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
   VOICE_CREDIT_USAGE,
@@ -305,7 +307,11 @@ export {
 } from "./accepted-subscription-authority";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
-import { storedBillingOrigin, type BillingOrigin } from "@opengeni/contracts";
+import {
+  BYOK_PLATFORM_FEE_TYPE,
+  storedBillingOrigin,
+  type BillingOrigin,
+} from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
@@ -6900,10 +6906,19 @@ export async function applyCreditDebitAfterUse(
     usage?: CreditUsage;
     /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
     usageOrigin?: BillingOrigin;
+    /**
+     * A bring-your-own-key platform fee: payable only from paid credit. Its
+     * receipt records how much a paid plan's credit absorbed (app use) and
+     * how much came from paid-for credits, which later fees cannot reuse.
+     */
+    byokPlatformFee?: boolean;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  if (input.byokPlatformFee && (input.type !== BYOK_PLATFORM_FEE_TYPE || input.usage)) {
+    throw new Error("a bring-your-own-key fee is a general byok_platform_fee debit");
   }
   return await withRlsContext(
     db,
@@ -6924,6 +6939,23 @@ export async function applyCreditDebitAfterUse(
           input.usage,
         );
       }
+      let feeFunding: { planPaidMicros: number; creditPaidMicros: number } | null = null;
+      if (input.byokPlatformFee) {
+        // A paid plan's credit pays first (it counts the fee as period usage),
+        // then paid-for credits. Free plan credit never counts the fee.
+        const before = await getBillingBalance(
+          scopedDb,
+          input.accountId,
+          undefined,
+          settledAt,
+          true,
+        );
+        const planPaidMicros =
+          usageOrigin === "app"
+            ? Math.min(input.amountMicros, before.paidPlanCreditMicros ?? 0)
+            : 0;
+        feeFunding = { planPaidMicros, creditPaidMicros: input.amountMicros - planPaidMicros };
+      }
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6935,7 +6967,7 @@ export async function applyCreditDebitAfterUse(
           sourceId: input.sourceId,
           usageOrigin,
           idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
+          metadata: { ...input.metadata, ...feeFunding },
           occurredAt: input.occurredAt ?? new Date(),
           createdAt: sql`${settledAt}::timestamptz`,
         })
