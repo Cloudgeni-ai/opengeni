@@ -92,20 +92,26 @@ test("folders disclose four at a time independently of their cached pages", asyn
   expect(pageErrors).toEqual([]);
 }, 30_000);
 
-test("production project menu renames, guards saves, and preserves failed drafts", async () => {
+test("the project menu's Edit project renames, guards saves, and preserves failed drafts", async () => {
   const open = async (name: string) => {
     await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
     await capture("project-rename-menu");
-    await page.getByRole("menuitem", { name: "Rename project", exact: true }).click();
+    const edit = page.getByRole("menuitem", { name: "Edit project…", exact: true });
+    await edit.waitFor();
+    // Edit project is the one way to rename; there is no separate item.
+    expect(await page.getByRole("menuitem", { name: "Rename project" }).count()).toBe(0);
+    await edit.click();
   };
   await open("Website redesign");
-  const dialog = page.getByRole("dialog", { name: "Rename project" });
-  const input = dialog.getByRole("textbox");
-  const submit = dialog.getByRole("button", { name: "Rename", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Edit project" });
+  const input = dialog.getByRole("textbox", { name: "Name" });
+  const submit = dialog.getByRole("button", { name: "Save", exact: true });
   expect(await input.inputValue()).toBe("Website redesign");
   await capture("project-rename-dialog");
   await input.fill("   ");
-  expect(await submit.isDisabled()).toBe(true);
+  await submit.click();
+  await dialog.getByText("Give it a name.").waitFor();
+  expect(await dialog.isVisible()).toBe(true);
   await input.fill("Website redesign");
   await submit.click();
   await dialog.waitFor({ state: "hidden" });
@@ -117,7 +123,7 @@ test("production project menu renames, guards saves, and preserves failed drafts
     (window as any).renameQa.fail = true;
   });
   await submit.click();
-  await page.getByText("Couldn't rename the project. The name may already be in use.").waitFor();
+  await page.getByText("Couldn't save the project. The name may already be in use.").waitFor();
   expect(await input.inputValue()).toBe("Product launch");
   expect(await dialog.isVisible()).toBe(true);
   await capture("project-rename-error");
@@ -126,7 +132,7 @@ test("production project menu renames, guards saves, and preserves failed drafts
     (window as any).renameQa.delay = 1000;
   });
   await submit.click();
-  expect(await input.isDisabled()).toBe(true);
+  await dialog.locator("form[aria-busy=true]").waitFor();
   await page.keyboard.press("Escape");
   expect(await dialog.isVisible()).toBe(true);
   await dialog.waitFor({ state: "hidden" });
