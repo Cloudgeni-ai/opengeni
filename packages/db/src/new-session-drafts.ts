@@ -563,17 +563,30 @@ export async function assertExactNewSessionDraftInTransaction(
   await lockExactNewSessionDraft(db, input);
 }
 
-async function workspacePlacementDefaults(db: Database, workspaceId: string) {
+async function workspacePlacementDefaults(db: Database, workspaceId: string, subjectId: string) {
   const [row] = await db
     .select({ defaultRigId: schema.workspaces.defaultRigId, settings: schema.workspaces.settings })
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
+  // The caller's own default ("Your default machine"). The seed runs with the
+  // subject's RLS context, so only their own row is visible.
+  const [memberRow] = await db
+    .select({ subjectId: schema.workspaceMemberExecutionDefaults.subjectId })
+    .from(schema.workspaceMemberExecutionDefaults)
+    .where(
+      and(
+        eq(schema.workspaceMemberExecutionDefaults.workspaceId, workspaceId),
+        eq(schema.workspaceMemberExecutionDefaults.subjectId, subjectId),
+      ),
+    )
+    .limit(1);
   return {
     hasDefaultRig: Boolean(row?.defaultRigId),
     // Even a malformed configured value must not silently restore a different
     // computer. Session creation validates the configured target fail-closed.
-    hasDefaultExecutionTarget: row?.settings?.defaultExecutionTarget != null,
+    hasDefaultExecutionTarget:
+      row?.settings?.defaultExecutionTarget != null || memberRow !== undefined,
   };
 }
 
@@ -614,11 +627,11 @@ export async function seedNewSessionDraftInTransaction(
     ? input.acceptedSelection.channelId
     : newSessionDraftSelectedProjectChannelId(current);
   // A Sandbox Environment choice replaces the workspace default and the
-  // default Variable Sets it carries. When the workspace has a default, that
-  // choice covers only the session it was made for: the next form starts on
-  // the workspace default again. Without a default nothing is replaced, so the
-  // choice is remembered like any other selection.
-  const defaults = await workspacePlacementDefaults(db, input.workspaceId);
+  // default Variable Sets it carries. When the workspace or the person has a
+  // default, that choice covers only the session it was made for: the next
+  // form starts on the default again. Without a default nothing is replaced,
+  // so the choice is remembered like any other selection.
+  const defaults = await workspacePlacementDefaults(db, input.workspaceId, input.subjectId);
   const rememberCompute = !defaults.hasDefaultExecutionTarget;
   const rememberRig =
     typeof options.rigId === "string" && options.rigId.length > 0 && !defaults.hasDefaultRig;

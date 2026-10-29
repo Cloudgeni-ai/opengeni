@@ -3,7 +3,9 @@ import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websoc
 import {
   createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
+  memberExecutionTargetUsable,
   realtimeVoiceOfferProblem,
+  resolveMemberExecutionDefault,
   MissingPermissionRefusal,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
@@ -20,15 +22,19 @@ import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@ope
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
   machineCanBeWorkspaceDefault,
+  MemberDefaultExecutionTarget,
   resolveRealtimeVoiceSettings,
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
+  UpdateMemberDefaultExecutionTargetRequest,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
 import {
+  clearWorkspaceMemberExecutionDefault,
   forgetWorkspaceRecordingVoices,
   getWorkspaceConnectionModelRestrictions,
+  setWorkspaceMemberExecutionDefault,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -625,6 +631,43 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+  });
+
+  // "Your default machine": the caller's own placement for the new chats they
+  // start here, ahead of the workspace default. Personal: nobody else reads it.
+  app.get("/v1/workspaces/:workspaceId/my-default-execution-target", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const resolved = await resolveMemberExecutionDefault(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
+    return c.json(MemberDefaultExecutionTarget.parse(resolved));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/my-default-execution-target", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const parsed = parseRequestBody(UpdateMemberDefaultExecutionTargetRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid default machine",
+    });
+    const access = { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId };
+    if (parsed.target === null) {
+      await clearWorkspaceMemberExecutionDefault(deps.db, access);
+      return c.json(MemberDefaultExecutionTarget.parse({ target: null, usable: false }));
+    }
+    if (!(await memberExecutionTargetUsable(deps.db, deps.settings, access, parsed.target))) {
+      throw new HTTPException(422, {
+        message:
+          parsed.target.kind === "managed"
+            ? "This deployment does not provide a managed sandbox."
+            : "Choose an available Connected Machine you can use.",
+      });
+    }
+    await setWorkspaceMemberExecutionDefault(deps.db, { ...access, target: parsed.target });
+    return c.json(MemberDefaultExecutionTarget.parse({ target: parsed.target, usable: true }));
   });
 
   // Per-workspace model/provider availability policy (the HARD blocker over

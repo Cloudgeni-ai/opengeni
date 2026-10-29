@@ -163,6 +163,7 @@ export * from "./domain/slack-bot";
 export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";
 export * from "./domain/workspace-members";
+export * from "./domain/member-execution-defaults";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";

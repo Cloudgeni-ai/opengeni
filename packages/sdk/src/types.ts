@@ -6240,6 +6240,17 @@ export type WorkspaceDefaultExecutionTarget =
   | { kind: "managed" }
   | { kind: "machine"; targetSandboxId: string };
 
+/**
+ * `GET/PUT /v1/workspaces/:id/my-default-execution-target`: the caller's own
+ * placement for the new chats they start in the workspace ("Your default
+ * machine"). Null follows the workspace default. `usable` is false when the
+ * saved machine is no longer available to them.
+ */
+export type MemberDefaultExecutionTarget = {
+  target: WorkspaceDefaultExecutionTarget | null;
+  usable: boolean;
+};
+
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
   modelCompactionThresholds?: unknown;
@@ -7259,6 +7270,12 @@ export type NewSessionDraft = {
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
+  /**
+   * Read-only: the caller's own default placement for new chats ("Your default
+   * machine") when usable now. A fresh form starts on it ahead of the
+   * workspace default. Older servers omit it.
+   */
+  memberDefaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   updatedAt: string | null;
 };
 
@@ -7574,7 +7591,7 @@ export type SubmitComposerDraftResponse = {
 
 export type SaveNewSessionDraftRequest = Omit<
   NewSessionDraft,
-  "revision" | "selectionHistory" | "updatedAt"
+  "revision" | "selectionHistory" | "updatedAt" | "memberDefaultExecutionTarget"
 > & {
   expectedRevision: number;
 };
