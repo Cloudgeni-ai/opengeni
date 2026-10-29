@@ -192,7 +192,9 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
       keywords: ["install", "server url", "claude code", "cursor", "codex", "coding agents"],
     },
   ],
-  "organization:billing": [{ label: "Buy credits", keywords: ["top up", "payment"] }],
+  "organization:billing": [
+    { label: "Add credits", keywords: ["buy credits", "top up", "payment"] },
+  ],
   "organization:developer": [
     {
       label: "Create organization API key",

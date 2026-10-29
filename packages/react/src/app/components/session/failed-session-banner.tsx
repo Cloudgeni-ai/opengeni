@@ -5,7 +5,8 @@ import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
 import { failedSessionCopy } from "../../lib/failed-session-copy";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
-import type { CreditRefusalKind } from "../../../lib/format";
+import { creditRefusalHeadline, type CreditRefusalKind } from "../../../lib/format";
+import { t } from "../../lib/console-text";
 import { analyticsAction } from "../../../ui/analytics-actions";
 import {
   noteTurnFailureAction,
@@ -127,7 +128,10 @@ export function FailedSessionBanner({
           subscriptions,
           canChooseModel: hasModelPicker ?? canChooseModel,
         })
-      : reason;
+      : creditRefusal && !offerCredits
+        ? // Without billing access the one fix is asking an owner.
+          creditRefusalHeadline(t, creditRefusal, false)
+        : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -313,6 +317,7 @@ function UpgradeLink({ workspaceId }: { workspaceId: string }) {
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
         search={{ section: "billing" }}
+        onClick={() => noteTurnFailureAction("upgrade_plan")}
       >
         Upgrade to Pro
       </Link>

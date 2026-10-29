@@ -3,6 +3,7 @@ import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/s
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { CreditRefusalNotice } from "@opengeni/react/app/components/credits/credit-refusal-notice";
+import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
 import { SubscriptionPlans } from "@/components/organization/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "@/components/organization/plan-seats";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
@@ -173,6 +174,24 @@ export function SubscriptionPlansPreview() {
                       canBuyCredits
                       canConnectModel={false}
                       onAddCredits={() => setMessage("Preview only. Add credits opens Stripe.")}
+                    />
+                  ))}
+                  {/* A chat that stopped on a refusal, for an owner and for a member. */}
+                  {(
+                    [
+                      ["byok_upgrade_required", true],
+                      ["byok_upgrade_required", false],
+                      ["api_credits_required", true],
+                      ["api_credits_required", false],
+                    ] as const
+                  ).map(([code, owner]) => (
+                    <FailedSessionBanner
+                      key={`${code}-${owner}`}
+                      failure={{ failedAt: null, consecutiveRecoveryCount: null, reason: null }}
+                      creditExhausted
+                      creditRefusal={code}
+                      workspaceId="00000000-0000-4000-8000-000000000003"
+                      canBuyCredits={owner}
                     />
                   ))}
                   {message ? (

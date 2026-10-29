@@ -291,11 +291,38 @@ test("a stop between model calls names its refusal from the turn end, not the fa
   const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
   expect(row().textContent).toContain("Add credits to use your own key.");
-  expect(row().textContent).not.toContain("Switch to a model");
+  expect(row().textContent).not.toContain("Free model");
   expect(labels()).toEqual(["Add credits"]);
   await act(async () => root!.render(banner("byok_upgrade_required")));
   expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
   expect(labels()).toEqual(["Upgrade to Pro"]);
+});
+
+test("a member who can't fix a refusal is told to ask an owner, with no action", async () => {
+  const banner = (creditRefusal: "byok_upgrade_required" | "api_credits_required") => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: null }}
+      creditExhausted
+      creditRefusal={creditRefusal}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits={false}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("byok_upgrade_required"));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  expect(row().textContent).not.toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual([]);
+  await act(async () => root!.render(banner("api_credits_required")));
+  expect(row().textContent).toContain(
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  );
+  expect(labels()).toEqual([]);
 });
 
 test("the free model keeps ordinary wording for failures other than its daily limit", async () => {

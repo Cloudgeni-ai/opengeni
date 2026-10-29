@@ -2058,8 +2058,30 @@ export const englishMessages = {
   "interactiveAnswer.viewAs": "View as",
   "interactiveAnswer.writing": "Writing options…",
   "interactiveAnswer.yes": "Yes",
+  "lib.format.apiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+  "lib.format.apiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.apiCreditsRequiredHeadline":
+    "API usage uses credits, not your plan credit. Add credits to continue.",
+  "lib.format.byokPaidCreditRequired":
+    "Add credits to use your own key. The conversation is preserved.",
+  "lib.format.byokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.byokPaidCreditRequiredHeadline": "Add credits to use your own key.",
+  "lib.format.byokUpgradeRequired":
+    "Upgrade to Pro to use your own key. The conversation is preserved.",
+  "lib.format.byokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.byokUpgradeRequiredHeadline": "Upgrade to Pro to use your own key.",
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
+  "lib.format.composerApiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequired":
+    "Add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequired":
+    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -2069,21 +2091,6 @@ export const englishMessages = {
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
-  "lib.format.byokUpgradeRequired":
-    "Upgrade to Pro to use your own key. The conversation is preserved.",
-  "lib.format.byokPaidCreditRequired":
-    "Add credits to use your own key. The conversation is preserved.",
-  "lib.format.apiCreditsRequired":
-    "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
-  "lib.format.byokUpgradeRequiredHeadline": "Upgrade to Pro to use your own key.",
-  "lib.format.byokPaidCreditRequiredHeadline": "Add credits to use your own key.",
-  "lib.format.apiCreditsRequiredHeadline": "API usage uses credits, not your plan credit.",
-  "lib.format.composerByokUpgradeRequired":
-    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
-  "lib.format.composerByokPaidCreditRequired":
-    "Add credits to use your own key. Your message and attachments are saved.",
-  "lib.format.composerApiCreditsRequired":
-    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -5325,7 +5332,7 @@ export const englishMessages = {
   "timeline.patchApplyCommand.tryAgain": "Try again",
   "timeline.paymentPage.balanceNow": "Balance {balance}",
   "timeline.paymentPage.billingPortal": "Billing",
-  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.buyCredits": "Add credits",
   "timeline.paymentPage.continueToPayment": "Continue to payment",
   "timeline.paymentPage.checkFailed":
     "Couldn't check your payment from here. If you paid, your credits still arrive.",
