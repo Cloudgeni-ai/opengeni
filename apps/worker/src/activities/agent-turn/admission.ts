@@ -474,7 +474,6 @@ export async function ensureRunAllowed(
   } else if (
     !chargesOpenGeniCredits &&
     byok &&
-    !entitlements &&
     byokPlatformFeeActive(settings, accountId)
   ) {
     // The person's own key pays a platform fee, payable only from paid credit.
