@@ -112,6 +112,27 @@ export function builtinAutomationTemplates(t: OpenGeniText): AutomationTemplate[
       ],
     },
     {
+      id: "automation-failed",
+      name: t("automations.template.automationFailed.name"),
+      description: t("automations.template.automationFailed.description"),
+      instructions: t("automations.template.automationFailed.instructions"),
+      when: t("automations.template.automationFailed.when"),
+      schedule: null,
+      triggers: [
+        {
+          source: { kind: "workspace" },
+          eventTypes: ["turn.failed"],
+          // Failed automation chats are Opengeni's own events: only chats an
+          // automation ran, and only the person's own automations.
+          includeOwnEvents: true,
+          conditions: [
+            { field: "data.automationRunId", op: "exists" },
+            { field: "data.startedByYou", op: "equals", value: true },
+          ],
+        },
+      ],
+    },
+    {
       id: "issue-triage",
       name: t("automations.template.issueTriage.name"),
       description: t("automations.template.issueTriage.description"),

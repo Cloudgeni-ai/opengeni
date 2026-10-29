@@ -853,6 +853,12 @@ const SettingsSchema = z.object({
   // pauses event dispatch; stored sources, triggers and events are kept.
   // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
   eventTriggersEnabled: EnvBoolean.default(false),
+  // The deepest chain of automations waking each other through Opengeni's own
+  // events: a run is one level deeper than the deepest event it carries, and
+  // events that would start a deeper run are left out. It stops accidental
+  // loops; it is not meant to be tuned.
+  // Env: OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH.
+  automationMaxChainDepth: z.coerce.number().int().min(1).max(100).default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -5795,6 +5801,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
+    automationMaxChainDepth: optional("OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),

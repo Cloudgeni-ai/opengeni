@@ -605,6 +605,11 @@ export type StoredEventInput = {
   data: Record<string, unknown>;
   dataTruncated: boolean;
   gapBefore: boolean;
+  /**
+   * The chain depth of the automation run that caused the event, or 0 when
+   * none did (every event from another app). Migration 1100.
+   */
+  chainDepth?: number;
 };
 
 /** The parts of a stored trigger a matcher reads. */
@@ -757,6 +762,7 @@ export async function recordEventDeliveryInTransaction(
         data: event.data,
         dataTruncated: event.dataTruncated,
         gapBefore: event.gapBefore,
+        chainDepth: Math.max(0, Math.min(32_767, Math.floor(event.chainDepth ?? 0))),
         // The write time, not the transaction's: events of one delivery
         // then list in the order the source sent them.
         receivedAt: sql`clock_timestamp()`,
@@ -1591,13 +1597,36 @@ export type EventTriggerDispatch = {
   start: EventOccurrenceToStart[];
   /** The storm guard engaged for this automation; tell its owner once. */
   throttleNotice: EventThrottleNotice | null;
+  /** The chain limit left events out; tell the owner once each time it engages. */
+  chainLimitNotice: EventChainLimitNotice | null;
 };
+
+/** Default deepest chain of automations waking each other; see the design doc. */
+export const EVENT_AUTOMATION_MAX_CHAIN_DEPTH = 3;
+
+/** Events left out of a run because it would have been deeper than the chain limit. */
+export type EventChainLimitNotice = {
+  taskId: string;
+  taskName: string;
+  /** The chat the owner opens from the notice. */
+  sessionId: string;
+  maxChainDepth: number;
+  limitedEvents: number;
+};
+
+/** The producer key of the skipped run that records one engagement of the chain limit. */
+export function eventChainLimitProducerKey(firstInboxId: string): string {
+  return `scheduled-task-event-chain-limit:${firstInboxId}`;
+}
 
 type DispatchFacts = {
   account_id: string;
   task_status: string;
   task_deleted: boolean;
   task_name: string;
+  authority_revision: number;
+  execution_digest: string | null;
+  chain_limit_engaged: boolean;
   session_id: string | null;
   max_runs_per_hour: number;
   once: boolean;
@@ -1618,18 +1647,24 @@ function byteLength(value: unknown): number {
  * One dispatcher step for one automation, under its settings lock. Pending
  * inbox events become one occurrence unless the storm guard holds them back,
  * the automation is not runnable (they are skipped), or a once-automation has
- * already run (it completes instead). Occurrences whose start failed earlier
- * are returned again. A concurrent dispatcher holding the lock makes this a
- * no-op.
+ * already run (it completes instead). Events that would make the run deeper
+ * than `maxChainDepth` are left out and skipped, with a skipped run receipt
+ * (reason `chain_limit`). Occurrences whose start failed earlier are returned
+ * again. A concurrent dispatcher holding the lock makes this a no-op.
  */
 export async function claimEventTriggerDispatch(
   db: Database,
   workspaceId: string,
   taskId: string,
+  maxChainDepth: number = EVENT_AUTOMATION_MAX_CHAIN_DEPTH,
 ): Promise<EventTriggerDispatch> {
   return await withWorkspaceRls(db, workspaceId, async (scoped) =>
     scoped.transaction(async (tx) => {
-      const none: EventTriggerDispatch = { start: [], throttleNotice: null };
+      const none: EventTriggerDispatch = {
+        start: [],
+        throttleNotice: null,
+        chainLimitNotice: null,
+      };
       const locked = await rawRows<{ task_id: string }>(
         tx,
         sql`select task_id from scheduled_task_event_settings
@@ -1642,6 +1677,11 @@ export async function claimEventTriggerDispatch(
         tx,
         sql`select task.account_id, task.status as task_status,
             task.deleted_at is not null as task_deleted, task.name as task_name,
+            task.authority_revision, task.execution_digest,
+            coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
+              from scheduled_task_runs run
+              where run.workspace_id = task.workspace_id and run.task_id = task.id
+              order by run.created_at desc, run.id desc limit 1), false) as chain_limit_engaged,
             coalesce(task.reusable_session_id, (
               select run.session_id from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
@@ -1717,9 +1757,9 @@ export async function claimEventTriggerDispatch(
           );
         }
         await clearDue();
-        return { start: retry, throttleNotice: null };
+        return { start: retry, throttleNotice: null, chainLimitNotice: null };
       }
-      const pending = await tx
+      const queued = await tx
         .select({
           inbox: schema.scheduledTaskEventInbox,
           event: {
@@ -1733,6 +1773,7 @@ export async function claimEventTriggerDispatch(
             actorKind: schema.inboundEvents.actorKind,
             actorName: schema.inboundEvents.actorName,
             gapBefore: schema.inboundEvents.gapBefore,
+            chainDepth: schema.inboundEvents.chainDepth,
           },
           sourceKind: schema.eventSources.kind,
         })
@@ -1750,9 +1791,47 @@ export async function claimEventTriggerDispatch(
           ),
         )
         .orderBy(schema.scheduledTaskEventInbox.occurredAt, schema.scheduledTaskEventInbox.id);
+      if (queued.length === 0) {
+        await clearDue();
+        return { start: retry, throttleNotice: null, chainLimitNotice: null };
+      }
+      // A run is one level deeper than its deepest event: leave out the
+      // events that would take it past the limit, before the storm guard
+      // counts anything, so a loop of automations stops here.
+      const limited = queued.filter((entry) => entry.event.chainDepth >= maxChainDepth);
+      const pending = queued.filter((entry) => entry.event.chainDepth < maxChainDepth);
+      let chainLimitNotice: EventChainLimitNotice | null = null;
+      if (limited.length > 0) {
+        await tx
+          .update(schema.scheduledTaskEventInbox)
+          .set({ status: "skipped" })
+          .where(
+            inArray(
+              schema.scheduledTaskEventInbox.id,
+              limited.map((entry) => entry.inbox.id),
+            ),
+          );
+        const recorded = await recordChainLimitReceipt(tx, {
+          accountId: facts.account_id,
+          workspaceId,
+          taskId,
+          authorityRevision: facts.authority_revision,
+          executionDigest: facts.execution_digest,
+          producerKey: eventChainLimitProducerKey(limited[0]!.inbox.id),
+        });
+        if (recorded && !facts.chain_limit_engaged && facts.session_id !== null) {
+          chainLimitNotice = {
+            taskId,
+            taskName: facts.task_name,
+            sessionId: facts.session_id,
+            maxChainDepth,
+            limitedEvents: limited.length,
+          };
+        }
+      }
       if (pending.length === 0) {
         await clearDue();
-        return { start: retry, throttleNotice: null };
+        return { start: retry, throttleNotice: null, chainLimitNotice };
       }
       if (facts.recent_occurrences >= facts.max_runs_per_hour) {
         const oldest = facts.oldest_recent_occurrence_at
@@ -1778,6 +1857,7 @@ export async function claimEventTriggerDispatch(
                 resumesAt,
               }
             : null,
+          chainLimitNotice,
         };
       }
       const summaries: InboundEventSummary[] = [];
@@ -1847,9 +1927,48 @@ export async function claimEventTriggerDispatch(
           },
         ],
         throttleNotice: null,
+        chainLimitNotice,
       };
     }),
   );
+}
+
+/**
+ * The run history's record that the chain limit left events out: a skipped
+ * run with reason `chain_limit`, never started. Recorded in a savepoint, so
+ * an automation the refusal guard won't take (one that changed meanwhile)
+ * still dispatches; returns whether it was recorded.
+ */
+async function recordChainLimitReceipt(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    authorityRevision: number;
+    executionDigest: string | null;
+    producerKey: string;
+  },
+): Promise<boolean> {
+  try {
+    return await tx.transaction(async (savepoint) => {
+      const rows = await rawRows<{ id: string }>(
+        savepoint,
+        sql`insert into scheduled_task_runs (account_id, workspace_id, task_id,
+            task_authority_revision, task_execution_digest, trigger_type, producer_key,
+            fired_at, completed_at, action_kind, status, error, admission_refusal)
+          values (${input.accountId}, ${input.workspaceId}, ${input.taskId},
+            ${input.authorityRevision}, ${input.executionDigest}, 'event', ${input.producerKey},
+            now(), now(), 'agent_turn', 'skipped', 'chain_limit',
+            '{"version":1,"reason":"chain_limit","retryable":true}'::jsonb)
+          on conflict do nothing
+          returning id`,
+      );
+      return rows.length > 0;
+    });
+  } catch {
+    return false;
+  }
 }
 
 export async function markEventOccurrenceStarted(

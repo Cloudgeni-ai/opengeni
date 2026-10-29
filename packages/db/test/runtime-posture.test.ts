@@ -1808,6 +1808,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1100 workspace activity facts: read and insert, FORCE RLS; written
+          // by invoker-rights triggers on chat events and usage notices.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1959,7 +1966,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
         1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
-        1; // 1090 personal default machines: full-DML, FORCE-RLS.
+        1 + // 1090 personal default machines: full-DML, FORCE-RLS.
+        1; // 1100 workspace activity facts: read and insert, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

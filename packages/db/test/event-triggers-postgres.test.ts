@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
+import type postgres from "postgres";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -8,6 +9,7 @@ import {
   type ScheduledTask,
 } from "@opengeni/contracts";
 import {
+  appendSessionEvents,
   bootstrapWorkspace,
   bindGitHubInstallationRepositories,
   claimEventTriggerDispatch,
@@ -15,7 +17,10 @@ import {
   createEventSource,
   createScheduledTask,
   createScheduledTaskRun,
+  createSession,
+  createWorkspace,
   deleteEventSource,
+  enqueueSessionTurn,
   eventOccurrenceProducerKey,
   findAppEventSource,
   getEventOccurrenceForRun,
@@ -25,13 +30,16 @@ import {
   getScheduledTaskEvents,
   getScheduledTaskRunEventOccurrences,
   githubInstallationRouteKey,
+  grantWorkspaceAccess,
   listDueEventTriggerTasks,
   listEventDeliveries,
   listEventSources,
   listGitHubEventRoutes,
   listInboundEvents,
+  listWorkspaceActivityEventsForSource,
   markEventOccurrenceStarted,
   markScheduledTaskRunFailedIfQueued,
+  pruneEventIntake,
   recordEventDelivery,
   recordEventOccurrenceStartFailure,
   rearmScheduledTaskEvents,
@@ -562,6 +570,7 @@ describe("dispatch", () => {
     expect(await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id)).toEqual({
       start: [],
       throttleNotice: null,
+      chainLimitNotice: null,
     });
     const occurrence = await getEventOccurrenceForRun(client.db, space.workspaceId, occurrenceId);
     expect(occurrence?.eventCount).toBe(2);
@@ -797,6 +806,7 @@ describe("dispatch", () => {
     expect(await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id)).toEqual({
       start: [],
       throttleNotice: null,
+      chainLimitNotice: null,
     });
     expect(await inboxStatuses(space, automation.id)).toEqual(["skipped"]);
   });
@@ -833,5 +843,384 @@ describe("dispatch", () => {
     expect((await getScheduledTaskEvents(client.db, space.workspaceId, [automation.id])).size).toBe(
       0,
     );
+  });
+});
+
+describe("Opengeni's own events (migration 1100)", () => {
+  /** Test setup past the lifecycle guards: links that real runs make through their own paths. */
+  async function force(write: (tx: postgres.TransactionSql) => Promise<unknown>) {
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await write(tx);
+    });
+  }
+
+  async function member(space: Space) {
+    const subjectId = `member-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      subjectId,
+      permissions: ["sessions:read", "sessions:create"],
+    });
+    return subjectId;
+  }
+
+  async function chat(
+    space: Space,
+    owner: string,
+    visibility: "user_private" | "workspace_shared" = "user_private",
+  ) {
+    const session = await createSession(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      initialMessage: "Weekly report",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      visibility: "workspace_shared",
+      subjectId: owner,
+      createdBy: { kind: "subject", subjectId: owner },
+    } as Parameters<typeof createSession>[1]);
+    const turn = await enqueueSessionTurn(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      sessionId: session.id,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${session.id}`,
+      source: "api",
+      prompt: "Write the weekly report",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "service", subjectId: "host" },
+    });
+    // The person's own message, past the managed-human checks a real prompt passes.
+    await force(
+      (
+        tx,
+      ) => tx`update session_turns set initiator_kind = 'subject', initiator_subject_id = ${owner}
+        where id = ${turn.id}`,
+    );
+    if (visibility === "user_private") {
+      // Only me creation runs through organization lifecycle checks; the
+      // visibility is what matters here, so set it directly past them.
+      const personal = await createWorkspace(client.db, {
+        accountId: space.accountId,
+        name: "Personal",
+      });
+      await force(async (tx) => {
+        const [membership] = await tx<{ id: string }[]>`
+          insert into organization_memberships
+            (account_id, subject_id, role, status, personal_workspace_id, authorization_revision)
+          values (${space.accountId}, ${owner}, 'member', 'active', ${personal.id}, 1)
+          on conflict (account_id, subject_id) do update set status = 'active'
+          returning id`;
+        await tx`update sessions set visibility = 'user_private', owner_subject_id = ${owner},
+            owner_organization_membership_id = ${membership!.id}
+          where id = ${session.id}`;
+      });
+    }
+    return { sessionId: session.id, turnId: turn.id };
+  }
+
+  type Chat = Awaited<ReturnType<typeof chat>>;
+
+  async function listen(space: Space, owner = space.subjectId) {
+    const { source } = await createEventSource(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      createdBySubjectId: owner,
+      kind: "workspace",
+      name: "This workspace",
+      ownerSubjectId: owner,
+      visibility: "private",
+    });
+    return source;
+  }
+
+  async function append(target: Chat, space: Space, type: string, payload: unknown = {}) {
+    return appendSessionEvents(client.db, space.workspaceId, target.sessionId, [
+      { type: type as never, turnId: target.turnId, payload },
+    ]);
+  }
+
+  async function facts(space: Space) {
+    const rows = await shared!.admin<
+      {
+        id: string;
+        type: string;
+        session_id: string | null;
+        subject_id: string | null;
+        automation_id: string | null;
+        automation_run_id: string | null;
+        chain_depth: number;
+        data: Record<string, unknown>;
+      }[]
+    >`select id, type, session_id, subject_id, automation_id, automation_run_id, chain_depth, data
+      from workspace_activity_events where workspace_id = ${space.workspaceId}
+      order by created_at, id`;
+    return [...rows];
+  }
+
+  async function seen(space: Space, sourceId: string, subjectId: string) {
+    const read = await listWorkspaceActivityEventsForSource(client.db, {
+      workspaceId: space.workspaceId,
+      sourceId,
+      subjectId,
+      since: new Date(Date.now() - 10 * 60_000),
+      limit: 100,
+    });
+    return read.events;
+  }
+
+  test("chat facts are written for offered types once someone listens", async () => {
+    const space = await workspace();
+    const report = await chat(space, space.subjectId);
+    await append(report, space, "turn.completed", { output: "Nobody listens yet" });
+    expect(await facts(space)).toEqual([]);
+    await listen(space);
+    await append(report, space, "session.status.changed", { status: "idle" });
+    await append(report, space, "turn.completed", { maintenance: true, output: "Compacted" });
+    const [done] = await append(report, space, "turn.completed", {
+      output: `  ${"x".repeat(1_500)}`,
+    });
+    await append(report, space, "turn.failed", { code: "model_error", error: "The model failed" });
+    await append(report, space, "session.requiresAction", {
+      approvals: [{ display: { toolName: "github_merge" } }, { name: "slack_post" }],
+    });
+    await append(report, space, "session.humanInput.requested", {
+      request: { questions: [{ prompt: "Which branch?" }, { label: "no prompt" }] },
+    });
+    const written = await facts(space);
+    expect(written.map((fact) => fact.type)).toEqual([
+      "turn.completed",
+      "turn.failed",
+      "session.requiresAction",
+      "session.humanInput.requested",
+    ]);
+    expect(written[0]).toMatchObject({
+      id: done!.id,
+      session_id: report.sessionId,
+      subject_id: space.subjectId,
+      automation_id: null,
+      automation_run_id: null,
+      chain_depth: 0,
+    });
+    expect((written[0]!.data.answerExcerpt as string).length).toBe(1_000);
+    expect(written[1]!.data).toEqual({
+      error: { code: "model_error", message: "The model failed" },
+    });
+    expect(written[2]!.data).toEqual({ tools: ["github_merge", "slack_post"] });
+    expect(written[3]!.data).toEqual({ questions: ["Which branch?"] });
+  });
+
+  test("a fact that cannot be written never fails the chat's event", async () => {
+    const space = await workspace();
+    await listen(space);
+    const report = await chat(space, space.subjectId);
+    await shared!.admin.unsafe("revoke insert on workspace_activity_events from opengeni_app");
+    try {
+      const [recorded] = await append(report, space, "turn.completed", {
+        output: "Still recorded",
+      });
+      expect(recorded?.type).toBe("turn.completed");
+    } finally {
+      await shared!.admin.unsafe("grant insert on workspace_activity_events to opengeni_app");
+    }
+    expect(await facts(space)).toEqual([]);
+  });
+
+  test("a trigger sees the chats and usage its owner may see", async () => {
+    const space = await workspace();
+    const bob = await member(space);
+    const adaSource = await listen(space);
+    const bobSource = await listen(space, bob);
+    const privateChat = await chat(space, bob);
+    const sharedChat = await chat(space, bob, "workspace_shared");
+    await append(privateChat, space, "turn.completed", { output: "Private" });
+    await append(sharedChat, space, "turn.completed", { output: "Shared" });
+    expect(
+      (await seen(space, adaSource.id, space.subjectId)).map((fact) => fact.sessionId),
+    ).toEqual([sharedChat.sessionId]);
+    const bobSees = await seen(space, bobSource.id, bob);
+    expect(bobSees.map((fact) => fact.sessionId)).toEqual([
+      privateChat.sessionId,
+      sharedChat.sessionId,
+    ]);
+    expect(bobSees[0]).toMatchObject({ subjectId: bob, chainDepth: 0, automationRunId: null });
+
+    const period = `period-${crypto.randomUUID()}`;
+    await shared!.admin`insert into opengeni_private.workspace_allowance_notifications
+        (account_id, workspace_id, period_key, subject_id, threshold, payload)
+      values (${space.accountId}, ${space.workspaceId}, ${period}, '', 0.8,
+          ${shared!.admin.json({ used: 80, limit: 100, resetsAt: "2026-12-01T00:00:00.000Z" })}),
+        (${space.accountId}, ${space.workspaceId}, ${period}, ${bob}, 1,
+          ${shared!.admin.json({ used: 10, limit: 10 })}),
+        (${space.accountId}, ${space.workspaceId}, ${period}, '', -1, '{}'::jsonb)`;
+    const usage = (events: { type: string; sessionId: string | null; data: unknown }[]) =>
+      events.filter((fact) => fact.sessionId === null).map((fact) => [fact.type, fact.data]);
+    expect(usage(await seen(space, adaSource.id, space.subjectId))).toEqual([
+      [
+        "usage.threshold_reached",
+        {
+          scope: "workspace",
+          threshold: 0.8,
+          usedCredits: 80,
+          limitCredits: 100,
+          period,
+          periodEnd: "2026-12-01T00:00:00.000Z",
+        },
+      ],
+      ["usage.period_reset", { scope: "workspace", period }],
+    ]);
+    const memberUsage = {
+      scope: "member",
+      threshold: 1,
+      usedCredits: 10,
+      limitCredits: 10,
+      period,
+    };
+    expect(
+      usage(await seen(space, bobSource.id, bob)).sort(([a], [b]) =>
+        String(a).localeCompare(String(b)),
+      ),
+    ).toEqual([
+      ["usage.exhausted", memberUsage],
+      ["usage.threshold_reached", memberUsage],
+    ]);
+  });
+
+  test("an automation run's chats carry its run and depth, a person's agent chats do not", async () => {
+    const space = await workspace();
+    await listen(space);
+    const automation = await task(space);
+    const automationRun = await run(automation, "scheduled", `scheduled-${crypto.randomUUID()}`);
+    const runChat = await chat(space, space.subjectId);
+    await force(
+      (tx) => tx`update session_turns set scheduled_task_run_id = ${automationRun.id}
+      where id = ${runChat.turnId}`,
+    );
+    const helper = await chat(space, space.subjectId);
+    await force(
+      (tx) => tx`update sessions set parent_turn_id = ${runChat.turnId}
+      where id = ${helper.sessionId}`,
+    );
+    const personal = await chat(space, space.subjectId);
+    const personalHelper = await chat(space, space.subjectId);
+    await force(
+      (tx) => tx`update sessions set parent_turn_id = ${personal.turnId}
+      where id = ${personalHelper.sessionId}`,
+    );
+    await append(runChat, space, "turn.completed", { output: "Run done" });
+    await append(helper, space, "turn.completed", { output: "Helper done" });
+    await append(personalHelper, space, "turn.completed", { output: "Mine" });
+    const written = await facts(space);
+    const caused = {
+      automation_id: automation.id,
+      automation_run_id: automationRun.id,
+      chain_depth: 1,
+    };
+    expect(written[0]).toMatchObject({ session_id: runChat.sessionId, ...caused });
+    expect(written[1]).toMatchObject({ session_id: helper.sessionId, ...caused });
+    expect(written[2]).toMatchObject({
+      session_id: personalHelper.sessionId,
+      automation_run_id: null,
+      chain_depth: 0,
+    });
+  });
+
+  test("event runs are one deeper than their deepest event, and the limit skips past 3", async () => {
+    const space = await workspace();
+    const source = await webhookSource(space);
+    const automation = await task(space);
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: automation.id,
+      triggers: [{ sourceId: source.id, ...everything }],
+    });
+    await deliver(space, source.id, [
+      event("shallow", { chainDepth: 1 }),
+      event("deep", { chainDepth: 2 }),
+    ]);
+    const first = await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id);
+    expect(first.chainLimitNotice).toBeNull();
+    const occurrenceId = first.start[0]!.id;
+    await markEventOccurrenceStarted(client.db, space.workspaceId, occurrenceId);
+    const eventRun = await run(automation, "event", eventOccurrenceProducerKey(occurrenceId));
+    const runChat = await chat(space, space.subjectId);
+    await force(
+      (tx) => tx`update scheduled_task_runs set session_id = ${runChat.sessionId}
+      where id = ${eventRun.id}`,
+    );
+    const [stored] = await shared!.admin<{ chain_depth: number }[]>`
+      select chain_depth from scheduled_task_runs where id = ${eventRun.id}`;
+    expect(stored?.chain_depth).toBe(3);
+
+    // The third run's events would start a fourth: left out, recorded, told once.
+    await deliver(space, source.id, [event("loop", { chainDepth: 3 }), event("fresh")]);
+    const limited = await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id);
+    expect(limited.start).toHaveLength(1);
+    const carried = await getEventOccurrenceForRun(
+      client.db,
+      space.workspaceId,
+      limited.start[0]!.id,
+    );
+    expect(carried?.events.map((entry) => entry.type)).toEqual(["fresh"]);
+    expect(limited.chainLimitNotice).toEqual({
+      taskId: automation.id,
+      taskName: automation.name,
+      sessionId: runChat.sessionId,
+      maxChainDepth: 3,
+      limitedEvents: 1,
+    });
+    const receipts = await shared!.admin<{ status: string; error: string; trigger_type: string }[]>`
+      select status, error, trigger_type from scheduled_task_runs
+      where task_id = ${automation.id} and error = 'chain_limit'`;
+    expect([...receipts]).toEqual([
+      { status: "skipped", error: "chain_limit", trigger_type: "event" },
+    ]);
+    // Blocker review never mistakes the chain limit for a broken automation.
+    let reviewed: string[] = [];
+    await reviewScheduledTaskBlockers(client.db, space.workspaceId, automation.id, (review) => {
+      reviewed = review.runs.map((entry) => entry.id);
+      return { kind: "none", reviewedRunId: null };
+    });
+    expect(reviewed).toEqual([eventRun.id]);
+
+    await markEventOccurrenceStarted(client.db, space.workspaceId, limited.start[0]!.id);
+    await deliver(space, source.id, [event("loop again", { chainDepth: 5 })]);
+    const again = await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id);
+    expect(again).toEqual({ start: [], throttleNotice: null, chainLimitNotice: null });
+    expect((await inboxStatuses(space, automation.id)).sort()).toEqual([
+      "batched",
+      "batched",
+      "batched",
+      "skipped",
+      "skipped",
+    ]);
+  });
+
+  test("facts are removed after 24 hours", async () => {
+    const space = await workspace();
+    await listen(space);
+    const report = await chat(space, space.subjectId);
+    await append(report, space, "turn.completed", { output: "Old" });
+    await append(report, space, "turn.failed", { error: "Recent" });
+    const [old] = await facts(space);
+    await shared!
+      .admin`update workspace_activity_events set created_at = now() - interval '25 hours'
+      where workspace_id = ${space.workspaceId} and id = ${old!.id}`;
+    await pruneEventIntake(client.db, {
+      bodyRetentionSeconds: 604_800,
+      eventRetentionSeconds: 2_592_000,
+    });
+    expect((await facts(space)).map((fact) => fact.type)).toEqual(["turn.failed"]);
   });
 });
