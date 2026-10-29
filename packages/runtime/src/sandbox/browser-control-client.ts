@@ -298,7 +298,9 @@ export type PlacementBrowserSessionReference = {
 };
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
-  observation: BrowserObservationValue;
+  /** Null when a session continued in the person's own browser with none of
+   * its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservationValue | null;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
@@ -841,7 +843,7 @@ export class BrowserControlClient {
     }
     return {
       ...returnedReference,
-      observation: BrowserObservation.parse(data.observation),
+      observation: data.observation === null ? null : BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
       ...creationDisplay(data.display),

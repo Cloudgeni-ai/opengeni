@@ -285,7 +285,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         headed: true,
         transport: TRANSPORT,
       });
-      const first = created.observation.target.id;
+      const first = created.observation!.target.id;
       expect(chrome.tabs.get(first)?.url).toBe(BLANK);
       // The agent opens a second tab and works in it. The empty tab it
       // started in closes as it moves on.
@@ -319,7 +319,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         headed: true,
         transport: TRANSPORT,
       });
-      expect(recovered.observation.target.id).toBe(second);
+      expect(recovered.observation!.target.id).toBe(second);
       expect(chrome.requests.filter((request) => request.type === "tabs.create")).toHaveLength(2);
       await expect(supervisor.observe(session, first)).rejects.toThrow(
         `this session closed this empty tab after it stopped using it; its current tab is ${second}`,
@@ -333,13 +333,87 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
     });
   });
 
+  test("a session that continues with none of its tabs left opens no tab in the person's window", async () => {
+    await withChrome(async ({ chrome, clock, open }) => {
+      const supervisor = await open();
+      const session = reference(31);
+      const created = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      const work = created.observation!.target.id;
+      chrome.tabs.get(work)!.url = "https://work.example.test/";
+      // The agent closes the tab it worked in, its last one.
+      await supervisor.closeTarget(session, work);
+      clock.now += 11 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+      const tabsBefore = chrome.requests.filter((request) => request.type === "tabs.create").length;
+
+      // Any later call, even a read of the tab list, continues the session:
+      // it still has no tab, and none appears in the person's window.
+      const recovered = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      expect(recovered.observation).toBeNull();
+      expect(chrome.requests.filter((request) => request.type === "tabs.create")).toHaveLength(
+        tabsBefore,
+      );
+      expect([...chrome.tabs.keys()]).toEqual(["1"]);
+      const listed = await supervisor.listTargets(session);
+      expect(listed.map((target) => target.id)).toEqual(["1"]);
+      expect(listed.some((target) => target.selected)).toBe(false);
+      // The person's tab was not taken over either.
+      expect(chrome.attached.size).toBe(0);
+
+      // Opening a tab when the agent asks for one still works.
+      const opened = await supervisor.openTarget(session);
+      expect(chrome.tabs.has(opened.target.id)).toBe(true);
+      await supervisor.endSession(session);
+    });
+  });
+
+  test("a session whose tab closed continues in another tab it opened, opening nothing", async () => {
+    await withChrome(async ({ chrome, clock, open }) => {
+      const supervisor = await open();
+      const session = reference(32);
+      const created = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      const first = created.observation!.target.id;
+      chrome.tabs.get(first)!.url = "https://first.example.test/";
+      const second = (await supervisor.openTarget(session)).target.id;
+      chrome.tabs.get(second)!.url = "https://second.example.test/";
+      clock.now += 11 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+      // While the session was released, its selected tab closed.
+      chrome.tabs.delete(second);
+      const tabsBefore = chrome.requests.filter((request) => request.type === "tabs.create").length;
+
+      const recovered = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      expect(recovered.observation!.target.id).toBe(first);
+      expect(chrome.requests.filter((request) => request.type === "tabs.create")).toHaveLength(
+        tabsBefore,
+      );
+      await supervisor.endSession(session);
+    });
+  });
+
   test("a session closes the empty tab it opened as soon as it moves to another tab, and nothing else", async () => {
     await withChrome(async ({ chrome, root, open }) => {
       const supervisor = await open();
       const session = reference(7);
       const start = (
         await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
-      ).observation.target.id;
+      ).observation!.target.id;
       expect(chrome.tabs.get(start)?.url).toBe(BLANK);
 
       // The agent moves to the person's tab: the empty tab it started in
@@ -371,7 +445,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       const session = reference(8);
       const start = (
         await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
-      ).observation.target.id;
+      ).observation!.target.id;
       // A navigation started in the empty tab; Chrome still lists it blank.
       chrome.startNavigation(start, "https://slow.example.test/");
       await Bun.sleep(300);
@@ -392,7 +466,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         headed: true,
         transport: TRANSPORT,
       });
-      const tab = created.observation.target.id;
+      const tab = created.observation!.target.id;
       clock.now += 9 * MINUTE;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
       await supervisor.observe(session, tab);
@@ -414,7 +488,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         headed: true,
         transport: TRANSPORT,
       });
-      const tab = created.observation.target.id;
+      const tab = created.observation!.target.id;
       expect(await supervisor.holdForWait(session, { until: clock.now + 30 * MINUTE })).toBe(true);
       clock.now += 29 * MINUTE;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
@@ -434,7 +508,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       const session = reference(11);
       const tab = (
         await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
-      ).observation.target.id;
+      ).observation!.target.id;
       chrome.tabs.get(tab)!.url = "https://work.example.test/";
       // The agent's click opened a confirm; it asks the person and waits.
       chrome.dialog(tab, true);
@@ -467,7 +541,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       const session = reference(15);
       const tab = (
         await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
-      ).observation.target.id;
+      ).observation!.target.id;
       chrome.tabs.get(tab)!.url = "https://work.example.test/";
       chrome.dialog(tab, true);
       await waitFor(async () => (await supervisor.observe(session, tab)).dialog !== null);
@@ -499,7 +573,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       });
       const targets = await supervisor.listTargets(session);
       expect(targets.map((target) => target.id)).toEqual(
-        expect.arrayContaining([created.observation.target.id, long]),
+        expect.arrayContaining([created.observation!.target.id, long]),
       );
     });
   });
@@ -513,22 +587,25 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         headed: true,
         transport: TRANSPORT,
       });
-      expect(chrome.attached.has(created.observation.target.id)).toBe(true);
+      expect(chrome.attached.has(created.observation!.target.id)).toBe(true);
       await supervisor.close();
-      expect(chrome.tabs.has(created.observation.target.id)).toBe(false);
+      expect(chrome.tabs.has(created.observation!.target.id)).toBe(false);
       expect(chrome.attached.size).toBe(0);
       expect(ledger(root, 3)?.settled).toBe(true);
 
-      // The restarted controller recovers the session with one new tab, not
-      // one more on top of an empty one.
+      // The restarted controller recovers the session without opening a tab
+      // in the person's window; the session opens one when it needs one.
       const successor = await open();
       const recovered = await successor.createSession({
         ...session,
         headed: true,
         transport: TRANSPORT,
       });
-      expect(recovered.observation.target.id).not.toBe(created.observation.target.id);
-      expect([...chrome.tabs.keys()].sort()).toEqual(["1", recovered.observation.target.id].sort());
+      expect(recovered.observation).toBeNull();
+      expect([...chrome.tabs.keys()]).toEqual(["1"]);
+      const opened = await successor.openTarget(session);
+      expect(opened.target.id).not.toBe(created.observation!.target.id);
+      expect([...chrome.tabs.keys()].sort()).toEqual(["1", opened.target.id].sort());
     });
   });
 
@@ -539,7 +616,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       const second = reference(5);
       const shared = (
         await supervisor.createSession({ ...first, headed: true, transport: TRANSPORT })
-      ).observation.target.id;
+      ).observation!.target.id;
       await supervisor.createSession({ ...second, headed: true, transport: TRANSPORT });
       clock.now += 11 * MINUTE;
       // The second session moves into the first session's empty tab.
@@ -594,7 +671,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         headed: true,
         transport: TRANSPORT,
       });
-      expect(recovered.observation.target.id).toBe(used);
+      expect(recovered.observation!.target.id).toBe(used);
     });
   });
 

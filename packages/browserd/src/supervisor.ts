@@ -294,7 +294,9 @@ export type BrowserStateRestoreInput = {
 };
 
 export type BrowserSupervisorSession = BrowserSessionReference & {
-  observation: BrowserObservation;
+  /** Null only in the person's own browser, for a session that continued
+   * there with none of its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservation | null;
   /** Returned only by the create that launched the browser. */
   notice?: string;
   /** How this headed managed browser shows on the machine as launched: in a
@@ -325,6 +327,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   /** The load error of the page start() kept on the browser's error page. */
   readonly startLoadError?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
+  /** Start a session continuing in the person's browser in a tab it left
+   * there; null when it has none left, so it starts with no tab. */
+  resume?(): Promise<BrowserObservation | null>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
@@ -510,6 +515,8 @@ type Runtime = {
    * returned once from createSession instead of immediately rebuilding the
    * same accessibility tree through a second controller round trip. */
   creationObservation: BrowserObservation | null;
+  /** The runtime continued a session that had no tab left, so it has none. */
+  startedWithoutTab: boolean;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
   /** Outstanding uses that keep the browser's windows presented. Each is
@@ -1011,6 +1018,15 @@ export class BrowserSupervisor {
     return supervisor;
   }
 
+  /** A browser this controller launches always shows a tab. */
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions & {
+      transport?: Exclude<BrowserSupervisorTransport, { kind: "attached_chrome" }>;
+    },
+  ): Promise<BrowserSupervisorSession & { observation: BrowserObservation }>;
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions,
+  ): Promise<BrowserSupervisorSession>;
   async createSession(
     optionsInput: BrowserSupervisorSessionOptions,
   ): Promise<BrowserSupervisorSession> {
@@ -1405,8 +1421,11 @@ export class BrowserSupervisor {
         runtime.waitHoldUntil = detachedHold;
       }
       this.sessions.set(options.browserSessionId, runtime);
-      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+      const observation =
+        runtime.creationObservation ??
+        (runtime.startedWithoutTab ? null : await this.currentObservation(runtime));
       runtime.creationObservation = null;
+      runtime.startedWithoutTab = false;
       // The browser opened even if its first page did not load; say why in
       // plain words rather than leave the caller to infer it from the
       // browser's error page.
@@ -2518,6 +2537,7 @@ export class BrowserSupervisor {
         },
         lastTargets: [],
         creationObservation: null,
+        startedWithoutTab: false,
         recovery: null,
         presence: new Set(),
         recording: null,
@@ -2543,9 +2563,15 @@ export class BrowserSupervisor {
         } else {
           // The browser opens even when its first page fails to load: the tab
           // shows the browser's error page, which names the failure.
-          const observation = await driver.start(options.initialUrl, { keepTabOnLoadError: true });
+          // A session continuing in the person's browser carries on in a
+          // tab it left there, and opens none when it has none left.
+          const observation =
+            options.initialUrl === undefined && driver.resume
+              ? await driver.resume()
+              : await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
-          runtime.lastTargets = [observation.target];
+          runtime.startedWithoutTab = observation === null;
+          runtime.lastTargets = observation ? [observation.target] : [];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         }
       } finally {

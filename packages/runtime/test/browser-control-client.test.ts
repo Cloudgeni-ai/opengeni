@@ -2784,8 +2784,29 @@ test("keeps a create's tab inventory only when it validates for the same binding
     for (const value of [undefined, [{ id: "x" }], [target, foreign], "not-a-list"]) {
       targets = value;
       const created = await client.createSession(input);
-      expect(created.observation.target.id).toBe(target.id);
+      expect(created.observation?.target.id).toBe(target.id);
       expect(created).not.toHaveProperty("targets");
+    }
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("accepts a continued session that has no tab, and still rejects a malformed observation", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-resume" };
+  let observation: unknown = null;
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => success({ ...reference, observation }),
+  });
+  const placement = await localPlacement();
+  const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+  const input = { ...reference, tokenGeneration: 1, controlToken, viewToken, headed: true };
+  try {
+    expect((await client.createSession(input)).observation).toBeNull();
+    for (const value of [undefined, { target: { id: "x" } }]) {
+      observation = value;
+      await expect(client.createSession(input)).rejects.toThrow();
     }
   } finally {
     await server.stop(true);
