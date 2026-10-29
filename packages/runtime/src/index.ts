@@ -2330,6 +2330,8 @@ export type BuildAgentOptions = {
   //   `view_image` data URLs back into typed input_image content when the
   //   selected model has a proven image-input wire.
   hostedWebSearch?: boolean;
+  /** Deployment route's static hosted-search context budget, not a turn classifier. */
+  hostedWebSearchContextSize?: "low" | "medium" | "high";
   /** Stable provider-specific image-generation transport for this turn. */
   imageGeneration?:
     | { kind: "native_hosted" }
@@ -3263,7 +3265,15 @@ export function buildOpenGeniAgent(
   // with the sandbox capability tools (prepareSandboxAgent: tools =
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
-  const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
+  const hostedTools: Tool[] = hostedWebSearch
+    ? [
+        webSearchTool(
+          options.hostedWebSearchContextSize === undefined
+            ? undefined
+            : { searchContextSize: options.hostedWebSearchContextSize },
+        ),
+      ]
+    : [];
   if (mediaTools.hosted.includes("image_generation")) {
     hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
   }
