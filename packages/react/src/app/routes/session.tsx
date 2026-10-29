@@ -1510,7 +1510,10 @@ export function SessionRoute({
               setReconnectRequest(null);
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
-                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
                 return;
               }
               toast.success("Connection updated", {

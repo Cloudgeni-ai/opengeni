@@ -2526,11 +2526,12 @@ function workspaceRepositoryPickerProps(
     org: context.githubOrg,
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
+    githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
     githubAppBusy: context.githubAppBusy,
     onRefresh: async () => {
       await Promise.all([
-        context.refreshGitHub(workspaceId, undefined, { sync: true }),
-        context.refreshPersonalGitHub(workspaceId),
+        context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true }),
+        context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true }),
       ]);
     },
     onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
