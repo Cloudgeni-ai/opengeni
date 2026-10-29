@@ -2531,7 +2531,7 @@ function workspaceRepositoryPickerProps(
     onRefresh: async () => {
       await Promise.all([
         context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true }),
-        context.refreshPersonalGitHub(workspaceId),
+        context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true }),
       ]);
     },
     onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),

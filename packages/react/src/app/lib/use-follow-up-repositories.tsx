@@ -83,7 +83,9 @@ export function useRepositoryCatalogRefresh(
               }),
             ]
           : []),
-        ...(canReadPersonal ? [context.refreshPersonalGitHub(workspaceId)] : []),
+        ...(canReadPersonal
+          ? [context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: explicit })]
+          : []),
       ]).then(() => undefined);
       accepted.inFlight = request;
       try {

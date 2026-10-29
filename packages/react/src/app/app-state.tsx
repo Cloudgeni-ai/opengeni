@@ -41,6 +41,8 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import { isTransientServiceFailure } from "../lib/transient-retry";
+import { createQuietRetry } from "./lib/quiet-retry";
 import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
@@ -227,6 +229,8 @@ type StartSessionOptions = Parameters<AppContextValue["startSession"]>[2];
 
 /** The one "GitHub status unavailable" toast; a newer failure replaces it. */
 export const GITHUB_STATUS_TOAST_ID = "opengeni-github-status";
+/** The one "Your GitHub account is unavailable" toast. */
+export const PERSONAL_GITHUB_STATUS_TOAST_ID = "opengeni-personal-github-status";
 
 export type SlackLinkPrepareController<Request> = ReturnType<
   typeof createSlackLinkPrepareController<Request>
@@ -458,6 +462,19 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const seenCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const personalGitHubRefreshId = useRef(0);
+  // Background GitHub reads that fail while Opengeni is briefly unreachable
+  // (a deploy, a network drop) try again by themselves, quietly.
+  const githubQuietRetry = useRef(createQuietRetry());
+  const personalGitHubQuietRetry = useRef(createQuietRetry());
+  const refreshGitHubRef = useRef<AppContextValue["refreshGitHub"]>(async () => {});
+  const refreshPersonalGitHubRef = useRef<AppContextValue["refreshPersonalGitHub"]>(async () => {});
+  useEffect(
+    () => () => {
+      githubQuietRetry.current.reset();
+      personalGitHubQuietRetry.current.reset();
+    },
+    [],
+  );
   const mcpRefreshId = useRef(0);
   const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -1472,8 +1489,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
+      // This read replaces any quiet retry still waiting.
+      githubQuietRetry.current.cancel();
       // A member whose loaded grant lacks GitHub has no GitHub state to read.
       if (lacksWorkspacePermission(accessContextRef.current, workspaceId, "github:use")) {
+        githubQuietRetry.current.reset();
         setGithubStatus(null);
         setGithubStatusFailed(false);
         setGithubAppOpen(false);
@@ -1507,6 +1527,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setGithubRepos([]);
           setGithubCatalogReady(true);
         }
+        githubQuietRetry.current.reset();
       } catch (error) {
         if (
           isAbortError(error) ||
@@ -1522,9 +1543,17 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         // first-load failure must not look like an empty catalog, or draft
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
-        // Load and focus refreshes run in the background: a transient failure
-        // there is shown where GitHub is used (the GitHub card and the GitHub
-        // integration keep a retry), not as a toast for something the person
+        // Opengeni briefly unreachable (a deploy, a network drop): read again
+        // by itself, with a growing pause, until it answers.
+        if (isTransientServiceFailure(error)) {
+          githubQuietRetry.current.schedule(() => {
+            if (!ownsRefresh() || githubRefreshId.current !== refreshId) return;
+            void refreshGitHubRef.current(workspaceId);
+          });
+        }
+        // Load and focus refreshes run in the background: a failure there is
+        // shown where GitHub is used (the repository picker, the GitHub card and
+        // the GitHub integration), not as a toast for something the person
         // didn't do. Someone without GitHub access has nothing to fix.
         if (!options?.userInitiated || isWorkspacePermissionDenied(error)) return;
         // One toast for the GitHub status, replaced rather than stacked when
@@ -1542,12 +1571,21 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     [client],
   );
 
+  useInsertionEffect(() => {
+    refreshGitHubRef.current = refreshGitHub;
+  }, [refreshGitHub]);
+
   const refreshPersonalGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal): Promise<void> => {
+    async (
+      workspaceId: string,
+      signal?: AbortSignal,
+      options?: Pick<GitHubRefreshOptions, "userInitiated">,
+    ): Promise<void> => {
       const acceptedTransition = workspaceTransitionIdentity.current;
       if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) return;
       const refreshId = personalGitHubRefreshId.current + 1;
       personalGitHubRefreshId.current = refreshId;
+      personalGitHubQuietRetry.current.cancel();
       const ownsRefresh = () =>
         ownsWorkspaceTransition(
           workspaceTransitionIdentity.current,
@@ -1563,6 +1601,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setSelectedPersonalGitHubRepoRefs({});
         setPersonalGitHubCatalogReady(true);
         setPersonalGitHubBusy(false);
+        personalGitHubQuietRetry.current.reset();
         return;
       }
       setPersonalGitHubBusy(true);
@@ -1571,6 +1610,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         if (signal?.aborted || !ownsRefresh()) return;
         const connection = status.connection;
         setPersonalGitHubStatus(status);
+        personalGitHubQuietRetry.current.reset();
         setPersonalGitHubAuthorityCache((current) =>
           connection &&
           reusablePersonalGitHubAuthority(current, {
@@ -1624,7 +1664,17 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       } catch (error) {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
+        if (isTransientServiceFailure(error)) {
+          // Opengeni is briefly unreachable: read again by itself, quietly,
+          // unless the person asked for this refresh.
+          personalGitHubQuietRetry.current.schedule(() => {
+            if (!ownsRefresh()) return;
+            void refreshPersonalGitHubRef.current(workspaceId);
+          });
+          if (!options?.userInitiated) return;
+        }
         toast.error("Your GitHub account is unavailable", {
+          id: PERSONAL_GITHUB_STATUS_TOAST_ID,
           description: userErrorText(error),
         });
       } finally {
@@ -1633,6 +1683,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     },
     [client],
   );
+
+  useInsertionEffect(() => {
+    refreshPersonalGitHubRef.current = refreshPersonalGitHub;
+  }, [refreshPersonalGitHub]);
 
   async function beginPersonalGitHubOAuth(workspaceId: string, reconnect: boolean): Promise<void> {
     const connection = personalGitHubStatus?.connection;
@@ -1665,7 +1719,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         expectedVersion: connection.version,
         idempotencyKey: crypto.randomUUID(),
       });
-      await refreshPersonalGitHub(workspaceId);
+      await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("Your GitHub account was disconnected");
       return true;
     } catch (error) {
@@ -1693,7 +1747,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         idempotencyKey: crypto.randomUUID(),
         repositories,
       });
-      await refreshPersonalGitHub(workspaceId);
+      await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("GitHub repository access updated");
       return true;
     } catch (error) {
