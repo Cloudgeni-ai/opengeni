@@ -43,9 +43,9 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
   canManageWorkspaceSettings,
-  hasAccountPermission,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 import { errorText } from "./knowledge-data";
 import { Markdown } from "./knowledge-markdown";
@@ -173,9 +173,11 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
     workspaceId,
     "documents:manage",
   );
-  const canManageOrganization = workspace
-    ? hasAccountPermission(context.accessContext, workspace.accountId, "account:admin")
-    : false;
+  const canManageOrganization = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspace?.accountId,
+  });
   const [state, setState] = useState<{
     identity: string;
     items: ReviewItem[];

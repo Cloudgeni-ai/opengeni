@@ -54,6 +54,31 @@ export function administersOrganization(input: {
   return administratorSession && (role === "owner" || role === "admin");
 }
 
+/**
+ * The API's organization-administration rule, for organization-wide resources
+ * (organization Knowledge, documents and Skills, the company profile, vaults,
+ * machines, Sandbox Environments, integrations, API keys and service
+ * accounts): a literal `account:admin` grant (the owner, the single local
+ * user), or an owner or admin in a signed-in session. Billing, roles and
+ * ownership stay with `account:admin` alone.
+ */
+export function canAdministerOrganization(input: {
+  accessContext: AccessContext;
+  clientConfig: Pick<ClientConfig, "productAccessMode"> & {
+    auth: Pick<ClientConfig["auth"], "mode">;
+  };
+  accountId: string | null | undefined;
+}): boolean {
+  const accountId = input.accountId ?? null;
+  if (!accountId) return false;
+  if (hasAccountPermission(input.accessContext, accountId, "account:admin")) return true;
+  // Embedders and fixtures can render before a client config is known; no
+  // config proves no signed-in session, so only the literal grant counts then.
+  const clientConfig = input.clientConfig as typeof input.clientConfig | undefined;
+  if (!clientConfig?.auth) return false;
+  return administersOrganization({ ...input, clientConfig, accountId });
+}
+
 /** Replace-or-append a workspace in the cached list (create + rename share it). */
 export function upsertWorkspace(workspaces: Workspace[], workspace: Workspace): Workspace[] {
   if (workspaces.some((candidate) => candidate.id === workspace.id)) {

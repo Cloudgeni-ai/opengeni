@@ -204,7 +204,7 @@ test("points per-chat changes at the chat's Agent tab and opens Review from the 
   }
 });
 
-test("organization owners get an Organization identity row in the same words", async () => {
+test("organization owners and admins get an Organization identity row in the same words", async () => {
   getCompanyProfileAgentPolicy.mockClear();
   updateCompanyProfileAgentPolicy.mockClear();
   const container = document.createElement("div");
@@ -231,7 +231,7 @@ test("organization owners get an Organization identity row in the same words", a
       radios().find((radio) => radio.getAttribute("aria-checked") === "true")?.textContent,
     ).toBe("Review first");
     expect(container.textContent).not.toContain("Require approval");
-    expect(identityRow()!.textContent).toContain("that owner confirms them in the chat");
+    expect(identityRow()!.textContent).toContain("that person confirms them in the chat");
     await act(async () =>
       radios()
         .find((radio) => radio.textContent === "Automatic")!
@@ -249,7 +249,7 @@ test("organization owners get an Organization identity row in the same words", a
   }
 });
 
-test("people who don't own the organization get no identity row and no policy read", async () => {
+test("people who don't administer the organization get no identity row and no policy read", async () => {
   getCompanyProfileAgentPolicy.mockClear();
   const container = document.createElement("div");
   document.body.append(container);

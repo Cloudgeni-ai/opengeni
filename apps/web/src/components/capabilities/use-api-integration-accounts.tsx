@@ -26,7 +26,8 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { ConnectionOwnershipDialog } from "@opengeni/react/app/components/capabilities/connection-ownership-selector";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
@@ -308,10 +309,11 @@ export function useApiIntegrationAccounts({
   const canManagePersonalDestination = Boolean(
     workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
   );
-  const canManageOrganizationDestination = Boolean(
-    workspaceGrant &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
+  const canManageOrganizationDestination = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspaceGrant?.accountId,
+  });
 
   async function startAdd(existing: ApiIntegrationInstallationSummary | null) {
     if (!definition || !canManage || busy) return;

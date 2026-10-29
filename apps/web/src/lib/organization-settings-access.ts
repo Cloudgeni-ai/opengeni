@@ -7,7 +7,10 @@ import {
   type OrganizationAdminSection,
 } from "@opengeni/react/app/lib/organization-admin";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
-import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
+import {
+  administersOrganization,
+  canAdministerOrganization,
+} from "@opengeni/react/app/lib/workspaces";
 import type {
   AccessContext,
   ClientConfig,
@@ -49,14 +52,13 @@ export function organizationSettingsAccess(input: {
   const canManageBilling = hasAccountPermission(accessContext, accountId, "billing:manage");
   const canReadBilling =
     canManageBilling || hasAccountPermission(accessContext, accountId, "billing:read");
-  const canManageOrganizationKnowledge = hasAccountPermission(
-    accessContext,
-    accountId,
-    "account:admin",
-  );
+  // Organization Knowledge and the company profile: the owner or an admin.
+  const canManageOrganizationKnowledge = canAdministerOrganization(input);
   const accountGrant =
     accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
-  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
+  const canManageCompanyProfileAgentPolicy =
+    canManageOrganizationKnowledge &&
+    (accountGrant?.role === "owner" || accountGrant?.role === "admin");
   const canManageOrganizationApiKeys = hasAccountPermission(
     accessContext,
     accountId,

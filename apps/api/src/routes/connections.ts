@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import {
+  authorizationHoldsOrganizationAdministration,
   verifyDirectModelAccess,
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
@@ -924,8 +925,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       grant,
       connectionId: c.req.param("connectionId"),
       payload: await c.req.json(),
-      canManageOrganizationDestination:
-        authorization.accountGrant?.permissions.includes("account:admin") === true,
+      canManageOrganizationDestination: authorizationHoldsOrganizationAdministration(authorization),
       canManageWorkspaceDestination: await workspaceSettingsAuthorized(
         deps,
         authorization,
@@ -1013,7 +1013,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         connectionId: c.req.param("connectionId"),
         payload: await c.req.json(),
         canManageOrganizationDestination:
-          authorization.accountGrant?.permissions.includes("account:admin") === true,
+          authorizationHoldsOrganizationAdministration(authorization),
         canManageWorkspaceDestination: await workspaceSettingsAuthorized(
           deps,
           authorization,
@@ -1129,7 +1129,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             const destinationSelection = destination.data;
             if (
               destinationSelection.authorityKind === "organization" &&
-              authorization.accountGrant?.permissions.includes("account:admin") !== true
+              !authorizationHoldsOrganizationAdministration(authorization)
             ) {
               throw new MissingPermissionRefusal("account:admin");
             }
