@@ -1753,6 +1753,54 @@ export type UpdateSessionVisibilityResponse = {
   revokedGrantCount: number;
 };
 
+/** One message a share link shows: the person's or the reply, as text. */
+export type SharedSessionMessage = {
+  role: "user" | "assistant";
+  text: string;
+  /**
+   * The name the chat shows for the person who sent a message, never an
+   * email address or id. Absent for replies, and when the chat has no such
+   * name for them.
+   */
+  sender?: string;
+};
+
+/** A chat's live read-only share link, as its owner sees it. */
+export type SessionShareLink = {
+  shareId: string;
+  /** The page anyone with the link opens. */
+  url: string;
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  /** Messages the link shows. */
+  messageCount: number;
+  createdAt: string;
+  /** When the snapshot behind the link was last taken. */
+  updatedAt: string;
+};
+
+/** Whether the person can share a chat here, and their live link. */
+export type SessionShareLinkState = {
+  /** False when this deployment has turned share links off. */
+  enabled: boolean;
+  link: SessionShareLink | null;
+};
+
+export type SessionShareLinkList = {
+  links: SessionShareLink[];
+};
+
+/** What anyone holding a share link reads, without signing in. */
+export type SharedSession = {
+  title: string;
+  /** When the snapshot was taken. */
+  sharedAt: string;
+  messages: SharedSessionMessage[];
+  /** Earlier messages left out to keep the snapshot within its size. */
+  omittedMessageCount: number;
+};
+
 export type ForkSessionRequest = {
   idempotencyKey: string;
   visibility: SessionVisibility;
@@ -4434,6 +4482,11 @@ export type ClientModel = {
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
+  /**
+   * Transient availability hint. `reason: "region_restricted"`: the workspace
+   * is EU-only and this model's route is not EU by its residency record.
+   */
+  availability?: ModelAvailabilityV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -4983,6 +5036,59 @@ export type OrganizationAgentAdminAccess = {
 export type UpdateOrganizationAgentAdminAccessRequest = {
   sessionAdminAccessAllowed?: boolean;
   chatActionsAllowed?: boolean;
+};
+
+/**
+ * The organization's EU-only inference setting. When on, every model call for
+ * its workspaces runs on an EU route or not at all. Any member can read it;
+ * owners and admins can turn it on, and only an owner or admin in the app in a
+ * browser can turn it off (`canTurnOff`).
+ */
+export type OrganizationInferenceResidency = {
+  organizationId: string;
+  euOnly: boolean;
+  /** 0 until the setting is first changed. */
+  version: number;
+  updatedAt: string | null;
+  /** Whether the caller may turn EU-only off: only an owner or admin in a browser. */
+  canTurnOff: boolean;
+  changed?: boolean | undefined;
+};
+
+/**
+ * Turn EU-only on or off. `expectedVersion` is the current `version` (a stale
+ * one is `409`); `operationId` makes a retry safe. Changes answer `503` while
+ * the deployment doesn't allow them yet.
+ */
+export type UpdateOrganizationInferenceResidencyRequest = {
+  euOnly: boolean;
+  expectedVersion: number;
+  operationId: string;
+};
+
+/** Model-backed features besides the chat model, as reported in `ClientConfig.inferenceFeatures`. */
+export type InferenceFeatureId =
+  | "web_search"
+  | "image_generation"
+  | "video_generation"
+  | "realtime_voice"
+  | "voice_input"
+  | "meeting_transcription"
+  | "live_transcription"
+  | "knowledge_embeddings"
+  | "code_search";
+
+/**
+ * Why the server switched a feature off. `region_restricted`: the workspace
+ * is EU-only and the feature has no EU route here ("Not supported in EU").
+ */
+export type FeatureUnavailableReason = "region_restricted";
+
+/** One feature's availability for the caller's workspace. */
+export type InferenceFeatureAvailability = {
+  id: InferenceFeatureId;
+  available: boolean;
+  unavailableReason: FeatureUnavailableReason | null;
 };
 
 /**
@@ -5616,6 +5722,13 @@ export type ClientConfig = {
    * what workspaces without their own setting get (`split` = half of sessions).
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
+  /**
+   * EU-only inference: each model-backed feature's region availability for the
+   * caller's workspace. `unavailableReason: "region_restricted"` means the
+   * workspace is EU-only and the feature has no EU route here. Absent on older
+   * servers.
+   */
+  inferenceFeatures?: InferenceFeatureAvailability[] | undefined;
   /**
    * Present only when this deployment archives idle sessions: after `idleDays`
    * without activity a session (unless kept live) becomes read-only.
@@ -8335,6 +8448,8 @@ export type VideoGenerationFundingOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** `region_restricted` when EU-only inference switched this source off. */
+  unavailableCode?: FeatureUnavailableReason | undefined;
 };
 
 export type WorkspaceVideoGenerationSettings = {
@@ -11009,6 +11124,8 @@ export type ClientAgentConfig = {
     id: AgentCapabilityId;
     available: boolean;
     reason?: string | undefined;
+    /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+    code?: FeatureUnavailableReason | undefined;
   }>;
 };
 
