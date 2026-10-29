@@ -7,6 +7,7 @@ import {
   AgentConfigError,
   agentConfigFirstPartyMcpTools,
   agentConfigToolRefs,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   legacyEffectiveAgentCapabilities,
   mergeToolRefEager,
   resolveAgentConfig,
@@ -57,6 +58,40 @@ export function newSessionKnowledgeSearchTools(
       ? { ...tool, eager: mergeToolRefEager(tool.eager, ["knowledge_search"]) }
       : tool,
   );
+}
+
+/**
+ * Creation only: the tools a new session's opening context is for
+ * (`modelContextTools`, such as the tool that reaches a workbook the person is
+ * writing from, or an application's tools for the record a chat opens on),
+ * frozen in the initial turn so its first model step loads them as a search by
+ * name would. A first-party name counts only inside the session's own
+ * first-party selection. Any other name counts only when the session selects
+ * another MCP server; the first turn then loads it only if one of those
+ * servers authorizes a tool by that name (see LazyToolRuntime.openingToolLoad).
+ * So this never adds a tool or permission, and the session's tools stay
+ * exactly as selected: the first request's tool block is the same as any other
+ * chat's.
+ */
+export function newSessionOpeningTools(
+  tools: ToolRef[],
+  firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+  modelContextTools: readonly string[] | undefined,
+): string[] {
+  const opengeni = tools.find((tool) => tool.kind === "mcp" && tool.id === "opengeni");
+  const otherServers = tools.some((tool) => tool.kind === "mcp" && tool.id !== "opengeni");
+  const firstParty = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
+  return [
+    ...new Set(
+      (modelContextTools ?? []).filter((name) =>
+        firstParty.has(name)
+          ? opengeni?.kind === "mcp" &&
+            firstPartyMcpTools.includes(name as FirstPartyMcpToolName) &&
+            (opengeni.allowedTools === undefined || opengeni.allowedTools.includes(name))
+          : otherServers,
+      ),
+    ),
+  ];
 }
 
 /**

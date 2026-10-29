@@ -47,6 +47,20 @@ import type {
   Workspace,
 } from "./types";
 
+export type GitHubRefreshOptions = {
+  /** Re-sync the repository list from GitHub instead of reading the catalog. */
+  sync?: boolean | undefined;
+  /**
+   * The person started this refresh (connect, disconnect, an explicit
+   * Refresh or Retry), so a failure is told with a toast. Background
+   * refreshes on load and focus only record the failure: the repository
+   * picker, the GitHub card and the GitHub integration show it where GitHub
+   * is used. A background read that failed because Opengeni was briefly
+   * unreachable (a deploy, a network drop) tries again by itself.
+   */
+  userInitiated?: boolean | undefined;
+};
+
 export type AppContextValue = {
   client: OpenGeniBrowserClient;
   clientConfig: ClientConfig;
@@ -152,6 +166,11 @@ export type AppContextValue = {
   revalidatePrincipalAccess: () => void;
   /** Refreshes the current principal's organization and workspace grants in place. */
   refreshPrincipalAccess: () => Promise<boolean>;
+  /**
+   * Reads the open workspace's client config again, for example after
+   * EU-only inference changed. Absent outside the stock app state.
+   */
+  refreshWorkspaceConfig?: () => void;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (
@@ -172,6 +191,18 @@ export type AppContextValue = {
     sessionId: string,
     title: string,
   ) => Promise<Session | null>;
+  /**
+   * Change a chat's name, description or avatar as the person (what makes a
+   * chat a bot). Only the named fields change; null clears one. Absent in
+   * hosts that predate bots.
+   */
+  updateSessionProfile?:
+    | ((
+        workspaceId: string,
+        sessionId: string,
+        change: import("@opengeni/sdk").UpdateSessionRequest,
+      ) => Promise<Session | null>)
+    | undefined;
   /** Optimistically set the current member's personal session pin. */
   updateSessionPin: (
     workspaceId: string,
@@ -183,9 +214,13 @@ export type AppContextValue = {
   refreshGitHub: (
     workspaceId: string,
     signal?: AbortSignal,
-    options?: { sync?: boolean | undefined },
+    options?: GitHubRefreshOptions,
   ) => Promise<void>;
-  refreshPersonalGitHub: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  refreshPersonalGitHub: (
+    workspaceId: string,
+    signal?: AbortSignal,
+    options?: Pick<GitHubRefreshOptions, "userInitiated">,
+  ) => Promise<void>;
   connectPersonalGitHub: (workspaceId: string) => Promise<void>;
   reconnectPersonalGitHub: (workspaceId: string) => Promise<void>;
   disconnectPersonalGitHub: (workspaceId: string) => Promise<boolean>;
@@ -212,6 +247,8 @@ export type AppContextValue = {
       instructions?: string | undefined;
       /** Installed session-selected Skills to freeze onto this exact session. */
       installedSkillIds?: string[] | undefined;
+      /** Start the chat as a bot: its name, description and avatar, kept live. */
+      bot?: import("./lib/session-create").NewSessionBotProfile | undefined;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[] | undefined;
       newSessionDraftToolPolicy?:

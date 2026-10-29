@@ -1,6 +1,7 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
+import { FeatureUnavailableReason } from "./inference-residency";
 import {
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
@@ -206,6 +207,8 @@ export const VideoGenerationFundingOption = /* @__PURE__ */ defineSchema(() =>
       description: z.string().min(1).max(256),
       available: primitives.boolean,
       unavailableReason: z.string().min(1).max(256).nullable(),
+      /** `region_restricted` when EU-only inference switched this source off. */
+      unavailableCode: FeatureUnavailableReason.optional(),
     })
     .strict()
     .superRefine((value, ctx) => {

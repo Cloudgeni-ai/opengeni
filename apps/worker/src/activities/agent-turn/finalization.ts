@@ -842,7 +842,6 @@ async function finalizeTurnAttemptSteps(
       attributes: {
         "opengeni.turn_id": attempt.turnId ?? "",
         "opengeni.status": control.activityStatus,
-        "opengeni.variable_set_id": workspaceRefs.variableSetId,
         "opengeni.rig_id": workspaceRefs.rigId,
         "opengeni.rig_version_id": workspaceRefs.rigVersionId,
         "opengeni.codex_credential_id": providerTurn.effectiveCodexCredentialId ?? "",

@@ -32,9 +32,14 @@ an init system of its own.
   proxy, `maskRequestHost`, and `autoPauseMemory: false`. A create asking
   for any of them gets a 400 naming them. `autoResume` needs `autoPause`.
 - **E2B's lifecycle words map onto our sleep, with explicit states.** A
-  sandbox E2B calls running sleeps whenever idle like any other, and any
-  request or port traffic wakes it; that is our own business and not
-  visible through the API. E2B's pause, and its timeout, are different:
+  sandbox E2B calls running that pauses at its timeout sleeps whenever
+  idle like any other, and any request or port traffic wakes it; that is
+  our own business and not visible through the API. One killed at its
+  timeout runs until then and never sleeps, as on E2B: only a request or
+  traffic from outside wakes a sleeping sandbox, never anything it does on
+  its own (a timer, a connection it opened), so sleeping would stop work it
+  drives itself, such as a CI runner's job, for good. Its timeout bounds
+  what it costs. E2B's pause, and its timeout, are different:
   the service records them as lifecycle states (`pausing`, `paused`,
   `killing`), which traffic does not cancel. Pausing ends every command and
   PTY stream, saves to at least Saved, and is complete only when the host
@@ -42,7 +47,10 @@ an init system of its own.
   work. A paused sandbox wakes on resume or connect, and on traffic only
   if it was created with auto-resume; otherwise traffic gets E2B's answer
   for a paused sandbox. At its timeout a sandbox is killed, or with
-  `onTimeout: pause` paused the same way.
+  `onTimeout: pause` paused the same way. Only a sandbox that pauses at
+  its timeout is checkpointed to object storage while it runs. One killed
+  at its timeout is never resumed, so a checkpoint would only stop its
+  programs for nothing; a host that loses it loses it, as on E2B.
 - **The pause and the timeout are durable.** The service writes the
   lifecycle state first (`pausing`, `killing`), then acts, then writes the
   end state. A sweeper in every replica finishes a pause or kill that a

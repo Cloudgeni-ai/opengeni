@@ -3,11 +3,7 @@
  * candidate selection, operation leases for transcription, realtime and
  * video, refresh under the core lock, the per-connection quota probe and
  * the status read, on real PostgreSQL as the non-owner application role.
- *
- * SuperGrok stays unregistered in production until its cutover (X3); this
- * file registers the production binding (with a scripted OAuth refresh) in
- * its own process, plus the registry row and cutover receipt a cutover
- * migration ships, on its own test database.
+ * The file registers the production binding with a scripted OAuth refresh.
  */
 import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -66,17 +62,6 @@ beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("subscription-core-xai-operations-v1");
   if (!shared) throw new Error("Real PostgreSQL is required");
-  // What the SuperGrok cutover migration ships: the registry row and receipt.
-  await shared.admin`
-    insert into opengeni_private.subscription_core_providers
-      (provider, extra_credits, primary_setting_column)
-    values ('xai', false, 'xai_primary_connection_id')
-    on conflict do nothing`;
-  await shared.admin`
-    insert into opengeni_private.subscription_provider_cutover_receipts
-      (provider, migration, committed_at, seed_rotation)
-    values ('xai', '9999_xai_operations_test.sql', clock_timestamp(), '{"mode":"spread"}'::jsonb)
-    on conflict do nothing`;
   client = createDb(shared.appUrl, { max: 6 });
 }, 180_000);
 
@@ -125,20 +110,12 @@ async function organization(): Promise<Org> {
       ${accountId}::uuid, ${shared!.admin.json({ xai: { mode: "spread" } })}::jsonb,
       '{}'::jsonb, false, '{}'::jsonb, true, true
     )`;
-  await setCutover(accountId, true);
   return {
     accountId,
     ownerSubjectId,
     ownerMembershipId: membership!.id,
     workspaceId: workspace!.id,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'xai', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 function encryptedTokens(label: string): string {
@@ -353,7 +330,7 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
   });
 
-  test("operation candidates are shared only, primary first, and empty without the cutover", async () => {
+  test("operation candidates are shared only and primary first", async () => {
     const org = await organization();
     const first = await sharedConnection(org, "first");
     const assigned = await sharedConnection(org, "assigned", { scope: "workspaces" });
@@ -373,13 +350,6 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     expect(status.connections.map((connection) => connection.connectionId).sort()).toEqual(
       [first, assigned].sort(),
     );
-    await setCutover(org.accountId, false);
-    expect(
-      await operations().listSubscriptionCoreOperationCandidates(client!.db, workspaceScope(org)),
-    ).toEqual([]);
-    expect(await runOn(org, workspaceScope(org), first, "transcription")).toEqual({
-      kind: "unavailable",
-    });
   });
 
   test("transcription and realtime lease shared connections, refuse personal ones, and never write the binding", async () => {

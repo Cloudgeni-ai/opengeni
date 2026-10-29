@@ -12,6 +12,8 @@ import {
   mcpOAuthBearerToken,
 } from "../mcp-oauth";
 
+// The signed-out read of a chat share link (routes/session-share-links.ts).
+const SHARED_SESSION_PUBLIC_PATH = /^\/v1\/shared-sessions\/[^/]+$/;
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
 // The Connected Machine agent's own protocol. A machine never holds the
 // deployment key; each route authenticates its own enroll token, device code,
@@ -23,8 +25,6 @@ const connectedMachineProtocolPaths = new Set([
   "/v1/enrollments/renew",
 ]);
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
-const prReviewGithubBrowserPathPattern =
-  /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
 
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
@@ -80,13 +80,16 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path === ANALYTICS_CONSENT_PATH) {
     return true;
   }
+  // A chat share link opens without signing in: the unguessable share id is
+  // the whole credential, the route is rate limited, and a deployment turns
+  // links off with OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED.
+  if (c.req.method === "GET" && SHARED_SESSION_PUBLIC_PATH.test(path)) {
+    return true;
+  }
   if (path === "/v1/auth" || path.startsWith("/v1/auth/")) {
     return true;
   }
   if (path === "/v1/webhooks/stripe") {
-    return true;
-  }
-  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/automations/")) {
     return true;
   }
   // Event source webhooks are authenticated by the sender's signature, which
@@ -98,21 +101,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path === "/v1/webhooks/github") {
     return true;
   }
-  if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
-    return true;
-  }
   if (
     path === "/v1/github/setup" ||
     path === "/v1/github/install/callback" ||
     path === "/v1/github/oauth/callback" ||
     path === "/v1/github/app-manifest/callback"
-  ) {
-    return true;
-  }
-  if (
-    path === "/v1/pr-review/github/setup" ||
-    path === "/v1/pr-review/github/install/callback" ||
-    path === "/v1/pr-review/github/oauth/callback"
   ) {
     return true;
   }
@@ -146,12 +139,14 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path.startsWith("/v1/catalog-assets/")) {
     return true;
   }
+  // A bot's avatar picture, fetched by Slack without credentials. The signed
+  // path is its only authority (integrations/session-avatar-image.ts).
+  if (c.req.method === "GET" && path.startsWith("/v1/public/session-avatars/")) {
+    return true;
+  }
   // The GitHub owner-consent entry remains public like the callbacks above; it
   // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {
-    return true;
-  }
-  if (prReviewGithubBrowserPathPattern.test(path)) {
     return true;
   }
   // Compatibility endpoint for stale chooser submissions. It remains public

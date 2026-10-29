@@ -50,6 +50,7 @@ import {
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
   type Database,
+  isWorkspaceEuOnly,
   loadModelProviderExecutionInputs,
   type ModelProviderExecutionInputs,
 } from "@opengeni/db";
@@ -443,6 +444,30 @@ export async function settingsWithOrganizationProviderCredentials(
 }
 
 /**
+ * EU-only inference: when the workspace is EU-only, every model route the run
+ * resolves must be EU (`requiredModelGeography`). A failed read throws, so a
+ * run never proceeds without knowing. Narrowing only: an EU requirement
+ * already on the settings is kept.
+ */
+export async function settingsWithInferenceResidency(
+  db: Database,
+  input: { accountId: string; workspaceId: string; settings: Settings },
+): Promise<Settings> {
+  if (input.settings.requiredModelGeography === "eu") return input.settings;
+  const euOnly = await isWorkspaceEuOnly(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+  });
+  return withInferenceResidencyRequirement(input.settings, euOnly);
+}
+
+function withInferenceResidencyRequirement(settings: Settings, euOnly: boolean): Settings {
+  return euOnly && settings.requiredModelGeography !== "eu"
+    ? { ...settings, requiredModelGeography: "eu" }
+    : settings;
+}
+
+/**
  * Apply every execution overlay in the order the worker claim uses, then
  * install the selected customer direct connection when the model names one.
  * `codexSubscriptionActive` is the caller's single readiness observation, so
@@ -474,11 +499,14 @@ export async function settingsWithModelProviderCredentials(
     claudeSubscriptionEnabled: xaiSettings.claudeSubscriptionEnabled,
     loadOrganizationCredentials: environmentsEncryptionKeyBytes(xaiSettings) !== null,
   });
+  // EU-only inference (`settingsWithInferenceResidency`, read in the same
+  // transaction as the rest): set before any overlay that resolves a route.
+  const residencySettings = withInferenceResidencyRequirement(xaiSettings, prepared.euOnly);
   const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
     db,
     accountId,
     workspaceId,
-    xaiSettings,
+    residencySettings,
     productModelId,
     prepared,
   );

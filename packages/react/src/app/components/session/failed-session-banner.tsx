@@ -13,6 +13,8 @@ import {
 } from "../../lib/turn-failure-analytics";
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
+import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
+import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -40,6 +42,7 @@ export function FailedSessionBanner({
   sandboxRecovery,
   analyticsKey,
   shownInTimeline = false,
+  codexUsage,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
@@ -75,6 +78,11 @@ export function FailedSessionBanner({
    * recovery actions here instead of a second headline and Details.
    */
   shownInTimeline?: boolean | undefined;
+  /**
+   * When the ChatGPT/Codex plan is out of usage: say when it resets, with a
+   * "Continue at reset" switch in place of Retry.
+   */
+  codexUsage?: CodexUsageChoice | undefined;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
@@ -93,15 +101,21 @@ export function FailedSessionBanner({
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
   const offerCredits = Boolean(workspaceId && canBuyCredits);
   const offerConnect = Boolean(workspaceId && canConnectModel);
-  const headline = freeModelLimit
-    ? freeModelDailyLimitReason({
-        modelChanged,
-        canBuyCredits: offerCredits,
-        canConnectModel: offerConnect,
-        subscriptions,
-        canChooseModel: hasModelPicker ?? canChooseModel,
-      })
-    : reason;
+  const codexUsageFailure =
+    codexUsage && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure
+      ? codexUsage
+      : null;
+  const headline = codexUsageFailure
+    ? `Codex usage limit reached. ${codexUsageFailure.resetText}`
+    : freeModelLimit
+      ? freeModelDailyLimitReason({
+          modelChanged,
+          canBuyCredits: offerCredits,
+          canConnectModel: offerConnect,
+          subscriptions,
+          canChooseModel: hasModelPicker ?? canChooseModel,
+        })
+      : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -112,13 +126,23 @@ export function FailedSessionBanner({
       return actions.onRetry();
     },
   };
-  const retryActions =
-    trackedActions &&
+  // Retry would only hit the same limit: the switch runs the turn again
+  // once the limit resets. Another model from the picker continues at once.
+  const retryActions = codexUsageFailure ? (
+    <>
+      <ContinueAtResetSwitch {...codexUsageFailure} />
+      {codexUsageFailure.error ? (
+        <p role="alert" className="order-last basis-full text-xs text-fg-muted">
+          {codexUsageFailure.error}
+        </p>
+      ) : null}
+    </>
+  ) : trackedActions &&
     !failure.safetyRefusal &&
     failure.failureCode !== "knowledge_learning_scope_changed" &&
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
-      <FailedSessionActions {...trackedActions} />
-    ) : null;
+    <FailedSessionActions {...trackedActions} />
+  ) : null;
   if (shownInTimeline && compaction && !structuralFailure) {
     const recovery = sandboxRecovery ? (
       <SandboxRecoveryActions

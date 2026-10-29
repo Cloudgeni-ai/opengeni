@@ -1,8 +1,13 @@
 // Agents find and read recorded meetings, and write their notes. They act as
 // the person the session works for, so an agent sees exactly the meetings
-// that person can see: their own Only me recordings and everything shared
-// with the workspace. Transcripts are given as compact speaker-named lines
+// that person can see: everything shared with the workspace, and their own
+// Only me recordings, including those stored in their other workspaces of the
+// same organization (never another organization's). Transcripts are given as compact speaker-named lines
 // with people's corrections applied, in parts a model can page through.
+// Opengeni's own meeting-summary chat is fenced to the one meeting it was
+// started for: it cannot search, every other meeting is not found, and it
+// writes only the first notes or its own. An Only me summary reads that
+// meeting as its owner.
 import {
   defaultRecordingSpeakerName,
   RECORDING_NOTE_MAX_BYTES,
@@ -12,7 +17,12 @@ import {
   type RecordingSpeaker,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import { siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  creationInitiatorForGrant,
+  hasPermission,
+  siteViewerForGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   getManagedUserProfilesByIds,
   getRecording,
@@ -20,11 +30,16 @@ import {
   getRecordingTranscriptPage,
   listRecordingLiveSegments,
   listRecordingNotes,
-  listRecordings,
+  listRecordingsWithOwnElsewhere,
   listRecordingTranscriptVersions,
+  meetingSummarySessionScope,
+  ownRecordingHome,
+  ownRecordingWorkspaces,
+  recordingVisible,
   RecordingConflictError,
   RecordingNotFoundError,
   saveRecordingNote,
+  type OwnRecordingWorkspace,
   type RecordingActor,
 } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -169,18 +184,84 @@ function failure(json: JsonResult, code: string, message: string) {
 export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
   const { server, deps, grant, sessionId, authorize, json } = input;
 
-  /** The person the agent acts for; without one it sees only shared meetings. */
-  async function actor(): Promise<RecordingActor> {
+  /**
+   * The person the agent acts for; without one it sees only shared meetings.
+   * `only` is the one meeting a meeting-summary chat may reach.
+   */
+  async function actor(): Promise<RecordingActor & { only: string | null }> {
     await authorize();
+    const summary = await meetingSummarySessionScope(deps.db, {
+      workspaceId: grant.workspaceId,
+      sessionId,
+      createdByActor: creationInitiatorForGrant(grant).actor ?? null,
+    });
+    if (summary?.ownerSubjectId) {
+      return {
+        workspaceId: grant.workspaceId,
+        subjectId: summary.ownerSubjectId,
+        only: summary.recordingId,
+      };
+    }
     const viewer = await siteViewerForGrant(deps.db, grant);
-    return { workspaceId: grant.workspaceId, subjectId: viewer.subjectId ?? grant.subjectId };
+    return {
+      workspaceId: grant.workspaceId,
+      subjectId: viewer.subjectId ?? grant.subjectId,
+      only: summary?.recordingId ?? null,
+    };
   }
+
+  /**
+   * The person's other workspaces of this organization where they may do
+   * this now: their own live permissions there (their membership, or their
+   * Personal workspace), never only this session's.
+   */
+  async function ownElsewhere(
+    who: RecordingActor,
+    permission: "sessions:read" | "sessions:create",
+  ): Promise<OwnRecordingWorkspace[]> {
+    const workspaces = await ownRecordingWorkspaces(deps.db, {
+      ...who,
+      accountId: grant.accountId,
+    });
+    return workspaces.filter((workspace) => hasPermission(workspace.permissions, permission));
+  }
+
+  /**
+   * The person, in the workspace storing the meeting: this one, or for their
+   * own Only me meeting, another workspace of this organization where they
+   * hold the permission themselves.
+   */
+  async function actorForMeeting(
+    meetingId: string,
+    permission: "sessions:read" | "sessions:create",
+  ): Promise<{ who: RecordingActor & { only: string | null }; recordedIn: string | null }> {
+    const who = await actor();
+    // A meeting-summary chat reaches its one meeting, here, and nothing else.
+    if (who.only) return { who, recordedIn: null };
+    if (await recordingVisible(deps.db, { ...who, recordingId: meetingId })) {
+      return { who, recordedIn: null };
+    }
+    const home = await ownRecordingHome(deps.db, {
+      subjectId: who.subjectId,
+      recordingId: meetingId,
+      workspaces: await ownElsewhere(who, permission),
+    });
+    return home
+      ? { who: { ...who, workspaceId: home.id }, recordedIn: home.name }
+      : { who, recordedIn: null };
+  }
+
+  const notVisible = () =>
+    json({
+      found: false,
+      message: "No meeting with this id is visible to the person you act for.",
+    });
 
   server.registerTool(
     "meetings_search",
     {
       description:
-        "Find recorded meetings the person you act for can see: their own and those shared with the workspace. Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
+        "Find recorded meetings the person you act for can see: those shared with the workspace and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
       inputSchema: {
         query: z
           .string()
@@ -215,8 +296,16 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         return failure(json, "invalid_cursor", "Pass nextCursor exactly as it was returned.");
       }
       const who = await actor();
-      const page = await listRecordings(deps.db, {
+      if (who.only) {
+        return failure(
+          json,
+          "not_allowed",
+          "This chat writes the notes of one meeting; read it with meeting_read.",
+        );
+      }
+      const page = await listRecordingsWithOwnElsewhere(deps.db, {
         ...who,
+        elsewhere: await ownElsewhere(who, "sessions:read"),
         query: request.query?.trim() || undefined,
         person: request.person?.trim() || undefined,
         startedFrom: request.startedFrom ? new Date(request.startedFrom) : undefined,
@@ -225,11 +314,30 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         before,
         limit: request.limit,
       });
-      const searchDetails = await getRecordingSearchDetails(deps.db, {
-        ...who,
-        recordingIds: page.recordings.map((recording) => recording.id),
-        query: request.query,
-      });
+      // Each meeting's details are read in the workspace that stores it.
+      const byWorkspace = new Map<string, string[]>();
+      for (const recording of page.recordings) {
+        byWorkspace.set(recording.workspaceId, [
+          ...(byWorkspace.get(recording.workspaceId) ?? []),
+          recording.id,
+        ]);
+      }
+      const searchDetails = new Map(
+        (
+          await Promise.all(
+            [...byWorkspace].map(async ([workspaceId, recordingIds]) => [
+              ...(
+                await getRecordingSearchDetails(deps.db, {
+                  ...who,
+                  workspaceId,
+                  recordingIds,
+                  query: request.query,
+                })
+              ).entries(),
+            ]),
+          )
+        ).flat(),
+      );
       return json({
         meetings: page.recordings.map((recording) => {
           const found = searchDetails.get(recording.id);
@@ -240,6 +348,9 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
             duration: formatMeetingTimestamp(recording.durationMilliseconds),
             status: meetingStatus(recording),
             visibility: recording.visibility === "private" ? "only_me" : "workspace",
+            ...(page.sourceWorkspaces.has(recording.workspaceId)
+              ? { recordedIn: page.sourceWorkspaces.get(recording.workspaceId) }
+              : {}),
             speakers: (found?.speakers ?? []).map(speakerName),
             ...(recording.externalRef ? { externalRef: recording.externalRef } : {}),
             ...(found && found.matches.length > 0
@@ -264,7 +375,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meeting_read",
     {
       description:
-        'Read a recorded meeting the person you act for can see: its details, speakers, notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
+        'Read a recorded meeting the person you act for can see: its details, speakers (each with its label, and its personId when it is a person from the workspace), notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
       inputSchema: {
         meetingId: z.uuid().describe("A meeting id from meetings_search."),
         from: z
@@ -300,17 +411,13 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (from === null || to === null) {
         return failure(json, "invalid_time", 'Give from and to as "m:ss" or "h:mm:ss".');
       }
-      const who = await actor();
+      const { who, recordedIn } = await actorForMeeting(request.meetingId, "sessions:read");
+      if (who.only && who.only !== request.meetingId) return notVisible();
       let recording: Recording;
       try {
         recording = await getRecording(deps.db, { ...who, recordingId: request.meetingId });
       } catch (error) {
-        if (error instanceof RecordingNotFoundError) {
-          return json({
-            found: false,
-            message: "No meeting with this id is visible to the person you act for.",
-          });
-        }
+        if (error instanceof RecordingNotFoundError) return notVisible();
         throw error;
       }
       // Details come with the first part only; later parts carry just lines.
@@ -351,7 +458,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
             ? live!.segments.at(-1)!.sequence
             : null;
         return json({
-          ...(first ? { meeting: await details(recording, who, []) } : {}),
+          ...(first ? { meeting: await details(recording, who, [], recordedIn) } : {}),
           transcript:
             live && live.segments.length > 0
               ? "live preview: rough text while recording; speakers are not told apart"
@@ -394,7 +501,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       );
       const more = rendered.lastKey !== null && (rendered.truncated || page.nextAfter !== null);
       return json({
-        ...(first ? { meeting: await details(recording, who, page.speakers) } : {}),
+        ...(first ? { meeting: await details(recording, who, page.speakers, recordedIn) } : {}),
         transcript: versionSummary(page.version),
         lines: rendered.text,
         nextCursor: more
@@ -431,7 +538,22 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (new TextEncoder().encode(request.notes).length > RECORDING_NOTE_MAX_BYTES) {
         return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
       }
-      const who = await actor();
+      const { who } = await actorForMeeting(request.meetingId, "sessions:create");
+      if (who.only && who.only !== request.meetingId) return notVisible();
+      // A summary chat writes the first notes and may revise only its own,
+      // whatever revision it passes; the revision check below then refuses
+      // anyone's save in between.
+      if (who.only && request.expectedRevision > 0) {
+        const notes = (await listRecordingNotes(deps.db, { ...who, recordingId: who.only })).find(
+          (note) => note.kind === "notes",
+        );
+        if (notes?.revision !== request.expectedRevision || notes.updatedBy.sessionId !== sessionId)
+          return failure(
+            json,
+            "notes_changed",
+            "Someone else saved these notes; leave them as they are.",
+          );
+      }
       try {
         const saved = await saveRecordingNote(deps.db, {
           ...who,
@@ -443,13 +565,14 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         });
         return json({ saved: true, revision: saved.revision });
       } catch (error) {
-        if (error instanceof RecordingNotFoundError) {
-          return json({
-            found: false,
-            message: "No meeting with this id is visible to the person you act for.",
-          });
-        }
+        if (error instanceof RecordingNotFoundError) return notVisible();
         if (error instanceof RecordingConflictError && error.code === "notes_changed") {
+          if (who.only)
+            return failure(
+              json,
+              "notes_changed",
+              "Someone else saved these notes; leave them as they are.",
+            );
           const current = (
             await listRecordingNotes(deps.db, { ...who, recordingId: request.meetingId })
           ).find((note) => note.kind === "notes");
@@ -468,6 +591,8 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     recording: Recording,
     who: RecordingActor,
     speakers: readonly RecordingSpeaker[],
+    /** The other workspace of the organization storing the person's own meeting. */
+    recordedIn: string | null,
   ) {
     const [owner] = recording.ownerSubjectId.startsWith("user:")
       ? await getManagedUserProfilesByIds(deps.db, [recording.ownerSubjectId.slice(5)])
@@ -486,8 +611,10 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       duration: formatMeetingTimestamp(recording.durationMilliseconds),
       status: meetingStatus(recording),
       visibility: recording.visibility === "private" ? "only_me" : "workspace",
+      ...(recordedIn ? { recordedIn } : {}),
       ...(owner ? { recordedBy: owner.name ?? owner.email } : {}),
       speakers: speakers.map((speaker) => ({
+        label: speaker.label,
         name: speaker.name,
         ...(speaker.personId ? { personId: speaker.personId } : {}),
         ...(speaker.source === "suggested" ? { suggested: true } : {}),

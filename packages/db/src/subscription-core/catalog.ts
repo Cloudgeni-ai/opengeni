@@ -2,10 +2,6 @@
  * Provider readiness for catalog, default-model and admission reads on the
  * shared subscription core, for any provider.
  *
- * Callers decide by the provider's cutover disposition first: a disabled
- * row reports the provider as not ready (fail closed), and an enabled row
- * reads only what is listed here.
- *
  * Connections that count, for one workspace and one acting subject:
  *
  * - active, allocatable shared connections that reach the workspace;
@@ -22,19 +18,14 @@
  */
 import { providerSwitchesFor } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
-import { rawRows, rlsContextForWorkspace, withRlsContext, type Database } from "../database";
+import { rawRows, withRlsContext, type Database } from "../database";
 import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
 import {
   decodeSubscriptionQuota,
   listSubscriptionConnectionsForPlacement,
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
 } from "../subscription-core-repository";
-import {
-  listSubscriptionCorePersonalConnectionRowsInTransaction,
-  readSubscriptionCoreCutoverDisposition,
-  type SubscriptionCoreCutoverDisposition,
-} from "./administration";
+import { listSubscriptionCorePersonalConnectionRowsInTransaction } from "./administration";
 import {
   subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
@@ -89,28 +80,6 @@ export function subscriptionCoreConnectionAllowlist(connection: ModelPolicy): st
 }
 
 /**
- * The provider's cutover disposition for a workspace whose organization the
- * caller does not hold. One extra workspace-to-organization lookup.
- */
-export async function readSubscriptionCoreCutoverDispositionForWorkspace(
-  db: Database,
-  provider: SubscriptionCoreProvider,
-  workspaceId: string,
-  accountId?: string | null,
-): Promise<{ accountId: string; disposition: SubscriptionCoreCutoverDisposition }> {
-  const organizationId = accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
-  return {
-    accountId: organizationId,
-    disposition: await readSubscriptionCoreCutoverDisposition(
-      db,
-      provider,
-      organizationId,
-      workspaceId,
-    ),
-  };
-}
-
-/**
  * Live per-model cooldowns of one connection, sorted by model id. A cooldown
  * ends at its stored time as a Date holds it (whole milliseconds).
  */
@@ -123,8 +92,8 @@ function liveModelCooldowns(quota: ReturnType<typeof decodeSubscriptionQuota>, n
 
 /**
  * The core connections of this provider that can serve new work of
- * `subjectId` in this workspace (see the module comment). Empty without an
- * enabled cutover. A null or non-human subject sees shared capacity only.
+ * `subjectId` in this workspace (see the module comment). A null or
+ * non-human subject sees shared capacity only.
  */
 export async function listSubscriptionCoreServingConnections(
   db: Database,
@@ -143,11 +112,6 @@ export async function listSubscriptionCoreServingConnections(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      const cutover = await readSubscriptionProviderCutoverState(tx, {
-        accountId: input.accountId,
-        provider: providerId,
-      });
-      if (cutover !== "enabled") return [];
       const effective = await readSubscriptionEffectiveSettings(
         tx,
         input.accountId,
@@ -257,7 +221,7 @@ export async function listSubscriptionCoreServingConnections(
 
 /**
  * The provider's readiness on the core: at least one connection can serve
- * new work of this subject here. False without an enabled cutover.
+ * new work of this subject here.
  */
 export async function subscriptionCoreWorkspaceReady(
   db: Database,

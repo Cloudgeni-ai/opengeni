@@ -530,7 +530,8 @@ with the workspace's voice input and kept like any dictation.
   transcribes it again, which uploads the kept speech as a new dictation and
   replaces the text. An optional retry shortcut does that for the last
   dictation and types the new text; an optional cancel shortcut works like
-  Escape.
+  Escape. Cancel deletes the dictation; its speech, after the first few
+  seconds, stays only here, marked cancelled, to play or transcribe again.
 - **Vocabulary.** Names and terms the person lists (up to 100) go with every
   dictation as the recording's `keyterms`, and reach the voice input model
   when it takes them.
@@ -574,10 +575,11 @@ People get the app four ways, all from the same releases:
   version-less file name (`Opengeni-mac.dmg`, `Opengeni-windows.exe`,
   `Opengeni-linux-amd64.deb`, `SHA256SUMS`, ...) to that file on the current
   release, and `GET /desktop/latest` to the release page. The current release
-  is the newest stable `desktop-v` tag, looked up on GitHub and cached for ten
-  minutes, unless the operator pins `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's
-  own "latest release" can't be used: agent and package releases share the
-  repository.
+  is the newest stable `desktop-v` tag, listed over Git's smart HTTP protocol
+  (the REST API's unauthenticated limit is shared by every caller behind the
+  same outbound address) and cached for ten minutes, unless the operator pins
+  `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's own "latest release" can't be
+  used: agent and package releases share the repository.
 - **With one command.** `curl -fsSL https://<server>/desktop/install.sh | sh`
   installs or updates the app on macOS (into `/Applications`, after checking
   the checksum, signature and notarization) and Linux (deb through apt, rpm

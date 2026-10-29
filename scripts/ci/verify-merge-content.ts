@@ -10,11 +10,27 @@ function git(args: string[], cwd: string): string {
   }).trim();
 }
 
+/** The head a squash-landed PR had, fetched from GitHub's refs/pull/<n>/head. */
+export function fetchPullHead(number: number, cwd: string): string | null {
+  try {
+    git(["fetch", "--quiet", "--no-tags", "origin", `refs/pull/${number}/head`], cwd);
+    return git(["rev-parse", "FETCH_HEAD"], cwd);
+  } catch {
+    return null;
+  }
+}
+
 /** Recompute each landed merge independently of the provider's merge implementation.
- * Single-parent squash commits from before queue rollout are reported, not attested.
- * This is detection after landing, not a substitute for merge_group checks.
+ * A squash commit titled "... (#N)" is recomputed from its parent and PR #N's
+ * head, as GitHub squashes. Other single-parent commits are reported, not attested.
+ * This is detection after landing, not a substitute for testing before it.
  */
-export function verifyMergeContent(base: string, head: string, cwd = process.cwd()) {
+export function verifyMergeContent(
+  base: string,
+  head: string,
+  cwd = process.cwd(),
+  pullHead: (number: number) => string | null = (number) => fetchPullHead(number, cwd),
+) {
   for (const sha of [base, head]) {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("expected exact base/head commit SHAs");
   }
@@ -27,8 +43,13 @@ export function verifyMergeContent(base: string, head: string, cwd = process.cwd
   for (const sha of commits) {
     const parents = git(["show", "-s", "--format=%P", sha], cwd).split(" ");
     if (parents.length === 1) {
-      singleParent.push(sha);
-      continue;
+      const number = /\(#(\d+)\)$/.exec(git(["show", "-s", "--format=%s", sha], cwd))?.[1];
+      const side = number ? pullHead(Number(number)) : null;
+      if (!side) {
+        singleParent.push(sha);
+        continue;
+      }
+      parents.push(side);
     }
     if (parents.length !== 2) throw new Error(`unsupported merge topology: ${sha}`);
     // merge-tree exits nonzero on conflicts. Never bless a hand-resolved tree

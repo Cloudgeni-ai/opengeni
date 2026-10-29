@@ -5,6 +5,7 @@ import {
   createTranscriptionService,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextModelFor,
   transcriptText,
 } from "../src/transcription-service";
@@ -145,6 +146,9 @@ describe("speech-to-text deployment", () => {
     const deployment = createSpeechToTextDeployment(
       { settings: testSettings({}) },
       {
+        // Without a database the EU-only setting cannot be read (fail closed);
+        // this workspace is not EU-only.
+        isEuOnly: async () => false,
         loadWorkspaceKey: async (_provider, scope) => (scope.workspaceId === "keyed" ? "el" : null),
       },
     );
@@ -305,6 +309,9 @@ describe("the model a workspace's meetings run", () => {
       },
       {
         providers: [subscription(input.signedIn ?? [])],
+        // Without a database the EU-only setting cannot be read (fail closed);
+        // these workspaces are not EU-only.
+        isEuOnly: async () => false,
         loadWorkspaceKey: async (_provider, { workspaceId }) =>
           (input.keyed ?? []).includes(workspaceId) ? "el" : null,
       },
@@ -346,6 +353,30 @@ describe("the model a workspace's meetings run", () => {
     });
     expect(await meetingModelFor(pinned, null, scope)).toEqual(pinned.pinned!);
   });
+
+  test("a refused deployment model gives way to one the payer doesn't pay credits for", async () => {
+    // The deployment's own Azure account is the default and charges credits.
+    const signedIn = deploymentWith({ signedIn: ["w"], settings: azure });
+    expect(signedIn.meetingDefault.providerId).toBe("azure-speech");
+    expect(await meetingModelWithoutCreditsFor(signedIn, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+    // The workspace's own key counts too, in the deployment's order.
+    expect(
+      await meetingModelWithoutCreditsFor(deploymentWith({ keyed: ["w"], settings: azure }), scope),
+    ).toEqual({ providerId: "elevenlabs", model: "scribe_v2" });
+    // Nothing connected: nothing to switch to, so the refusal stands.
+    expect(await meetingModelWithoutCreditsFor(deploymentWith({ settings: azure }), scope)).toBe(
+      null,
+    );
+    // A pinned deployment sends audio to its one model only.
+    const pinned = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
+    });
+    expect(await meetingModelWithoutCreditsFor(pinned, scope)).toBe(null);
+  });
 });
 
 describe("dictation over the shared providers", () => {
@@ -364,6 +395,7 @@ describe("dictation over the shared providers", () => {
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
+        isEuOnly: async () => false,
         providers: [
           fakeTextProvider("elevenlabs", "workspace_key", async (input, credentials) => {
             heard.push({
@@ -433,7 +465,11 @@ describe("dictation over the shared providers", () => {
       db: {} as never,
       deployment: createSpeechToTextDeployment(
         { settings },
-        { providers: [listening, deaf], loadWorkspaceKey: async () => "workspace-key" },
+        {
+          providers: [listening, deaf],
+          loadWorkspaceKey: async () => "workspace-key",
+          isEuOnly: async () => false,
+        },
       ),
     });
     const keyterms = ["Kubernetes", "Ada Lovelace"];
@@ -468,6 +504,7 @@ describe("dictation over the shared providers", () => {
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
+        isEuOnly: async () => false,
         providers: [
           fakeTextProvider("first", "workspace_subscription", async () => {
             throw new RecordingTranscriptionError("signed out", "unauthorized", false);
@@ -516,7 +553,7 @@ describe("dictation over the shared providers", () => {
     const service = createTranscriptionService({
       settings,
       db: {} as never,
-      deployment: createSpeechToTextDeployment({ settings }),
+      deployment: createSpeechToTextDeployment({ settings }, { isEuOnly: async () => false }),
     });
     expect(await service.availableProviderIds?.({ workspaceId: "w" })).toEqual(["azure-speech"]);
     expect(await service.selectProvider?.({ workspaceId: "w", preferredProvider: "openai" })).toBe(

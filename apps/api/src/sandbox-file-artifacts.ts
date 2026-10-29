@@ -123,10 +123,7 @@ export async function publishSandboxFileArtifact(
       requireWorkspace(deps.db, input.grant.workspaceId),
     ]);
     if (!authority) throw new HTTPException(404, { message: "Source session is unavailable" });
-    const personal =
-      authority.visibility === "user_private" ||
-      authority.memoryScope === "user" ||
-      workspace.kind === "personal";
+    const personal = authority.visibility === "user_private" || authority.memoryScope === "user";
     const expectedOwner =
       authority.visibility === "user_private"
         ? authority.ownerSubjectId
@@ -434,7 +431,7 @@ async function publishSandboxFileArtifactInScope(
     fileId: file.id,
     sourceSessionId: input.session.id,
   });
-  if (!newlyPrepared && input.visibility && input.workspace.kind !== "personal") {
+  if (!newlyPrepared && input.visibility) {
     file = (
       await changeFileVisibility({
         db: deps.db,

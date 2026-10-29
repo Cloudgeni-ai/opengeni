@@ -41,8 +41,6 @@ import { z } from "zod";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parsePathParam } from "../http/path-identifier";
-import { codexRouteDisposition } from "./codex-core";
-import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 import { parseRequestBody } from "../http/request-body";
 
 const Kind = z.enum([
@@ -69,25 +67,11 @@ function modelPrefix(target: ModelConnectionTarget) {
 }
 
 /**
- * Codex access policies follow the organization's Codex cutover row (M3 PR
- * 3): the legacy credential row without one; the shared core connection with
- * an enabled one (the legacy rows are frozen after 0680); a disabled row is
- * maintenance (typed 503 from `codexRouteDisposition`). SuperGrok's follow
- * its provider route (design 5.3, X2b): legacy without the `xai` cutover
- * receipt, the shared core connection with it, maintenance fails closed.
+ * Codex, SuperGrok and Claude subscription access policies live on the shared
+ * core connection; every other connection kind keeps its own access row.
  */
-async function coreAccessDisposition(
-  deps: ApiRouteDeps,
-  kind: ModelConnectionTarget["kind"],
-  accountId: string,
-): Promise<"legacy" | "core"> {
-  if (kind === "codex") return await codexRouteDisposition(deps, accountId);
-  // SuperGrok runs only on the core: any other route fails closed.
-  if (kind === "supergrok")
-    return await requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
-  if (kind === "claude_subscription")
-    return await requireSubscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
-  return "legacy";
+function onSubscriptionCore(kind: ModelConnectionTarget["kind"]): boolean {
+  return kind === "codex" || kind === "supergrok" || kind === "claude_subscription";
 }
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
@@ -119,7 +103,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             workspaceId: null,
             subjectId: human.subjectId,
           },
-          core: (await coreAccessDisposition(deps, kind, scopeId)) === "core",
+          core: onSubscriptionCore(kind),
         };
       }
       // Workspace OpenAI and Azure OpenAI connections are exact direct
@@ -129,9 +113,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       // On the core a SuperGrok or Claude access policy is a shared connection's, which
       // the core editor authorizes; only the legacy pools have private rows.
-      const sharedCore =
-        (kind === "supergrok" || kind === "claude_subscription") &&
-        (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
+      const sharedCore = kind === "supergrok" || kind === "claude_subscription";
       if (mutate) {
         // A core Claude change keeps the legacy same-origin browser check.
         if (kind === "claude_subscription" && !c.req.header("authorization"))
@@ -160,7 +142,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         core:
           kind === "supergrok" || kind === "claude_subscription"
             ? sharedCore
-            : (await coreAccessDisposition(deps, kind, grant.accountId)) === "core",
+            : onSubscriptionCore(kind),
       };
     }
     app.get(path, async (c) => {

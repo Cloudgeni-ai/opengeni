@@ -61,7 +61,26 @@ const FIRST_PARTY_LITERAL_SECRET_TOOLS: Readonly<Record<string, (args: unknown) 
   // invoking another tool) keeps reference text like any other hand-off tool.
   [APP_ACTION_CALL_TOOL_NAME]: (args) =>
     appActionCallStoresVaultItem(args) || appActionCallSecretInputs(args).length > 0,
+  // Set a webhook source's signing secret, which the source keeps encrypted
+  // like a credential. Only `signingSecret` gets the value (see
+  // `literalSecretScope`); a name or format keeps reference text.
+  event_sources_create_webhook: hasSigningSecretReference,
+  event_sources_update: hasSigningSecretReference,
 };
+
+/** Opengeni tools whose one credential field is `signingSecret`. */
+const SIGNING_SECRET_TOOLS: ReadonlySet<string> = new Set([
+  "event_sources_create_webhook",
+  "event_sources_update",
+]);
+
+function hasSigningSecretReference(args: unknown): boolean {
+  return (
+    args !== null &&
+    typeof args === "object" &&
+    hasMarker((args as Record<string, unknown>).signingSecret)
+  );
+}
 
 /**
  * A reference resolves where something executes. Connectors and Codex apps
@@ -116,7 +135,7 @@ export function secretArgumentMode(
  * target. Usually the whole call; an admin_action_call that fills a
  * credential field resolves only that field and hands off the rest of its
  * body, so a chat message or a nested tool call next to it keeps reference
- * text.
+ * text, and a webhook source tool resolves only its `signingSecret`.
  */
 export type LiteralSecretScope = {
   target: unknown;
@@ -128,6 +147,16 @@ export function literalSecretScope(
   args: unknown,
 ): LiteralSecretScope {
   const whole: LiteralSecretScope = { target: args, assemble: (resolved) => resolved };
+  if (entry.source === "opengeni" && SIGNING_SECRET_TOOLS.has(entry.identity.toolName)) {
+    if (args === null || typeof args !== "object") {
+      return { target: [], assemble: () => handOffSecretArguments(args) };
+    }
+    const record = args as Record<string, unknown>;
+    return {
+      target: record.signingSecret,
+      assemble: (resolved) => ({ ...handOffSecretArguments(record), signingSecret: resolved }),
+    };
+  }
   if (entry.source !== "opengeni" || entry.identity.toolName !== APP_ACTION_CALL_TOOL_NAME) {
     return whole;
   }

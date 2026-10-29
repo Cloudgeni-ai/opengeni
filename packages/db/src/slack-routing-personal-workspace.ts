@@ -4,7 +4,7 @@
 // and this keeps that from becoming an import cycle between them.
 import { sql } from "drizzle-orm";
 
-import { type Database } from "./database";
+import { rawRows, withRlsContext, type Database } from "./database";
 import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
 import { rlsSubjectIdOrEmpty } from "./workspace-authority";
 
@@ -85,5 +85,54 @@ async function activeMembershipPersonalWorkspaceId(
       // restore's `25P02`.
       await restore.catch(() => undefined);
     }
+  }
+}
+
+function deniedAuthority(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; current && depth < 4; depth += 1) {
+    if ((current as { code?: unknown }).code === "42501") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * True only when `workspaceId` is a Personal workspace of `accountId` and its
+ * pointer names exactly `subjectId` (a `user:` or `external_user:` subject).
+ *
+ * Shared workspaces stop at the workspace-kind check, before any membership
+ * read. A subject the membership oracle refuses (for example an external user
+ * with no Personal workspace of their own) is not the owner, so its `42501` is
+ * a plain false; the probe runs in its own scope (a savepoint inside a caller's
+ * transaction), so the refusal never aborts the caller. The same oracle caveat
+ * as `namedSubjectPersonalWorkspaceId` applies.
+ */
+export async function isSubjectOwnPersonalWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  if (!input.subjectId.startsWith("user:") && !input.subjectId.startsWith("external_user:"))
+    return false;
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scoped) => {
+        const [row] = await rawRows<{ kind: string | null }>(
+          scoped,
+          sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+        );
+        if (row?.kind !== "personal") return false;
+        const pointer = input.subjectId.startsWith("user:")
+          ? await namedSubjectPersonalWorkspaceId(scoped, input)
+          : await externalPersonPersonalWorkspaceId(scoped, input);
+        return pointer === input.workspaceId;
+      },
+      undefined,
+      "none",
+    );
+  } catch (error) {
+    if (deniedAuthority(error)) return false;
+    throw error;
   }
 }

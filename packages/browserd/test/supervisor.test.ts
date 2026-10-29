@@ -505,6 +505,7 @@ describe("BrowserSupervisor", () => {
                 tabs: [
                   { targetId: created.observation.target.id, replacementId: recovered[0]!.id },
                 ],
+                restoredTargetIds: [recovered[0]!.id],
               },
             },
           ]);
@@ -846,7 +847,7 @@ describe("BrowserSupervisor", () => {
         // agent has paused.
         clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
-        const action = supervisor.action(command(created.observation));
+        const action = supervisor.action(command(created.observation!));
         await dispatched.promise;
         expect(supervisor.isIdle()).toBe(false);
         gate.resolve();
@@ -887,7 +888,7 @@ describe("BrowserSupervisor", () => {
             browserVersion: "151.0.0.0",
           },
         });
-        const action = supervisor.action(command(created.observation));
+        const action = supervisor.action(command(created.observation!));
         await dispatched.promise;
         expect(supervisor.isIdle()).toBe(false);
         fail.resolve();
@@ -1485,7 +1486,7 @@ describe("restored launch that fails before completion", () => {
         // The next resume binds a new generation and restores the same checkpoint.
         const resumed = { ...target, controllerGeneration: "controller-resumed" };
         const restored = await supervisor.createSession({ ...resumed, restore: restoreInput() });
-        expect(restored.observation.target.url).toBe("https://authenticated.test/account");
+        expect(restored.observation!.target.url).toBe("https://authenticated.test/account");
         expect(await readFile(join(sessionDirectory, "profile", "Cookies"), "utf8")).toBe(
           "session=durable",
         );
@@ -1509,7 +1510,7 @@ describe("restored launch that fails before completion", () => {
           target.browserSessionId,
         );
         const restored = await supervisor.createSession({ ...target, restore: restoreInput() });
-        expect(restored.observation.target.url).toBe("https://authenticated.test/account");
+        expect(restored.observation!.target.url).toBe("https://authenticated.test/account");
         expect(await readFile(join(sessionDirectory, "profile", "Cookies"), "utf8")).toBe(
           "session=durable",
         );
@@ -2499,7 +2500,7 @@ describe("same-working-directory controller restart", () => {
         expect(supervisor.isIdle()).toBe(false);
         clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
-        const running = supervisor.action(command(created.observation));
+        const running = supervisor.action(command(created.observation!));
         await dispatched.promise;
         expect(supervisor.isIdle()).toBe(false);
         release.resolve();
@@ -2600,7 +2601,7 @@ describe("same-working-directory controller restart", () => {
             contexts[0]?.recoverOwnedProcess?.profileDirectory === contexts[0]?.profileDirectory,
           ).toBe(true);
           expect(contexts[0]?.restoredProfile).toBe(false);
-          expect(result.observation.target.url).toBe("about:blank");
+          expect(result.observation!.target.url).toBe("about:blank");
           const receipt = await supervisor.action(action);
           expect(receipt.state).toBe("outcome_unknown");
           expect(dispatches).toBe(0);
@@ -3535,7 +3536,7 @@ describe("same-working-directory controller restart", () => {
           ...options,
           recoverExistingWorkingDirectory: true,
         });
-        const oldTab = created.observation.target.id;
+        const oldTab = created.observation!.target.id;
         clock += 61_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
         const record = join(
@@ -3563,6 +3564,7 @@ describe("same-working-directory controller restart", () => {
               reason: "idle_release",
               idleReleaseMinutes: 1,
               tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+              restoredTargetIds: [replacement!.id],
             },
           },
         ]);
@@ -3583,7 +3585,7 @@ describe("same-working-directory controller restart", () => {
           ...options,
           recoverExistingWorkingDirectory: true,
         });
-        const oldTab = created.observation.target.id;
+        const oldTab = created.observation!.target.id;
         clock += 61_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
         const record = join(
@@ -3609,6 +3611,7 @@ describe("same-working-directory controller restart", () => {
               reason: "idle_release",
               idleReleaseMinutes: 1,
               tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+              restoredTargetIds: [replacement!.id],
             },
           },
         ]);
@@ -3707,6 +3710,7 @@ describe("same-working-directory controller restart", () => {
             relaunched: {
               reason: "controller_restart",
               tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+              restoredTargetIds: [replacement!.id],
             },
           },
         ]);
@@ -3964,7 +3968,7 @@ describe("same-working-directory controller restart", () => {
       });
       // A recording runs for longer than the idle release time with no
       // request; it keeps the browser in use (#5410) up to the shutdown.
-      await first.startRecording(options, created.observation.target.id);
+      await first.startRecording(options, created.observation!.target.id);
       clock += 5 * 60_000;
       expect(await first.releaseIdleBrowsers()).toEqual([]);
       await first.close();

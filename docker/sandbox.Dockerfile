@@ -216,6 +216,7 @@ RUN set -eux; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    cp -aL packages/contracts/node_modules/entities "$runtime/node_modules/entities"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
     test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
@@ -576,6 +577,14 @@ RUN set -eux; \
     else \
       test -f /opt/opengeni/artifact-runtime/.unavailable; \
     fi
+
+# A commit identity for a box nobody configured one for. Commands run as the
+# host's uid, which has no passwd entry here, so Git can find neither a name nor
+# an email and `git commit` fails. The system level is Git's lowest: `GIT_*`
+# variables (OPENGENI_GIT_* or the GitHub App bot), ~/.gitconfig and
+# repository config all win over it.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
 
 ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681

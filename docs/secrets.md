@@ -156,11 +156,12 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
 | `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
+| Credential profiles | Opt-in variables (for example `GH_TOKEN`) added to the environment of every `exec_command` and `run_on` exec, resolved per command through the same resolver. The command text is unchanged. See [Credential profiles](#credential-profiles). |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
 | MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. Inside a shell command, `ogtool call` arguments are command text: escape a reference there (`\{{secret:Item}}`) or the shell resolves it before the tool sees it. |
 | Opengeni's hand-off tools: sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, Skills, artifacts, Sites data, notifications, and every Opengeni tool not named in the next row | Never resolved. The tool receives the reference text and stores or forwards it; the session, scheduled run or goal continuation that receives it resolves it only when it executes something (a shell command, `run_on`, browser typing, a connector call), under its own vault policy. A missing or malformed reference does not fail the call, and `secretfile` stays text. An escaped reference (`\{{secret:Item}}`) still arrives as `{{secret:Item}}`, so escaping here is optional. Opengeni tools added later are hand-off tools by default. Opengeni's built-in tools that send text to outside systems (Slack bot messages, X, Reddit and social replies, Fiken contacts and invoices, `web_fetch` URLs) are hand-off tools too: the recipient gets the reference text, never the value. |
-| Opengeni tools that need a value | Only `excel_run` (runs code in the person's open workbook) and `admin_action_call` when the call fills a request field the action marks as a credential, such as a password manager's API key or an MCP server's headers: only that field resolves, and the rest of the body (a chat's first message, a note) stays reference text. Creating or updating a vault item resolves its body, which the vault keeps. Other `admin_action_call` calls, including actions that return a secret and `tools/invoke`, are hand-off. These resolve like connectors. The `secret_*` tools take references as names and never resolve them. The list and the reason for each entry live in `secretArgumentMode` (`packages/runtime/src/secret-argument-resolution.ts`). |
+| Opengeni tools that need a value | Only `excel_run` (runs code in the person's open workbook) and `admin_action_call` when the call fills a request field the action marks as a credential, such as a password manager's API key or an MCP server's headers: only that field resolves, and the rest of the body (a chat's first message, a note) stays reference text. Creating or updating a vault item resolves its body, which the vault keeps. Other `admin_action_call` calls, including actions that return a secret and `tools/invoke`, are hand-off. `event_sources_create_webhook` and `event_sources_update` resolve only `signingSecret`, which the webhook source keeps encrypted; a name or format next to it stays reference text. These resolve like connectors. The `secret_*` tools take references as names and never resolve them. The list and the reason for each entry live in `secretArgumentMode` (`packages/runtime/src/secret-argument-resolution.ts`). |
 | Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. Hand-off tools keep reference text for Sites too. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
 | Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. A login in a connected password manager that holds a passkey (Bitwarden, Vaultwarden, Keeper, Proton Pass) shows `hasPasskey`, matches a `passkey` search and signs in the same way; its key is read live from the provider and never stored. See [external vaults](external-vaults.md). |
@@ -190,10 +191,11 @@ under the person's own access, not the session's task vault or vault policy;
 it needs full access, which already acts as the person.
 
 Stored content is otherwise kept exact. The 5 August 2026 decision against
-heuristic redaction still holds. Two exceptions were approved on 26 October
-2026 and are planned, not yet implemented: masking known secret values before
-storage and before the model sees them, and masking narrow, high-precision
-secret-shaped strings in tool output.
+heuristic redaction still holds, with two approved exceptions: known secret
+values are masked ([Masking](#masking)), and so are narrow, high-precision
+secret-shaped strings in tool output
+([Secret-shaped values in tool output](#secret-shaped-values-in-tool-output));
+see [Masking decision](#masking-decision).
 
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
@@ -207,7 +209,389 @@ Variable Sets used to inject every value into every sandbox as environment
 variables. That is gone: nothing is injected, and a value exists in a process
 only while a command that references it runs. Scripts that read ambient
 variables should take them from a reference instead, for example
-`API_TOKEN={{secret:Stripe}} ./deploy.sh`.
+`API_TOKEN={{secret:Stripe}} ./deploy.sh`, or from a credential profile when
+every command should have the variable.
+
+## Credential profiles
+
+A credential profile is an opt-in list of environment variable names, each
+mapped to one secret reference. Opengeni adds those variables to the
+environment of every command an agent runs, so CLIs such as `gh`, `az` or
+`terraform` find their credentials without the agent writing references into
+each command or into the prompts of the chats it starts.
+
+```json
+{
+  "entries": [
+    { "name": "GH_TOKEN", "reference": "{{secret:cloudgeni-cloud-auth/CLOUDGENI_GITHUB_TOKEN/value}}" },
+    { "name": "AZURE_CLIENT_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_CLIENT_ID/value}}" },
+    { "name": "AZURE_CLIENT_SECRET", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_CLIENT_SECRET/value}}" },
+    { "name": "AZURE_TENANT_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_TENANT_ID/value}}" },
+    { "name": "AZURE_SUBSCRIPTION_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_SUBSCRIPTION_ID/value}}" }
+  ],
+  "gitHelper": true
+}
+```
+
+**Levels.** A workspace has at most one profile, used by every chat in it. A
+chat can add its own profile, which the chats it starts inherit, the same way
+the vault policy propagates. A command receives the workspace entries, then
+each chat's entries from the root chat down to its own; a nearer level
+replaces an entry with the same name (ignoring case). `gitHelper` follows the nearest level
+that sets it and is off by default. Nothing is configured until someone sets a
+profile.
+
+**Delivery.** For each `exec_command` (including commands that keep running in
+the background) and each `run_on` exec, the runtime resolves the effective
+profile through the attempt's `SecretResolver`, so the vault policy, "Ask me
+each time" approvals and the audit trail apply exactly as for a written
+reference. Values ride the same in-memory carry as references
+(`packages/runtime/src/sandbox/secret-delivery.ts`): Connected Machines receive
+them in `ExecRequest.env`, and managed sandboxes export them from the 0600 env
+file that is sourced and deleted in the same command. They exist only in the
+command's process environment, never in the command text, stored tool
+arguments, git config or files left on the machine. They are resolved through
+the attempt's own resolver, so they are known values like any other
+([Masking](#masking)): a command that prints one (`env`, `printenv`,
+`gh auth status -t`) shows its reference in the tool result instead, within
+that section's limits (values shorter than 8 characters, plain `text` fields
+and values read with `secret_get` stay as they are). Masking is a safety net,
+not a reason to print them. Profile variables are applied first, so anything the
+command sets itself (`GH_TOKEN=… gh …`, `export`, a reference) wins. Each
+command also gets `OPENGENI_CREDENTIAL_PROFILE_VARS`, the comma-separated names
+(never values) the profile delivered. The profile is read again at most every
+few seconds, so a change applies to the next commands without restarting
+anything; a read that takes longer than about two seconds or fails uses the
+last profile read in the attempt, or none, so a slow database never stalls
+commands. Only one read runs at a time; once a command stopped waiting for it,
+later commands use that fallback without waiting until it finishes (a stuck
+read is replaced after 30 seconds).
+
+**Lenient.** A profile never fails a command. An entry that cannot be resolved
+(missing secret, policy, waiting for approval, provider unavailable, too large
+or binary) is skipped and the command runs without it; the tool result ends
+with a short note such as `[Note: credential profile skipped AZURE_TENANT_ID
+(secret not found)]`. Each distinct note is shown once per attempt, not on
+every command. A password manager that does not answer within about 15 seconds
+skips its entries the same way; that lookup is not cancelled, so it can
+still use an "Allow once" approval and be recorded in the audit trail even
+though the command ran without the value. A managed sandbox that cannot receive the env
+file (for example an OpenSandbox backend, which has no private file writes)
+runs the command without the profile and says so once. An agent with secrets
+turned off runs without the profile and without a note. An entry waiting for
+the person's approval is asked for once per attempt; approving it with "Allow once" covers one command, so use a
+longer approval for an item every command needs. Notes never show values.
+Entries resolve only after the command's own references resolved. Entries from
+connected vaults (1Password and similar) are read per command and count toward
+the per-attempt provider read limit, so prefer Opengeni vaults for profile
+items that every command uses.
+
+**Git helper.** With `gitHelper: true` and `GH_TOKEN` set by the profile,
+each command also gets per-command git configuration through
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`: for
+`https://github.com` it first clears the machine's own credential helpers and
+then adds one that answers git's `get` request with `GH_TOKEN` from the
+environment (user `x-access-token`). Nothing is written to global or repository
+git config, and other hosts keep the machine's configuration. This needs git
+2.31 or later; older git ignores the variables. On a Connected Machine whose
+own environment already sets `GIT_CONFIG_COUNT`, the helper's entries replace
+the first ones for that command, so put such settings in the profile instead.
+
+**Precedence on managed sandboxes.** A profile is an explicit choice, so it
+wins over the platform's repository bindings for the variables it delivers:
+the git helper replaces the binding's helper for `github.com`, and the `gh`,
+`glab` and `az` wrappers keep a profile-delivered `GH_TOKEN`, `GITLAB_TOKEN` or
+`AZURE_DEVOPS_EXT_PAT` (they read `OPENGENI_CREDENTIAL_PROFILE_VARS`) instead
+of replacing it with the binding token. Without a profile entry for that
+variable, the bindings work as before. Host run credentials
+([credentials.md](credentials.md)) are applied after the profile and win for
+the same variable names. On Connected Machines there are no wrappers, so `gh`
+reads `GH_TOKEN` directly.
+
+**Rules.** Names use letters, digits and underscores, do not start with a
+digit, are unique ignoring case, and never start with `OPENGENI_` (reserved).
+Each entry holds exactly one `{{secret:…}}` reference; `secretfile` references
+are not accepted. An escaped reference (`\{{secret:…}}`, as written for
+hand-off tools) is stored unescaped. At most 32 entries; each value is capped
+at 100 KiB and all profile values of one command at 256 KiB. That cap is
+counted separately from the command's own references (which have their own
+256 KiB cap), so one command can carry up to 512 KiB of such variables. Saving an empty profile clears that
+level. Changes are audited as `credential_profile.updated` or
+`credential_profile.cleared` with variable names only.
+
+**Configuring.** Reading needs `secrets:list`. Changing needs `secrets:write`
+plus `workspace:admin` for the workspace profile, or `sessions:control` and
+the chat's tool-policy access for a chat profile. Use the HTTP routes below or
+the `secret_profile_get` and `secret_profile_set` agent tools; there is no web
+UI yet. Profiles hold references, never values.
+
+**Masking.** The worker (`agent-build.ts`) and the `run_on` path
+(`apps/api/src/mcp/server.ts`) give the profile the same remembering resolver
+they use for written references, so every profile value a command receives is
+in the attempt's (or the `run_on` call's) known values and is masked, an `env`
+dump included, within the limits in [Masking](#masking).
+
+## Masking decision
+
+A Knowledge decision of 5 August 2026 removed heuristic redaction and kept
+content exact. After two staging incidents on 26 October 2026 (database
+connection strings printed by a command, and a resolved token stored in a
+chat's first message), Bendik's delegate approved two narrow exceptions that
+supersede that decision for these cases only: masking of known secret values
+(values Opengeni resolved or delivered, credential profile values included)
+before storage and before the model sees them, and masking of narrow,
+high-precision secret-shaped strings in tool output. Other content stays
+exact. Both are implemented ([Masking](#masking)).
+
+## Masking
+
+Opengeni replaces secret values it knows about before text is stored or
+shown to the model. A masked value is written as the reference that
+resolved it, for example `{{secret:Vault/Item/field}}`, so the agent still
+knows which secret it was and can keep using it by reference.
+
+Approved on 26 October 2026, after two staging incidents that day put real
+credentials into stored tool output and child-session messages. For known
+values this supersedes the 5 August 2026 decision to keep content exact.
+
+### What is known
+
+Each agent attempt keeps one memory of secret values (`SecretValueMemory`):
+
+- Every value a reference resolves to for the attempt, on any surface:
+  `exec_command`, `write_stdin`, `apply_patch`, MCP connectors, Codex apps,
+  Codemode, Opengeni's own tools and the browser. The label is the reference.
+  Plain `text` fields (a username, a host name) are not secret and are not
+  remembered, so pages, logs and URLs that mention them stay readable. This
+  includes answers a person saved as a text field through `request_human_input`.
+- Credentials Opengeni puts into the attempt itself: the Codemode bearer and
+  each renewal, git tokens and broker bearers, host run credentials
+  (environment values whose names say they are secret and that are at least
+  12 characters long, and single-line credential files) and MCP header
+  values of at least 12 characters whose names say they carry credentials
+  (`Authorization`, `Proxy-Authorization`, `Cookie`, and names containing
+  token, key, secret, auth, password, session or signature). Headers such as
+  `Accept` are not remembered. The label is a marker such as
+  `[opengeni credential: codemode token]`.
+- Best effort, the hosted vault values of secrets the session's root tree
+  used before, found through the `vault.secret.used` audit rows. They are read
+  with the attempt's own vault reach, decrypted in memory and never
+  delivered, so they count as neither a use nor an approval. Connected vaults
+  are skipped. Tool results wait (at most 2 seconds) only for the first load.
+  Later refreshes run in the background, at most every 10 seconds, and take
+  effect from the next result, so values resolved elsewhere, for example by
+  `run_on` or the browser, are learned too. Each refresh reads audit rows
+  from 30 seconds before the previous refresh onwards (so a use committed
+  late is still read) through a partial index on `vault.secret.used` rows.
+  These values are labelled with the reference's ID form, which names the
+  same field from any session in the tree. Plain `text` fields are skipped.
+  A failure only logs a metadata-only warning.
+
+The memory holds a bounded number of values. Over the limit the oldest go
+first, but Opengeni's own credentials stay. It is cleared when the attempt
+ends.
+
+`secret_get` is Opengeni's explicit, audited read of a plaintext value. The
+value it returns is shown as returned and is not masked again for the rest of
+that attempt, since the agent asked for it on purpose. Values inside it
+(the password of a revealed database URL) are released with it: they are
+shown as written wherever they appear, and not captured. This holds for a
+direct call and for a Codemode script's call, and a base64 result (a file
+field) reveals both the encoded and the decoded text. Only Opengeni's own
+`secret_get` reveals; a connector's tool with the same name does not.
+
+### Matching
+
+- Each value is searched as written, trimmed, line by line, JSON-escaped (once and twice), percent-encoded (URI
+  component, `+` for spaces, form encoding) and base64 (standard and URL-safe,
+  standalone and inside a longer base64 run such as a Basic auth header).
+- Lines of a multi-line value are searched on their own only when they look
+  like key material: at least 16 characters that are pure hex, or base64
+  characters with an upper-case letter, a lower-case letter and a digit, such
+  as the body lines of a PEM key. Ordinary lines such as `NODE_ENV=production`
+  or `production-cluster-name` are not searched alone.
+- Values shorter than 8 characters are never searched. Shorter values are
+  PINs, one-time codes, ports and short words that would mangle unrelated
+  text, while real passwords, tokens and keys are longer.
+- The longest match wins, and masking is idempotent: references and markers
+  already in the text are kept. Only the labels the memory itself writes and
+  the `[opengeni credential: …]`, `[masked …]` and `[secret]` markers are
+  kept; a value that appears inside text that merely looks like a reference
+  is still masked.
+- A value cut off just before a truncation mark (`...` or `…`), or at the
+  end of a text of at least 1,024 characters (output clipped to a size), has
+  its visible start replaced too, when at least 16 characters and at least
+  half of the value are visible. Shorter tails are left alone, since many
+  unrelated strings share a short prefix with a secret. Each cut is one
+  lookup in an index of value starts, built for the value as written,
+  trimmed and JSON-escaped (not its encoded forms; browser and desktop
+  results, whose typed values are short, index every form, including
+  lines and percent-encoded forms). The work is bounded: at
+  most 256 marks per text (a run of marks such as `......` counts once), at
+  most 200,000 index entries in total (the longest values beyond that are
+  matched whole only), and values longer than 8,192 characters are matched
+  whole only.
+- File and image payloads keep their exact bytes: a string that is entirely
+  a base64 data URL (`data:<type>;base64,<base64>`) and `data` fields beside
+  a MIME type. A payload of a text type (`text/*`, JSON, XML, YAML and
+  similar) is decoded, searched and encoded again, so it stays valid base64;
+  when the decoded text holds nothing known, the payload as written is
+  searched too (some tokens are themselves valid base64).
+  Any other text, including a plain data URL or text after one, is searched.
+
+### Where it applies
+
+1. Every tool result before the model sees it: sandbox tools (including
+   `exec_command`, `write_stdin`, `command_read` and `command_wait`), MCP,
+   Codemode, Opengeni's own tools and tool search dispatch. A tool's error
+   (message, stack and causes) and an oversized result spilled to a file are
+   masked the same way.
+2. Every model request: a final filter masks the whole model input, so no
+   path into history can carry a known value to the provider. It runs after
+   every filter that can add input (the host, tool-output and modality
+   filters); the context filter after it only shortens or drops items. It
+   covers the instructions too. Model-context
+   snapshots are stored masked, and context compaction masks what it sends
+   to the summarizing model.
+3. Storage, as a backstop inside an attempt: conversation columns (session
+   events, history items, turn prompts, initial messages, realtime entries,
+   system updates and run state) mask in their codec. Messages to other
+   sessions, goals, notes and command output are masked before their
+   idempotency checks. The Codemode journal stores references, which a script
+   can pass on to its next call.
+4. Opengeni's own tools: the worker sends the values a call's arguments
+   resolved to in that call's MCP `_meta` (never logged). The first-party
+   server masks the call's result, its errors and everything the call stores
+   with them. It honours these values only from an agent attempt's worker.
+   `run_on` masks its result and its errors with the values it resolved.
+
+Hosted tools that are not function tools, such as the provider's own
+`apply_patch` and computer tools, are covered by the model-input filter and
+the storage backstop rather than at the tool.
+
+Masking never fails a tool call or a turn. An internal error keeps the text
+as it was and writes a metadata-only diagnostic.
+
+### Secret-shaped values in tool output
+
+Some secrets were never in a vault, for example a database URL a command
+prints from a Kubernetes secret. Tool results (and their stored copies) are
+also searched with a small set of high-precision detectors, and only the
+secret part is replaced:
+
+- The password of a URL with userinfo, any scheme (`postgres`, `mysql`,
+  `mongodb+srv`, `redis`, `amqps`, `https` and others):
+  `postgres://user:<masked>@host:5432/db` keeps the user, host and database.
+- `password=` and `pwd=` values in connection strings: written without
+  spaces around `=` (plain, quoted or in braces), as a URL query parameter or
+  on a line that also has a host, server, database, user, port or SSL key
+  written the same way. In the `Key=value;` style (after `;`, `?`, `&` or at
+  a line start) a plain value runs to the next `;`, unless it is lower-case
+  code such as `config.password`. In the keyword style
+  (`host=db password=…`, `connect(…, password=…)`) it also ends at a comma,
+  bracket or parenthesis, and code such as `password=args.password` or
+  `password=os.environ["DB_PW"]` is not a value. Source code such as
+  `const password = config.password;` is not a connection string.
+- Azure `AccountKey=` (also `StorageAccountKey=`) and `SharedAccessKey=`
+  values written without spaces around `=` as a base64 key of at least 40
+  characters with a digit (real keys have 88 or 44), and SAS `sig=` values.
+- PEM private key blocks, whole, cut off, or only their end (a later chunk of
+  streamed output). A body needs at least 64 base64 characters. A cut-off
+  key needs a line break right after its BEGIN line and covers only base64
+  lines (and `Proc-Type:` and `DEK-Info:` headers) after it.
+- Well-known token formats: GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+  `github_pat_`), OpenAI (`sk-proj-`, `sk-svcacct-` and `sk-admin-` keys of 40
+  or more characters, and legacy `sk-` keys without hyphens), Anthropic
+  (`sk-ant-`), Slack (`xoxb-`, `xoxp-` and similar with a numeric id, and
+  `xoxe` rotated tokens), Stripe secret and restricted keys, npm,
+  GitLab, Google `AIza`, 1Password service account tokens, Opengeni's own
+  bearers (`ogk_` and `ogp_` keys, and the signed `ogd_`, `oge_`, `ogr_` and
+  `ogs_` envelopes) and JWTs. URLs are also found inside JSON-escaped text.
+
+Tokens must contain a digit, and placeholders such as `${PASSWORD}` (or any
+`${…}` template), `$(cat file)`, `<password>`, `%(password)s`, `@Password`,
+`****`, `your_account_key_here` or the word `password` are ignored. There is no generic
+"long random string" rule: UUIDs, git SHAs, base64 data, prose such as
+"password: required" and URLs without a password stay untouched.
+
+Each detected value is saved into the root session's Task vault (hosted and
+encrypted), as one item per value: a login item for passwords, an API key
+item for tokens and keys, a secure note for private keys. The item name is
+the kind plus the first 16 hex characters of an HMAC-SHA256 of the value,
+keyed with the deployment's encryption key, so the same value maps to the
+same item and is saved once. The value is replaced by a reference to that
+item, for example `{{secret:Task/url-password-0123456789abcdef/password}}`,
+so the agent can still use it in a later command without seeing it. A URL
+with the reference in its password position works when used whole in a
+command. The value is saved exactly as it appeared, so a key found inside
+JSON keeps its escaped line breaks. An existing item is reused only while it
+still holds the same value.
+
+A detected value is masked wherever a detector finds it. It also joins the
+attempt's known values, and so is masked in any text afterwards, only when
+it is distinctive: at least 16 characters with three kinds of characters
+(lower case, upper case, digits, others), or 24 with two, and not the user
+name beside it. A weak or common password such as `postgres` would otherwise
+mask ordinary words.
+
+The save runs as the agent attempt, with the same Task vault access as
+`secret_save` to Task, and is audited like any other secret write
+(`vault.item.created`, metadata only). A tool result waits at most 5 seconds
+for it. Up to 16 values are saved per result, four at a time; the rest are
+saved from a later result. A value that got a marker is detected and saved
+again from the next result that contains it. An attempt captures into its root session's Task vault only
+while it holds fewer than 200 captured items (attempts running at the same
+time in one session tree can go slightly over). When saving is not possible (the secrets capability is off,
+the attempt cannot write to the Task vault, the capture or vault limit is
+reached, any error), the value is replaced by a marker such as
+`[masked url password]` and the tool call still succeeds. After three failed
+saves in a row an attempt stops trying and writes markers. A save that
+finishes after the wait upgrades the marker to the reference from the next
+result on.
+
+Shape masking applies only to tool results and their stored copies (tool
+output, command output, Codemode settlements). Messages a person types,
+commands as written and files on disk are not changed. Shapes inside a
+value `secret_get` returned (for example the password of a revealed database
+URL) are neither captured nor masked, here or in other output (see What is
+known).
+
+### Limits
+
+- Text a person types, and files on disk, are not changed.
+- A value split across two streamed output chunks is masked where it is read
+  whole (the tool result and model input), not in the stored chunks.
+- Output a background command produces while no attempt is running is stored
+  as written and masked when a later attempt reads it.
+- Multi-line credential files, values shorter than 8 characters and earlier
+  values from connected vaults are not searched.
+- A value the agent read with `secret_get` stays readable for the rest of
+  that attempt.
+- The past-uses lookup reads at most 500 audit rows per refresh, newest
+  first, so in a very long session tree the oldest uses may not be loaded.
+- Shape detectors read the first 4,000,000 characters of one text.
+- A URL password or connection string split across two stored output chunks
+  is masked where the output is read whole, not in the stored chunks. A
+  private key split that way is masked in both chunks.
+
+Masking is a safety net. It is not a reason to print secrets.
+
+### Matchers for other code
+
+The matchers are pure and deterministic and live in `@opengeni/contracts`
+(`packages/contracts/src/secret-value-masking.ts`): `SecretValueMemory`,
+`compileSecretValueMasks`, `maskSecretValues`, `maskSecretValuesInText`,
+`maskSecretValuesInError`, `secretValueForms`, `isBase64DataUrl`, the
+`secret_get` reveal helpers and the label helpers. The shape detectors live in
+`packages/contracts/src/secret-shape-masking.ts` (also the
+`@opengeni/contracts/secret-shape-masking` subpath): `detectSecretShapes`,
+`collectSecretShapes`, `maskSecretShapesInText`, `maskSecretShapes`,
+`SECRET_SHAPE_KINDS` and `secretShapeMaskLabel`. The database backstop is
+`withSecretValueMasking`, `maskSecretValuesForStorage` and
+`maskToolOutputForStorage` in `@opengeni/db`. Item names for captured values
+come from `secretShapeItemName` in `@opengeni/core`.
+Browser and desktop observations use the same engine with a 4-character
+minimum for typed values.
 
 ## Asking a person
 
@@ -335,6 +719,8 @@ With the `secrets` capability on, agents get:
 | `secret_get` | Reveal a value to the model. Agents do not hold `secrets:read` by default. | `secrets:read` |
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
 | `secret_delete` | Archive an item. | `secrets:write` |
+| `secret_profile_get` | Show the [credential profile](#credential-profiles): this chat's additions and what its commands receive (`scope: "session"`, the default), or the workspace profile. Names and references only. | `secrets:list` |
+| `secret_profile_set` | Replace this chat's profile (inherited by the chats it starts) or, with `scope: "workspace"`, the workspace profile. References are stored as written, never resolved. | `secrets:write`, plus `sessions:control` (chat) or `workspace:admin` (workspace) |
 
 Discovery with no filters lists items; an empty query is not required. Keep
 the same filters when following `nextCursor`. Provider freshness is reported
@@ -459,6 +845,147 @@ For local development, `OPENGENI_ONEPASSWORD_FAKE_TOKENS=1` enables the
 in-memory fake provider tokens `ops_fake_healthy` and `ops_fake_sync_error`.
 Managed runtimes refuse to start with it set.
 
+## Removing secrets from stored history
+
+A secret that already reached a session's stored history (pasted into a
+message, printed by a command, or resolved into a hand-off before references
+were kept) stays there until it is removed. A workspace owner or admin removes
+it with `POST /v1/workspaces/:workspaceId/secret-redactions`:
+
+```json
+{
+  "sessionIds": ["…"],
+  "includeDescendants": true,
+  "match": { "reference": "Vault/Item/field" },
+  "dryRun": true
+}
+```
+
+- `match` is either a vault reference, written with or without its braces,
+  or built-in patterns:
+  `{ "patterns": [{ "kind": "url_password", "hosts": ["db.example.com"] }, { "kind": "github_token" }] }`.
+  `url_password` finds the password in `scheme://user:password@host` URLs, for
+  every host or only the hosts named; `github_token` finds GitHub token
+  shapes, including one inside a longer URL password. Both use the masking
+  module's own matchers, so a reference finds its
+  value in every form masking recognizes (as written, JSON-escaped,
+  percent-encoded and base64) and the patterns find exactly the shapes masking
+  catches.
+- A reference's value is read in memory for matching only. It is never
+  returned, logged or written to the audit event. The caller needs
+  `workspace:admin`; a reference also needs permission to use that item
+  (`secrets:use`, which workspace owners and admins hold unless a grant with
+  explicit permissions leaves it out). A value shorter than masking searches
+  for (8 characters, not counting surrounding whitespace) answers 422, so a
+  run can never rewrite everything; so does a value holding `[redacted: …]`
+  text, since that part may be a kept marker.
+  Every named session (and descendant) must be one the caller may change; one
+  that is not answers 404.
+- Each match becomes `[redacted: <reference or kind>]`, for example
+  `[redacted: secret:Vault/Item/field]` or `[redacted: url_password]`. The
+  marker names the reference without its braces, so it can never resolve back
+  into the value. Everything else in the text stays exact.
+- `dryRun: true` counts without changing anything. Running the same request
+  again is safe: markers are never matched, so the second run finds nothing.
+  A later run with another reference never rewrites a marker an earlier run
+  wrote, even when its value appears in that marker's label. Text that only
+  looks like a marker (a label the scrub never writes) is searched like any
+  text; text typed exactly like a reference marker
+  (`[redacted: secret:Vault/Item/field]`) is kept as is, like a real one.
+  Run patterns before references for the same sessions: once a URL's
+  username is replaced, `url_password` no longer recognizes that URL.
+- The response has counts only, per table and per session (`rowsMatched`,
+  `rowsChanged`, `matches`), the places still `pending` (below) and any
+  `failures` by table and error code. A failure never stops the run; run it
+  again to retry. `mirror_row_unreadable` means a search-mirror row still could
+  not be decoded after the run rebuilt it from its event, so it could not be
+  checked. `cell_not_rewritten` means a matched copy is still stored (it
+  changed under the run, a check refused the edit, or something still refers
+  to a matched content blob).
+- A session with a turn in progress is skipped (failure `session_active`):
+  the turn could write the text again from memory. So is a session being
+  moved to long-term storage (`session_archiving`): its export could keep the
+  old copy. A dry run still counts both. Run again once it is idle or
+  archived. Every write also takes the session's ordinary writer lock and
+  rechecks this. Before the archive pass, every session listed as live is
+  read again: one archived during the run has its archive scrubbed too, and
+  one still being moved is reported as `session_archiving`.
+- An audit event (`session.secret_history.redacted`, or
+  `session.secret_history.counted` for a dry run) records the match label,
+  sessions and totals, and is written even when the run stops part way
+  (`outcome: "failed"`).
+
+What is rewritten: every stored copy in the chosen sessions: the session row
+(title, first message, instructions, metadata), turns (prompts, model context
+and the frozen goal), timeline events and the message search mirror, model
+history, pending tool calls, realtime entries and projections, model-request
+snapshots and the content blobs they point to, code-mode calls, background
+commands, machine inputs (scheduled ones included) and their outbox,
+human-input requests, run states, command receipts, unsent composer drafts,
+connector action reviews, feedback comments and context, session list
+snapshots, goals and goal revisions, task notes, MCP operation results, host
+export payloads and the history repair audit, and, for a session in
+long-term storage, its archive bundle and transcript
+(docs/session-storage-lifecycle.md, "Removing secrets from the archive").
+Each table is read in bounded pages, one transaction per page, under the
+caller's row-level security; a cell is rewritten only while it still holds
+what was read, so a concurrent writer is never overwritten. JSON keys are
+never rewritten, only string values. Content blobs are content-addressed: a
+model request is redacted whole (a secret can straddle two body chunks), then
+re-encoded into new blobs, and every old blob nothing refers to any more is
+deleted, along with any other unreferenced blob of the session created at
+least ten minutes ago (a chunk a failed earlier run left behind may hold part
+of a split secret). Those deletions count in the blobs' `rowsChanged` only,
+so it can be higher than `rowsMatched`. The search mirror is rebuilt from the
+scrubbed events, and its `rowsChanged` counts the rows rebuilt. The patterns
+scan a very large cell in windows cut at whitespace or quotes, so a long cell
+is searched whole.
+
+Goal text, goal revisions, a turn's frozen goal, task notes, the search
+mirror, machine inputs, content blobs (and so the model-request snapshots
+that keep their content in them), MCP results, host export payloads, the
+repair audit and the archive manifest are written only through two owner
+routines (1091). The cell writer re-reads each cell, checks it belongs to the
+named session, and accepts only text that is the old text with spans
+replaced by `[redacted: …]` markers; goal text keeps its length limit. The
+guards on immutable records (goals, frozen goals, settled MCP results,
+scheduled occurrences, archived sessions) let only that writer through, by a
+capability row it holds for its own transaction. Their runtime grant follows
+one release later, as for every new private routine
+(docs/migrations-expand-contract.md); until then the response lists those
+places in `pending` and still counts what it can read. Run the request again
+once they are granted.
+
+Not covered, by design or for now:
+
+- Other sessions that copied the text: a fork or a session that received it
+  in a message is its own session; name it too. `includeDescendants` follows
+  child sessions up to 64 levels deep.
+- Document inspection receipts stay immutable; they hold artifact
+  observations, not conversation text.
+- Inbox items and phone push records keep their own copies of a reply's
+  first lines, a question's prompt and choices, an approval's title, a
+  paused goal's reason and the agent's notifications; push records also
+  copy the chat's title. The scrub does not rewrite them. Push records are
+  deleted a week after they are delivered or given up on.
+- Opengeni's Slack inbox keeps the text of incoming Slack messages, and a
+  message the agent posts as the Opengeni Slack bot is saved with its text
+  before it is sent and kept until the chat or the Slack connection is
+  deleted.
+- An MCP operation's `receipt_digest` is not recomputed after its result is
+  rewritten, so re-settling that exact operation later reports a conflict
+  instead of replaying.
+- Files, artifacts, recordings, screenshots, Knowledge, workspace files,
+  sandbox disks, provider-side stored responses, and logs or telemetry
+  outside Opengeni's database and archive. Rotate a credential that reached
+  any of these, or a model provider.
+
+Masking (parts B and C of the credential work) keeps new copies out; this
+removes old ones. Both supersede, for those two cases only, the 5 August 2026
+decision to keep all stored content exact without heuristic redaction: known
+secret values and a narrow set of high-precision secret shapes are now masked
+or removed. Everything else stays exact.
+
 ## HTTP API
 
 All routes are under `/v1/workspaces/:workspaceId`.
@@ -471,6 +998,8 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `GET, PUT /vaults/:vaultId/items/:itemId/approval`; `POST …/approval/grants/:grantId/revoke` | "Ask me each time" marks and the approvals in force |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
+| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `workspace:admin` and `secrets:write` |
+| `GET, PUT /sessions/:sessionId/credential-profile` | A chat's own profile and its effective profile `{profile, effective}`; `PUT` needs `sessions:control` and `secrets:write` |
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |
@@ -478,6 +1007,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
 | `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
 | `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
+| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin; counts only) |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).
@@ -501,19 +1031,11 @@ Migration `0739_vaults.sql` (maintenance mode) runs in one transaction:
 3. Variable values are deleted, and variable names are scrubbed from persisted
    sandbox env in session envelopes and lease resume state.
 
-Set header rows, attachments and the set database routines stay for now,
-because scheduled-run admission still fences on them; they are inert. A later
-contract migration drops them.
-
-After the migration:
-
-- `/variable-sets/*`, `/environments/*` and `PUT /sessions/:id/variable-sets`
-  return 410 `variable_sets_removed`.
-- Non-empty `variableSetIds`, `variableSetId`, `environmentId` and rig
-  `defaultVariableSetIds` return 422 `variable_sets_removed`. Empty arrays and
-  null are accepted and ignored.
-- `@opengeni/sdk` 2.0.0 drops the Variable Set methods and types.
-- The Variable Sets settings page redirects to Secrets.
+The old set tables are inert: nothing reads or writes them, and a later
+contract migration drops them. The Variable Set routes, request and response
+fields, SDK methods and settings page are gone, and the retired
+`variable-sets:*` and `environments:*` permissions were rewritten to the
+matching `secrets:*` permissions.
 
 Anything that read a set's variables from the environment must now reference
 them explicitly.

@@ -1,9 +1,10 @@
 import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { containedPortal } from "../ui/portal-container";
-import { useRef, useState, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
+import { useTimelineAnswerFollow } from "./timeline-answer-follow";
 
 const DialogContainedPortal = containedPortal(Dialog.Portal);
 
@@ -11,9 +12,20 @@ export type SessionCapabilityFrameProps = {
   name: string;
   subtitle: string;
   logo: string | null;
-  /** A short kind label beside the name; empty shows none. */
+  /** A short kind label for the setup dialog's subtitle; the card itself shows none. */
   typeLabel: string;
+  /**
+   * A quiet label beside the name, only where it tells a person what they are
+   * trusting (a server someone added by hand). Reviewed services show none.
+   */
+  badge?: string | undefined;
   description: string;
+  /**
+   * The description is the agent's reason for asking: keep it to two lines so
+   * a long rationale never pushes the action down. State and guidance copy
+   * stays whole.
+   */
+  clampDescription?: boolean | undefined;
   skill: boolean;
   expanded: boolean;
   complete: boolean;
@@ -62,7 +74,9 @@ export function SessionCapabilityFrame({
   subtitle,
   logo,
   typeLabel,
+  badge,
   description,
+  clampDescription = false,
   skill,
   expanded,
   complete,
@@ -86,19 +100,46 @@ export function SessionCapabilityFrame({
   const localCard = useRef<HTMLElement>(null);
   const buttonRef = opener ?? localOpener;
   const sectionRef = cardRef ?? localCard;
+  const rootRef = useRef<HTMLDivElement>(null);
   const portalStyle = usePortalTokenStyle(sectionRef.current);
+  // Finishing the card here is the person's answer and the agent continues
+  // from it: let the conversation follow that answer. Only a completion the
+  // person brought about in this card counts. A card that was already complete
+  // when it appeared, or whose saved completion loads after it appears while
+  // the person reads elsewhere, asks nothing.
+  const followAnswer = useTimelineAnswerFollow();
+  const wasComplete = useRef(complete);
+  const engaged = useRef(false);
+  useLayoutEffect(() => {
+    if (expanded || busy) engaged.current = true;
+  }, [expanded, busy]);
+  const engage = () => {
+    engaged.current = true;
+  };
+  useLayoutEffect(() => {
+    if (complete && !wasComplete.current && engaged.current && rootRef.current)
+      followAnswer?.(rootRef.current);
+    wasComplete.current = complete;
+  }, [complete, followAnswer]);
   const identity = (
     <>
       <Mark src={logo} name={name} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        <span>{subtitle}</span>
+        {subtitle ? <span>{subtitle}</span> : null}
       </div>
-      {typeLabel ? <span className="og-session-capability-type">{typeLabel}</span> : null}
+      {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
   );
   return (
-    <div className="og-session-capability">
+    // React bubbles the setup dialog's portaled events here too.
+    <div
+      ref={rootRef}
+      className="og-session-capability"
+      onPointerDownCapture={engage}
+      onClickCapture={engage}
+      onKeyDownCapture={engage}
+    >
       <section
         hidden={dialogOnly}
         style={dialogOnly ? { display: "none" } : undefined}
@@ -113,7 +154,8 @@ export function SessionCapabilityFrame({
           {complete ? <CheckIcon size={16} aria-hidden /> : null}
         </div>
         {complete ? (
-          <p role="status" className="og-session-capability-copy">
+          // Focusable so a card that just finished can keep keyboard focus.
+          <p role="status" tabIndex={-1} className="og-session-capability-copy">
             {completeLabel ??
               (skill
                 ? t("sessionCapabilityFrame.installedWorkspace")
@@ -121,7 +163,13 @@ export function SessionCapabilityFrame({
           </p>
         ) : (
           <>
-            <p className="og-session-capability-copy">{description}</p>
+            <p
+              className="og-session-capability-copy"
+              data-clamp={clampDescription ? "" : undefined}
+              title={clampDescription ? description : undefined}
+            >
+              {description}
+            </p>
             {inlineSetup ? (
               <div className="og-session-capability-setup">{inlineSetup}</div>
             ) : actionUnavailable ? (
@@ -180,7 +228,8 @@ export function SessionCapabilityFrame({
               const target = buttonRef.current?.isConnected
                 ? buttonRef.current
                 : sectionRef.current;
-              if (target?.isConnected) target.focus();
+              // Keep the view where the conversation is; focus alone must not scroll.
+              if (target?.isConnected) target.focus({ preventScroll: true });
             }}
           >
             <div className="og-session-capability-dialog-header">

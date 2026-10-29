@@ -817,6 +817,7 @@ export async function startFakeLoginServer(
           publicKeyJwk: verified.publicKeyJwk,
           alg: verified.alg,
           signCount: verified.signCount,
+          backupEligibility: verified.backupEligibility,
           userHandle: account.userHandle,
           username: user,
           createdAt: iso(),

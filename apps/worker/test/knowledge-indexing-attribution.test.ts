@@ -25,6 +25,7 @@ function scoped(real: Record<string, unknown>, fakes: Record<string, unknown>) {
   }
   return replacements;
 }
+let embeddingRouteAllowed = true;
 const realCore: Record<string, unknown> = { ...(await import("@opengeni/core")) };
 const realDocuments: Record<string, unknown> = { ...(await import("@opengeni/documents")) };
 const realDb: Record<string, unknown> = { ...(await import("@opengeni/db")) };
@@ -33,6 +34,8 @@ mock.module("@opengeni/core", () =>
     paidDocumentEmbedding: () => true,
     documentEmbeddingCostMicros: () => 20,
     workspaceCreditsDisabled: async () => false,
+    // EU-only inference: the embedding route may run unless a test says not.
+    sideFeatureAllowedForWorkspace: async () => embeddingRouteAllowed,
   }),
 );
 mock.module("@opengeni/documents", () =>
@@ -154,4 +157,20 @@ test("unknown attribution and exhausted allowance defer before paid provider use
   } finally {
     refusal = null;
   }
+});
+
+test("an EU-only workspace without an EU embedding route defers before any text is sent", async () => {
+  const calls = embed.mock.calls.length;
+  const debits = debit.mock.calls.length;
+  attribution = { kind: "human", initiatingHumanSubjectId: "human:root" };
+  embeddingRouteAllowed = false;
+  try {
+    expect((await worker().indexKnowledge()).deferred).toBe(1);
+    expect(embed.mock.calls.length).toBe(calls);
+    expect(debit.mock.calls.length).toBe(debits);
+  } finally {
+    embeddingRouteAllowed = true;
+  }
+  expect((await worker().indexKnowledge()).completed).toBe(1);
+  expect(embed.mock.calls.length).toBe(calls + 1);
 });

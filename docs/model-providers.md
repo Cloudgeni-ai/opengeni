@@ -75,6 +75,17 @@ billing ledger. Both retain 30 days with bounded maintenance deletes; reads use
 14 days to support same-hours comparisons. The public read returns no call rows,
 session identities, monetary amounts or absolute units.
 
+The forecast samples usage from a five-minute slot's first reading to the first
+reading two or more slots later, and restarts the sample at any change. So the
+history read returns only each window's first and last reading, every reading
+that differs from the one before it, and each five-minute slot's first reading.
+It returns calls as totals per stretch between two returned readings and UTC
+hour, with their count. Its size follows how often usage changes, not how many
+model calls ran: at most about one reading per window and one total per account
+for every five minutes of activity, plus the changes. The forecast from it
+equals the forecast from every row, except that a total's calls are capped at
+their average size when the forecast damps call-size outliers.
+
 `model_call_facts.connection_id` is the canonical account ID used by Codex and
 Claude Models lists, in both scopes. Facts have no age-based prune job, but writes
 are best-effort; old unattributed facts, deleted workspaces and deleted accounts
@@ -472,7 +483,7 @@ managed-provider slice of a catalog document:
   "opperModels": [
     {
       "upstreamModelId": "aws/claude-opus-5-5",
-      "label": "Claude Opus 5.5 (EU)",
+      "label": "Claude Opus 5.5",
       "shortLabel": "Opus 5.5",
       "capabilities": { "...": "complete V1 capabilities" },
       "contextWindowTokens": 1000000,
@@ -626,8 +637,8 @@ continuation can still resolve its retained definition. Re-adding the same slug
 creates a fresh row identity; stale mutations against an older generation
 cannot affect the replacement.
 Fresh session admission, an explicit follow-up switch from another model, a new
-or materially reaccepted scheduled task, automation trigger, or PR-review
-repository binding, and a fresh generated-session scheduled occurrence recheck
+or materially reaccepted scheduled task, and a fresh generated-session scheduled
+occurrence recheck
 the active row under the custom-model shared transaction lock in the same commit
 that inserts the session, accepts the turn, writes the task/trigger/binding, or
 accepts the occurrence. A committed keyed session shell or exact producer
@@ -1095,11 +1106,13 @@ Reviewed 2026-10-05 against Opper's catalogue
 (`GET https://api.opper.ai/v3/compat/models`; each entry's `opper.reasoning`
 lists supported efforts and `opper.capabilities` its inputs) and probed live end
 to end. The starter pins an EU-resident route so Opper never pools it onto a
-non-EU provider:
+non-EU provider. Its label doesn't say EU: EU status comes from the route's
+residency record (see [eu-only-inference.md](eu-only-inference.md)), never from
+a name.
 
 | Product              | Upstream route (Opper id) | Served by / inference                           | Context / max output | Opper list price (per 1M): input / cached input / cache write / output | Opengeni debit |
 | -------------------- | ------------------------- | ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------- | -------------- |
-| Claude Opus 5.5 (EU) | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
+| Claude Opus 5.5      | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
 
 Product ids are `opper/aws/claude-opus-5-5` and `workspace-opper/aws/claude-opus-5-5`.
 Effective context is the raw window minus Opper's max output (872,000);
@@ -1468,6 +1481,25 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
+Registry models may set `hostedWebSearchContextSize` to `low`, `medium`, or
+`high` for Responses routes that support `search_context_size` and have hosted
+web search enabled. Configuration rejects the setting for other APIs or a
+disabled hosted-search capability, rather than changing a route's execution
+digest for an option that its adapter cannot use. The worker
+passes this static route setting to the hosted search tool. Omission preserves
+the SDK's current `medium` default byte-for-byte; it does not add a new field
+to the executable definition. The option neither enables search nor changes
+reasoning effort, tool choice, evidence includes, or answer-length policy.
+There is no session override or automatic lookup-turn classifier. Other
+provider adapters are not claimed to support this Responses-specific budget.
+
+An explicit size participates in the model definition digest. Finish accepted
+turns before changing the route: a turn accepted with another size fails the
+existing definition-mismatch check rather than silently changing its tools
+on a later request. Changing the size can invalidate the provider's tool-prefix
+cache for new turns. A smaller context can omit useful evidence or cause extra
+searches; compare latency, token usage and answer quality before enabling it.
+
 Claude models use Anthropic's server-side search through the same hosted
 capability (see [web search](web-search.md#claudes-server-side-search)).
 Models without hosted search (Gemini, DeepSeek, GLM and other registry models)
@@ -1487,7 +1519,9 @@ hosted client `tool_search`, `tool_list`, native search output definitions and
 direct function calls. `generic_dispatch` retains ordinary search/list/invoke
 controls. Ranked discovery loads the strongest match per explicit query clause;
 generic receipts also return compact alternatives. Native search outputs cannot
-carry compact suggestions, so use `tool_list` to browse alternatives. Exact ties,
+carry compact suggestions, so a search that neither names a tool nor matches one
+clearly is followed by a developer note listing its unloaded close candidates
+and any unresolved exact names. Exact ties,
 operation-only queries and no matches disclose no schemas. Exact
 `names` loads complete schemas. An optional decision model handles ambiguous
 searches from a wider candidate set; strong lexical matches skip inference.
@@ -1814,7 +1848,7 @@ first match wins:
    on a covered model. With no funded selectable model, new work falls back
    to the next step. See [promotional coverage](scoped-promotional-credits.md).
    `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
-   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
+   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `medium`, clamped to the
    highest effort the model supports at or below it) configure it. An explicit
    `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
    catalog or boot fails. The unset built-in value, and any value checked
@@ -1825,8 +1859,8 @@ first match wins:
    already a funded selectable credits-billed model, it keeps the deployment effort,
    except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
    `credits`) when it is the credits default model itself, so a deployment
-   whose default is `gpt-6-luna` still starts credit holders on extra high
-   reasoning.
+   whose default is `gpt-6-luna` still starts credit holders on the credits
+   default effort.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a

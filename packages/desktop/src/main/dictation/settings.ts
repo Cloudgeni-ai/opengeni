@@ -263,6 +263,7 @@ function parseHistoryEntry(value: unknown): DesktopDictationHistoryEntry | null 
       typeof audio.durationMilliseconds === "number"
         ? { mimeType: audio.mimeType, durationMilliseconds: audio.durationMilliseconds }
         : null,
+    ...(entry.cancelled === true ? { cancelled: true } : {}),
   };
 }
 
@@ -274,22 +275,26 @@ function parseHistoryEntry(value: unknown): DesktopDictationHistoryEntry | null 
 export class DictationSettingsStore {
   private readonly path: string;
   private readonly audioDir: string;
+  /** The file as last read or written; only this store writes it. */
+  private cached: Record<string, unknown> | null = null;
 
   constructor(
     dataDir: string,
     private readonly platform: NodeJS.Platform,
-    /** What the first shortcut hears until the person changes it; null detects. */
-    private readonly language: string | null = null,
+    /**
+     * What the first shortcut hears until the person changes it; null detects.
+     * A function is asked on every read, so the default follows the app's
+     * language once it is known (after sign-in, say).
+     */
+    private readonly language: string | null | (() => string | null) = null,
   ) {
     this.path = join(dataDir, "dictation.json");
     this.audioDir = join(dataDir, "dictation-audio");
   }
 
   read(): DesktopDictationSettings {
-    return mergeDictationSettings(
-      defaultDictationSettings(this.platform, this.language),
-      this.file(),
-    );
+    const language = typeof this.language === "function" ? this.language() : this.language;
+    return mergeDictationSettings(defaultDictationSettings(this.platform, language), this.file());
   }
 
   write(settings: DesktopDictationSettings): void {
@@ -314,7 +319,10 @@ export class DictationSettingsStore {
       .slice(0, DICTATION_HISTORY_MAX);
   }
 
-  /** Newest first; its speech is kept with it when given. */
+  /**
+   * Newest first; its speech is kept with it when given. A cancelled
+   * dictation is kept only for its speech: without it, it is not kept.
+   */
   remember(entry: DesktopDictationHistoryEntry, audio: DesktopDictationAudio | null = null): void {
     let kept: DesktopDictationHistoryEntry = { ...entry, audio: null };
     if (audio && ENTRY_ID.test(entry.id)) {
@@ -331,6 +339,7 @@ export class DictationSettingsStore {
         // The text is kept without its speech.
       }
     }
+    if (kept.cancelled && !kept.audio) return;
     const history = [kept, ...this.history().filter((item) => item.id !== entry.id)].slice(
       0,
       DICTATION_HISTORY_MAX,
@@ -339,13 +348,18 @@ export class DictationSettingsStore {
     this.pruneAudio(history);
   }
 
-  /** A kept dictation's text, after it was transcribed again. */
+  /** A kept dictation's text, after it was transcribed again; a cancelled one is no longer. */
   replaceText(id: string, text: string): void {
     const history = this.history();
     if (!history.some((entry) => entry.id === id)) return;
     this.save({
       ...this.file(),
-      history: history.map((entry) => (entry.id === id ? { ...entry, text } : entry)),
+      history: history.map((entry) => {
+        if (entry.id !== id) return entry;
+        const next: DesktopDictationHistoryEntry = { ...entry, text };
+        delete next.cancelled;
+        return next;
+      }),
     });
   }
 
@@ -390,12 +404,14 @@ export class DictationSettingsStore {
   }
 
   private file(): Record<string, unknown> {
+    if (this.cached) return this.cached;
     try {
       const value: unknown = JSON.parse(readFileSync(this.path, "utf8"));
-      return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+      this.cached = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
     } catch {
-      return {};
+      this.cached = {};
     }
+    return this.cached;
   }
 
   private save(value: Record<string, unknown>): void {
@@ -403,5 +419,6 @@ export class DictationSettingsStore {
     const temporary = `${this.path}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     renameSync(temporary, this.path);
+    this.cached = value;
   }
 }

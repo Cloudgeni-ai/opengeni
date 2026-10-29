@@ -25,7 +25,6 @@ import {
   migrate,
   pinSubscriptionCoreSessionCodexAccount,
   provisionRoles,
-  readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
   resolveSubscriptionCoreCodexAppsDesignation,
   setSubscriptionCoreCodexAllocator,
@@ -88,13 +87,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex consumers fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable or disable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The organization's seeded settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -128,13 +121,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: sharedWorkspace!.id,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 /** Seed historical/corrupt state to test independent reader defenses. */
@@ -312,34 +298,8 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
   });
 
-  test(`${harness}: without a cutover row nothing on the core resolves, even with core rows present`, async () => {
-    const org = await organization();
-    const connectionId = await sharedConnection(org, "gate-off");
-    await seedHistoricalAppsDesignation(org, connectionId);
-    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
-    const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
-    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
-    expect(await readCredential(org, org.sharedWorkspaceId, connectionId)).toEqual([]);
-    const begun = await withRlsContext(client!.db, scope, (tx) =>
-      rawRows(
-        tx,
-        sql`select * from opengeni_private.begin_subscription_codex_apps_refresh(
-          ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connectionId}::uuid)`,
-      ),
-    );
-    expect(begun).toEqual([]);
-
-    // A disabled row is maintenance: still nothing resolves.
-    await setCutover(org.accountId, false);
-    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
-    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
-    expect(await readCredential(org, org.sharedWorkspaceId, connectionId)).toEqual([]);
-  });
-
   test(`${harness}: an administrator designates Apps on the core; requests recheck and refresh by designation`, async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
-    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("core");
     const connectionId = await sharedConnection(org, "apps-admin");
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
 
@@ -446,12 +406,6 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     await shared!.admin`update subscription_connections
       set status = 'active', expires_at = now() + interval '1 hour'
       where id = ${connectionId}::uuid`;
-    // Maintenance (a disabled cutover row) ends authority for in-flight
-    // request auth too; re-enabling restores it.
-    await setCutover(org.accountId, false);
-    const paused = await auth.withAuthorization(async (token) => token).catch((caught) => caught);
-    expect(isCodexAppsCredentialUnavailable(paused)).toBe(true);
-    await setCutover(org.accountId, true);
     expect((await auth.withAuthorization(async (token) => token)).accessToken).toBe(
       "access-rotated",
     );
@@ -469,8 +423,6 @@ function authorizationCases(harness: "template" | "owner-migrated") {
   test(`${harness}: designation authority, scope and personal-connection rules are enforced by the database`, async () => {
     const org = await organization();
     const other = await organization();
-    await setCutover(org.accountId, true);
-    await setCutover(other.accountId, true);
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     const organizationScoped = await sharedConnection(org, "org-scoped");
     const managedHere = await sharedConnection(org, "managed-here", {
@@ -655,7 +607,6 @@ function authorizationCases(harness: "template" | "owner-migrated") {
 
   test(`${harness}: designate refuses a target the Apps resolver could never serve`, async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     const admin = { ...scope, subjectId: org.ownerSubjectId };
     const [other] = await shared!.admin<{ id: string }[]>`
@@ -711,7 +662,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
   test("workspace and organization projections keep the legacy shapes and hide personal connections", async () => {
     const org = await organization();
     const other = await organization();
-    await setCutover(org.accountId, true);
     const first = await sharedConnection(org, "projection-a");
     const second = await sharedConnection(org, "projection-b", {
       scope: "workspaces",
@@ -830,7 +780,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     await expect(
       setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...stranger, mode: "disabled" }),
     ).rejects.toMatchObject({
-      message: expect.stringContaining("missing permission"),
+      message: expect.stringContaining("don't have permission"),
       reason: "forbidden",
     });
     await expect(
@@ -996,7 +946,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
   test("session pins are core bindings; Running on and the legacy pointers project from them", async () => {
     const org = await organization();
     const other = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "pin-shared");
     const personal = await personalConnection(org, "pin-personal");
     const foreign = await sharedConnection(other, "pin-foreign");
@@ -1168,7 +1117,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     "Codex choice preserves the %s pin and refuses its account (D-32)",
     async (provider) => {
       const org = await organization();
-      await setCutover(org.accountId, true);
       const sessionId = await ownedSession(org, org.sharedWorkspaceId);
       const codex = await sharedConnection(org, "pin-beside-foreign");
       // Another provider's shared account, explicitly chosen for this session.
@@ -1276,7 +1224,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("Codex 'auto' clears a pin whose account was deleted (D-24's way out)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const sessionId = await ownedSession(org, org.sharedWorkspaceId);
     const doomed = await sharedConnection(org, "pin-deleted");
     const pin = async (connectionId: string | null) =>
@@ -1309,7 +1256,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     ]);
   });
 
-  test("route wakes reach waiting core waiters only with an enabled cutover", async () => {
+  test("route wakes reach waiting core waiters", async () => {
     const org = await organization();
     const sessionId = await ownedSession(org, org.sharedWorkspaceId);
     const turn = { id: await queuedTurn(org, org.sharedWorkspaceId, sessionId) };
@@ -1330,11 +1277,9 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       reason: "core_codex_allocator_changed",
       workspaceIds: [org.sharedWorkspaceId],
     };
+    const before = await revision();
     await deliverSubscriptionCoreCodexWake(client!.db, wake);
-    expect(await revision()).toBe(1);
-    await setCutover(org.accountId, true);
-    await deliverSubscriptionCoreCodexWake(client!.db, wake);
-    expect(await revision()).toBe(2);
+    expect(await revision()).toBe(before + 1);
     const [reason] = await shared!.admin<{ last_wake_reason: string }[]>`
       select last_wake_reason from subscription_capacity_waiters where session_id = ${sessionId}::uuid`;
     expect(reason!.last_wake_reason).toBe("core_codex_allocator_changed");
@@ -1342,7 +1287,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("organization activate and rotation write the organization row (H1, L5)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const orgAccount = await sharedConnection(org, "org-write-a");
     const workspaceManaged = await sharedConnection(org, "org-write-managed", {
       scope: "workspaces",
@@ -1495,7 +1439,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("the workspace rotation toggle keeps the inherited primary (M1)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const a = await sharedConnection(org, "inherit-a");
     const orgAdmin = { accountId: org.accountId, workspaceId: null, subjectId: org.ownerSubjectId };
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
@@ -1544,7 +1487,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     // Before any primary exists, the toggle works and carries none; a later
     // workspace activate sets the workspace's own.
     const fresh = await organization();
-    await setCutover(fresh.accountId, true);
     const c = await sharedConnection(fresh, "inherit-c");
     const freshScope = { accountId: fresh.accountId, workspaceId: fresh.sharedWorkspaceId };
     const none = await setSubscriptionCoreCodexRotation(client!.db, {
@@ -1579,7 +1521,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("workspace routes manage only the workspace's projected pool (M3, L5)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const [other] = await shared!.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
       values (${org.accountId}::uuid, 'Core Codex consumers second workspace')
@@ -1659,7 +1600,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("a stale Apps clear cannot remove a newer designation (L1)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const x = await sharedConnection(org, "stale-clear-x");
     const y = await sharedConnection(org, "stale-clear-y");
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
@@ -1693,7 +1633,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("a pin waits for a concurrent binding write instead of reporting not found (L2)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "pin-race");
     const sessionId = await ownedSession(org, org.sharedWorkspaceId);
     const base = {
@@ -1742,7 +1681,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("one workspace's ended Apps designation never fails another's refresh (L3)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "flight-shared");
     const first = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     const second = { accountId: org.accountId, workspaceId: org.personalWorkspaceId };
@@ -1830,7 +1768,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
 
   test("a session pin wakes only that session's waiter; failed wakes are logged (L4)", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "pin-wake");
     const pinnedSession = await ownedSession(org, org.sharedWorkspaceId);
     const otherSession = await ownedSession(org, org.sharedWorkspaceId);

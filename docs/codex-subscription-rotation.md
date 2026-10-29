@@ -2,9 +2,8 @@
 
 Since maintenance migration `0689_subscription_core_codex_cutover.sql`, Codex
 (ChatGPT subscription) accounts run on the shared subscription core. The legacy
-selector, leases, refresh and failover path is removed in M3 PR 4. Missing or
-disabled cutover rows fail closed; neither permits a legacy-table fallback.
-Its historical text remains in git history. The reset-redemption ledger remains
+selector, leases, refresh and failover path is removed in M3 PR 4, and the
+per-organization cutover switch is no longer read. Its historical text remains in git history. The reset-redemption ledger remains
 a live core fence.
 
 | Topic | Now |
@@ -20,17 +19,16 @@ methods and events retain their shapes (SUB-COMPAT-02).
 
 ## Included allowance and extra credits
 
-Codex chat, compaction and chat-owned image generation check included allowance
-immediately before each provider request in `agent-turn/codex-credit-policy.ts`,
-independently of account selection. The default protects extra credits.
-Exhausted response-header observations stop dispatch immediately; otherwise a
-bounded `/wham/usage` read is required for each request. A successful check is
-never reused for the next request. Weekly-only plans use their reported window,
-without inventing a five-hour cap. Missing or unreadable allowance gives that
-account a one-minute local admission hold, then re-places the checkpointed turn
-or waits. It neither authorizes extra credits nor marks the account unhealthy.
-Reported exhausted feature allowances also block spending conservatively;
-provider feature identifiers have no authoritative model mapping yet.
+Codex chat, compaction, session titles and chat-owned image generation check
+included allowance immediately before each provider request in
+`agent-turn/codex-credit-policy.ts`, independently of account selection. The
+default protects extra credits. The check reads no usage endpoint. It uses the
+usage every earlier response in the turn reported (HTTP headers, or the
+WebSocket rate-limit event): once any reported window is fully used and not yet
+reset, the next dispatch is refused. Every reported window counts, whether or
+not its duration identifies it, so weekly-only plans are protected without
+inventing a five-hour cap. Unknown usage admits the request. Accounts the shared
+core already knows are exhausted are not leased to a turn in the first place.
 
 Observed exhaustion is a local admission refusal, not a fabricated HTTP error.
 Core placement checkpoints durable progress before switching the same turn.
@@ -86,7 +84,7 @@ reading below the limit replaces the stored windows and wakes the waiters; it
 ends a refusal's stored deadline only when it also confirms the account may
 serve (not `allowed: false`, no spent feature limit).
 For a stalled waiter check `next_check_at`, `wake_revision`,
-`observed_wake_revision`, and the organization's cutover row; see the
+and `observed_wake_revision`; see the
 [wait design](design/subscription-core-2026-10-07.md#pr-2a-codex-chat-waits-wakes-re-placement-and-health-dormant).
 
 ## Historical maintenance cutovers

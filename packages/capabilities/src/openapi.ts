@@ -12,6 +12,7 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
+import { displayTitleMeta } from "./operation-titles";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -39,6 +40,8 @@ export interface OpenApiParameterBinding {
   readonly required: boolean;
   readonly schema: JsonSchema;
   readonly description?: string;
+  readonly style?: string;
+  readonly explode?: boolean;
 }
 
 export interface OpenApiOperationBinding {
@@ -52,6 +55,12 @@ export interface OpenApiOperationBinding {
     readonly schemas: Readonly<Record<string, JsonSchema>>;
   };
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
+  /**
+   * Reviewed Microsoft Search entity types this operation may request. When
+   * present, every request in the body must name only these entity types; any
+   * other request is rejected before credentials are resolved.
+   */
+  readonly searchEntityTypes?: readonly string[];
 }
 
 export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding, "openapi">;
@@ -62,6 +71,17 @@ export interface CompileOpenApiOptions {
   readonly baseUrl?: string;
   readonly provider?: string;
   readonly schemaMode?: "provider_validated_json";
+  /**
+   * Reviewed `"<method> <path>"` operations that only read despite a non-GET
+   * method (a POST search, for example), with any reviewed request-body rule.
+   * Supplied by reviewed definitions only.
+   */
+  readonly readOnlyOperations?: ReadonlyMap<string, OpenApiReadOnlyOperationRule>;
+}
+
+export interface OpenApiReadOnlyOperationRule {
+  /** Microsoft Search entity types the read may request; others are rejected. */
+  readonly searchEntityTypes?: readonly string[];
 }
 
 export interface OpenApiServerOptions {
@@ -189,7 +209,8 @@ export function compileOpenApiRevision(
       );
       const requiredScopeAlternatives =
         operation.security === undefined ? documentSecurity : readSecurity(operation.security);
-      const safety = classifyHttpSafety(method, operation);
+      const readOnlyRule = options.readOnlyOperations?.get(`${method} ${pathTemplate}`);
+      const safety = readOnlyRule ? "read" : classifyHttpSafety(method, operation);
       const inputSchema = operationInputSchema(parameters, requestBody);
       const outputSchema = options.schemaMode
         ? undefined
@@ -213,6 +234,9 @@ export function compileOpenApiRevision(
         parameters,
         ...(requestBody ? { requestBody } : {}),
         ...(requiredScopeAlternatives.length > 0 ? { requiredScopeAlternatives } : {}),
+        ...(readOnlyRule?.searchEntityTypes
+          ? { searchEntityTypes: [...readOnlyRule.searchEntityTypes] }
+          : {}),
       };
       if (tools.length > MAX_INTEGRATION_TOOLS) {
         throw new IntegrationProtocolError(
@@ -235,7 +259,26 @@ export function compileOpenApiRevision(
   const contentSha256 = sha256Hex(
     canonicalJson({
       document,
+      // Older compilers discarded serialization metadata. A refreshed catalog
+      // must not collide with their immutable stored bindings for the same spec.
+      ...(Object.values(bindings).some((binding) => binding.parameters.some(isNonExplodedFormQuery))
+        ? { queryArraySerializationVersion: 1 }
+        : {}),
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
+      // Reviewed read-only overrides change tool safety, so they are part of the
+      // executable identity. Absent overrides keep existing digests unchanged.
+      ...(options.readOnlyOperations && options.readOnlyOperations.size > 0
+        ? {
+            readOnlyOperations: Object.fromEntries(
+              [...options.readOnlyOperations.entries()]
+                .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+                .map(([key, rule]) => [
+                  key,
+                  rule.searchEntityTypes ? { searchEntityTypes: [...rule.searchEntityTypes] } : {},
+                ]),
+            ),
+          }
+        : {}),
       baseUrl: Object.values(bindings)[0]!.serverUrl,
       serverUrls: Object.fromEntries(
         Object.entries(bindings).map(([id, binding]) => [id, binding.serverUrl]),
@@ -317,6 +360,10 @@ export class OpenApiMcpServer implements MCPServer {
           _meta: {
             "opengeni/approvalMode": tool.approvalMode,
             "opengeni/operationKey": tool.operationKey,
+            ...displayTitleMeta(tool.operationKey, {
+              method: this.options.revision.bindings[tool.id]?.method,
+              serverUrl: this.options.revision.bindings[tool.id]?.serverUrl,
+            }),
             "opengeni/revisionId": this.options.revision.id,
           },
         }) as LocalMcpTool,
@@ -366,6 +413,7 @@ export async function invokeOpenApiOperation(
       false,
     );
   }
+  assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
@@ -414,6 +462,65 @@ export async function invokeOpenApiOperation(
     );
   }
   return result;
+}
+
+/**
+ * A reviewed read-only search may only ask for its reviewed entity types, so a
+ * connection's other granted scopes (mail, chats) cannot be searched without
+ * the approval their own tools require.
+ */
+function assertSearchEntityTypes(
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+): void {
+  const allowed = binding.searchEntityTypes;
+  if (!allowed) return;
+  const reject = (detail: string): never => {
+    throw new IntegrationInvocationError(
+      "parameter_invalid",
+      `${detail} Allowed entityTypes: ${allowed.join(", ")}.`,
+      "not_started",
+      false,
+    );
+  };
+  const body = args.body;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return reject('Send the search as a JSON object body: {"requests":[...]}.');
+  }
+  // The provider may read property names case-insensitively, so a second
+  // spelling must never smuggle in entity types the guard did not check.
+  const unexpected = Object.keys(body).filter((key) => key !== "requests");
+  if (unexpected.length > 0) {
+    return reject(`The search body may only contain requests, not ${unexpected.join(", ")}.`);
+  }
+  const requests = (body as Record<string, unknown>).requests;
+  if (!Array.isArray(requests) || requests.length === 0) {
+    return reject("The search body needs a non-empty requests array.");
+  }
+  for (const request of requests) {
+    if (typeof request !== "object" || request === null || Array.isArray(request)) {
+      return reject("Every search request must be an object.");
+    }
+    if (
+      Object.keys(request).some(
+        (key) => key !== "entityTypes" && key.toLowerCase() === "entitytypes",
+      )
+    ) {
+      return reject("Spell the search field exactly entityTypes.");
+    }
+    const entityTypes = (request as Record<string, unknown>).entityTypes;
+    if (!Array.isArray(entityTypes) || entityTypes.length === 0) {
+      return reject("Every search request needs a non-empty entityTypes array.");
+    }
+    for (const entityType of entityTypes) {
+      if (
+        typeof entityType !== "string" ||
+        !allowed.some((entry) => entry.toLowerCase() === entityType.toLowerCase())
+      ) {
+        return reject(`This search cannot request entityType ${JSON.stringify(entityType)}.`);
+      }
+    }
+  }
 }
 
 async function resolveOpenApiCredential(
@@ -566,6 +673,13 @@ function readParameters(
         name: parameter.name,
         location,
         required: location === "path" || parameter.required === true,
+        // Retain the supported non-default encoding. Unchanged encodings keep
+        // their old binding shape as well as their old immutable revision ID.
+        ...(location === "query" &&
+        (parameter.style ?? "form") === "form" &&
+        parameter.explode === false
+          ? { style: "form", explode: false }
+          : {}),
         schema: dereferenceSchema(document, parameter.schema),
         ...(stringValue(parameter.description)
           ? { description: stringValue(parameter.description)! }
@@ -738,7 +852,12 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
   const query = objectValue(args.query);
-  for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
+  for (const [name, value] of Object.entries(query)) {
+    const parameter = binding.parameters.find(
+      (entry) => entry.location === "query" && entry.name === name,
+    );
+    appendQueryValue(url, name, value, parameter);
+  }
   return url;
 }
 
@@ -792,9 +911,26 @@ function buildOperationBody(
   );
 }
 
-function appendQueryValue(url: URL, name: string, value: unknown): void {
+function isNonExplodedFormQuery(parameter: OpenApiParameterBinding | undefined): boolean {
+  return (
+    parameter?.location === "query" &&
+    (parameter.style ?? "form") === "form" &&
+    parameter.explode === false
+  );
+}
+
+function appendQueryValue(
+  url: URL,
+  name: string,
+  value: unknown,
+  parameter: OpenApiParameterBinding | undefined,
+): void {
   if (Array.isArray(value)) {
-    for (const entry of value) url.searchParams.append(name, scalarString(entry));
+    if (isNonExplodedFormQuery(parameter)) {
+      url.searchParams.append(name, value.map(scalarString).join(","));
+    } else {
+      for (const entry of value) url.searchParams.append(name, scalarString(entry));
+    }
   } else if (value !== undefined && value !== null) {
     url.searchParams.append(name, scalarString(value));
   }

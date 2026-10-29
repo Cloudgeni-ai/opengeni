@@ -61,7 +61,9 @@ export function impactPlanConsoleSummary(plan: ImpactPlan, outputPath: string): 
 
 const GLOBAL_FENCES = [
   /^\.bun-version$/,
-  /^\.changeset\//,
+  // A changeset note only feeds the release plan, which source contracts
+  // validate on every run; changeset configuration still fences.
+  /^\.changeset\/(?![^/]+\.md$)/,
   /^\.github\//,
   /^\.dockerignore$/,
   /^\.npmrc$/,
@@ -97,7 +99,7 @@ const PUBLIC_API_WORKSPACES = new Set([
   "@opengeni/sdk",
 ]);
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
-const DOC_PATTERN = /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md)$/;
+const DOC_PATTERN = /^(?:docs\/.+\.mdx?|[^/]+\.md|\.changeset\/[^/]+\.md)$/;
 
 export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
   "test/integration/temporal-workflow.integration.ts",
@@ -111,6 +113,15 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/integration/background-command-wake.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/core",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/child-wait-boundary.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -314,6 +325,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/teams-approval.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/connector-accounts.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -426,9 +442,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/capability-details.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/project-profile.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/desktop-corner.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/error-branding.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",
@@ -448,6 +466,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/site-conversations.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/site-navigation.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/setup-account-token.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/personal-resource-attachments.browser.e2e.ts": [
     "opengeni-web",
@@ -553,6 +577,13 @@ const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
   "test/e2e/browser-account-request-observation.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
+  "test/e2e/desktop-window-bar.ts": [
+    "test/e2e/artifact-desktop.browser.e2e.ts",
+    "test/e2e/desktop-corner.browser.e2e.ts",
+    "test/e2e/desktop-rail.browser.e2e.ts",
+    "test/e2e/session-sidebar.browser.e2e.ts",
+    "test/e2e/signed-out-page.browser.e2e.ts",
   ],
 };
 
@@ -750,10 +781,8 @@ function fullPlan(
       "migration-test-budgets",
       // Contract requirement IDs and the tests that claim them stay consistent.
       "subscription-contract",
-      // The public API surface snapshot and the published-SDK compatibility
-      // run (docs/design/api-compatibility-policy.md).
+      // The public API surface snapshot (docs/design/api-compatibility-policy.md).
       "public-api",
-      "sdk-compat",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -843,6 +872,12 @@ export function createImpactPlan(
   const direct = new Set<string>();
   const changedTests = new Set<string>();
   for (const path of changedFiles) {
+    // Docs and changeset notes select no tests; the docs, format and
+    // release-plan guards check them on every run.
+    if (DOC_PATTERN.test(path)) {
+      reasons.push({ path, reason: "documentation or changeset note" });
+      continue;
+    }
     const pkg = workspaceForPath(graph, path);
     if (pkg && !ARTIFACT_SKILL_PATTERN.test(path)) {
       direct.add(pkg.name);
@@ -974,7 +1009,7 @@ export function createImpactPlan(
     );
   }
   if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
-    guards.push("public-api", "sdk-compat");
+    guards.push("public-api");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");

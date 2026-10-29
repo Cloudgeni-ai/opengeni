@@ -36,6 +36,11 @@ import {
   type NativeTimelineTheme,
 } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { NativeInteractiveAnswer } from "./interactive-answer";
+import {
+  INTERACTIVE_ANSWER_FENCE,
+  trailingOpenFence,
+} from "@opengeni/react/interactive-answer-model";
 import { tableColumns, tableLayout } from "./markdown-table-layout";
 
 /**
@@ -331,9 +336,34 @@ function MarkdownTable({
   );
   return (
     <View
-      style={{ marginTop: 12, marginBottom: 10 }}
+      style={{ marginTop: onCopy ? 4 : 12, marginBottom: 10 }}
       onLayout={(event) => setAvailable(Math.round(event.nativeEvent.layout.width))}
     >
+      {/* Copy sits on its own line above the table, so it never covers a
+          header cell, whether the table fits or scrolls sideways. */}
+      {onCopy ? (
+        <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={m.copyTable}
+            hitSlop={8}
+            onPress={() => {
+              onCopy(rows.map((row) => row.join("\t")).join("\n"));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1400);
+            }}
+            style={{
+              width: 28,
+              height: 28,
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: 8,
+            }}
+          >
+            <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
+          </Pressable>
+        </View>
+      ) : null}
       {scrolls ? (
         <View>
           <ScrollView
@@ -372,31 +402,6 @@ function MarkdownTable({
       ) : (
         body
       )}
-      {onCopy ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={m.copyTable}
-          hitSlop={8}
-          onPress={() => {
-            onCopy(rows.map((row) => row.join("\t")).join("\n"));
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1400);
-          }}
-          style={{
-            position: "absolute",
-            top: 2,
-            right: 0,
-            width: 28,
-            height: 28,
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: 8,
-            backgroundColor: scrolls ? theme.colors.bg : "transparent",
-          }}
-        >
-          <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
-        </Pressable>
-      ) : null}
     </View>
   );
 }
@@ -556,6 +561,15 @@ function webRules(
       const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
       const info = (node as { sourceInfo?: unknown }).sourceInfo;
       const language = typeof info === "string" ? (info.trim().split(/\s+/)[0] ?? "") : "";
+      if (language === INTERACTIVE_ANSWER_FENCE) {
+        return (
+          <AnswerFence
+            key={node.key}
+            content={content}
+            renderSource={() => <CodeFence content={content} language={language} onCopy={onCopy} />}
+          />
+        );
+      }
       const kind = interactivePreviewKind(language);
       if (kind && media.renderInteractiveBlock) {
         return (
@@ -665,21 +679,7 @@ export interface MarkdownLinkOptions {
 /** Text groups whose only link the host drew as a block, so they render as views. */
 const BLOCK_LINK_GROUPS = new WeakSet<object>();
 
-/** Whether the message ends inside an unclosed fence, and that fence's body. */
-export function trailingOpenFence(text: string): string | null {
-  let open: { char: string; length: number; lines: string[] } | null = null;
-  for (const line of text.split("\n")) {
-    if (open) {
-      const close = /^ {0,3}([`~]{3,})\s*$/.exec(line);
-      if (close && close[1]![0] === open.char && close[1]!.length >= open.length) open = null;
-      else open.lines.push(line);
-      continue;
-    }
-    const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (start) open = { char: start[1]![0]!, length: start[1]!.length, lines: [] };
-  }
-  return open ? open.lines.join("\n") : null;
-}
+export { trailingOpenFence };
 
 const FenceStateContext = createContext<{ openTail: string | null; streaming: boolean }>({
   openTail: null,
@@ -699,6 +699,20 @@ function InteractiveFence({
   const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
   const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
   return <>{render({ kind, content: state === "complete" ? content : "", state })}</>;
+}
+
+/** An `opengeni-ui` answer: drawn natively, growing in place while it streams. */
+function AnswerFence({
+  content,
+  renderSource,
+}: {
+  content: string;
+  renderSource: () => ReactNode;
+}) {
+  const { openTail, streaming } = useContext(FenceStateContext);
+  const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
+  const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
+  return <NativeInteractiveAnswer source={content} state={state} renderSource={renderSource} />;
 }
 
 /** Plain image URLs load directly; retained files need the host's `renderImage`. */
@@ -764,8 +778,12 @@ function TrimmedMarkdown({
     return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
   }, [theme, tone, textStyle]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
+  // Previews and interactive answers both need to know whether the last fence is still open.
   const openTail = useMemo(
-    () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
+    () =>
+      media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE)
+        ? trailingOpenFence(text)
+        : null,
     [media.renderInteractiveBlock, text],
   );
   const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import {
+  CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  insertDisconnectAuditEventInScope,
+  type DisconnectAuditActor,
+} from "./disconnect-audit";
 
 export type TeamsInstallation = {
   tenant_id: string;
@@ -8,8 +14,12 @@ export type TeamsInstallation = {
   workspace_id: string;
   generation: string;
   active: boolean;
+  group_revision: number;
 };
+export type TeamsGroupAudience = Array<{ actorId: string; subjectId: string }>;
 export type TeamsRoute = TeamsInstallation & {
+  group_audience: TeamsGroupAudience | null;
+  group_active: boolean;
   route_id: string;
   actor_id: string;
   subject_id: string;
@@ -20,6 +30,9 @@ export type TeamsRoute = TeamsInstallation & {
   service_url: string;
   bot_id: string;
   session_id: string;
+  /** Where a 1:1 route's session lives when not in the installation's workspace:
+   * the linked person's own Personal workspace. Null keeps the installation's. */
+  session_workspace_id: string | null;
   session_bound: boolean;
   delivered_sequence: number;
   lease_token: string | null;
@@ -58,7 +71,7 @@ export async function listTeamsInstallations(
 ): Promise<TeamsInstallation[]> {
   return rawRows<TeamsInstallation>(
     db,
-    sql`select tenant_id,account_id,workspace_id,generation,active from teams_bot_installations where active and (${afterTenantId}::uuid is null or tenant_id>${afterTenantId}::uuid) order by tenant_id limit 100`,
+    sql`select tenant_id,account_id,workspace_id,generation,active,group_revision from teams_bot_installations where active and (${afterTenantId}::uuid is null or tenant_id>${afterTenantId}::uuid) order by tenant_id limit 100`,
   );
 }
 export async function getTeamsInstallation(
@@ -69,7 +82,7 @@ export async function getTeamsInstallation(
     (
       await rawRows<TeamsInstallation>(
         db,
-        sql`select tenant_id,account_id,workspace_id,generation,active from teams_bot_installations where tenant_id=${tenantId}::uuid limit 1`,
+        sql`select tenant_id,account_id,workspace_id,generation,active,group_revision from teams_bot_installations where tenant_id=${tenantId}::uuid limit 1`,
       )
     )[0] ?? null
   );
@@ -82,7 +95,7 @@ export async function getWorkspaceTeamsInstallation(
     (
       await rawRows<TeamsInstallation>(
         db,
-        sql`select tenant_id,account_id,workspace_id,generation,active from teams_bot_installations where workspace_id=${workspaceId}::uuid limit 1`,
+        sql`select tenant_id,account_id,workspace_id,generation,active,group_revision from teams_bot_installations where workspace_id=${workspaceId}::uuid limit 1`,
       )
     )[0] ?? null
   );
@@ -187,6 +200,21 @@ export async function removeTeamsLink(db: Database, i: TeamsInstallation, subjec
     );
     if (!link) return;
     await tx.execute(
+      sql`update teams_bot_installations set group_revision=group_revision+1 where tenant_id=${i.tenant_id}::uuid`,
+    );
+    await tx.execute(
+      sql`select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and group_audience @> ${JSON.stringify([{ actorId: link.actor_id, subjectId }])}::jsonb order by route_id for update`,
+    );
+    await tx.execute(
+      sql`update teams_bot_routes set group_active=false where tenant_id=${i.tenant_id}::uuid and group_audience @> ${JSON.stringify([{ actorId: link.actor_id, subjectId }])}::jsonb`,
+    );
+    await tx.execute(
+      sql`update teams_bot_inbox set state='failed',error_code='group_audience_changed' where state='pending' and route_id in(select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and group_audience @> ${JSON.stringify([{ actorId: link.actor_id, subjectId }])}::jsonb)`,
+    );
+    await tx.execute(
+      sql`update teams_bot_outbox set state=case when state='sending' then 'unknown' else 'failed' end,error_code='group_audience_changed' where state in ('pending','sending') and route_id in(select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and group_audience @> ${JSON.stringify([{ actorId: link.actor_id, subjectId }])}::jsonb)`,
+    );
+    await tx.execute(
       sql`select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and (actor_id=${link.actor_id}::uuid or exists(select 1 from teams_bot_inbox inbox where inbox.route_id=teams_bot_routes.route_id and inbox.actor_id=${link.actor_id}::uuid and inbox.state='pending')) order by route_id for update`,
     );
     await tx.execute(
@@ -203,8 +231,19 @@ export async function removeTeamsLink(db: Database, i: TeamsInstallation, subjec
     );
   });
 }
-export async function disconnectTeamsBot(db: Database, i: TeamsInstallation) {
+export async function disconnectTeamsBot(
+  db: Database,
+  i: TeamsInstallation,
+  options: {
+    /** Who disconnected the bot: audited in the same transaction when it was active. */
+    audit?: DisconnectAuditActor | null;
+  } = {},
+) {
   return teamsScoped(db, i, async (tx) => {
+    const [prior] = await rawRows<{ active: boolean }>(
+      tx,
+      sql`select active from teams_bot_installations where tenant_id=${i.tenant_id}::uuid for update`,
+    );
     await tx.execute(
       sql`update teams_bot_installations set active=false,generation=gen_random_uuid() where tenant_id=${i.tenant_id}::uuid`,
     );
@@ -214,6 +253,15 @@ export async function disconnectTeamsBot(db: Database, i: TeamsInstallation) {
     await tx.execute(
       sql`update teams_bot_outbox set state=case when state='sending' then 'unknown' else 'failed' end,error_code='installation_disconnected' where workspace_id=${i.workspace_id}::uuid and state in ('pending','sending')`,
     );
+    if (options.audit && prior?.active) {
+      await insertDisconnectAuditEventInScope(tx, {
+        accountId: i.account_id,
+        workspaceId: i.workspace_id,
+        action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+        actor: options.audit,
+        target: { type: "teams_bot_installation", id: i.tenant_id, provider: "microsoft_teams" },
+      });
+    }
   });
 }
 export async function enqueueTeamsMessage(
@@ -225,22 +273,69 @@ export async function enqueueTeamsMessage(
     subjectId: string;
     personal: boolean;
     channelId?: string | null;
+    groupAudience?: TeamsGroupAudience;
+    groupRevision?: number;
     conversationId: string;
     threadId: string | null;
     serviceUrl: string;
     botId: string;
     eventId: string;
     payload: unknown;
+    /** A 1:1 route's session in the sender's own Personal workspace. */
+    sessionWorkspaceId?: string | null;
   },
 ) {
+  if (input.groupAudience && input.groupRevision === undefined)
+    throw new Error("teams_group_revision_missing");
+  const sessionWorkspaceId = input.sessionWorkspaceId ?? null;
+  if (
+    sessionWorkspaceId &&
+    (!input.personal ||
+      input.groupAudience ||
+      input.channelId ||
+      sessionWorkspaceId === i.workspace_id)
+  )
+    throw new Error("teams_route_unavailable");
   return teamsScoped(db, i, async (tx) => {
+    // Only the linked person's own Personal workspace, named by their active
+    // organization membership, can hold their 1:1 chat.
+    if (
+      sessionWorkspaceId &&
+      (await namedSubjectPersonalWorkspaceId(tx, {
+        accountId: i.account_id,
+        subjectId: input.subjectId,
+      })) !== sessionWorkspaceId
+    )
+      throw new Error("teams_route_unavailable");
     const active = await rawRows(
       tx,
-      sql`select 1 from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid for share`,
+      sql`select 1 from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid and (${input.groupRevision ?? null}::bigint is null or group_revision=${input.groupRevision ?? null}::bigint) for update`,
     );
     if (!active.length) throw new Error("teams_installation_changed");
-    await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id)
-   values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId}) on conflict(route_id) do nothing`);
+    if (input.groupAudience) {
+      const [current] = await rawRows<{ route_id: string; group_audience: TeamsGroupAudience }>(
+        tx,
+        sql`select route_id,group_audience from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and generation=${i.generation}::uuid and conversation_id=${input.conversationId} and group_active and group_audience is not null for update`,
+      );
+      if (
+        current &&
+        JSON.stringify(current.group_audience.map((x) => [x.actorId, x.subjectId])) ===
+          JSON.stringify(input.groupAudience.map((x) => [x.actorId, x.subjectId]))
+      )
+        input = { ...input, routeId: current.route_id };
+      else {
+        await tx.execute(
+          sql`update teams_bot_installations set group_revision=group_revision+1 where tenant_id=${i.tenant_id}::uuid`,
+        );
+        await tx.execute(
+          sql`update teams_bot_routes set group_active=false where tenant_id=${i.tenant_id}::uuid and conversation_id=${input.conversationId} and group_audience is not null and group_active`,
+        );
+        await settleInactiveTeamsGroups(tx, i, input.conversationId);
+        input = { ...input, routeId: `teams-group:${randomUUID()}` };
+      }
+    }
+    await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id)
+   values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},${input.groupAudience ? JSON.stringify(input.groupAudience) : null}::jsonb,${Boolean(input.groupAudience)},${sessionWorkspaceId}::uuid) on conflict(route_id) do nothing`);
     const [route] = await rawRows<TeamsRoute>(
       tx,
       sql`select * from teams_bot_routes where route_id=${input.routeId}`,
@@ -248,7 +343,8 @@ export async function enqueueTeamsMessage(
     if (
       !route ||
       route.generation !== i.generation ||
-      (route.personal && route.actor_id !== input.actorId)
+      (route.personal && route.actor_id !== input.actorId) ||
+      (route.session_workspace_id ?? null) !== sessionWorkspaceId
     )
       throw new Error("teams_route_unavailable");
     await tx.execute(
@@ -438,4 +534,74 @@ export async function refuseTeamsRouteOutputs(
       sql`update teams_bot_routes set delivered_sequence=greatest(delivered_sequence,relevant_event_sequence) where route_id=${r.route_id} and lease_token=${r.lease_token}::uuid and lease_until>now()`,
     );
   });
+}
+
+/** Membership notifications only revoke; a later verified roster creates a new route. */
+export async function invalidateTeamsGroup(
+  db: Database,
+  i: TeamsInstallation,
+  conversationId: string,
+  expected: { routeId?: string; revision?: number; leaseToken?: string | null } = {},
+): Promise<void> {
+  return teamsScoped(db, i, async (tx) => {
+    await tx.execute(
+      sql`select tenant_id from teams_bot_installations where tenant_id=${i.tenant_id}::uuid for update`,
+    );
+    const live = await rawRows(
+      tx,
+      sql`select tenant_id from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and generation=${i.generation}::uuid and active and (${expected.revision ?? null}::bigint is null or group_revision=${expected.revision ?? null}::bigint)`,
+    );
+    if (!live.length) return;
+    if (expected.routeId) {
+      const current = await rawRows(
+        tx,
+        sql`select route_id from teams_bot_routes where route_id=${expected.routeId} and tenant_id=${i.tenant_id}::uuid and generation=${i.generation}::uuid and conversation_id=${conversationId} and group_active and (${expected.leaseToken ?? null}::uuid is null or (lease_token=${expected.leaseToken ?? null}::uuid and lease_until>clock_timestamp())) for update`,
+      );
+      if (!current.length) return;
+    }
+    await tx.execute(
+      sql`update teams_bot_installations set group_revision=group_revision+1 where tenant_id=${i.tenant_id}::uuid`,
+    );
+    await tx.execute(
+      sql`select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and conversation_id=${conversationId} and group_audience is not null order by route_id for update`,
+    );
+    await tx.execute(
+      sql`update teams_bot_routes set group_active=false where tenant_id=${i.tenant_id}::uuid and conversation_id=${conversationId} and group_audience is not null and group_active`,
+    );
+    await settleInactiveTeamsGroups(tx, i, conversationId);
+  });
+}
+
+export async function teamsGroupRouteActive(
+  db: Database,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+): Promise<boolean> {
+  return teamsScoped(
+    db,
+    i,
+    async (tx) =>
+      (
+        await rawRows(
+          tx,
+          sql`select route_id from teams_bot_routes where route_id=${r.route_id} and generation=${i.generation}::uuid and group_active and lease_token=${r.lease_token}::uuid and lease_until>clock_timestamp()`,
+        )
+      ).length === 1,
+  );
+}
+
+async function settleInactiveTeamsGroups(
+  tx: Database,
+  i: TeamsInstallation,
+  conversationId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and conversation_id=${conversationId} and group_audience is not null and not group_active order by route_id for update`,
+  );
+  await tx.execute(
+    sql`update teams_bot_inbox set state='failed',error_code='group_audience_changed' where state='pending' and route_id in(select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and conversation_id=${conversationId} and group_audience is not null and not group_active)`,
+  );
+  await tx.execute(
+    sql`update teams_bot_outbox set state=case when state='sending' then 'unknown' else 'failed' end,error_code='group_audience_changed' where state in ('pending','sending') and route_id in(select route_id from teams_bot_routes where tenant_id=${i.tenant_id}::uuid and conversation_id=${conversationId} and group_audience is not null and not group_active)`,
+  );
 }

@@ -69,7 +69,8 @@ test("docs and non-package paths select no units without treating missing tests 
 test("product plus release note selects units, but changeset cannot mask another broad fence", () => {
   const paths = [".changeset/example.md", "packages/runtime/src/index.ts"];
   const product = createImpactPlan(paths);
-  expect(product.mode).toBe("full");
+  // A changeset note no longer fences; the product change selects its own plan.
+  expect(product.mode).toBe("focused");
   expect(selectPrFastPlan(product, ["packages/runtime"]).unitTests).toHaveLength(PR_UNIT_FILE_CAP);
   for (const fence of ["package.json", ".github/workflows/pr-ci.yml"]) {
     const broad = createImpactPlan([...paths, fence]);

@@ -6,6 +6,7 @@ import {
   type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  ErrorEnvelope,
   isReadOnlyPermissionSet,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -25,6 +26,10 @@ import {
 } from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
 import { actionDescription } from "./mcp/action-descriptions";
+import {
+  stampActionAuditProvenance,
+  type ActionAuditProvenance,
+} from "./http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -79,8 +84,15 @@ export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
   );
 }
 
-/** The billing routes' 403 when the caller lacks billing:manage (requireSelectedAccount). */
-const BILLING_MANAGE_MISSING = "missing permission: billing:manage";
+/** Whether a 403 body is the billing routes' refusal for a missing billing:manage. */
+async function refusedForBillingManage(response: Response): Promise<boolean> {
+  try {
+    const envelope = ErrorEnvelope.safeParse(await response.clone().json());
+    return envelope.success && envelope.data.error.details?.permission === "billing:manage";
+  } catch {
+    return false;
+  }
+}
 
 /** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
 const EXTERNAL_PERSON_REFUSED_HINT =
@@ -181,6 +193,11 @@ export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
 
 export type OrganizationActionContext = {
   caller: OrganizationMcpCaller;
+  /**
+   * Who acts for the person (an agent session with admin access, a connected
+   * agent, a personal key), for audit records. Trusted server state only.
+   */
+  auditProvenance?: ActionAuditProvenance;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
   /** The web app's public origin, when configured; serves the PNG icon. */
@@ -240,8 +257,8 @@ function words(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Actions an MCP caller can complete: browser-only and retired ones are left out. */
-const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly && !entry.retired);
+/** Actions an MCP caller can complete: browser-only ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
 const DESCRIPTIONS = new Map(
   CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
 );
@@ -253,9 +270,15 @@ export function searchActions(input: {
   /** Only actions the caller can reach at all, when they can reach fewer than all. */
   reachable?: (entry: ActionCatalogEntry) => boolean;
 }) {
-  // Singular and plural match ("workspace" finds listWorkspaces).
-  const stem = (word: string) =>
-    word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+  // Singular and plural match ("workspace" finds listWorkspaces), and so do a
+  // verb and its noun ("invite" finds createOrganizationInvitation). Only
+  // longer words lose a final "e", so short words such as "note", "line" or
+  // "theme" don't turn into other words' prefixes ("not", "lin", "them").
+  const stem = (word: string) => {
+    const singular = word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+    const verb = singular.replace(/(?<=\w{3})ation$/u, "");
+    return verb.length > 5 ? verb.replace(/e$/u, "") : verb;
+  };
   const wanted = words(input.query).map(stem);
   // "workspaces" asks for a list; prefer list actions on a plural query.
   const plural = words(input.query).some((word) => /[^s]s$/u.test(word));
@@ -334,7 +357,6 @@ export function describeActionResult(id: string): CallToolResult {
   const entry = findAppAction(id);
   if (!entry) return failure(`No action "${id}". Search for it first.`);
   if (entry.browserOnly) return browserOnly(entry);
-  if (entry.retired) return retired(entry);
   return json(describeAction(entry));
 }
 
@@ -381,7 +403,7 @@ export async function callOrganizationAction(
     options.billingForbidden &&
     outcome.externalPerson !== true &&
     outcome.response.status === 403 &&
-    (await outcome.response.clone().text()).includes(BILLING_MANAGE_MISSING)
+    (await refusedForBillingManage(outcome.response))
   ) {
     await outcome.response.body?.cancel();
     return failure(options.billingForbidden);
@@ -407,7 +429,6 @@ export async function runOrganizationAction(
   const entry = findAppAction(input.id);
   if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
   if (entry.browserOnly) return { refused: browserOnly(entry) };
-  if (entry.retired) return { refused: retired(entry) };
   const reads = entry.method === "GET" || entry.method === "HEAD";
   const externalWorkspace = externalPersonWorkspace(context.caller);
   if (context.caller.kind === "person" && context.caller.subjectId.startsWith("external_user:")) {
@@ -485,6 +506,7 @@ export async function runOrganizationAction(
         workspaceScope: context.caller.access.workspaceScope,
       });
     }
+    if (context.auditProvenance) stampActionAuditProvenance(request, context.auditProvenance);
   }
   return {
     response: await context.dispatch(request),
@@ -680,14 +702,6 @@ function json(value: unknown): CallToolResult {
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
     `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
-  );
-}
-
-/** A removed action: name the action that replaced it instead of calling it. */
-function retired(entry: ActionCatalogEntry): CallToolResult {
-  const replacement = entry.retired ? findAppAction(entry.retired) : undefined;
-  return failure(
-    `${entry.id} was removed. Use ${replacement ? `the ${replacement.id} action (${entry.retired})` : entry.retired} instead; describe it for its input.`,
   );
 }
 

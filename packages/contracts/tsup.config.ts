@@ -6,6 +6,7 @@ export default defineConfig({
   entry: [
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
+    "src/timeline-order.ts",
     "src/learning-refusal.ts",
     "src/values.ts",
     "src/usage-allowances.ts",
@@ -23,6 +24,8 @@ export default defineConfig({
     "src/atlassian-native-retirement.ts",
     "src/canonical-human-identities.ts",
     "src/client-error-report.ts",
+    "src/secret-value-masking.ts",
+    "src/secret-shape-masking.ts",
     "src/analytics-consent-report.ts",
     "src/connection-account-label.ts",
     "src/personal-integration-setup.ts",

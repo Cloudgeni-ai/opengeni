@@ -64,6 +64,7 @@ import {
 } from "@opengeni/contracts";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import type { SessionWorkflowClient } from "@opengeni/core";
 import { normalizeConnectedMachineWorkspaceRoot } from "@opengeni/runtime/sandbox";
 import type { AutomaticAgentUpdater } from "./agent-update";
 import {
@@ -561,6 +562,7 @@ export async function handleAgentEventPayload(
   bus?: EventBus,
   agentUpdates?: AutomaticAgentUpdater | null,
   completionLocator?: ConnectedCommandCompletionLocator,
+  wakeSessionWorkflow?: SessionWorkflowClient["wakeSessionWorkflow"],
 ): Promise<void> {
   const ids = parseAgentEventSubject(subject);
   if (!ids) {
@@ -586,6 +588,7 @@ export async function handleAgentEventPayload(
         undefined,
         undefined,
         completionLocator,
+        wakeSessionWorkflow,
       );
     } catch (error) {
       observability?.warn?.("Failed to settle a Connected Machine completion event", {
@@ -597,7 +600,14 @@ export async function handleAgentEventPayload(
   }
   if (event.event?.$case === "operationInventory") {
     try {
-      await answerOperationInventory(db, ids, event.event.operationInventory, bus, observability);
+      await answerOperationInventory(
+        db,
+        ids,
+        event.event.operationInventory,
+        bus,
+        observability,
+        wakeSessionWorkflow ? { wakeSessionWorkflow } : undefined,
+      );
     } catch (error) {
       // Unanswered, the runner repeats the page on its next tick.
       observability?.warn?.("Failed to answer a runner's operation inventory", {
@@ -859,6 +869,8 @@ export function startMetricsIngestion(deps: {
   bus: EventBus;
   observability?: Observability;
   agentUpdates?: AutomaticAgentUpdater | null;
+  /** Wakes a session waiting on a command this ingestion settles. */
+  wakeSessionWorkflow?: SessionWorkflowClient["wakeSessionWorkflow"];
 }): (() => void) & { whenIdle: () => Promise<void> } {
   const completionLocator = createConnectedCommandCompletionLocator(deps.db);
   const scheduler = createAgentEventIngestionScheduler(
@@ -871,6 +883,7 @@ export function startMetricsIngestion(deps: {
         deps.bus,
         deps.agentUpdates,
         completionLocator,
+        deps.wakeSessionWorkflow,
       ),
     {
       onHeartbeatCoalesced: () =>

@@ -117,6 +117,22 @@ export function assertImageDimensions(width: number, height: number): void {
   }
 }
 
+/** The image scaled down to fit a frame bound, keeping its aspect ratio and
+ * format. An image that already fits is returned as it is. */
+export async function fitImageWithin(
+  data: Uint8Array,
+  dimensions: { width: number; height: number },
+  bound: Pick<NormalizedBrowserFrameStreamOptions, "format" | "quality" | "maxWidth" | "maxHeight">,
+): Promise<{ data: Uint8Array; width: number; height: number }> {
+  const scale = Math.min(1, bound.maxWidth / dimensions.width, bound.maxHeight / dimensions.height);
+  if (scale >= 1) return { data, ...dimensions };
+  const width = Math.min(bound.maxWidth, Math.max(1, Math.round(dimensions.width * scale)));
+  const height = Math.min(bound.maxHeight, Math.max(1, Math.round(dimensions.height * scale)));
+  const image = new Bun.Image(data).resize(width, height, { fit: "fill" });
+  const encoded = bound.format === "jpeg" ? image.jpeg({ quality: bound.quality }) : image.png();
+  return { data: await encoded.bytes(), width, height };
+}
+
 /** Bounded latest-wins fan-out cursor shared by Browser and Computer media.
  * Slow viewers skip superseded frames instead of accumulating stale input. */
 export class LatestFrameSubscription<TFrame> implements AsyncIterable<TFrame> {

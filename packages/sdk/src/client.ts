@@ -41,6 +41,11 @@ import type {
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   AutomationTemplateResponse,
+  BotTemplateResponse,
+  CreateBotTemplateRequest,
+  ListBotTemplatesResponse,
+  UpdateBotTemplateRequest,
+  WorkspaceBotTemplate,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -129,7 +134,9 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -177,7 +184,6 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
-import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import {
   abortableReadRetryDelay,
   isSafeReadMethod,
@@ -401,6 +407,8 @@ import type {
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
   UpdateOrganizationPrivacySettingsRequest,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
@@ -634,6 +642,10 @@ import type {
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
   SessionVisibility,
+  SessionShareLink,
+  SessionShareLinkList,
+  SessionShareLinkState,
+  SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
   SessionEvent,
@@ -723,9 +735,6 @@ import type {
   PtyResizeRequest,
   PtyCloseRequest,
   TranscribeAudioResponse,
-  TranscriptionRecordingListResponse,
-  TranscriptionRecordingResponse,
-  UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
   RefreshScheduledTaskAccessRequest,
   UpdateScheduledTaskRequest,
@@ -742,6 +751,8 @@ import type {
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  MemberDefaultExecutionTarget,
+  WorkspaceDefaultExecutionTarget,
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   Channel,
@@ -985,12 +996,6 @@ export type OpenGeniClientOptions = {
   baseUrl: string;
   /** Opengeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
-  /**
-   * Receives a notice (once per route per client) when the API advertises a
-   * `Deprecation`/`Sunset` header on a response. Defaults to a one-time
-   * `console.warn` per route; pass `false` to silence notices.
-   */
-  onDeprecation?: OpenGeniDeprecationHandler | false | undefined;
   /** Extra headers (static or computed per request) merged into every call. */
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
@@ -1235,28 +1240,6 @@ export type TranscribeAudioInput = {
   signal?: AbortSignal | undefined;
 };
 
-export type CreateTranscriptionRecordingInput = {
-  recordingId: string;
-  mimeType: string;
-  signal?: AbortSignal | undefined;
-};
-
-export type UploadTranscriptionRecordingChunkInput = {
-  audio: Blob | File | Uint8Array;
-  mimeType: string;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  signal?: AbortSignal | undefined;
-};
-
-export type FinalizeTranscriptionRecordingInput = {
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  signal?: AbortSignal | undefined;
-};
-
 function normalizeScheduledTaskMachineTarget<
   T extends CreateScheduledTaskRequest | UpdateScheduledTaskRequest,
 >(request: T): T {
@@ -1357,11 +1340,8 @@ export class OpenGeniClient {
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
-    // Bind lazily so variable sets that polyfill fetch after module load work.
-    this.fetchImpl = withDeprecationNotices<FetchResponse>(
-      options.fetch ?? ((input, init) => fetch(input, init)),
-      options.onDeprecation,
-    );
+    // Bind lazily so environments that polyfill fetch after module load work.
+    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
@@ -1439,164 +1419,6 @@ export class OpenGeniClient {
       });
     }
     return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async createTranscriptionRecording(
-    workspaceId: string,
-    input: CreateTranscriptionRecordingInput,
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings`,
-        { recordingId: input.recordingId, mimeType: input.mimeType },
-        {},
-        input.signal ? { signal: input.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async getTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "GET",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async listTranscriptionRecordings(
-    workspaceId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingListResponse> {
-    const body = await this.requestJson<unknown>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/transcription-recordings`,
-      undefined,
-      {},
-      options.signal ? { signal: options.signal } : {},
-    );
-    if (!isTranscriptionRecordingListResponse(body)) {
-      throw invalidApiResponseError("Invalid transcription recording list response.", {
-        code: "invalid_response",
-      });
-    }
-    return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async uploadTranscriptionRecordingChunk(
-    workspaceId: string,
-    recordingId: string,
-    chunkNumber: number,
-    input: UploadTranscriptionRecordingChunkInput,
-  ): Promise<UploadTranscriptionRecordingChunkResponse> {
-    const correlationId = crypto.randomUUID();
-    let response: FetchResponse;
-    try {
-      response = await this.fetchImpl(
-        this.url(
-          `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/chunks/${chunkNumber}`,
-        ),
-        {
-          method: "PUT",
-          headers: {
-            ...this.headers(correlationId),
-            Accept: "application/json",
-            "Content-Type": input.mimeType,
-            "x-opengeni-chunk-sha256": input.sha256,
-            "x-opengeni-chunk-start-milliseconds": String(input.startMilliseconds),
-            "x-opengeni-chunk-duration-milliseconds": String(input.durationMilliseconds),
-          },
-          body: input.audio instanceof Uint8Array ? Uint8Array.from(input.audio) : input.audio,
-          ...(input.signal ? { signal: input.signal } : {}),
-        },
-      );
-    } catch (error) {
-      if (input.signal?.aborted) throw error;
-      throw mutationTransportError(correlationId);
-    }
-    assertApiContractResponse(response, this.apiContractStrict);
-    if (!response.ok)
-      throw await apiErrorFromResponse(response, {
-        method: "PUT",
-        correlationId,
-      });
-    await assertJsonResponse(response, { method: "PUT", correlationId });
-    const body = await response.json().catch(() => null);
-    if (!isUploadTranscriptionRecordingChunkResponse(body)) {
-      throw new OpenGeniApiError(response.status, "Invalid transcription chunk response.", {
-        code: "invalid_response",
-        mutation: true,
-        correlationId,
-      });
-    }
-    return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async finalizeTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    input: FinalizeTranscriptionRecordingInput,
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/finalize`,
-        {
-          chunkCount: input.chunkCount,
-          totalBytes: input.totalBytes,
-          totalDurationMilliseconds: input.totalDurationMilliseconds,
-        },
-        {},
-        input.signal ? { signal: input.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async processNextTranscriptionRecordingSegment(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/process-next`,
-        {},
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async discardTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "DELETE",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
   }
 
   async createSession(
@@ -1903,6 +1725,60 @@ export class OpenGeniClient {
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/visibility`,
       request,
+    );
+  }
+
+  /**
+   * Whether the person can share a chat with a read-only link here, and their
+   * live link for it (`link: null` when they haven't shared it).
+   */
+  async getSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionShareLinkState> {
+    return await this.requestJson<SessionShareLinkState>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /**
+   * Share a chat the person started with a read-only link: anyone holding it
+   * reads the conversation as it is now (the person's messages and the
+   * replies, never tool details or files), without signing in. Calling it
+   * again refreshes the same link with the newest messages.
+   */
+  async createSessionShareLink(workspaceId: string, sessionId: string): Promise<SessionShareLink> {
+    return await this.requestJson<SessionShareLink>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** Stop sharing a chat: its link stops working at once. */
+  async revokeSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{ revoked: boolean }> {
+    return await this.requestJson<{ revoked: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** The person's live share links in a workspace, newest first. */
+  async listSessionShareLinks(workspaceId: string): Promise<SessionShareLinkList> {
+    return await this.requestJson<SessionShareLinkList>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/share-links`,
+    );
+  }
+
+  /** Read a shared chat by its share id, as anyone holding the link does. */
+  async getSharedSession(shareId: string): Promise<SharedSession> {
+    return await this.requestJson<SharedSession>(
+      "GET",
+      `/v1/shared-sessions/${encodeURIComponent(shareId)}`,
     );
   }
 
@@ -2307,6 +2183,24 @@ export class OpenGeniClient {
     return this.requestJson(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
+    );
+  }
+
+  /**
+   * Move a Site's sidebar row from one project to another (null is Default),
+   * like moving a chat: its conversations in that project move with it, and the
+   * Site itself moves for everyone when the row is its own project's. Needs
+   * `sessions:control`; the Site stays published and in Artifacts.
+   */
+  async updateSiteProject(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteProjectRequest,
+  ): Promise<SiteProjectResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/channel`,
       request,
     );
   }
@@ -6415,6 +6309,31 @@ export class OpenGeniClient {
     );
   }
 
+  /** The organization's EU-only inference setting. Any member. */
+  async getOrganizationInferenceResidency(
+    organizationId: string,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "GET",
+      `/v1/organizations/${organizationId}/inference-residency`,
+    );
+  }
+
+  /**
+   * Turn EU-only inference on (an owner or admin) or off (an owner or admin in
+   * the app in a browser, never an agent or API key).
+   */
+  async updateOrganizationInferenceResidency(
+    organizationId: string,
+    request: UpdateOrganizationInferenceResidencyRequest,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/inference-residency`,
+      request,
+    );
+  }
+
   /** Fully replace the workspace's hard provider/model allowlist. */
   async updateWorkspaceModelAccessPolicy(
     workspaceId: string,
@@ -6874,21 +6793,6 @@ export class OpenGeniClient {
           await this.disconnectSocialConnection(workspaceId, connectionId);
           return;
         }
-        if (id.startsWith("lens-registration:")) {
-          const registrationId = id.slice("lens-registration:".length);
-          if (
-            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(registrationId)
-          )
-            throw new Error("Invalid Lens registration ID");
-          await this.requestJson(
-            "DELETE",
-            `/v1/workspaces/${encodeURIComponent(workspaceId)}/pr-review/registrations/${registrationId}`,
-            undefined,
-            undefined,
-            options,
-          );
-          return;
-        }
         if (id.startsWith("github-installation:")) {
           const installationId = id.slice("github-installation:".length);
           if (
@@ -7098,6 +7002,11 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Creates an inactive draft revision. Empty (or blank) content is stored as
+   * "" and, once activated, clears the target: prompts get no policy for it,
+   * history keeps the earlier versions, and rollback can restore one.
+   */
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
@@ -7857,6 +7766,60 @@ export class OpenGeniClient {
     await this.requestJson<unknown>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/automation-templates/${templateId}`,
+    );
+  }
+
+  // --- Bot templates ----------------------------------------------------------
+  // A bot is a long-lived chat with a name, description and avatar. A bot
+  // template is a saved starting point for one: starting from it opens a new
+  // chat whose first message is the template's setup instructions. Whoever
+  // saved one, or an admin, can change it.
+
+  async listBotTemplates(workspaceId: string): Promise<WorkspaceBotTemplate[]> {
+    const response = await this.requestJson<ListBotTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+    );
+    return response.templates;
+  }
+
+  async getBotTemplate(workspaceId: string, templateId: string): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+    return response.template;
+  }
+
+  async createBotTemplate(
+    workspaceId: string,
+    request: CreateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+      request,
+    );
+    return response.template;
+  }
+
+  async updateBotTemplate(
+    workspaceId: string,
+    templateId: string,
+    request: UpdateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+      request,
+    );
+    return response.template;
+  }
+
+  async deleteBotTemplate(workspaceId: string, templateId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
     );
   }
 
@@ -8783,6 +8746,26 @@ export class OpenGeniClient {
     );
   }
 
+  /** The caller's own default placement for new chats ("Your default machine"). */
+  async getMyDefaultExecutionTarget(workspaceId: string): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+    );
+  }
+
+  /** Saves the caller's own default placement; null follows the workspace default. */
+  async setMyDefaultExecutionTarget(
+    workspaceId: string,
+    target: WorkspaceDefaultExecutionTarget | null,
+  ): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+      { target },
+    );
+  }
+
   async setWorkspaceDefaultRig(
     workspaceId: string,
     request: SetWorkspaceDefaultRigRequest,
@@ -8793,8 +8776,6 @@ export class OpenGeniClient {
       request,
     );
   }
-
-  /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
 
   // --- Capabilities -------------------------------------------------------------------------
 
@@ -11470,14 +11451,21 @@ export class OpenGeniClient {
     );
   }
 
-  /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
-  async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
-    // A JSON body even though the route reads none: signed-in browsers are
-    // admitted to subscription mutations only as same-origin JSON requests.
+  /**
+   * Begin device-code login: show `userCode` at `verificationUri`, then poll
+   * with `state`. `scope: "user"` connects the person's own subscription from
+   * this workspace; it is kept in their own Personal workspace.
+   */
+  async codexConnectStart(
+    workspaceId: string,
+    options: { scope?: "user" } = {},
+  ): Promise<CodexConnectStart> {
+    // Always a JSON body: signed-in browsers are admitted to subscription
+    // mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
-      {},
+      options.scope ? { scope: options.scope } : {},
     );
   }
 
@@ -12131,91 +12119,6 @@ function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResp
     typeof record.text === "string" &&
     Array.isArray(record.languages) &&
     record.languages.every((language) => typeof language === "string")
-  );
-}
-
-function isUploadTranscriptionRecordingChunkResponse(
-  value: unknown,
-): value is UploadTranscriptionRecordingChunkResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (
-    !isTranscriptionRecordingResponse({
-      recording: record.recording,
-      segments: [],
-    })
-  ) {
-    return false;
-  }
-  if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {
-    return false;
-  }
-  const chunk = record.chunk as Record<string, unknown>;
-  return (
-    typeof chunk.chunkNumber === "number" &&
-    typeof chunk.byteLength === "number" &&
-    typeof chunk.sha256 === "string" &&
-    typeof chunk.startMilliseconds === "number" &&
-    typeof chunk.durationMilliseconds === "number" &&
-    typeof chunk.deduplicated === "boolean"
-  );
-}
-
-function isTranscriptionRecordingResponse(value: unknown): value is TranscriptionRecordingResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const response = value as Record<string, unknown>;
-  if (
-    !response.recording ||
-    typeof response.recording !== "object" ||
-    Array.isArray(response.recording)
-  ) {
-    return false;
-  }
-  const recording = response.recording as Record<string, unknown>;
-  return (
-    typeof recording.id === "string" &&
-    typeof recording.workspaceId === "string" &&
-    typeof recording.mimeType === "string" &&
-    typeof recording.state === "string" &&
-    typeof recording.nextChunkNumber === "number" &&
-    typeof recording.chunkCount === "number" &&
-    typeof recording.totalBytes === "number" &&
-    typeof recording.totalDurationMilliseconds === "number" &&
-    typeof recording.segmentCount === "number" &&
-    typeof recording.completedSegmentCount === "number" &&
-    (recording.transcriptText === null || typeof recording.transcriptText === "string") &&
-    Array.isArray(recording.languages) &&
-    (recording.errorCode === null || typeof recording.errorCode === "string") &&
-    typeof recording.retryable === "boolean" &&
-    typeof recording.objectsCleaned === "boolean" &&
-    typeof recording.createdAt === "string" &&
-    typeof recording.updatedAt === "string" &&
-    typeof recording.expiresAt === "string" &&
-    (response.retryAfterMilliseconds === undefined ||
-      (typeof response.retryAfterMilliseconds === "number" &&
-        Number.isInteger(response.retryAfterMilliseconds) &&
-        response.retryAfterMilliseconds > 0 &&
-        response.retryAfterMilliseconds <= 60_000)) &&
-    Array.isArray(response.segments)
-  );
-}
-
-function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
-  if (isTranscriptionRecordingResponse(value)) return value;
-  throw invalidApiResponseError("Invalid transcription recording response.", {
-    code: "invalid_response",
-  });
-}
-
-function isTranscriptionRecordingListResponse(
-  value: unknown,
-): value is TranscriptionRecordingListResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const recordings = (value as Record<string, unknown>).recordings;
-  return (
-    Array.isArray(recordings) &&
-    recordings.length <= 50 &&
-    recordings.every((recording) => isTranscriptionRecordingResponse({ recording, segments: [] }))
   );
 }
 

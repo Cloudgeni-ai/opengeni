@@ -14,19 +14,15 @@ afterEach(() => {
   while (restores.length > 0) restores.pop()!.mockRestore();
 });
 
-const LEGACY_REACHED = "legacy SuperGrok credential read";
 // Every live check of whether this turn can change the workspace's settings.
 const settingsChecks: unknown[] = [];
 
 // Execute the production builder for a SuperGrok turn with SuperGrok-funded
 // video and a connected image credential, and capture the media options it
-// hands to the runtime. Every legacy SuperGrok credential reader is spied on
-// and fails loudly, so reaching one is observable; the organization's
-// SuperGrok route and the core video funding reads are spied on too.
+// hands to the runtime. The core video funding reads are spied on.
 async function buildSuperGrokTurn(
   core: boolean,
   videoFunding: "supergrok_subscription" | "opengeni_credits" = "supergrok_subscription",
-  route: "legacy" | "core" = core ? "core" : "legacy",
   sandboxBackend: "none" | "selfhosted" = "none",
   policyEnabled = true,
 ) {
@@ -46,17 +42,8 @@ async function buildSuperGrokTurn(
     executionGeneration: 1,
     credentialSubjectId: null,
   });
-  const legacyReaders = [
-    spyOn(db, "resolveXaiProviderAccountAuthoritySnapshotForAcceptance").mockRejectedValue(
-      new Error(LEGACY_REACHED),
-    ),
-    spyOn(db, "getXaiSessionAccountPin").mockRejectedValue(new Error(LEGACY_REACHED)),
-    spyOn(db, "materializeXaiCredentialForRun").mockRejectedValue(new Error(LEGACY_REACHED)),
-    spyOn(db, "selectXaiCredentialForUse").mockRejectedValue(new Error(LEGACY_REACHED)),
-  ];
   const coreFundingCalls: string[] = [];
   restores.push(
-    spyOn(db, "readSubscriptionCoreProviderRouteForWorkspace").mockResolvedValue(route),
     spyOn(db, "readSubscriptionCoreSessionOwner").mockResolvedValue({
       ownerSubjectId: "user:owner",
     } as Awaited<ReturnType<typeof db.readSubscriptionCoreSessionOwner>>),
@@ -78,11 +65,10 @@ async function buildSuperGrokTurn(
         return new Set<string>();
       },
     } as unknown as ReturnType<typeof db.subscriptionCoreOperationConnections>),
-    ...legacyReaders,
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
-    spyOn(db, "turnCanChangeWorkspaceSettings").mockImplementation(async (_db, input) => {
+    spyOn(db, "turnWorkspaceSettingsAccess").mockImplementation(async (_db, input) => {
       settingsChecks.push(input);
-      return false;
+      return null;
     }),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue(
       policyEnabled
@@ -194,14 +180,13 @@ async function buildSuperGrokTurn(
     xai: { subjectId: "user:owner", generation: 1 },
   };
   const built = buildTurnAgent(deps as BuildTurnAgentDeps);
-  return { built, options, legacyReaders, coreFundingCalls };
+  return { built, options, coreFundingCalls };
 }
 
 test("a core-placed SuperGrok turn gets the core image tool and core video funding, and reads no legacy credential", async () => {
-  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
+  const { built, options, coreFundingCalls } = await buildSuperGrokTurn(
     true,
     "supergrok_subscription",
-    "core",
     "selfhosted",
   );
   await built;
@@ -211,48 +196,15 @@ test("a core-placed SuperGrok turn gets the core image tool and core video fundi
   // Video funding is read when the tool is called, not when the turn starts.
   expect(coreFundingCalls).toEqual([]);
   const capabilities = await options[0]!.videoGeneration!.capabilities();
-  // Funded by a shared candidate on the `core` route.
+  // Funded by a shared candidate.
   expect(coreFundingCalls[0]).toBe("candidates");
   expect(capabilities).toMatchObject({ defaultModelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID });
-  for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
-});
-
-test("a core-placed SuperGrok turn never reaches the legacy video credential, whatever the route reads", async () => {
-  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
-    true,
-    "supergrok_subscription",
-    "legacy",
-    "selfhosted",
-  );
-  await built;
-  await expect(options[0]!.videoGeneration!.capabilities()).resolves.toMatchObject({
-    status: "unavailable",
-    code: "video_generation_unfunded",
-  });
-  expect(coreFundingCalls).toEqual([]);
-  for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
 
 test("an unplaced SuperGrok turn cannot regain a retired connected image tool", async () => {
-  const { built, options, legacyReaders } = await buildSuperGrokTurn(false, "opengeni_credits");
+  const { built, options } = await buildSuperGrokTurn(false, "opengeni_credits");
   await built;
   expect(options[0]?.imageGeneration).toBeUndefined();
-  for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
-});
-
-test("an unplaced SuperGrok turn cannot regain the retired video credential route", async () => {
-  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
-    false,
-    "supergrok_subscription",
-    "legacy",
-    "selfhosted",
-  );
-  await built;
-  await expect(
-    options[0]!.videoGeneration!.execute({ prompt: "a beach" }, { toolCallId: "call-video" }),
-  ).resolves.toMatchObject({ status: "unavailable", code: "video_generation_unfunded" });
-  expect(coreFundingCalls).toEqual([]);
-  for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
 
 test("a turn without a sandbox gets no video tools", async () => {
@@ -265,7 +217,6 @@ test("a workspace with video off keeps both video tools, which answer that it is
   const { built, options, coreFundingCalls } = await buildSuperGrokTurn(
     true,
     "supergrok_subscription",
-    "core",
     "selfhosted",
     false,
   );

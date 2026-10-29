@@ -77,7 +77,10 @@ export type UseVoiceInputOptions = {
   recover?: boolean | undefined;
   /**
    * A copy of each dictation's speech once capture ends, for a host that keeps
-   * it on the device (the desktop app's dictation history).
+   * it on the device (the desktop app's dictation history). When the person
+   * cancels a dictation, its copy comes with `cancelled` set (again, when
+   * capture had already ended): the dictation itself is deleted, so this copy
+   * is all that is left of it.
    */
   onAudio?: ((audio: VoiceInputAudio) => void) | undefined;
   /** A recordings client, such as a host proxy. Built from `client` otherwise. */
@@ -106,6 +109,12 @@ export type VoiceInputAudio = {
   recordingId: string | null;
   audio: Blob;
   durationMilliseconds: number;
+  /**
+   * The person cancelled the dictation and it is deleted. Speech shorter than
+   * a few seconds is taken for an accidental start and never comes; capture
+   * cut short by Cancel may miss its last second.
+   */
+  cancelled?: boolean;
 };
 
 export type UseVoiceInputResult = {
@@ -134,10 +143,19 @@ export type UseVoiceInputResult = {
   /** Insert a saved transcript into the draft. */
   insertSavedTranscript: () => Promise<void>;
   /**
-   * Cancel active work without losing speech: a recording longer than a few
-   * seconds and any stopped or transcribing one stay saved to insert later.
+   * The person's Cancel or Escape: delete the dictation under way, recording
+   * or transcribing, so nothing offers it again. Its speech goes to `onAudio`
+   * first, marked cancelled, for a host that keeps it. A saved dictation an
+   * earlier page left only stops being retried and stays offered.
    */
   cancel: () => void;
+  /**
+   * Stop without transcribing and keep the speech here, to insert, retry or
+   * discard later: for something other than the person ending the dictation,
+   * such as another chat opening or live voice taking over. A start of a few
+   * seconds is deleted.
+   */
+  setAside: () => void;
   /** Intentionally delete the current dictation. */
   discard: () => Promise<void>;
   /**
@@ -163,8 +181,8 @@ export const VOICE_RECORDING_OWNER_STALE_MILLISECONDS = 30_000;
 export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
 /** The longest dictation recorded through the recordings API. */
 export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60;
-// Cancel deletes only an accidental start; anything longer is kept for the user.
-const DISCARD_ON_CANCEL_MAX_MILLISECONDS = 3_000;
+// A dictation ended this soon is taken for an accidental start: nothing of it is kept.
+const ACCIDENTAL_START_MAX_MILLISECONDS = 3_000;
 const DEFAULT_POLL_MILLISECONDS = 1_000;
 const MAX_POLL_MILLISECONDS = 15_000;
 const TAKEN_STORAGE_KEY = "opengeni.voice-input.taken.v1";
@@ -212,8 +230,10 @@ function dictationClient(
 /** What one dictation is doing, outside React state so async work reads it current. */
 type Dictation = {
   recordingId: string;
-  /** Insert the text as soon as it is ready; off once cancelled or recovered. */
+  /** Insert the text as soon as it is ready; off once set aside or recovered. */
   autoInsert: boolean;
+  /** Dictated here and now, not one an earlier page left: Cancel deletes it. */
+  fresh: boolean;
   text: string | null;
 };
 
@@ -273,6 +293,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const uploaderRef = useRef<RecordingUploader | null>(null);
   /** The speech of the dictation being recorded, copied as it is saved, for `onAudio`. */
   const audioCopies = useRef(new Map<string, AudioCopy>());
+  /** The copy `onAudio` was given for the dictation in hand, to give again if it is cancelled. */
+  const handed = useRef<VoiceInputAudio | null>(null);
   const startedAtRef = useRef(0);
   /** Text a one-shot dictation heard while it couldn't go into the draft. */
   const oneShotText = useRef<string | null>(null);
@@ -336,6 +358,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     dictationRef.current = null;
     recorderRef.current = null;
     oneShotRef.current = null;
+    handed.current = null;
     clearStopTimer();
     setStatus("idle");
     setError(null);
@@ -376,6 +399,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     focus();
   }, []);
 
+  /** Give the host its copy of a dictation's speech; its trouble is its own. */
+  const giveAudio = useCallback((audio: VoiceInputAudio) => {
+    try {
+      latest.current.onAudio?.(audio);
+    } catch {
+      // The host's copy is its own concern; the dictation goes on.
+    }
+  }, []);
+
   /** Look for a dictation an earlier page, tab or device left with this workspace. */
   const loadSaved = useCallback(
     async (generation: number): Promise<void> => {
@@ -410,7 +442,12 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
           );
           continue;
         }
-        const dictation: Dictation = { recordingId: recording.id, autoInsert: false, text: null };
+        const dictation: Dictation = {
+          recordingId: recording.id,
+          autoInsert: false,
+          fresh: false,
+          text: null,
+        };
         if (recording.state === "capturing") {
           // Still being spoken in another tab or on another device: that composer owns it.
           if (!resumed.includes(recording.id)) continue;
@@ -534,8 +571,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
             if (automatic) {
               await take(dictation, text, generation);
             } else {
-              // Cancelled, recovered, or a send holds the composer: keep it,
-              // and insert it once the send is done unless it was cancelled.
+              // Set aside, recovered, or a send holds the composer: keep it,
+              // and insert it once the send is done unless it was set aside.
               const waitingForSend =
                 current?.recordingId === dictation.recordingId && current.autoInsert;
               hold({ ...dictation, text }, "transcript-ready", null, waitingForSend);
@@ -559,15 +596,13 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         settleIdle();
         return;
       }
-      try {
-        latest.current.onAudio?.({
-          recordingId: null,
-          audio,
-          durationMilliseconds: Math.round(capture.durationSeconds() * 1_000),
-        });
-      } catch {
-        // The host's copy is its own concern; the dictation goes on.
-      }
+      const copy: VoiceInputAudio = {
+        recordingId: null,
+        audio,
+        durationMilliseconds: Math.round(capture.durationSeconds() * 1_000),
+      };
+      giveAudio(copy);
+      handed.current = copy;
       const maxBytes = latest.current.capability?.maxSizeBytes;
       if (maxBytes !== undefined && audio.size > maxBytes) {
         settleIdle();
@@ -603,7 +638,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         setError(errorCode(cause));
       }
     },
-    [insertText, settleIdle],
+    [giveAudio, insertText, settleIdle],
   );
 
   const finishCapture = useCallback(
@@ -632,29 +667,23 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         upload = null;
       }
       recorderRef.current = null;
-      const copy = id ? audioCopies.current.get(id) : undefined;
-      if (id) audioCopies.current.delete(id);
+      const audio = id ? takeCopy(audioCopies.current, id) : null;
       if (generation !== generationRef.current || !id) return;
       if (!upload || upload.discarded) {
         settleIdle();
         return;
       }
-      const onAudio = latest.current.onAudio;
-      if (copy && onAudio && copy.parts.length > 0 && !upload.failed) {
-        try {
-          onAudio({
-            recordingId: id,
-            audio: new Blob(
-              copy.parts.filter((part): part is Uint8Array => part !== undefined) as BlobPart[],
-              copy.mimeType ? { type: copy.mimeType } : {},
-            ),
-            durationMilliseconds: elapsed,
-          });
-        } catch {
-          // The host's copy is its own concern; the dictation goes on.
-        }
+      if (audio && latest.current.onAudio && !upload.failed) {
+        const copy: VoiceInputAudio = { recordingId: id, audio, durationMilliseconds: elapsed };
+        giveAudio(copy);
+        handed.current = copy;
       }
-      const dictation = dictationRef.current ?? { recordingId: id, autoInsert, text: null };
+      const dictation = dictationRef.current ?? {
+        recordingId: id,
+        autoInsert,
+        fresh: true,
+        text: null,
+      };
       if (upload.failed) {
         await uploader()
           .discard(id)
@@ -669,7 +698,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       else hold(dictation, "recovered");
       await watch(dictation, versionId, generation);
     },
-    [finishOneShot, hold, settleIdle, uploader, watch],
+    [finishOneShot, giveAudio, hold, settleIdle, uploader, watch],
   );
 
   const stop = useCallback(() => {
@@ -791,7 +820,12 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       setError(captureCode(snapshot.error?.code ?? null));
       return false;
     }
-    dictationRef.current = { recordingId: snapshot.recordingId, autoInsert: true, text: null };
+    dictationRef.current = {
+      recordingId: snapshot.recordingId,
+      autoInsert: true,
+      fresh: true,
+      text: null,
+    };
     beginCapture(recorder.inputStream?.(0) ?? null, snapshot.recordingId);
     return true;
   }, [beginCapture, settleIdle, transport, uploader]);
@@ -826,13 +860,68 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       settleIdle();
       return;
     }
+    const dictation = dictationRef.current;
+    // Speech of a few seconds or more goes to the host before it is deleted.
+    const keep = (copy: VoiceInputAudio | null) => {
+      if (copy && copy.durationMilliseconds >= ACCIDENTAL_START_MAX_MILLISECONDS) {
+        giveAudio({ ...copy, cancelled: true });
+      }
+    };
+    if (current === "recording") {
+      const recorder = recorderRef.current;
+      const id = recorder?.snapshot.recordingId ?? null;
+      if (recorder && id && latest.current.onAudio) {
+        // What is saved so far: the deletion below drops the last moment of capture.
+        const audio = takeCopy(audioCopies.current, id);
+        const spoken = Math.max(
+          recorder.snapshot.elapsedMilliseconds,
+          now().getTime() - startedAtRef.current,
+        );
+        if (audio) keep({ recordingId: id, audio, durationMilliseconds: spoken });
+      }
+      void discard();
+      return;
+    }
+    if (current !== "saving" && current !== "transcribing" && current !== "retrying") return;
+    if (dictation && !dictation.fresh) {
+      // One an earlier page left: stop retrying it; it stays offered.
+      dictation.autoInsert = false;
+      setHeld(true);
+      setStatus("recovered");
+      return;
+    }
+    // A dictation being heard: in hand (`dictation`), or sent in one request (none).
+    if (handed.current) {
+      keep(handed.current);
+    } else if (dictation && latest.current.onAudio) {
+      // Cancelled while its upload finishes: the copy has not been given yet.
+      const audio = takeCopy(audioCopies.current, dictation.recordingId);
+      const recorder = recorderRef.current;
+      if (audio) {
+        keep({
+          recordingId: dictation.recordingId,
+          audio,
+          durationMilliseconds: recorder?.snapshot.elapsedMilliseconds ?? 0,
+        });
+      }
+    }
+    void discard();
+  }, [discard, giveAudio, now, settleIdle]);
+
+  const setAside = useCallback(() => {
+    const current = statusRef.current;
+    if (current === "requesting-permission") {
+      generationRef.current += 1;
+      settleIdle();
+      return;
+    }
     if (current === "recording") {
       const elapsed = now().getTime() - startedAtRef.current;
-      if (elapsed < DISCARD_ON_CANCEL_MAX_MILLISECONDS) {
+      if (elapsed < ACCIDENTAL_START_MAX_MILLISECONDS) {
         void discard();
         return;
       }
-      // Never delete real speech on Cancel or Escape: keep it to insert later.
+      // Real speech is never deleted here: it is kept to insert later.
       void finishCapture(false);
       return;
     }
@@ -921,8 +1010,13 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       const generation = ++generationRef.current;
       const newId = crypto.randomUUID();
       const transcription = dictationTranscription(current.language || null, current.keyterms);
-      // Held like a recorded dictation from here on, so Cancel and Escape keep it.
-      const dictation: Dictation = { recordingId: newId, autoInsert: true, text: null };
+      // Held like a recorded dictation from here on.
+      const dictation: Dictation = {
+        recordingId: newId,
+        autoInsert: true,
+        fresh: true,
+        text: null,
+      };
       dictationRef.current = dictation;
       setRecordingId(newId);
       setError(null);
@@ -1048,6 +1142,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     retry,
     insertSavedTranscript,
     cancel,
+    setAside,
     discard,
     release,
     transcribe,
@@ -1056,6 +1151,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
 
 /** The speech of one dictation, copied chunk by chunk as it is saved. */
 type AudioCopy = { mimeType: string | null; parts: Array<Uint8Array | undefined> };
+
+/** One dictation's copied speech as one file, or null when none was saved; the copy is let go. */
+function takeCopy(copies: Map<string, AudioCopy>, recordingId: string): Blob | null {
+  const copy = copies.get(recordingId);
+  copies.delete(recordingId);
+  const parts = copy?.parts.filter((part): part is Uint8Array => part !== undefined) ?? [];
+  if (!copy || parts.length === 0) return null;
+  return new Blob(parts as BlobPart[], copy.mimeType ? { type: copy.mimeType } : {});
+}
 
 /** The recording options a dictation sends: its language and the words to listen for. */
 function dictationTranscription(
@@ -1214,6 +1318,7 @@ function voiceInputCode(code: string | null): string {
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
     case "policy_blocked":
+    case "region_restricted":
     case "not_supported":
     case "unavailable":
     case "too_large":

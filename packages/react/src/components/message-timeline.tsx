@@ -64,7 +64,6 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Component,
   Fragment,
-  Suspense,
   createContext,
   lazy,
   memo,
@@ -103,6 +102,7 @@ import {
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
+import { TimelineAnswerFollowContext } from "./timeline-answer-follow";
 import {
   animateTimelineSettlement,
   captureTimelineSettlement,
@@ -168,6 +168,7 @@ import {
   isAgentWorkHumanInput,
 } from "../timeline/agent-work-human-input";
 import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
+import { annotationQuoteText } from "../timeline/annotation-model";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
@@ -209,6 +210,9 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LazyPart } from "./lazy-part";
+import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
@@ -521,6 +525,22 @@ function maxScrollOf(node: HTMLElement): number {
 }
 
 /**
+ * React bubbles events from portaled content (a card's setup dialog, a menu)
+ * through the timeline's handlers although that content is outside the
+ * scroller. Only events from the scroller's own DOM are reader intent.
+ */
+function eventFromScrollerDom(event: {
+  target: EventTarget | null;
+  currentTarget: EventTarget | null;
+}): boolean {
+  return (
+    event.currentTarget instanceof Node &&
+    event.target instanceof Node &&
+    event.currentTarget.contains(event.target)
+  );
+}
+
+/**
  * Wheel bubbled from a nested overflow scroller that can still move up — not
  * timeline intent (code blocks / notice `<pre>`).
  */
@@ -817,6 +837,8 @@ export function MessageTimeline({
     return sources;
   }, [resolvedItems]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** The card whose answer handed the view back to the tip (see followAfterAnswer). */
+  const answeredCardRef = useRef<HTMLElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
@@ -825,6 +847,7 @@ export function MessageTimeline({
     projectedGroups,
     autoFollow && pinned && !hasNewer,
     scrollRef.current,
+    answeredCardRef.current,
   );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
@@ -1263,6 +1286,8 @@ export function MessageTimeline({
 
   /** Reader left the tip — wheel, keyboard, pointer-armed scroll-up, or scrollend. */
   const releasePinFromReader = useCallback(() => {
+    // The reader took over again: focus on the answered card counts once more.
+    answeredCardRef.current = null;
     if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
       return;
     }
@@ -1366,6 +1391,9 @@ export function MessageTimeline({
     // timeline reader intent. A real timeline wheel in either direction
     // releases the disclosure fence; downward movement may then re-pin
     // naturally when it reaches the bottom.
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
@@ -1393,7 +1421,7 @@ export function MessageTimeline({
     currentTarget: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
-    if (event.button && event.pointerType === "mouse") {
+    if ((event.button && event.pointerType === "mouse") || !eventFromScrollerDom(event)) {
       return;
     }
     stopSettlement();
@@ -1415,7 +1443,14 @@ export function MessageTimeline({
       : null;
   };
 
-  const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
+  const onKeyDown = (event: {
+    key: string;
+    target: EventTarget | null;
+    currentTarget: EventTarget | null;
+  }) => {
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (
       event.key === "ArrowUp" ||
       event.key === "ArrowDown" ||
@@ -1463,6 +1498,28 @@ export function MessageTimeline({
       syncScrollBaseline,
       writeScrollTop,
     ],
+  );
+
+  /**
+   * The person answered a card (finished a connection, say) and the agent
+   * continues from that answer: follow the tip as Jump to latest does, while
+   * focus stays on the card for keyboard and screen reader users. Wheel, keys,
+   * a drag or focus elsewhere hand the view back to the reader as usual.
+   */
+  const followAfterAnswer = useCallback(
+    (card: HTMLElement) => {
+      const node = scrollRef.current;
+      if (!autoFollow || !node || !node.contains(card) || hasNewerRef.current) {
+        return;
+      }
+      answeredCardRef.current = card;
+      disclosureKeepsUnpinnedRef.current = false;
+      wantPinRef.current = false;
+      clearPendingReaderLeave();
+      applyPinned(true);
+      snapToBottom(node);
+    },
+    [applyPinned, autoFollow, clearPendingReaderLeave, snapToBottom],
   );
 
   const beginUserMessageDisclosureChange = useCallback(
@@ -2617,13 +2674,13 @@ export function MessageTimeline({
                         style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                       >
                         {onAnnotate ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationSelection
                               rootRef={scrollRef}
                               sources={annotationSources}
                               onAnnotate={onAnnotate}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
                         {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
@@ -2673,6 +2730,7 @@ export function MessageTimeline({
                             touchPositionRef.current = null;
                           }}
                           onClickCapture={(event) => {
+                            if (!eventFromScrollerDom(event)) return;
                             const target =
                               event.target instanceof Element
                                 ? event.target.closest("button[aria-expanded]")
@@ -2690,7 +2748,12 @@ export function MessageTimeline({
                             }
                           }}
                           onFocusCapture={(event) => {
-                            if (readableTurns && event.target !== event.currentTarget) {
+                            if (
+                              readableTurns &&
+                              event.target !== event.currentTarget &&
+                              eventFromScrollerDom(event) &&
+                              !answeredCardRef.current?.contains(event.target)
+                            ) {
                               stopSettlement();
                               releasePinFromReader();
                               disclosureKeepsUnpinnedRef.current = true;
@@ -2712,7 +2775,10 @@ export function MessageTimeline({
                         >
                           <TimelineBeforeLayout
                             capture={() => {
-                              if (readableTurns && timelineHasReader(scrollRef.current)) {
+                              if (
+                                readableTurns &&
+                                timelineHasReader(scrollRef.current, answeredCardRef.current)
+                              ) {
                                 releasePinFromReader();
                               }
                               readingAnchorRef.current =
@@ -2729,7 +2795,11 @@ export function MessageTimeline({
                                 !disclosureKeepsUnpinnedRef.current &&
                                 !prefersReducedMotion() &&
                                 scrollRef.current
-                                  ? captureTimelineSettlement(scrollRef.current, groups)
+                                  ? captureTimelineSettlement(
+                                      scrollRef.current,
+                                      groups,
+                                      answeredCardRef.current,
+                                    )
                                   : null;
                             }}
                           >
@@ -2921,13 +2991,13 @@ export function MessageTimeline({
                           </TimelineBeforeLayout>
                         </div>
                         {draftAnnotations && draftAnnotations.length > 0 ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationMarkers
                               rootRef={scrollRef}
                               annotations={draftAnnotations}
                               onSelect={onDraftAnnotationSelect}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
 
                         <div
@@ -3070,7 +3140,11 @@ export function MessageTimeline({
           resolveSessionTitle={resolveSessionTitle}
           onOpenSession={onOpenSession}
         >
-          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
+          <ProviderLogoProvider value={resolveProviderLogo}>
+            <TimelineAnswerFollowContext.Provider value={followAfterAnswer}>
+              {timeline}
+            </TimelineAnswerFollowContext.Provider>
+          </ProviderLogoProvider>
         </AgentIdentityProvider>
       </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>
@@ -3199,6 +3273,8 @@ type TimelineGroupRenderBoundaryProps = {
 
 type TimelineGroupRenderBoundaryState = {
   failed: boolean;
+  /** The item's code failed to download; only a reload helps. */
+  notLoaded: boolean;
   resetKeys: readonly unknown[];
 };
 
@@ -3239,11 +3315,12 @@ class TimelineGroupRenderBoundary extends Component<
 > {
   state: TimelineGroupRenderBoundaryState = {
     failed: false,
+    notLoaded: false,
     resetKeys: this.props.resetKeys,
   };
 
-  static getDerivedStateFromError(): Partial<TimelineGroupRenderBoundaryState> {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): Partial<TimelineGroupRenderBoundaryState> {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   static getDerivedStateFromProps(
@@ -3251,14 +3328,14 @@ class TimelineGroupRenderBoundary extends Component<
     state: TimelineGroupRenderBoundaryState,
   ): Partial<TimelineGroupRenderBoundaryState> | null {
     if (timelineRenderResetKeysChanged(state.resetKeys, props.resetKeys)) {
-      return { failed: false, resetKeys: props.resetKeys };
+      return { failed: false, notLoaded: false, resetKeys: props.resetKeys };
     }
     return null;
   }
 
   render(): ReactNode {
     if (this.state.failed) {
-      return <TimelineGroupRenderError />;
+      return this.state.notLoaded ? <LoadFailureNotice /> : <TimelineGroupRenderError />;
     }
     return this.props.children;
   }
@@ -4266,8 +4343,13 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const enter = useEntranceAnimation();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Switching a Codex chat to another model rebuilds its context once; say
+  // that plainly instead of describing an ordinary compaction.
+  const modelSwitch = item.implementation === "portable_model_switch";
   const trigger =
-    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL(t)[item.trigger] : null;
+    item.trigger && item.phase !== "started" && !modelSwitch
+      ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
+      : null;
   const before =
     item.estimatedTokensBefore != null
       ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
@@ -4278,14 +4360,18 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       : null;
   const title =
     item.phase === "started"
-      ? t("messageTimeline.compactingConversationHistory")
+      ? modelSwitch
+        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
+        : t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
-        ? before && after
-          ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-          : t("messageTimeline.conversationHistoryCompacted")
+        ? modelSwitch
+          ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+          : before && after
+            ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+            : t("messageTimeline.conversationHistoryCompacted")
         : compactionSkipTitle(t, item.skipReason);
   const subtitle =
-    item.phase === "compacted"
+    item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
         ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)
@@ -4413,14 +4499,16 @@ function UserMessageRow({
           copyText={
             item.text ||
             (item.annotations ?? [])
-              .map((annotation) => `${annotation.quote}\n${annotation.note}`)
+              .map((annotation) => `${annotationQuoteText(annotation)}\n${annotation.note}`)
               .join("\n\n")
           }
           label={t("messageTimeline.copyMessage")}
           className="w-fit max-w-full min-w-0"
           trailing={
             <>
-              {renderMessageActions?.(item)}
+              {renderMessageActions ? (
+                <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+              ) : null}
               <MessageFooterTime occurredAt={item.occurredAt} />
             </>
           }
@@ -4506,7 +4594,9 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
     item.response.outcome === "answered"
       ? t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
-        ? t("messageTimeline.skipped")
+        ? item.response.agentDecides
+          ? t("messageTimeline.youLetTheAgentDecide")
+          : t("messageTimeline.skipped")
         : item.response.outcome === "expired"
           ? t("messageTimeline.expired")
           : t("messageTimeline.cancelled");
@@ -4757,7 +4847,9 @@ function AgentMessageRow({
       trailing={
         item.streaming ? null : (
           <>
-            {renderMessageActions?.(item)}
+            {renderMessageActions ? (
+              <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+            ) : null}
             <MessageFooterTime occurredAt={item.occurredAt} />
           </>
         )

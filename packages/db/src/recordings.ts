@@ -14,9 +14,13 @@ import {
   type RecordingTranscriptVersion,
   type RecordingPurpose,
   type RecordingVisibility,
+  type Permission,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
+import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
 import { CreditDebitAttribution } from "./credit-debit-attribution";
@@ -431,6 +435,11 @@ export type ListRecordingsInput = RecordingActor & {
   externalRef?: string | undefined;
   /** Meetings unless asked otherwise: browser recordings stay out of meeting lists. */
   purpose?: RecordingPurpose | undefined;
+  /**
+   * Only the caller's own Only me recordings: what the person's list in
+   * another workspace shows of this one. Never anyone else's, nor shared ones.
+   */
+  ownPrivateOnly?: boolean | undefined;
   /** Only recordings started before this instant (the previous page's last `startedAt`). */
   before?: { startedAt: Date; id: string } | undefined;
   limit?: number | undefined;
@@ -449,6 +458,12 @@ export async function listRecordings(
       eq(schema.recordings.purpose, input.purpose ?? "meeting"),
     ];
     if (input.externalRef) conditions.push(eq(schema.recordings.externalRef, input.externalRef));
+    if (input.ownPrivateOnly) {
+      conditions.push(
+        eq(schema.recordings.ownerSubjectId, input.subjectId),
+        eq(schema.recordings.visibility, "user_private"),
+      );
+    }
     if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
     if (input.startedTo) conditions.push(lt(schema.recordings.startedAt, input.startedTo));
     if (input.before) {
@@ -523,6 +538,203 @@ export async function listRecordings(
           : null,
     };
   });
+}
+
+/**
+ * The other workspaces of this organization that may store the person's own
+ * Only me meetings: those they are a member of, with their membership's
+ * permissions, and their Personal workspace. Within an organization those
+ * meetings are the person's, so every workspace of it they belong to shows
+ * them, until they leave the storing workspace or the organization. Only a
+ * signed-in person's (a `user:` subject), never another organization's
+ * workspaces. Callers still check the person's live access to each.
+ */
+export async function ownRecordingWorkspaces(
+  db: Database,
+  input: RecordingActor & { accountId: string },
+): Promise<OwnRecordingWorkspace[]> {
+  if (!input.subjectId.startsWith("user:") || !input.accountId) return [];
+  const [memberships, personalId] = await Promise.all([
+    db
+      .select({
+        id: schema.workspaces.id,
+        name: schema.workspaces.name,
+        permissions: schema.workspaceMemberships.permissions,
+      })
+      .from(schema.workspaceMemberships)
+      .innerJoin(
+        schema.workspaces,
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+      )
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          eq(schema.workspaceMemberships.accountId, input.accountId),
+          eq(schema.workspaces.accountId, input.accountId),
+          ne(schema.workspaces.id, input.workspaceId),
+        ),
+      )
+      .orderBy(asc(schema.workspaces.createdAt))
+      .limit(100),
+    namedSubjectPersonalWorkspaceId(db, {
+      accountId: input.accountId,
+      subjectId: input.subjectId,
+    }),
+  ]);
+  const found: OwnRecordingWorkspace[] = memberships.map((row) => ({
+    id: row.id,
+    name: row.name,
+    permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
+  }));
+  if (
+    personalId &&
+    personalId !== input.workspaceId &&
+    !found.some((workspace) => workspace.id === personalId)
+  ) {
+    const [personal] = await db
+      .select({ id: schema.workspaces.id, name: schema.workspaces.name })
+      .from(schema.workspaces)
+      .where(
+        and(eq(schema.workspaces.id, personalId), eq(schema.workspaces.accountId, input.accountId)),
+      )
+      .limit(1);
+    if (personal) found.push({ ...personal, permissions: managedPersonalWorkspacePermissions });
+  }
+  return found;
+}
+
+export type OwnRecordingWorkspace = { id: string; name: string; permissions: Permission[] };
+
+/** Whether this workspace has the recording and the person may see it. */
+export async function recordingVisible(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.recordings.id })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .limit(1);
+    return Boolean(row);
+  });
+}
+
+/**
+ * Which of these workspaces stores the person's own Only me meeting with this
+ * id, so it opens in place elsewhere in the organization; null when none does
+ * (not theirs, shared, a dictation, being deleted, or in another workspace).
+ * Each workspace is read as the person, under its row-level security.
+ */
+export async function ownRecordingHome(
+  db: Database,
+  input: { subjectId: string; recordingId: string; workspaces: readonly OwnRecordingWorkspace[] },
+): Promise<OwnRecordingWorkspace | null> {
+  for (let start = 0; start < input.workspaces.length; start += OWN_ELSEWHERE_CONCURRENCY) {
+    const found = await Promise.all(
+      input.workspaces.slice(start, start + OWN_ELSEWHERE_CONCURRENCY).map(
+        async (workspace) =>
+          await withWorkspaceSubjectRls(db, workspace.id, input.subjectId, async (tx) => {
+            const [row] = await tx
+              .select({ id: schema.recordings.id })
+              .from(schema.recordings)
+              .where(
+                and(
+                  eq(schema.recordings.workspaceId, workspace.id),
+                  eq(schema.recordings.id, input.recordingId),
+                  eq(schema.recordings.ownerSubjectId, input.subjectId),
+                  eq(schema.recordings.visibility, "user_private"),
+                  eq(schema.recordings.purpose, "meeting"),
+                  ne(schema.recordings.state, "deleting"),
+                ),
+              )
+              .limit(1);
+            return row ? workspace : null;
+          }),
+      ),
+    );
+    const home = found.find((workspace) => workspace !== null);
+    if (home) return home;
+  }
+  return null;
+}
+
+/** How many other workspaces are read at once for one request. */
+const OWN_ELSEWHERE_CONCURRENCY = 8;
+
+/**
+ * The meetings this workspace lists for the person: its own, plus the
+ * person's own Only me meetings stored in `elsewhere`, the other workspaces of
+ * the same organization the caller checked they may read now, newest first
+ * across them. `sourceWorkspaces` names the other workspaces the page's
+ * meetings come from.
+ */
+export async function listRecordingsWithOwnElsewhere(
+  db: Database,
+  input: ListRecordingsInput & { elsewhere: readonly { id: string; name: string }[] },
+): Promise<{
+  recordings: Recording[];
+  nextBefore: { startedAt: string; id: string } | null;
+  sourceWorkspaces: Map<string, string>;
+}> {
+  const { elsewhere: candidates, ...request } = input;
+  const limit = Math.min(Math.max(request.limit ?? 50, 1), 200);
+  const meetings = (request.purpose ?? "meeting") === "meeting" && !request.ownPrivateOnly;
+  // A product's reference names something of this workspace's.
+  const elsewhere =
+    meetings && !request.externalRef && request.subjectId.startsWith("user:") ? candidates : [];
+  const here = await listRecordings(db, { ...request, limit });
+  if (elsewhere.length === 0) return { ...here, sourceWorkspaces: new Map() };
+  const pages: Awaited<ReturnType<typeof listRecordings>>[] = [];
+  for (let start = 0; start < elsewhere.length; start += OWN_ELSEWHERE_CONCURRENCY) {
+    pages.push(
+      ...(await Promise.all(
+        elsewhere.slice(start, start + OWN_ELSEWHERE_CONCURRENCY).map(
+          async (workspace) =>
+            await listRecordings(db, {
+              ...request,
+              workspaceId: workspace.id,
+              ownPrivateOnly: true,
+              limit,
+            }),
+        ),
+      )),
+    );
+  }
+  const merged = [here, ...pages]
+    .flatMap((page) => page.recordings)
+    .sort((a, b) =>
+      // The database's order: start time, then id, both newest first.
+      a.startedAt === b.startedAt
+        ? a.id < b.id
+          ? 1
+          : a.id > b.id
+            ? -1
+            : 0
+        : Date.parse(b.startedAt) - Date.parse(a.startedAt),
+    );
+  const recordings = merged.slice(0, limit);
+  const more =
+    merged.length > limit ||
+    here.nextBefore !== null ||
+    pages.some((page) => page.nextBefore !== null);
+  const last = recordings.at(-1);
+  const names = new Map(elsewhere.map((workspace) => [workspace.id, workspace.name]));
+  const sourceWorkspaces = new Map<string, string>();
+  for (const recording of recordings) {
+    const name = names.get(recording.workspaceId);
+    if (name !== undefined) sourceWorkspaces.set(recording.workspaceId, name);
+  }
+  return {
+    recordings,
+    nextBefore: more && last ? { startedAt: last.startedAt, id: last.id } : null,
+    sourceWorkspaces,
+  };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -1438,13 +1650,21 @@ export type FinalizeRecordingInput = RecordingActor & {
   tracks: ReadonlyArray<{ trackNumber: number; chunkCount: number }>;
   transcription: RecordingTranscriptionChoice;
   versionId: string;
+  /**
+   * The transcript can't start, for example because the payer has no credits
+   * for the model: capture still ends, and version 1 is stored already
+   * failed with this code, so the meeting reads as failed with a reason
+   * instead of waiting for a finalize that is refused every time.
+   */
+  transcriptRefusedCode?: string | undefined;
 };
 
 /**
  * End capture. Every track's chunks 0..chunkCount-1 must be uploaded and no
  * other chunk may exist. Queues transcript version 1 and records
- * `recording.finished`. Finalizing again with the same counts returns the
- * existing state.
+ * `recording.finished` (and `recording.transcript.failed` when the transcript
+ * was refused). Finalizing again with the same counts returns the existing
+ * state.
  */
 export async function finalizeRecording(
   db: Database,
@@ -1558,10 +1778,11 @@ export async function finalizeRecording(
       throw new RecordingConflictError("This recording has no audio", "empty_recording");
     }
     const endedAt = input.endedAt ?? new Date();
+    const refusedCode = input.transcriptRefusedCode?.slice(0, 128) ?? null;
     const [finalized] = await tx
       .update(schema.recordings)
       .set({
-        state: "processing",
+        state: refusedCode ? "failed" : "processing",
         captureEndedAt: endedAt < recording.startedAt ? recording.startedAt : endedAt,
         durationMilliseconds: recordingDuration,
         updatedAt: sql`clock_timestamp()`,
@@ -1586,12 +1807,28 @@ export async function finalizeRecording(
         options: input.transcription.options,
         requestedBySubjectId: input.subjectId,
         creditAttribution: input.transcription.creditAttribution ?? null,
+        ...(refusedCode
+          ? {
+              state: "failed" as const,
+              errorCode: refusedCode,
+              completedAt: sql`clock_timestamp()`,
+            }
+          : {}),
       })
       .returning();
     await insertEvent(tx, finalized!, "recording.finished", {
       durationMilliseconds: recordingDuration,
       versionId: version!.id,
     });
+    if (refusedCode) {
+      await insertEvent(tx, finalized!, "recording.transcript.failed", {
+        versionId: version!.id,
+        versionNumber: version!.versionNumber,
+        providerId: version!.providerId,
+        model: version!.model,
+        errorCode: refusedCode,
+      });
+    }
     const [view] = await loadViews(tx, input.workspaceId, [finalized!]);
     return { recording: view!, version: recordingTranscriptVersionView(version!), finalized: true };
   });
@@ -2913,6 +3150,104 @@ export async function listRecordingNotes(
       )
       .orderBy(asc(schema.recordingNotes.kind));
     return rows.map(noteView);
+  });
+}
+
+/**
+ * The built-in meeting summary (docs/recordings.md, "Built-in summary"): Opengeni's own
+ * chat that writes a meeting's notes once its transcript is ready. It is
+ * created by this service, for exactly one meeting, with exactly these tools,
+ * and `createSession` refuses any other session claiming to be one.
+ */
+export const MEETING_SUMMARY_SUBJECT_ID = "meeting-summary";
+export const MEETING_SUMMARY_POLICY_ROLE = "meeting_summary";
+/** Session metadata naming the one meeting a summary chat may read and write. */
+export const MEETING_SUMMARY_RECORDING_METADATA_KEY = "meetingSummaryRecordingId";
+export const MEETING_SUMMARY_TOOLS = ["meeting_read", "meeting_notes_save"] as const;
+
+export type MeetingSummaryCandidate =
+  | {
+      start: true;
+      recording: {
+        id: string;
+        title: string;
+        ownerSubjectId: string;
+        visibility: RecordingVisibility;
+      };
+    }
+  | {
+      start: false;
+      reason: "not_a_meeting" | "not_current" | "turned_off" | "has_notes";
+    };
+
+/**
+ * Whether a just-completed transcript version should start the built-in
+ * summary: a meeting (not a dictation or an agent's browser recording) whose
+ * shown transcript is this version, in a workspace that has not turned it off
+ * (`settings.recordings.autoSummary: false`), with no notes saved yet. It
+ * does not guess whether an automation will write notes: whatever saves notes
+ * first keeps them, because the summary only saves the first notes.
+ */
+export async function meetingSummaryCandidate(
+  db: Database,
+  input: RecordingActor & {
+    recordingId: string;
+    versionId: string;
+  },
+): Promise<MeetingSummaryCandidate> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [recording] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    if (!recording || recording.purpose !== "meeting" || recording.state === "deleting") {
+      return { start: false, reason: "not_a_meeting" };
+    }
+    const [version] = await tx
+      .select({ id: schema.recordingTranscriptVersions.id })
+      .from(schema.recordingTranscriptVersions)
+      .where(
+        and(
+          eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptVersions.recordingId, recording.id),
+          eq(schema.recordingTranscriptVersions.id, input.versionId),
+          eq(schema.recordingTranscriptVersions.state, "complete"),
+          eq(schema.recordingTranscriptVersions.isCurrent, true),
+        ),
+      );
+    if (!version) return { start: false, reason: "not_current" };
+    const [workspace] = await tx
+      .select({ settings: schema.workspaces.settings })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, input.workspaceId));
+    const settings = workspace?.settings as { recordings?: { autoSummary?: unknown } } | undefined;
+    if (settings?.recordings?.autoSummary === false) return { start: false, reason: "turned_off" };
+    const [notes] = await tx
+      .select({ kind: schema.recordingNotes.kind })
+      .from(schema.recordingNotes)
+      .where(
+        and(
+          eq(schema.recordingNotes.workspaceId, input.workspaceId),
+          eq(schema.recordingNotes.recordingId, recording.id),
+          eq(schema.recordingNotes.kind, "notes"),
+        ),
+      );
+    // Any saved notes, even cleared ones: the summary only ever writes the first.
+    if (notes) return { start: false, reason: "has_notes" };
+    return {
+      start: true,
+      recording: {
+        id: recording.id,
+        title: recording.title,
+        ownerSubjectId: recording.ownerSubjectId,
+        visibility: fromVisibility(recording.visibility),
+      },
+    };
   });
 }
 

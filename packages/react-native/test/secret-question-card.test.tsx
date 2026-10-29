@@ -318,7 +318,7 @@ describe("native ask card: secret question", () => {
     // ...and no state holds the secret.
     expect(state.some((value) => containsString(value, "hunter2-correct-horse"))).toBe(false);
 
-    await press("Send answers");
+    await press("Send answer");
     expect(submitted).toEqual([
       {
         outcome: "answered",
@@ -334,7 +334,7 @@ describe("native ask card: secret question", () => {
     );
     // Cleared after the submit: the field is emptied and the ref forgets it.
     expect(inputs.get("secret-input-pw")!.clears).toBe(1);
-    await press("Send answers");
+    await press("Send answer");
     expect(submitted).toHaveLength(1);
     expect(view.container.textContent).toContain("This question is required.");
     await view.unmount();
@@ -353,7 +353,7 @@ describe("native ask card: secret question", () => {
     await press("Undo");
     expect(view.container.querySelector("input")).not.toBeNull();
     await press("Generate");
-    await press("Send answers");
+    await press("Send answer");
     expect(submitted).toEqual([
       {
         outcome: "answered",
@@ -376,7 +376,7 @@ describe("native ask card: secret question", () => {
     expect(button("Workspace").getAttribute("data-checked")).toBe("true");
     expect(view.container.textContent).not.toContain("Saves to the Deploys vault");
     await type("secret-input-pw", "k");
-    await press("Send answers");
+    await press("Send answer");
     expect(submitted[0]).toMatchObject({
       secretAnswers: [{ questionId: "pw", value: "k", saveTo: "workspace" }],
     });
@@ -391,12 +391,12 @@ describe("native ask card: secret question", () => {
     expect(inputs.get("secret-input-pw")!.props.importantForAutofill).toBe("no");
     await type("secret-input-pw", "not-a-key");
     expect(view.container.textContent).toContain("doesn't match the expected format");
-    await press("Send answers");
+    await press("Send answer");
     expect(submitted).toHaveLength(1);
     await view.unmount();
   });
 
-  test("mixed forms keep question order and send ordinary answers as before", async () => {
+  test("mixed forms step through the questions in order and send ordinary answers as before", async () => {
     const env: HumanInputQuestion = {
       id: "env",
       kind: "single_select",
@@ -413,6 +413,8 @@ describe("native ask card: secret question", () => {
       secretQuestion({ item: "GitHub" }),
     ]);
     await press("Staging");
+    // Several questions are asked one at a time.
+    await press("Next");
     await type("secret-input-pw", "pw");
     await press("Send answers");
     expect(submitted).toEqual([

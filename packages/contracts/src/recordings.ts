@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
+import { FeatureUnavailableReason } from "./inference-residency";
+import * as primitives from "./primitives";
 
 /**
  * Recordings: captured conversations (meetings, interviews, site walks) with
@@ -237,6 +239,12 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        * it when the recording is done.
        */
       liveTranscript: z.boolean().optional(),
+      /**
+       * Write a summary into each meeting's notes once its transcript is
+       * ready. On when unset; `false` turns it off. An agent session writes
+       * it, like any chat, and never replaces notes someone already saved.
+       */
+      autoSummary: z.boolean().optional(),
       /**
        * How long meetings are kept, in days after they were recorded. Unset
        * keeps them until someone deletes them. When `audioDays` passes, the
@@ -621,6 +629,11 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     transcript: RecordingTranscriptVersion.nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /**
+     * Set when the person's own Only me meeting is listed or opened in another
+     * workspace of its organization than the one that stores it (`workspaceId`).
+     */
+    sourceWorkspace: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Recording = z.infer<typeof Recording>;
@@ -696,9 +709,11 @@ const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
 const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
 
 /**
- * True when a recording's microphone is the person recording it: computer
- * or tab audio sits beside it, so everyone else is on that track. A
- * microphone alone (a phone, a room) may hear several people.
+ * True when a recording's microphone is the person recording's: computer or
+ * tab audio sits beside it, so the others in a call are on that track and
+ * the microphone is mostly them (a finished transcript still tells apart
+ * anyone in the room with them). A microphone alone (a phone, a room) may
+ * hear several people.
  */
 export function recordingMicrophoneIsOwner(
   tracks: readonly { source: RecordingTrackSource }[],
@@ -719,8 +734,9 @@ export type RecordingSpeakerDefault =
 
 /**
  * What a speaker label stands for until someone names it: the diarizer's
- * `speaker_1` (or `t0_speaker_1`) is speaker 2, and a whole-track label such as
- * `track-0` is that track's microphone, shared audio or plain track number.
+ * `speaker_1` (or `t0_speaker_1` in older versions) is speaker 2, and a
+ * whole-track label such as `track-0` is that track's microphone, shared
+ * audio or plain track number.
  */
 export function recordingSpeakerDefault(
   label: string,
@@ -741,8 +757,9 @@ export function recordingSpeakerDefault(
 
 /**
  * The name a speaker label has until someone names it: "Speaker 2" for a
- * diarizer's `speaker_1` (or `t0_speaker_1` when several tracks were
- * diarized), and the track's role for a whole-track label such as `track-0`.
+ * diarizer's `speaker_1` (or `t0_speaker_1` in older versions that diarized
+ * several tracks), and the track's role for a whole-track label such as
+ * `track-0`.
  * Servers and clients both use this, so the same voice reads the same
  * everywhere.
  */
@@ -855,6 +872,12 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     name: z.string(),
     /** The provider can serve this workspace now (its key, sign-in or account is set up). */
     available: z.boolean(),
+    /**
+     * Why `available` is false when the reason is not setup: `region_restricted`
+     * when the workspace is EU-only and this provider has no EU route (show
+     * "Not supported in EU").
+     */
+    unavailableReason: FeatureUnavailableReason.nullable().optional(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
     /**
@@ -864,6 +887,11 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
      * or the price is unknown.
      */
     usdPerHour: z.number().nullable(),
+    /**
+     * Transcribing with it is charged in credits, so a payer without credits
+     * is refused. Absent from older servers, which tell it by `usdPerHour`.
+     */
+    chargedInCredits: z.boolean().optional(),
   }),
 );
 export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;
@@ -1118,3 +1146,19 @@ export type RecordingEventData = {
   noteRevision?: number;
   sessionId?: string | null;
 };
+
+/** Limits of durable (chunked, resumable) dictation, advertised in client config. */
+export const ClientResumableVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      maxDurationSeconds: primitives.positiveInteger.max(8 * 60 * 60),
+      maxSizeBytes: primitives.positiveInteger.max(512 * 1024 * 1024),
+      maxChunkSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
+      providerSegmentSeconds: z.number().int().positive().max(600),
+    })
+    .strict(),
+);
+export type ClientResumableVoiceInputConfig = z.infer<typeof ClientResumableVoiceInputConfig>;
+
+/** Audio is sent to a transcription provider in segments of at most this length. */
+export const TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS = 50;

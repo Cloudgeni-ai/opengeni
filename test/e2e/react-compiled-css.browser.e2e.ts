@@ -91,6 +91,36 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
     await browser?.close();
   });
 
+  test.each([
+    { hasTouch: true, expectedGap: "10px" },
+    { hasTouch: false, expectedGap: "6px" },
+  ])(
+    "attachment gap uses the published CSS for touch=$hasTouch",
+    async ({ hasTouch, expectedGap }) => {
+      const context = await browser.newContext({ hasTouch });
+      const gapPage = await context.newPage();
+      try {
+        await gapPage.setContent(`
+        <style>${compiledCss}</style>
+        <div class="og-root">
+          <div id="attachments" class="flex flex-wrap gap-1.5 pointer-coarse:gap-2.5"></div>
+        </div>
+        <div id="outside" class="flex flex-wrap gap-1.5 pointer-coarse:gap-2.5"></div>
+      `);
+        const styles = await gapPage.evaluate(() => ({
+          coarse: matchMedia("(pointer: coarse)").matches,
+          inside: getComputedStyle(document.getElementById("attachments")!).gap,
+          outside: getComputedStyle(document.getElementById("outside")!).gap,
+        }));
+        expect(styles.coarse).toBe(hasTouch);
+        expect(styles.inside).toBe(expectedGap);
+        expect(styles.outside).toBe("normal");
+      } finally {
+        await context.close();
+      }
+    },
+  );
+
   test("transform, shadow, ring, blur, and border utilities keep valid computed styles", async () => {
     const styles = await page.evaluate(() => {
       const computed = (id: string) => getComputedStyle(document.getElementById(id)!);

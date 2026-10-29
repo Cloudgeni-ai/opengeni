@@ -23,6 +23,8 @@ import {
 import { SiteOriginLink } from "../session/site-origin-link";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "../../lib/session-site-origin";
 import {
+  readSiteRowDragPayload,
+  SITE_DRAG_TYPE,
   SiteRowActionsContext,
   SiteSessionGroupHeading,
   type SiteRowActions,
@@ -45,18 +47,25 @@ import {
   EllipsisIcon,
   FolderIcon,
   FolderPlusIcon,
-  FolderOpenIcon,
   ListFilterIcon,
   MailIcon,
   MailOpenIcon,
   MessagesSquareIcon,
   PencilIcon,
+  UserRoundPenIcon,
   PinIcon,
   PlusIcon,
   SearchIcon,
   Trash2Icon,
   LinkIcon,
 } from "lucide-react";
+import { SessionAvatar } from "../session/session-avatar";
+import { ProjectGlyph } from "./project-glyph";
+import { ProjectProfileDialog } from "./project-profile";
+import {
+  SessionProfileEditorDialog,
+  useCanEditSessionProfile,
+} from "../session/session-profile-editor";
 import { toast } from "../../lib/toast";
 import {
   createContext,
@@ -210,6 +219,7 @@ import {
   mergeSessionForRail,
   parseSiteRowKey,
   relativeTimeLabel,
+  siteRowKey,
   sessionBrowseResultCount,
   selectedDescendantNode,
   siteRowConversationCount,
@@ -261,6 +271,7 @@ import {
 } from "../../lib/session-branch-cache";
 import { cn } from "../../lib/utils";
 import type { Channel, Session as SessionDetails } from "../../types";
+import type { UpdateChannelRequest } from "@opengeni/sdk";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
@@ -520,8 +531,7 @@ export function SessionList() {
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
-  const [projectPendingRename, setProjectPendingRename] = useState<Channel | null>(null);
-  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const [projectPendingEdit, setProjectPendingEdit] = useState<Channel | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -815,6 +825,11 @@ export function SessionList() {
     ReadonlyMap<string, { pinned: boolean; pinnedAt: string | null; operation: number }>
   >(() => new Map());
   const [archivedSiteIds, setArchivedSiteIds] = useState<ReadonlySet<string>>(() => new Set());
+  // Site rows moved to another project, keyed by Site and source project,
+  // shown at once while the move is in flight; the next read confirms it.
+  const [siteMoveOverrides, setSiteMoveOverrides] = useState<
+    ReadonlyMap<string, { channelId: string | null; operation: number }>
+  >(() => new Map());
   const siteArchivesInFlight = useRef(new Map<string, number>());
   // A Site the server lists again was restored (here or elsewhere): stop
   // hiding it, unless this rail is still archiving it.
@@ -1625,18 +1640,20 @@ export function SessionList() {
       (a, b) => compareSessionArchiveOrder(a.session, b.session),
     );
   }, [browseSessions, browseStatus, hierarchyMode]);
-  // A Site pin in flight shows at once; the next read confirms it.
+  // A Site pin or move in flight shows at once; the next read confirms it.
   const siteGroups = useMemo(
     () =>
       rootPage.siteGroups?.map((group) => {
+        const moved = siteMoveOverrides.get(siteRowKey(group.siteId, group.channelId));
+        const placed = moved ? { ...group, channelId: moved.channelId } : group;
         const override = sitePinOverrides.get(group.siteId);
-        if (!override) return group;
-        const { pinned: _pinned, pinnedAt: _pinnedAt, ...unpinned } = group;
+        if (!override) return placed;
+        const { pinned: _pinned, pinnedAt: _pinnedAt, ...unpinned } = placed;
         return override.pinned
           ? { ...unpinned, pinned: true as const, pinnedAt: override.pinnedAt }
           : unpinned;
       }),
-    [rootPage.siteGroups, sitePinOverrides],
+    [rootPage.siteGroups, sitePinOverrides, siteMoveOverrides],
   );
   // The helper builds all three projections together so explicit nested pins
   // never disappear into an ancestor shortcut.
@@ -1869,20 +1886,20 @@ export function SessionList() {
     },
     [context, refreshSessionPages, verifySessionChannelMove],
   );
-  const submitRenameProject = useCallback(async () => {
-    const name = projectRenameDraft.trim();
-    if (!projectPendingRename || !name || channelsQuery.mutating) return;
-    if (name === projectPendingRename.name) {
-      setProjectPendingRename(null);
-      return;
-    }
-    const updated = await updateProject(projectPendingRename.id, { name });
-    if (updated) {
-      setProjectPendingRename(null);
-    } else {
-      toast.error("Couldn't rename the project. The name may already be in use.");
-    }
-  }, [projectRenameDraft, projectPendingRename, channelsQuery.mutating, updateProject]);
+  const saveProjectProfile = useCallback(
+    async (project: Channel, change: UpdateChannelRequest): Promise<boolean> => {
+      const updated = await updateProject(project.id, change);
+      if (!updated) {
+        toast.error(
+          change.name !== undefined
+            ? "Couldn't save the project. The name may already be in use."
+            : "Couldn't save the project.",
+        );
+      }
+      return updated !== null;
+    },
+    [updateProject],
+  );
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {
       const updated = await updateProject(project.id, { pinned: !project.pinned });
@@ -2001,21 +2018,30 @@ export function SessionList() {
       setArchiveTransitions((current) => new Set(current).add(session.id));
       let archivedResult: Session | undefined;
       try {
-        const updated = await requestSessionArchive(context, session, archived, async (input) => {
-          // A confirmation is not an archive: retain the row and its window while deciding.
-          if (archived) preserveArchiveWindow(session.id, false);
-          setArchiveTransitions((current) => {
-            const next = new Set(current);
-            next.delete(session.id);
-            return next;
-          });
-          const confirmed = await confirmArchive(input);
-          if (confirmed) {
-            if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
-            setArchiveTransitions((current) => new Set(current).add(session.id));
-          }
-          return confirmed;
-        });
+        const updated = await requestSessionArchive(
+          context,
+          session,
+          archived,
+          {
+            page: confirmArchive.page,
+            confirm: async (input) => {
+              // A confirmation is not an archive: retain the row and its window while deciding.
+              if (archived) preserveArchiveWindow(session.id, false);
+              setArchiveTransitions((current) => {
+                const next = new Set(current);
+                next.delete(session.id);
+                return next;
+              });
+              const confirmed = await confirmArchive.confirm(input);
+              if (confirmed) {
+                if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
+                setArchiveTransitions((current) => new Set(current).add(session.id));
+              }
+              return confirmed;
+            },
+          },
+          sessionDisplayTitle(session),
+        );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         preserveArchiveWindow(session.id, archived, archiveWindowKeys);
@@ -2212,6 +2238,49 @@ export function SessionList() {
     },
     [context, rail.workspaceId, refreshSessionPages],
   );
+  // Moving a Site row is shared, like moving a chat: its conversations in that
+  // project move with it, and the Site itself when the row is its own project's.
+  const siteMoveOperation = useRef(0);
+  const onMoveSite = useCallback(
+    async (origin: SessionSiteOrigin, fromChannelId: string | null, channelId: string | null) => {
+      if (fromChannelId === channelId) return;
+      const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
+      if (!acceptedTransition) return;
+      const operation = ++siteMoveOperation.current;
+      const key = siteRowKey(origin.siteId, fromChannelId);
+      setCollapsedChannelSections((current) => {
+        const destinationKey = channelId ?? "default";
+        if (!current.has(destinationKey)) return current;
+        const next = new Set(current);
+        next.delete(destinationKey);
+        return next;
+      });
+      setSiteMoveOverrides((current) => new Map(current).set(key, { channelId, operation }));
+      let moved = false;
+      try {
+        await context.client.updateSiteProject(rail.workspaceId, origin.siteId, {
+          fromChannelId,
+          channelId,
+        });
+        moved = true;
+      } catch {
+        if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition))
+          toast.error("Couldn't move the Site. Its previous project was restored.");
+      }
+      try {
+        if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition) && moved)
+          await refreshSessionPages();
+      } finally {
+        setSiteMoveOverrides((current) => {
+          if (current.get(key)?.operation !== operation) return current;
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        });
+      }
+    },
+    [context, rail.workspaceId, refreshSessionPages],
+  );
   const siteRowActions = useMemo<SiteRowActions | null>(
     () =>
       // An embed's older client may predate Site sidebar state.
@@ -2219,9 +2288,15 @@ export function SessionList() {
         ? {
             pin: (origin, nextPinned) => void onPinSite(origin, nextPinned),
             archive: (origin) => void onArchiveSite(origin, true),
+            ...(typeof context.client.updateSiteProject === "function"
+              ? {
+                  move: (origin: SessionSiteOrigin, from: string | null, to: string | null) =>
+                    void onMoveSite(origin, from, to),
+                }
+              : {}),
           }
         : null,
-    [context.client, onArchiveSite, onPinSite],
+    [context.client, onArchiveSite, onMoveSite, onPinSite],
   );
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
@@ -4016,10 +4091,7 @@ export function SessionList() {
                           : undefined
                       }
                       onToggleProjectPin={onToggleProjectPin}
-                      onRenameProject={(project) => {
-                        setProjectRenameDraft(project.name);
-                        setProjectPendingRename(project);
-                      }}
+                      onEditProject={setProjectPendingEdit}
                       onDeleteProject={setProjectPendingDelete}
                       draggedProjectId={draggedProjectId}
                       dragOverProjectId={dragOverProjectId}
@@ -4220,18 +4292,17 @@ export function SessionList() {
               </>
             )}
           </div>
-          <ChannelCreateDialog
-            key={projectPendingRename?.id ?? "rename-project"}
-            mode="rename"
-            open={projectPendingRename !== null}
-            name={projectRenameDraft}
-            busy={channelsQuery.mutating}
-            onNameChange={setProjectRenameDraft}
-            onOpenChange={(open) => {
-              if (!open) setProjectPendingRename(null);
-            }}
-            onSubmit={() => void submitRenameProject()}
-          />
+          {projectPendingEdit ? (
+            <ProjectProfileDialog
+              key={projectPendingEdit.id}
+              project={projectPendingEdit}
+              open
+              onOpenChange={(open) => {
+                if (!open) setProjectPendingEdit(null);
+              }}
+              update={(change) => saveProjectProfile(projectPendingEdit, change)}
+            />
+          ) : null}
           <ChannelCreateDialog
             open={channelDialogOpen}
             name={channelNameDraft}
@@ -4464,7 +4535,7 @@ function SessionGroup(props: {
   allowNewSession?: boolean | undefined;
   project?: Channel | undefined;
   onToggleProjectPin?: ((project: Channel) => void) | undefined;
-  onRenameProject?: ((project: Channel) => void) | undefined;
+  onEditProject?: ((project: Channel) => void) | undefined;
   onDeleteProject?: ((project: Channel) => void) | undefined;
   draggedProjectId?: string | null | undefined;
   dragOverProjectId?: string | null | undefined;
@@ -4499,6 +4570,7 @@ function SessionGroup(props: {
   onRequestDelete: RequestDeleteFn;
 }) {
   const [sessionDragOver, setSessionDragOver] = useState(false);
+  const moveSite = useContext(SiteRowActionsContext)?.move;
   const sectionId = `session-group-${
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
@@ -4519,6 +4591,39 @@ function SessionGroup(props: {
       ? [collapsedSelection]
       : [];
   const treeExpanded = sectionExpanded ? props.expanded : EMPTY_SESSION_IDS;
+  const projectDescription = props.project?.description?.trim() || null;
+  const projectDescriptionId = useId();
+  const sectionToggle = (
+    <button
+      id={sectionId}
+      type="button"
+      aria-expanded={sectionExpanded}
+      aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
+      onClick={props.onToggleSection}
+      // A described project explains itself in a tooltip instead.
+      title={projectDescription ? undefined : `${summary.label} · ${summary.total} total`}
+      aria-describedby={projectDescription ? projectDescriptionId : undefined}
+      className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
+    >
+      <span className="flex w-4 shrink-0 items-center">
+        <ProjectGlyph project={props.project} open={sectionExpanded} />
+      </span>
+      <span className="min-w-0 flex-1 truncate">{props.label}</span>
+      {props.showSummary !== false ? (
+        // The row's actions sit where the summary is, on the translucent
+        // hover wash, so the summary steps aside while they show.
+        <span
+          className={cn(
+            "inline-flex shrink-0",
+            (props.project || props.allowNewSession !== false) &&
+              "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
+          )}
+        >
+          <RailTrailingMetadata summary={summary} />
+        </span>
+      ) : null}
+    </button>
+  );
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
       {props.channelHeader ? (
@@ -4531,7 +4636,10 @@ function SessionGroup(props: {
             props.onProjectDragStart?.(props.project.id);
           }}
           onDragOver={(event: DragEvent<HTMLDivElement>) => {
-            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+            if (
+              event.dataTransfer.types.includes(SESSION_DRAG_TYPE) ||
+              (moveSite && event.dataTransfer.types.includes(SITE_DRAG_TYPE))
+            ) {
               if (props.allowNewSession === false) return;
               event.preventDefault();
               event.dataTransfer.dropEffect = "move";
@@ -4545,6 +4653,20 @@ function SessionGroup(props: {
           }}
           onDrop={(event: DragEvent<HTMLDivElement>) => {
             setSessionDragOver(false);
+            if (moveSite && event.dataTransfer.types.includes(SITE_DRAG_TYPE)) {
+              event.preventDefault();
+              event.stopPropagation();
+              if (props.allowNewSession === false) return;
+              const dragged = readSiteRowDragPayload(event.dataTransfer.getData(SITE_DRAG_TYPE));
+              const destination = props.channelId ?? null;
+              if (dragged && dragged.channelId !== destination)
+                moveSite(
+                  { siteId: dragged.siteId, title: dragged.title },
+                  dragged.channelId,
+                  destination,
+                );
+              return;
+            }
             if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
               event.preventDefault();
               event.stopPropagation();
@@ -4575,37 +4697,21 @@ function SessionGroup(props: {
               "ring-1 ring-inset ring-accent",
           )}
         >
-          <button
-            id={sectionId}
-            type="button"
-            aria-expanded={sectionExpanded}
-            aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
-            onClick={props.onToggleSection}
-            title={`${summary.label} · ${summary.total} total`}
-            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
-          >
-            <span className="flex w-4 shrink-0 items-center">
-              {sectionExpanded ? (
-                <FolderOpenIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              ) : (
-                <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              )}
+          {projectDescription ? (
+            <Tooltip delayDuration={400}>
+              <TooltipTrigger asChild>{sectionToggle}</TooltipTrigger>
+              <TooltipContent side="right" className="max-w-72 whitespace-pre-line text-pretty">
+                {projectDescription}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            sectionToggle
+          )}
+          {projectDescription ? (
+            <span id={projectDescriptionId} hidden>
+              {projectDescription}
             </span>
-            <span className="min-w-0 flex-1 truncate">{props.label}</span>
-            {props.showSummary !== false ? (
-              // The row's actions sit where the summary is, on the translucent
-              // hover wash, so the summary steps aside while they show.
-              <span
-                className={cn(
-                  "inline-flex shrink-0",
-                  (props.project || props.allowNewSession !== false) &&
-                    "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
-                )}
-              >
-                <RailTrailingMetadata summary={summary} />
-              </span>
-            ) : null}
-          </button>
+          ) : null}
           {props.project ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -4621,9 +4727,9 @@ function SessionGroup(props: {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
-                <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
+                <DropdownMenuItem onSelect={() => props.onEditProject?.(props.project!)}>
                   <PencilIcon aria-hidden="true" />
-                  Rename project
+                  Edit project…
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
@@ -4743,6 +4849,8 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
         relativeTime={relativeTimeLabel(t, node.session.updatedAt)}
         depth={props.depth}
         pinned={node.session.pinned === true}
+        channelId={parseSiteRowKey(key)?.channelId}
+        channels={props.channels}
       />
       {children.length > 0 || (expanded && page) ? (
         <div role="list" aria-label={`Conversations from ${origin.title}`}>
@@ -4997,6 +5105,8 @@ function SessionRow(props: {
   const title = sessionDisplayTitle(props.session);
   const archiveTarget = useWorkstreamArchiveTarget(props.session);
   const rename = useInlineRename(props.session, props.onRename);
+  const canEditProfile = useCanEditSessionProfile();
+  const [profileOpen, setProfileOpen] = useState(false);
   const contextPinSelection = useRef(false);
   const chatOps = useChatOperations();
   const copyLinkKeys = useActionShortcut("chat.copyLink");
@@ -5252,6 +5362,18 @@ function SessionRow(props: {
               >
                 <SessionRowContent
                   quickActionSlots={Number(!props.session.archived) + 1}
+                  leading={
+                    props.session.avatar ? (
+                      <SessionAvatar
+                        avatar={props.session.avatar}
+                        name={title}
+                        workspaceId={props.session.workspaceId}
+                        seed={props.session.id}
+                        size="xs"
+                        className="mr-0.5"
+                      />
+                    ) : null
+                  }
                   title={title}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
@@ -5318,6 +5440,12 @@ function SessionRow(props: {
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
+        {canEditProfile ? (
+          <ContextMenuItem onSelect={() => setProfileOpen(true)}>
+            <UserRoundPenIcon className="size-4" />
+            Edit profile…
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuItem
           aria-keyshortcuts={copyLinkKeys?.ariaKeys}
           onSelect={() => void chatOps.copyLink(props.session)}
@@ -5396,7 +5524,11 @@ function SessionRow(props: {
                     void props.onMoveToChannel(props.session, channel.id, "row");
                   }}
                 >
-                  <FolderIcon aria-hidden="true" />
+                  {channel.id === null ? (
+                    <FolderIcon aria-hidden="true" />
+                  ) : (
+                    <ProjectGlyph project={channel} className="size-4" />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{channel.name}</span>
                   <DropdownMenuCheck checked={current} />
                 </ContextMenuItem>
@@ -5405,6 +5537,14 @@ function SessionRow(props: {
           </>
         ) : null}
       </ContextMenuContent>
+      {context.updateSessionProfile && profileOpen ? (
+        <SessionProfileEditorDialog
+          session={props.session}
+          update={context.updateSessionProfile}
+          open={profileOpen}
+          onOpenChange={setProfileOpen}
+        />
+      ) : null}
     </ContextMenu>
   );
 }
@@ -5651,7 +5791,11 @@ function RowActionsMenu({
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >
-                  <FolderIcon aria-hidden="true" />
+                  {channel.id === null ? (
+                    <FolderIcon aria-hidden="true" />
+                  ) : (
+                    <ProjectGlyph project={channel} className="size-4" />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{channel.name}</span>
                   <DropdownMenuCheck checked={current} />
                 </DropdownMenuItem>

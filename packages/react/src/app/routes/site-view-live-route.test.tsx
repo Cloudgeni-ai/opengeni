@@ -98,6 +98,8 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({ useAppApi: () => ({ request: async () => ({}) }) }));
 mock.module("../lib/navigation", () => ({
   useNavigate: () => async () => {},
+  useSearch: () => ({}),
+  useStringifySearch: () => () => "",
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("../lib/console-site", () => ({
@@ -109,13 +111,15 @@ mock.module("../lib/use-session-list-hint-refresh", () => ({
 }));
 // The conversation streams what a real one would; the test drives it.
 let stream: ((event: Pick<SessionEvent, "type">) => void) | null = null;
-mock.module("../../components/session-conversation", () => ({
-  SessionConversation: (props: { sessionId: string; onEvent?: (event: SessionEvent) => void }) => {
+mock.module("./session", () => ({
+  SessionRoute: (props: { sessionId: string; onEvent?: (event: SessionEvent) => void }) => {
     stream = (event) => props.onEvent?.(event as SessionEvent);
     return <div data-conversation={props.sessionId} />;
   },
 }));
-mock.module("../../components/new-conversation", () => ({ NewConversation: () => null }));
+mock.module("../components/session/console-new-conversation", () => ({
+  ConsoleNewConversation: () => null,
+}));
 
 let module: typeof import("./site-view");
 let ownsDom = false;

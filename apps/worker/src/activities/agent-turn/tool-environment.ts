@@ -29,7 +29,9 @@ import {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
+  createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
+  sideFeatureRouteRunnable,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
@@ -54,6 +56,7 @@ import {
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import {
   allowedFirstPartyMcpToolsForSession,
+  environmentsEncryptionKeyBytes,
   resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
@@ -85,6 +88,7 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
+import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -108,7 +112,6 @@ import type {
   EventingState,
   RenewalState,
   SandboxRuntimeState,
-  WorkspaceRefState,
 } from "./turn-context";
 import {
   createSessionTitleAttemptToolDefinition,
@@ -129,7 +132,16 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
-import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
+import {
+  attemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
+import {
+  attachSessionTreeSecretValues,
+  attachTaskVaultSecretCapture,
+  currentAttemptSecretValues,
+} from "./secret-values";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -154,7 +166,6 @@ export type PrepareTurnToolPolicyDeps = {
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   runSettings: GovernanceModelOk["runSettings"];
   rigVersion: GovernanceModelOk["rigVersion"];
-  workspaceRefs: WorkspaceRefState;
 };
 
 export type PrepareTurnToolRuntimeDeps = {
@@ -218,16 +229,8 @@ export type PrepareTurnToolRuntimeDeps = {
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
-  const {
-    input,
-    db,
-    turn,
-    session,
-    fileAuthoritySubjectId,
-    capabilitySettings,
-    runSettings,
-    workspaceRefs,
-  } = deps;
+  const { input, db, turn, session, fileAuthoritySubjectId, capabilitySettings, runSettings } =
+    deps;
 
   const turnResources = mergeResourceRefs(session.resources, turn.resources);
   // Repositories remain durable workspace inputs. File attachments do not:
@@ -275,15 +278,13 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-  // W1 (secrets delivery): the turn no longer loads or decrypts Variable Sets,
-  // and nothing user-defined is injected into the sandbox environment. User
+  // Nothing user-defined is injected into the sandbox environment. User
   // secrets reach a command only through `{{secret:…}}` references resolved at
-  // the exec boundary. Variable Sets stay readable elsewhere until W6 removes them.
+  // the exec boundary.
   const connectionScope = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   };
-  workspaceRefs.variableSetId = "";
   return {
     turnResources,
     runtimeResources,
@@ -470,17 +471,43 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  const videoSkillSelected =
+    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
+  // These are independent metadata reads on separate pool scopes, after the
+  // linked-identity guard. No selection, credential or authority is cached.
+  // Join every scope before proceeding or failing; executable preparation and
+  // the ordered, fenced history writes still happen at their original boundary.
+  const [workspaceResult, skillConfigurationResult, sharedSkillsResult] = await Promise.allSettled([
+    scheduledTurnMcpServerIds(turn) === null
+      ? requireWorkspace(db, input.workspaceId)
+      : Promise.resolve(null),
+    toolFamilies.skills === false || !videoSkillSelected
+      ? Promise.resolve(null)
+      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    toolFamilies.skills === false
+      ? Promise.resolve([])
+      : listSkillDescriptors(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+        }),
+  ]);
+  if (workspaceResult.status === "rejected") throw workspaceResult.reason;
+  if (skillConfigurationResult.status === "rejected") throw skillConfigurationResult.reason;
+  if (sharedSkillsResult.status === "rejected") throw sharedSkillsResult.reason;
+  const skillConfiguration = skillConfigurationResult.value;
+  const sharedSkillDescriptors = sharedSkillsResult.value;
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     scheduledTurnMcpServerIds(turn) !== null
       ? allowedFirstPartyMcpToolsForSession(
           runSettings,
           scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
         )
-      : resolveSessionFirstPartyMcpTools(
-          runSettings,
-          session,
-          (await requireWorkspace(db, input.workspaceId)).settings,
-        ),
+      : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -531,6 +558,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      settings: runSettings,
       // Live per change, the same check the API makes before running it.
       authority: async () =>
         (
@@ -543,29 +571,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ).kind,
     },
   );
-  // These reads only feed the Skill index. Disabled Skills need neither the
-  // descriptors nor bundled files; agent build still rechecks live video policy.
-  // Enabled reads remain independent and finish before executable preparation.
-  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
-    session.bundledSkillIds,
-    session.agent,
-  );
-  // A policy cannot affect the bundled index when this Skill was explicitly omitted.
-  // Agent build still performs its independent live policy read and validation.
-  const videoSkillSelected =
-    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
-  const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    toolFamilies.skills === false || !videoSkillSelected
-      ? Promise.resolve(null)
-      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-    toolFamilies.skills === false
-      ? Promise.resolve([])
-      : listSkillDescriptors(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-        }),
-  ]);
   const bundledSkills =
     toolFamilies.skills === false
       ? []
@@ -577,7 +582,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           videoGenerationEnabled:
             skillConfiguration !== null &&
             skillConfiguration.defaultModelId !== null &&
-            skillConfiguration.enabledModelIds.length > 0,
+            skillConfiguration.enabledModelIds.length > 0 &&
+            sideFeatureRouteRunnable(
+              runSettings,
+              videoGenerationRoute(skillConfiguration.fundingSource),
+            ),
         });
   const selectedSkills = [
     ...bundledSkills,
@@ -752,6 +761,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionId: input.sessionId,
         turnId: turn.id,
         turnAttemptId: input.attemptId,
+        processingResidency: decisionModelProcessingResidency(runSettings, true),
       };
       if (usage.decisionInputTokens !== null)
         await recordUsageEvent(db, {
@@ -812,6 +822,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,
   });
+  const firstPartyInteractionInput = {
+    settings: runSettings,
+    ...(credentialRestriction ? { credentialRestriction } : {}),
+    scope: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
+    selectedTools: selectedFirstPartyMcpTools,
+    subjectId: "worker:first-party-mcp",
+    subjectLabel: "Opengeni worker",
+  };
+  // A person-handoff request that leaves its generations out records the
+  // target as it is when the turn pauses.
+  eventing.interactionRequestTargetReader = createFirstPartyInteractionRequestTargetReader(
+    firstPartyInteractionInput,
+  );
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -878,20 +909,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
-      settings: runSettings,
-      ...(credentialRestriction ? { credentialRestriction } : {}),
-      scope: {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: attempt.executionGeneration,
-      },
-      ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
-      selectedTools: selectedFirstPartyMcpTools,
-      subjectId: "worker:first-party-mcp",
-      subjectLabel: "Opengeni worker",
+      ...firstPartyInteractionInput,
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
@@ -998,6 +1016,33 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
+  const maskingPrincipal = {
+    kind: "attempt",
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: attempt.executionGeneration,
+  } as const;
+  const maskingKey = environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null;
+  // Best effort: values this session tree used before are masked too.
+  attachSessionTreeSecretValues({
+    memory: currentAttemptSecretValues(),
+    db,
+    encryptionKey: maskingKey,
+    principal: maskingPrincipal,
+    observability,
+  });
+  // Secrets that show up in tool output are saved to the task vault.
+  attachTaskVaultSecretCapture({
+    memory: currentAttemptSecretValues(),
+    db,
+    encryptionKey: maskingKey,
+    principal: maskingPrincipal,
+    enabled: secretsCapabilityEnabled(session.agent),
+    observability,
+  });
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {

@@ -1,12 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
-import { once } from "node:events";
-import { createReadStream, createWriteStream } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
   SESSION_ARCHIVE_FORMAT,
@@ -23,16 +18,23 @@ import {
   readSessionArchiveTablePages,
   readSessionArchiveSessionRow,
   readSessionArchiveTranscriptEvents,
+  sessionArchiveObjectKeys,
   type Database,
   type SessionArchiveManifest,
   type SessionArchiveScope,
 } from "@opengeni/db";
 import {
   uploadWorkspaceArchiveSpool,
+  writeCompressedJsonLines,
   WorkspaceArchiveStorageError,
   type ObjectStorage,
+  type WorkspaceArchiveSpool,
 } from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
+
+export { sessionArchiveObjectKeys, writeCompressedJsonLines };
+
+type Spool = WorkspaceArchiveSpool;
 
 /**
  * Content-free public classification of a failed session archive. Telemetry
@@ -64,60 +66,6 @@ export const SESSION_ARCHIVE_TIME_BUDGET_MS = 10 * 60 * 1_000;
 export const SESSION_ARCHIVE_STALE_SECONDS = 2 * 60 * 60;
 export const SESSION_ARCHIVE_EXPORT_PAGE_ROWS = 200;
 export const SESSION_ARCHIVE_PURGE_BATCH_ROWS = 2_000;
-
-type Spool = {
-  path: string;
-  byteSize: number;
-  sha256: string;
-  open: () => AsyncIterable<Uint8Array>;
-  dispose: () => Promise<void>;
-};
-
-/** Stream JSON lines through zstd into a private file, metering the compressed bytes. */
-export async function writeCompressedJsonLines(
-  path: string,
-  produce: (write: (line: string) => Promise<void>) => Promise<void>,
-): Promise<Spool> {
-  const zstd = createZstdCompress({ params: { [zlibConstants.ZSTD_c_compressionLevel]: 9 } });
-  const hash = createHash("sha256");
-  let byteSize = 0;
-  const meter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      hash.update(chunk);
-      byteSize += chunk.length;
-      callback(null, chunk);
-    },
-  });
-  const piping = pipeline(zstd, meter, createWriteStream(path, { flags: "wx", mode: 0o600 }));
-  const write = async (line: string) => {
-    if (!zstd.write(`${line}\n`)) await once(zstd, "drain");
-  };
-  try {
-    await produce(write);
-    zstd.end();
-    await piping;
-  } catch (error) {
-    zstd.destroy(error instanceof Error ? error : new Error(String(error)));
-    await piping.catch(() => undefined);
-    await rm(path, { force: true });
-    throw error;
-  }
-  return {
-    path,
-    byteSize,
-    sha256: hash.digest("hex"),
-    open: () => createReadStream(path),
-    dispose: async () => rm(path, { force: true }),
-  };
-}
-
-export function sessionArchiveObjectKeys(scope: SessionArchiveScope, archiveId: string) {
-  const prefix = `session-archives/${scope.workspaceId}/${scope.sessionId}/${archiveId}`;
-  return {
-    bundle: `${prefix}/bundle.jsonl.zst`,
-    transcript: `${prefix}/transcript.jsonl.zst`,
-  };
-}
 
 /** Write the full-fidelity bundle: header, every exported row as exact JSON, footer. */
 async function writeBundle(db: Database, scope: SessionArchiveScope, path: string) {

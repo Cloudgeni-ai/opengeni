@@ -24,6 +24,8 @@ import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markd
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import type { OpenGeniLinkTarget } from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
 import * as Haptics from "expo-haptics";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
@@ -50,12 +52,14 @@ import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
-import { openOnWeb, webPaths } from "@/web-links";
+import { openOnWeb, webPaths, webUrl } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
 /** The session menu item that opens this conversation in the web app. */
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
+/** The session menu item that copies this conversation's web link. */
+const COPY_LINK_ACTION = "opengeni.copy-link";
 /** The session menu item that mutes or unmutes this session's replies for the person. */
 const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
 /** Session menu items for full access: a time limit to give it for, or turning it off. */
@@ -109,6 +113,12 @@ function fullAccessMenuAction(access: SessionFullAccess | null): MenuAction[] {
       ]
     : [];
 }
+
+/** Interactive answers remember picks and what was sent across app launches. */
+const answerStore: InteractiveAnswerStore = {
+  get: (key) => AsyncStorage.getItem(key),
+  set: (key, value) => AsyncStorage.setItem(key, value),
+};
 
 export default function SessionScreen() {
   const { id, at, workspace } = useLocalSearchParams<{
@@ -424,6 +434,11 @@ function LiveSession(props: {
                             title: "Open in web",
                             image: "safari" as MenuAction["image"],
                           },
+                          {
+                            id: COPY_LINK_ACTION,
+                            title: "Copy link",
+                            image: "link" as MenuAction["image"],
+                          },
                         ]
                       : []),
                     {
@@ -458,6 +473,15 @@ function LiveSession(props: {
                     if (nativeEvent.event === OPEN_ON_WEB_ACTION) {
                       if (webBaseUrl)
                         openOnWeb(webBaseUrl, webPaths.session(workspaceId, props.sessionId));
+                      return;
+                    }
+                    if (nativeEvent.event === COPY_LINK_ACTION) {
+                      if (!webBaseUrl) return;
+                      void copyText(
+                        webUrl(webBaseUrl, webPaths.session(workspaceId, props.sessionId)),
+                      ).then(() =>
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+                      );
                       return;
                     }
                     if (nativeEvent.event === CALL_PIN_ACTION) {
@@ -538,6 +562,7 @@ function LiveSession(props: {
         client={props.client}
         models={props.models}
         renderMarkdown={renderMarkdown}
+        answerStore={answerStore}
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
@@ -588,7 +613,6 @@ function LiveSession(props: {
           hasImageAttachments={controller.attachments.attachments.some(
             (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
           )}
-          codexOnly={session?.codexCompactionMode === "remote_v2"}
           groupPresentation={{
             opengeni_credits: {
               label: "Opengeni",

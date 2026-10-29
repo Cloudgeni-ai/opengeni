@@ -9,6 +9,16 @@
  */
 export { MultiProviderModelProvider } from "./model-provider-routing";
 export {
+  InferenceRegionRestrictedError,
+  assertSideFeatureRoute,
+  findInferenceRegionRestrictedError,
+  inferenceResidencyRequirement,
+  sideFeatureRegionRestrictedError,
+  sideFeatureRouteFetch,
+  sideFeatureRouteRunnable,
+  withInferenceResidency,
+} from "./inference-residency";
+export {
   runSingleModelCall,
   SingleModelCallProviderError,
   SingleModelCallUnsupportedError,

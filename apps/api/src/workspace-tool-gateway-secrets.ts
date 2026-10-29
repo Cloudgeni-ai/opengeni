@@ -15,7 +15,7 @@ import {
   type AccessGrant,
   type SecretPrincipal,
 } from "@opengeni/contracts";
-import { createSecretResolver, hasPermission } from "@opengeni/core";
+import { createSecretResolver, hasPermission, missingPermissionMessage } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import {
   createSecretArgumentResolver,
@@ -93,7 +93,7 @@ export function workspaceGatewaySecretArguments(input: {
         references.map((reference) => ({
           raw: reference.raw,
           code: "denied",
-          message: "the caller is not allowed to use secrets (secrets:use)",
+          message: missingPermissionMessage("secrets:use"),
         })),
       );
     }

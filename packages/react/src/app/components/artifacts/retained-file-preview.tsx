@@ -27,6 +27,8 @@ import {
 } from "../../lib/retained-artifact-load-error";
 import { InlineChatImage } from "./inline-chat-image";
 import { DeferredChatMedia } from "../../../artifacts";
+import { LoadFailureNotice } from "../../../components/load-failure-notice";
+import { isChunkLoadError } from "../../../lib/chunk-load-error";
 import { isRetainedTextPreview } from "./retained-text-preview-policy";
 import {
   cachedRetainedArtifactLoader,
@@ -227,16 +229,20 @@ function RetainedFilePreviewBody({
   );
 }
 
-class PreviewErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
+class PreviewErrorBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean; notLoaded: boolean }
+> {
+  state = { failed: false, notLoaded: false };
+  static getDerivedStateFromError(error: unknown) {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
   render() {
-    return this.state.failed ? (
-      <p role="status">PDF preview unavailable. Download the file or reload to try again.</p>
+    if (!this.state.failed) return this.props.children;
+    return this.state.notLoaded ? (
+      <LoadFailureNotice />
     ) : (
-      this.props.children
+      <p role="status">PDF preview unavailable. Download the file or reload to try again.</p>
     );
   }
 }
