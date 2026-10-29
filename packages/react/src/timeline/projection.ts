@@ -289,6 +289,9 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
+  // Open approval waits by the approval ids they ask about, so the person's
+  // answer is on the wait the moment it is recorded, before work resumes.
+  const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
   // Live model-capacity waits. Later lifecycle evidence that the turn is no
   // longer blocked (resume, a non-waiting status, its settlement) resolves
   // them, so a recovered wait never lingers as a warning.
@@ -1398,17 +1401,35 @@ export function buildTimeline(
             call.awaitingApproval = true;
           }
         }
-        rememberPresentationWait(
-          {
-            kind: "notice",
-            id: event.id,
-            tone: "waiting",
-            text: t("timeline.projection.approvalNeededTheTurnIs"),
-            approval: true,
-            occurredAt: event.occurredAt,
-          },
-          turnId,
-        );
+        const approvalActions = approvalActionsOf(payload);
+        const notice: NoticeItem = {
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text: t("timeline.projection.approvalNeededTheTurnIs"),
+          approval: true,
+          ...(approvalActions.length > 0 ? { approvalActions } : {}),
+          occurredAt: event.occurredAt,
+        };
+        for (const action of approvalActions) approvalWaitsById.set(action.id, { notice, turnId });
+        rememberPresentationWait(notice, turnId);
+        break;
+      }
+
+      case "user.approvalDecision": {
+        // The person answered: the wait reads as answered at once, saying how,
+        // rather than waiting for the run to resume.
+        if (event.duplicateOfEventId) break;
+        const approvalId = stringValue(payload.approvalId);
+        const decision = payload.decision;
+        const open = approvalId ? approvalWaitsById.get(approvalId) : undefined;
+        if (!open || (decision !== "approve" && decision !== "reject")) break;
+        approvalWaitsById.delete(approvalId);
+        const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
+        if (action) action.decision = decision;
+        if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
+          resolvePresentationWait(event, turnId ?? open.turnId);
+        }
         break;
       }
 
@@ -3523,6 +3544,26 @@ function approvalCallIds(payload: Record<string, unknown>): string[] {
     if (id) ids.push(id);
   }
   return ids;
+}
+
+/** The actions an approval request asks about, with their display titles when given. */
+function approvalActionsOf(
+  payload: Record<string, unknown>,
+): NonNullable<NoticeItem["approvalActions"]> {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const actions: NonNullable<NoticeItem["approvalActions"]> = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    // The same id `user.approvalDecision` answers (see `approvalCallIds`).
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (!id) continue;
+    const title = stringValue(asRecord(record.display).title).trim();
+    actions.push({ id, title: title || null });
+  }
+  return actions;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

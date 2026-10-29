@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import { toolRowPresentation } from "../src/timeline/tool-presentation";
-import type { TimelineGroup, ToolCallItem } from "../src/timeline/types";
+import { noticeDisplayText } from "../src/timeline/notice-presentation";
+import type {
+  NoticeItem,
+  SessionStatusItem,
+  TimelineGroup,
+  ToolCallItem,
+} from "../src/timeline/types";
 import { createOpenGeniText } from "../src/messages/runtime";
 import { coalesceSessionEventDeltas } from "@opengeni/events";
 
@@ -43,6 +49,74 @@ describe("a tool call waiting for approval", () => {
     const item = call(buildTimeline(englishText, [...waiting, event(4, "turn.cancelled")]));
     expect(item.awaitingApproval).toBeUndefined();
     expect(item.status).toBe("cancelled");
+  });
+});
+
+describe("an answered approval", () => {
+  const asking = (approvals: unknown[]) => [
+    event(1, "turn.started"),
+    event(2, "session.requiresAction", { approvals }),
+    event(3, "session.status.changed", { status: "requires_action" }),
+  ];
+  const sendEmail = {
+    id: "call-1",
+    name: "send_message",
+    display: { title: "Send email" },
+    rawItem: { callId: "call-1" },
+  };
+  const notice = (items: ReturnType<typeof buildTimeline>) =>
+    items.find((item): item is NoticeItem => item.kind === "notice" && item.approval === true)!;
+  // Decisions carry no turn id on the wire.
+  const decide = (sequence: number, approvalId: string, decision: "approve" | "reject") =>
+    event(sequence, "user.approvalDecision", { approvalId, decision }, null as unknown as string);
+
+  test("says what the person decided as soon as the decision is recorded", () => {
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      decide(4, "call-1", "approve"),
+    ]);
+    const item = notice(items);
+    // Answered before the run resumes: no longer a live wait.
+    expect(item.resolvedAt).toBe(new Date(Date.UTC(2026, 8, 30) + 4000).toISOString());
+    expect(noticeDisplayText(englishText, item)).toBe("You approved “Send email”.");
+    const status = items.find((each): each is SessionStatusItem => each.kind === "session-status");
+    expect(status?.resolvedAt).toBe(item.resolvedAt);
+  });
+
+  test("says a rejection, and stays answered when the run resumes", () => {
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      decide(4, "call-1", "reject"),
+      event(5, "session.status.changed", { status: "running" }),
+    ]);
+    const item = notice(items);
+    expect(noticeDisplayText(englishText, item)).toBe("You rejected “Send email”.");
+    expect(item.resolvedAt).toBe(new Date(Date.UTC(2026, 8, 30) + 4000).toISOString());
+  });
+
+  test("waits for every action of the request before reading as answered", () => {
+    const deploy = { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } };
+    const partial = buildTimeline(englishText, [
+      ...asking([sendEmail, deploy]),
+      decide(4, "call-1", "approve"),
+    ]);
+    expect(notice(partial).resolvedAt).toBeUndefined();
+    const answered = buildTimeline(englishText, [
+      ...asking([sendEmail, deploy]),
+      decide(4, "call-1", "approve"),
+      decide(5, "call-2", "reject"),
+    ]);
+    expect(noticeDisplayText(englishText, notice(answered))).toBe("You approved 1 and rejected 1.");
+  });
+
+  test("without a recorded decision, says only that it was answered", () => {
+    const item = notice(
+      buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        event(4, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(noticeDisplayText(englishText, item)).toBe("You responded to this approval.");
   });
 });
 

@@ -461,6 +461,16 @@ export type NoticeItem = {
   text: string;
   /** An approval wait (`session.requiresAction`), independent of its display text. */
   approval?: true;
+  /**
+   * The actions an approval wait asks about, with the request's display title
+   * when it carried one, and the person's answer once `user.approvalDecision`
+   * recorded it. Presentation only.
+   */
+  approvalActions?: Array<{
+    id: string;
+    title: string | null;
+    decision?: "approve" | "reject";
+  }>;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
   /**

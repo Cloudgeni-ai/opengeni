@@ -11,14 +11,37 @@ export function noticeIsResolvedApproval(
   return Boolean(item.resolvedAt && item.approval);
 }
 
-/** A resolved approval notice reads as history. */
+/**
+ * A resolved approval notice reads as history, saying what the person
+ * decided when the decision is known: "You approved “Send email”."
+ */
 export function noticeDisplayText(
   t: OpenGeniText,
-  item: Pick<NoticeItem, "text" | "approval" | "resolvedAt">,
+  item: Pick<NoticeItem, "text" | "approval" | "resolvedAt" | "approvalActions">,
 ): string {
-  return noticeIsResolvedApproval(item)
-    ? t("timeline.noticePresentation.youRespondedToThisApproval")
-    : item.text;
+  if (!noticeIsResolvedApproval(item)) return item.text;
+  const actions = item.approvalActions ?? [];
+  const decided = actions.filter((action) => action.decision !== undefined);
+  // Without every answer (an older or partial replay), say only that it was answered.
+  if (decided.length === 0 || decided.length !== actions.length)
+    return t("timeline.noticePresentation.youRespondedToThisApproval");
+  const approved = decided.filter((action) => action.decision === "approve").length;
+  const rejected = decided.length - approved;
+  if (decided.length === 1) {
+    const title = decided[0]!.title;
+    if (approved === 1)
+      return title
+        ? t("timeline.noticePresentation.youApprovedTitle", { title })
+        : t("timeline.noticePresentation.youApprovedThis");
+    return title
+      ? t("timeline.noticePresentation.youRejectedTitle", { title })
+      : t("timeline.noticePresentation.youRejectedThis");
+  }
+  if (rejected === 0)
+    return t("timeline.noticePresentation.youApprovedActions", { count: approved });
+  if (approved === 0)
+    return t("timeline.noticePresentation.youRejectedActions", { count: rejected });
+  return t("timeline.noticePresentation.youApprovedAndRejected", { approved, rejected });
 }
 
 /** Notice pill tone: failures stay red, an open wait keeps the waiting hue. */
