@@ -3818,6 +3818,8 @@ describe("CUA desktop boundary", () => {
       reply: Record<string, unknown> | null = null;
       /** Window-change lines of the last step. */
       windowChanges: string[] = [];
+      /** The effect each step reports, by index. */
+      effects: (string | undefined)[] = [];
       opens: { pid: number; window_id: number; title: string }[] = [];
       ran = false;
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
@@ -3836,6 +3838,7 @@ describe("CUA desktop boundary", () => {
               index,
               ok: true,
               message: "done",
+              ...(this.effects[index] ? { effect: this.effects[index] } : {}),
               ...(index === steps.length - 1 && this.windowChanges.length
                 ? { window_changes: this.windowChanges }
                 : {}),
@@ -3913,6 +3916,43 @@ describe("CUA desktop boundary", () => {
         expect(steps[2]!.args).toMatchObject({ key: "return", modifiers: [] });
       } finally {
         await backend.close();
+      }
+    });
+
+    test("a batch whose key press CUA only sent is reported as unconfirmed, as one action is", async () => {
+      const fixture = new BatchFixture();
+      const { backend } = await open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const unconfirmed = async (effects: (string | undefined)[]) => {
+          fixture.effects = effects;
+          let reported = false;
+          await backend.dispatch(batch(await backend.observe(target.id)), undefined, () => {
+            reported = true;
+          });
+          return reported;
+        };
+        // The Enter after typed text, sent with nothing confirming it.
+        expect(await unconfirmed(["confirmed", "confirmed", "unverifiable"])).toBe(true);
+        // The element press CUA could only send, as for one action.
+        expect(await unconfirmed(["unverifiable", "confirmed", "confirmed"])).toBe(true);
+        expect(await unconfirmed(["confirmed", "confirmed", "confirmed"])).toBe(false);
+        // A CUA that reports no effects confirms nothing either way.
+        expect(await unconfirmed([])).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("only macOS offers window focus", async () => {
+      for (const platform of ["macos", "windows", "linux"] as const) {
+        const backend = await CuaComputerBackend.open(new BatchFixture(), platform);
+        try {
+          expect(backend.initialCapabilities.targetFocus).toBe(platform === "macos");
+          expect((await backend.capabilities()).targetFocus).toBe(platform === "macos");
+        } finally {
+          await backend.close();
+        }
       }
     });
 

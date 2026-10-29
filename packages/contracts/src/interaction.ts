@@ -3481,6 +3481,9 @@ export const ComputerSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
       /** Accepts a ComputerActionBatch as one operation. */
       actionBatches: primitives.optionalBoolean,
       parallelApps: primitives.boolean,
+      /** A focus action brings a target's window to the front. Absent means
+       * not reported. */
+      targetFocus: primitives.optionalBoolean,
     })
     .strict(),
 );

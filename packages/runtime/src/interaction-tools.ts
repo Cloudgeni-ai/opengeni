@@ -1074,6 +1074,9 @@ const ComputerActionBatchReceipt = z
     /** Actions that acted on an element of another role than the one named,
      * by their index in the batch. */
     roleStandIns: ComputerActionReceipt.shape.roleStandIns,
+    /** An action of the batch delivered raw input (a key press, a click)
+     * with nothing confirming that the app acted on it. */
+    unconfirmedInput: ComputerActionReceipt.shape.unconfirmedInput,
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -4009,6 +4012,7 @@ async function actInComputerBatch(
   let observedAfterLastAction = true;
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
   const roleStandIns: NonNullable<z.output<typeof ComputerActionBatchReceipt>["roleStandIns"]> = [];
+  let unconfirmedInput = false;
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
@@ -4101,6 +4105,7 @@ async function actInComputerBatch(
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
     for (const standIn of receipt.roleStandIns ?? [])
       roleStandIns.push({ ...standIn, actionIndex: index });
+    if (receipt.unconfirmedInput) unconfirmedInput = true;
     if (receipt.observation) observation = receipt.observation;
     if (receipt.state !== "completed") {
       observedAfterLastAction = receipt.observation !== null;
@@ -4129,6 +4134,7 @@ async function actInComputerBatch(
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
     ...(roleStandIns.length ? { roleStandIns } : {}),
+    ...(unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -4243,6 +4249,7 @@ async function actInComputerNativeBatch(
     observation,
     observationPrecedesStop: false,
     ...(receipt.roleStandIns?.length ? { roleStandIns: receipt.roleStandIns } : {}),
+    ...(receipt.unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
