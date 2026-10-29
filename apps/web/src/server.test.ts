@@ -102,6 +102,14 @@ describe("production web handler", () => {
     );
     expect(setup.headers.get("referrer-policy")).toBe("no-referrer");
     expect(setup.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // A chat share link's address is its key: never a referrer, never indexed.
+    const shared = await handler(new Request("https://example.test/share/Zq3secretShareKey0000"));
+    expect(shared.status).toBe(200);
+    expect(shared.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(shared.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(shared.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await shared.text()).toContain("Opengeni");
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {

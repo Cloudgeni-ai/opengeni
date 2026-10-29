@@ -2339,8 +2339,9 @@ export const ComputerLocator = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerLocator = z.infer<typeof ComputerLocator>;
 
-/** Web-platform permissions which a managed browser can set for the exact
- * top-level origin currently fenced by a BrowserActionCommand. Names remain
+/** Web-platform permissions which a browser can set for the exact top-level
+ * origin currently fenced by a BrowserActionCommand (attached Chrome: camera,
+ * microphone, geolocation and notifications only). Names remain
  * provider-neutral; drivers map them to their native permission descriptors. */
 export const BrowserPermission = /* @__PURE__ */ defineSchema(() =>
   z.enum([

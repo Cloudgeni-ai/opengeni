@@ -12,6 +12,7 @@ import {
 import {
   AgentBrowserDriver,
   isBlankTabUrl,
+  PERMISSION_OPENED_TABS_ONLY,
   type AgentBrowserDriverOptions,
   type BrowserCdpConnection,
   type BrowserCommandRunner,
@@ -53,6 +54,66 @@ const DOWNLOAD_START_SLACK_MS = 5_000;
 const DOWNLOAD_FIND_ATTEMPTS = 10;
 const DOWNLOAD_FIND_RETRY_MS = 200;
 const MAX_TRACKED_DOWNLOADS = 1_000;
+// The site permissions Chrome lets an extension set, by their CDP names, as
+// the extension's `permissions.set` names them. The others it cannot set.
+const ATTACHED_SITE_PERMISSIONS = new Map([
+  ["videoCapture", "camera"],
+  ["audioCapture", "microphone"],
+  ["geolocation", "geolocation"],
+  ["notifications", "notifications"],
+]);
+const SITE_PERMISSION_UNSUPPORTED =
+  "In the person's own Chrome, only camera, microphone, geolocation and notifications permissions can be set.";
+const SITE_PERMISSIONS_OUTDATED =
+  "The browser extension in the person's Chrome is too old to set site permissions; Chrome updates it on its own.";
+const SITE_PERMISSION_CONSENT_REQUIRED =
+  "The person must allow site permissions once in their Chrome first. A tab asking them to is open there; ask them to allow it, then try again.";
+const SITE_PERMISSION_CONSENT_DECLINED =
+  "The person has not allowed site permissions in their Chrome. Ask them to allow it in the browser extension's popup, then try again.";
+const SITE_PERMISSION_TAB_CHANGED =
+  "The tab left this site before the permission was set; observe the tab again.";
+const SITE_PERMISSION_UNSUPPORTED_SITE =
+  "In the person's own Chrome, permissions can be set only for http and https sites with a plain host name or IP address.";
+const SITE_PERMISSION_LIMIT_REACHED =
+  "Agents have already set 1,000 site permissions in the person's Chrome; set ones no longer needed back to prompt, or ask the person to remove some in the extension's popup.";
+const SITE_PERMISSION_REFUSED =
+  "The browser extension in the person's Chrome refused this permission request; nothing was set.";
+
+/** What the agent is told when the extension does not set a permission.
+ * Anything else (Chrome's own refusal, a lost connection) is reported as for
+ * any other command. */
+function sitePermissionRefusal(error: AttachedBrowserBridgeError): Error {
+  // The extension could not read the request: nothing reached Chrome.
+  if (error.code === "invalid_request")
+    return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_REFUSED);
+  if (error.code !== "driver_rejected") return error;
+  switch (error.extensionCode) {
+    case "consent_required":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_REQUIRED,
+      );
+    case "consent_declined":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_DECLINED,
+      );
+    case "not_opened_by_agent":
+      return new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
+    case "tab_changed":
+      return new InteractionDefiniteDriverError(
+        "document_stale",
+        SITE_PERMISSION_TAB_CHANGED,
+        true,
+      );
+    case "unsupported_site":
+      return new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED_SITE);
+    case "limit_reached":
+      return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_LIMIT_REACHED);
+    default:
+      return error;
+  }
+}
 
 const EXTENSION_RESTRICTED_SCHEMES = [
   "about:",
@@ -282,7 +343,10 @@ export function createAttachedChromeDriver(
     },
     connect: async () => transport.connection,
     engine: "chrome",
-    permissionControl: false,
+    // Permissions go through the extension (see setSitePermission), which
+    // sets only some of them and only once the person allowed it to, and
+    // only in a tab this session opened: every other tab is the person's.
+    permissionControl: "opened_tabs",
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
@@ -602,6 +666,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
             true,
           );
         const navigation = method === "Page.navigate";
+        // A permission for the site of exactly this tab (see setSitePermission).
+        if (method === "Browser.setPermission")
+          return (await this.setSitePermission(params, tabId)) as T;
         if (navigation && typeof params.url === "string") this.assertNavigable(params.url);
         const mayChangePage = mayChangePageContent(method);
         if (mayChangePage) this.pendingInput.set(tabId, (this.pendingInput.get(tabId) ?? 0) + 1);
@@ -986,9 +1053,53 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         this.tabSessions.set(targetId, sessionId);
         return { sessionId };
       }
+      case "Browser.setPermission":
+        // Only for a tab: the driver sends it on that tab's session.
+        throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
       default:
         throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
     }
+  }
+
+  /** A permission for the exact site the tab `tabId` shows, set by the
+   * extension in the person's own Chrome once they allowed it to. The
+   * extension sets it only while this connection's attachment to that tab
+   * lasts and the tab shows that site. */
+  private async setSitePermission(
+    params: Readonly<Record<string, unknown>>,
+    tabId: string,
+  ): Promise<Record<string, unknown>> {
+    const name =
+      typeof params.permission === "object" && params.permission !== null
+        ? (params.permission as { name?: unknown }).name
+        : undefined;
+    const permission = typeof name === "string" ? ATTACHED_SITE_PERMISSIONS.get(name) : undefined;
+    if (!permission) {
+      throw new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED);
+    }
+    // An extension from before this command would not answer it at all.
+    const ping = await this.bridge.request<{ sitePermissions?: unknown } | null>({ type: "ping" });
+    if (ping?.sitePermissions !== true) {
+      throw new InteractionDefiniteDriverError("unsupported", SITE_PERMISSIONS_OUTDATED);
+    }
+    const attachment = this.tabAttachments.get(tabId);
+    if (attachment === undefined) {
+      throw new InteractionDefiniteDriverError("document_stale", SITE_PERMISSION_TAB_CHANGED, true);
+    }
+    try {
+      await this.bridge.request({
+        type: "permissions.set",
+        tabId,
+        attachment,
+        origin: params.origin,
+        permission,
+        setting: params.setting,
+      });
+    } catch (error) {
+      if (error instanceof AttachedBrowserBridgeError) throw sitePermissionRefusal(error);
+      throw error;
+    }
+    return {};
   }
 
   /** Chrome answers a navigation to a page the extension may not control by

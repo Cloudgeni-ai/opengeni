@@ -692,10 +692,7 @@ export function createAttemptToolEnvironment(
       : {}),
     entries: [...prepared.entries],
   };
-  const catalog = immutableVerifiedCatalog({
-    ...unsigned,
-    digest: digestAttemptToolCatalog(unsigned),
-  });
+  const catalog = immutableVerifiedCatalog(unsigned);
   return new AttemptToolEnvironment(
     catalog,
     prepared.create({
@@ -770,10 +767,26 @@ const immutableCatalogVerifications = new WeakMap<
   { catalog: AttemptToolCatalogValue; byteLength: number }
 >();
 
-function immutableVerifiedCatalog(input: unknown): AttemptToolCatalogValue {
+function immutableVerifiedCatalog(
+  input: Omit<AttemptToolCatalogValue, "digest">,
+): AttemptToolCatalogValue {
+  // A runtime caller can supply an extra scope property despite the TS type.
+  // The old construction rejected a supplied digest rather than re-signing it.
+  if ("digest" in input && input.digest !== undefined) {
+    throw new AttemptToolCatalogIntegrityError();
+  }
   // JSON-schema records can retain caller-owned nested values after parsing.
   // Detach before freezing so neither side can mutate the other's snapshot.
-  const verified = verifyAttemptToolCatalog(structuredClone(input));
+  // This is the internal constructor, not a verifier of an externally supplied
+  // digest. Validate the complete shape first, then hash the detached snapshot
+  // once. Public/durable inputs still take verifyAttemptToolCatalog's full check.
+  const catalog = AttemptToolCatalog.parse({
+    ...structuredClone(input),
+    digest: "0".repeat(64),
+  });
+  const { digest: _placeholder, ...unsigned } = catalog;
+  catalog.digest = digestAttemptToolCatalog(unsigned);
+  const verified = { catalog, byteLength: assertCatalogSize(catalog) };
   if (isPlainCatalogValue(verified.catalog)) {
     freezeCatalogValue(verified.catalog);
     immutableCatalogVerifications.set(verified.catalog, verified);
