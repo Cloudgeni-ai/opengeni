@@ -46,11 +46,12 @@ export async function getBillingBalance(
         select coalesce(sum(amount_micros), 0)::text as balance,
           greatest(0, coalesce(sum(-amount_micros) filter (where usage_origin = 'api'), 0))::text as "apiSpent",
           -- Paid-for funding (top-ups and operator grants net of refunds and
-          -- disputes); what own-key fees drew from paid credits; this
-          -- calendar month's (UTC) own-key fees.
+          -- disputes); what own-key fees drew beyond paid plan credit (paid
+          -- credits, or debt when those ran out); this calendar month's (UTC)
+          -- own-key fees.
           coalesce(sum(amount_micros) filter (where type in ('credit_topup', 'manual_credit_grant',
             'credit_refund', 'credit_dispute_hold', 'credit_dispute_release')), 0)::text as "paidFunding",
-          coalesce(sum(coalesce((metadata->>'creditPaidMicros')::bigint, -amount_micros))
+          coalesce(sum(-amount_micros - coalesce((metadata->>'planPaidMicros')::bigint, 0))
             filter (where type = ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as "feesFromCredits",
           coalesce(sum(-amount_micros) filter (where type = ${BYOK_PLATFORM_FEE_TYPE}
             and created_at >= date_trunc('month', statement_timestamp() at time zone 'UTC') at time zone 'UTC'),
@@ -129,7 +130,8 @@ export async function getBillingBalance(
       ...paidCredit(
         creditsOutsidePlan(generalBalanceMicros, row?.plan ?? null),
         row?.plan ?? null,
-        Number(row?.paidFunding ?? 0) - Number(row?.feesFromCredits ?? 0),
+        Number(row?.paidFunding ?? 0),
+        Number(row?.feesFromCredits ?? 0),
       ),
       ...(Number(row?.feesThisMonth ?? 0) > 0
         ? { byokPlatformFeeMonthMicros: Number(row?.feesThisMonth) }
@@ -170,9 +172,16 @@ function apiDebt(creditsMicros: number, apiSpentMicros: number) {
   return debt > 0 ? { apiDebtMicros: debt } : {};
 }
 
-/** General credit app work may use: API debt never shrinks the plan allowance. */
+/**
+ * General credit app work may use: API debt never shrinks the plan
+ * allowance, and own-key fee debt never draws promotional credit. The larger
+ * of the two is added back, so a debt that is both is never counted twice.
+ */
 function appGeneralMicros(balance: BillingBalance): number {
-  return (balance.generalBalanceMicros ?? balance.balanceMicros) + (balance.apiDebtMicros ?? 0);
+  return (
+    (balance.generalBalanceMicros ?? balance.balanceMicros) +
+    Math.max(balance.apiDebtMicros ?? 0, balance.byokFeeDebtMicros ?? 0)
+  );
 }
 
 /**
@@ -184,14 +193,23 @@ function appGeneralMicros(balance: BillingBalance): number {
 function paidCredit(
   creditsMicros: number,
   plan: BillingPlanBalance | null,
-  unspentPaidFundingMicros: number,
+  paidFundingMicros: number,
+  feesFromCreditsMicros: number,
 ) {
+  // Fees settle after use, so parallel calls can run past paid credit. The
+  // excess is fee debt: the next top-up repays it, and it never draws
+  // promotional credit (spendable figures add it back).
+  const feeDebtMicros = Math.max(0, feesFromCreditsMicros - paidFundingMicros);
   return {
     paidPlanCreditMicros:
       plan && plan.key !== "free" && !plan.creditScoped
         ? Math.max(0, plan.creditRemainingMicros)
         : 0,
-    paidCreditsMicros: Math.max(0, Math.min(creditsMicros, unspentPaidFundingMicros)),
+    paidCreditsMicros: Math.max(
+      0,
+      Math.min(creditsMicros, paidFundingMicros - feesFromCreditsMicros),
+    ),
+    ...(feeDebtMicros > 0 ? { byokFeeDebtMicros: feeDebtMicros } : {}),
   };
 }
 
@@ -218,7 +236,9 @@ export async function getByokFeeSpendableBalance(
 /** Credits only: what API-origin work may spend (never plan or promotional credit). */
 export function apiSpendableCreditMicros(balance: BillingBalance): number {
   // Without a credits figure, nothing is known to be credits: fail closed.
-  return Math.max(0, balance.creditsMicros ?? 0);
+  if (balance.creditsMicros === undefined) return 0;
+  // Own-key fee debt is owed from paid credit, never from promotional credit.
+  return Math.max(0, balance.creditsMicros + (balance.byokFeeDebtMicros ?? 0));
 }
 
 /**

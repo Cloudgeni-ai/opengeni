@@ -193,13 +193,14 @@ async function chargeByokPlatformFee(
   db: Database,
   input: ModelUsageSettlementInput,
   priced: {
-    estimatedProviderCostMicros: number | null;
+    listPriceMicros: number | null;
+    reportedCostMicros: number | null;
     pricingSource: ModelUsageBillingRecord["pricingSource"];
     inputTokens: number | null;
     outputTokens: number | null;
   },
 ): Promise<number> {
-  if (!byokPlatformFeeActive(settings)) return 0;
+  if (!byokPlatformFeeActive(settings, input.accountId)) return 0;
   const list = byokListEquivalent(priced);
   const feeMicros = byokPlatformFeeMicros(list.listMicros, settings.byokPlatformFeeBps);
   if (feeMicros <= 0) return 0;
@@ -426,12 +427,25 @@ export async function settleModelUsage(
     // Explicit from the caller, else the served route's payer: the person's
     // own key or subscription, never a deployment-funded free model.
     const byok =
-      input.byok ??
-      (resolveModelProviderForTurn(settings, input.model)?.model.billing.upstreamPayer ??
-        "deployment") !== "deployment";
+      byokPlatformFeeActive(settings, input.accountId) &&
+      (input.byok ??
+        (resolveModelProviderForTurn(settings, input.model)?.model.billing.upstreamPayer ??
+          "deployment") !== "deployment");
     const byokFee = byok
       ? await chargeByokPlatformFee(settings, db, input, {
-          estimatedProviderCostMicros,
+          // The list price, even on a gateway route, then a reported cost.
+          listPriceMicros:
+            hasCompleteCoreTokenTelemetry && configuredListPricingModel
+              ? (calculateModelListUsageCostSnapshot(
+                  settings,
+                  configuredListPricingModel,
+                  sanitizedUsage,
+                  { latencyMode: input.latencyMode ?? "standard", priceContextKnown: false },
+                )?.providerCostMicros ?? null)
+              : !gatewayBilling && hasCompleteCoreTokenTelemetry
+                ? (pricingBreakdown?.providerCostMicros ?? null)
+                : null,
+          reportedCostMicros: gatewayBilling ? estimatedProviderCostMicros : null,
           pricingSource,
           inputTokens: sanitizedUsage.inputTokens ?? null,
           outputTokens: sanitizedUsage.outputTokens ?? null,

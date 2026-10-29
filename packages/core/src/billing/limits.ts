@@ -8,10 +8,9 @@ import {
   API_CREDITS_REQUIRED_CODE,
   API_CREDITS_REQUIRED_MESSAGE,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
-  BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
   type BillingOrigin,
 } from "@opengeni/contracts";
-import { byokPlatformFeeActive } from "./byok-platform-fee";
+import { byokPaidCreditRefusalMessage, byokPlatformFeeActive } from "./byok-platform-fee";
 import type {
   LimitAction,
   LimitDecision,
@@ -241,7 +240,11 @@ async function checkCreditBalance(
 ): Promise<LimitDecision> {
   if (externallyBilled) {
     // Paid outside Opengeni; the person's own key still pays the platform fee.
-    if (byok && byokPlatformFeeActive(deps.settings) && isCostlyAction(input.action)) {
+    if (
+      byok &&
+      byokPlatformFeeActive(deps.settings, input.accountId) &&
+      isCostlyAction(input.action)
+    ) {
       return await checkByokPaidCredit(deps, input.accountId, input.billingOrigin);
     }
     return { allowed: true };
@@ -292,7 +295,7 @@ export async function checkByokPaidCredit(
     : {
         allowed: false,
         code: BYOK_PAID_CREDIT_REQUIRED_CODE,
-        message: BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
+        message: byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
       };
 }
 

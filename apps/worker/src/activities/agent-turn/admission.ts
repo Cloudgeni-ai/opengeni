@@ -1,6 +1,7 @@
 import {
   checkSessionUsageLimitAdmission,
   checkWorkspaceAllowance,
+  chargeBillingOrigin,
   getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   SessionUsageLimitUnavailableError,
@@ -12,11 +13,14 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { selectCodexCredentialId } from "@opengeni/codex";
-import { byokPlatformFeeActive, directPersonalConnectionSubjectId } from "@opengeni/core";
+import {
+  byokPaidCreditRefusalMessage,
+  byokPlatformFeeActive,
+  directPersonalConnectionSubjectId,
+} from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
-  BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
   type AllowanceExhaustedRefusal,
   type BillingOrigin,
   type SessionEvent,
@@ -467,10 +471,17 @@ export async function ensureRunAllowed(
         billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
       );
     }
-  } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings)) {
+  } else if (
+    !chargesOpenGeniCredits &&
+    byok &&
+    !entitlements &&
+    byokPlatformFeeActive(settings, accountId)
+  ) {
     // The person's own key pays a platform fee, payable only from paid credit.
     const balance = await getByokFeeSpendableBalance(db, accountId, billingOrigin);
-    if (balance.balanceMicros <= 0) throw new Error(BYOK_PAID_CREDIT_REQUIRED_MESSAGE);
+    if (balance.balanceMicros <= 0) {
+      throw new Error(byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)));
+    }
   }
   const refusal = await checkWorkspaceAllowance(db, {
     accountId,

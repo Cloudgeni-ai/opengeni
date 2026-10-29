@@ -211,11 +211,15 @@ Claude, Codex or SuperGrok subscription costs Opengeni nothing upstream. It
 pays a platform fee instead, in the app and over the API alike:
 `byokPlatformFeeBps` (`OPENGENI_BYOK_PLATFORM_FEE_BPS`, default 500 = 5%) of
 the call's list-price equivalent, rounded up to the micro-dollar. The fee is
-charged only while credit billing is active (`OPENGENI_BILLING_MODE=stripe` or
-`OPENGENI_USAGE_LIMITS_MODE=managed`); `0` turns it off.
+charged only with Stripe billing (`OPENGENI_BILLING_MODE=stripe`), where people
+can buy the credit it needs; `0` turns it off. A host that binds its own
+entitlements owns funding and is skipped, and so is an account on legacy
+billing terms (CloudGeni, above).
 
-- **List-price equivalent:** the reviewed list price of the served model, or
-  the cost the provider or Gateway reported. A custom endpoint with no list
+- **List-price equivalent:** the reviewed list price of the served model, even
+  on a Gateway route; else a positive cost the provider or Gateway reported (a
+  Gateway can report $0 on the person's own upstream key). A response with
+  incomplete token counts uses the fallback rate. A custom endpoint with no list
   price uses the fallback rate `BYOK_FALLBACK_LIST_RATE`: $1.25 per million
   input tokens (cached and cache-write tokens count as input) and $10 per
   million output tokens, a mid-tier frontier rate, so an unpriced model is
@@ -223,7 +227,7 @@ charged only while credit billing is active (`OPENGENI_BILLING_MODE=stripe` or
 - **Charge:** settlement writes one `byok_platform_fee` ledger debit per
   response (`credit:byok_platform_fee:<sourceId>`, idempotent), with
   `listEquivalentMicros`, `listEquivalentSource`, `feeBps`, and how it was
-  funded (`planPaidMicros`, `creditPaidMicros`).
+  funded (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`).
 - **Paid credit only:** the fee may draw on a paid plan's credit (Pro, Max)
   for app use, then on credits up to what was paid for: top-ups and operator
   credit grants, net of refunds and disputes and of what earlier fees took
@@ -232,9 +236,17 @@ charged only while credit billing is active (`OPENGENI_BILLING_MODE=stripe` or
   is a general debit and never draws on model-scoped grants, and Free monthly
   credit is always model-scoped. API-origin fees come from credits only, like
   all API use.
+- **Fee debt:** admission only checks that paid credit is above zero, so
+  parallel calls can settle past it. The excess (`unfundedMicros`) is fee debt
+  (`BillingBalance.byokFeeDebtMicros`): it never draws promotional credit
+  (spendable figures add it back), no own-key call is admitted while it is
+  owed, and the next top-up repays it first.
 - **Refusal:** with no paid credit an own-key call is refused before it runs:
-  HTTP 402, code `byok_paid_credit_required`, "Add credits to use your own
-  key." and the Add credits action. The worker re-checks between model calls.
+  HTTP 402, code `byok_paid_credit_required`, with one action. On the Free
+  plan in the app, "Upgrade to Pro to use your own key." and the
+  `upgrade_plan` action; otherwise "Add credits to use your own key." and the
+  Add credits action. The worker re-checks between model calls; scheduled
+  runs skip the occurrence as out of credits and goals pause on credits.
 
 The fee is not a model charge: it never consumes scoped promotional grants,
 and a deployment-funded free model (`cost: "free"`, Opengeni pays upstream)
@@ -242,8 +254,14 @@ pays neither credits nor the fee. Paid tools (sandbox time, web search,
 voice, image and video) keep their own credit charges with or without an own
 key.
 
-CloudGeni accounts that run on their own provider keys pay the fee from their
-operator credit grants, which count as paid credit.
+What counts as paid: `credit_topup` (a partially discounted coupon checkout
+records the full top-up, so its discount counts as paid) and
+`manual_credit_grant` (operators should use `grant` for goodwill credit that
+must not pay fees). Coupon redemptions that write `grant` never pay it.
+
+Workspace and member allowances count fee debits like any other debit, so an
+allowance that also counts unbilled usage at list price sees an own-key call
+at 105% of list.
 
 ## Rollout
 
@@ -265,5 +283,5 @@ intake doesn't mark the automations a delivery fires. Such a source stays app
 until its next API secret or format write on a new pod.
 
 The platform fee needs no migration. Its default (500) turns it on wherever
-credit billing is active once deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0`
+Stripe billing is active once deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0`
 to deploy it switched off.

@@ -1,7 +1,6 @@
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
-  BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
   type BillingOrigin,
   type EntitlementsPort,
 } from "@opengeni/contracts";
@@ -13,7 +12,7 @@ import {
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import { byokPlatformFeeActive } from "./byok-platform-fee";
+import { byokPaidCreditRefusalMessage, byokPlatformFeeActive } from "./byok-platform-fee";
 
 export type ModelCallAdmissionDenial =
   | "insufficient_credits"
@@ -61,13 +60,18 @@ export async function admitModelCall(
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
-  if (!input.chargesOpenGeniCredits && input.byok && byokPlatformFeeActive(settings)) {
+  if (
+    !input.chargesOpenGeniCredits &&
+    input.byok &&
+    !services.entitlements &&
+    byokPlatformFeeActive(settings, input.accountId)
+  ) {
     const balance = await getByokFeeSpendableBalance(db, input.accountId, input.billingOrigin);
     if (balance.balanceMicros <= 0) {
       return {
         allowed: false,
         denial: "insufficient_credits",
-        message: BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
+        message: byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(input.billingOrigin)),
         byokPaidCreditRequired: true,
       };
     }
