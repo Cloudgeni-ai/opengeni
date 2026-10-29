@@ -6672,6 +6672,12 @@ export type OrganizationMcpConnection = {
   lastUsedAt: string | null;
   expiresAt: string;
   revokedAt: null;
+  /**
+   * Listed agents: whether the caller can disconnect this one. Everyone
+   * disconnects their own; owners and admins anyone's, except only an owner an
+   * owner's.
+   */
+  canDisconnect?: boolean;
 };
 
 export type OrganizationMcpConnectionList = {
@@ -6702,6 +6708,11 @@ export type PersonalApiKey = {
   expiresAt: string | null;
   lastUsedAt: string | null;
   createdAt: string;
+  /**
+   * Listed keys: whether the caller can revoke this one. Everyone revokes their
+   * own; owners and admins anyone's, except only an owner an owner's.
+   */
+  canRevoke?: boolean;
 };
 
 export type ListPersonalApiKeysResponse = {

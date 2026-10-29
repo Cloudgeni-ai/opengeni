@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomBytes } from "node:crypto";
 import { organizationAccessPresetPermissions } from "@opengeni/contracts";
 import {
   acceptOrganizationInvitation,
@@ -65,6 +66,7 @@ describe("organization admins manage organization integrations", () => {
         betterAuthSecret: "organization-admin-integrations-secret-32-bytes",
         publicBaseUrl: origin,
         environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+        mcpOauthEnabled: true,
       }),
       db: client.db,
       bus: new MemoryEventBus(),
@@ -204,13 +206,81 @@ describe("organization admins manage organization integrations", () => {
     };
     const keys = async (person: Person, accountId: string) =>
       (await (await send(person, org(accountId, "/personal-api-keys"))).json()) as {
-        apiKeys: Array<{ id: string }>;
+        apiKeys: Array<{ id: string; canRevoke?: boolean }>;
         canManageAll: boolean;
       };
     const agents = async (person: Person, accountId: string) =>
       (await (await send(person, org(accountId, "/mcp-connections"))).json()) as {
+        connections: Array<{
+          id: string;
+          connectedBy: { subjectId: string };
+          canDisconnect?: boolean;
+        }>;
         canManageAll: boolean;
       };
+    // A person connects an outside agent to the organization MCP server.
+    const connectAgent = async (person: Person, accountId: string) => {
+      const redirectUri = "http://127.0.0.1:4567/callback";
+      const registered = await app.request("/oauth/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          client_name: "Claude Code",
+          redirect_uris: [redirectUri],
+          grant_types: ["authorization_code", "refresh_token"],
+          token_endpoint_auth_method: "none",
+        }),
+      });
+      expect(registered.status).toBe(201);
+      const { client_id: clientId } = (await registered.json()) as { client_id: string };
+      const verifier = randomBytes(32).toString("base64url");
+      const authorize = new URL("/oauth/authorize", origin);
+      for (const [key, value] of Object.entries({
+        response_type: "code",
+        scope: "mcp:access",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256",
+        resource: `${origin}/v1/mcp`,
+        state: "state",
+      }))
+        authorize.searchParams.set(key, value);
+      const started = await app.request(authorize.pathname + authorize.search, {
+        headers: { cookie: person.cookie },
+      });
+      const requestToken = new URL(started.headers.get("location")!).searchParams.get("request")!;
+      const approved = await app.request(`/v1/mcp-connections/requests/${requestToken}`, {
+        method: "POST",
+        headers: browser(person.cookie),
+        body: JSON.stringify({
+          decision: "approve",
+          organizationId: accountId,
+          access: {
+            preset: "read_only",
+            permissions: ["account:read", "workspace:read", "sessions:read"],
+            workspaceScope: { kind: "all" },
+          },
+        }),
+      });
+      expect(approved.status).toBe(200);
+      const code = new URL(
+        ((await approved.json()) as { redirectTo: string }).redirectTo,
+      ).searchParams.get("code")!;
+      const token = await app.request("/oauth/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: clientId,
+          code,
+          code_verifier: verifier,
+          redirect_uri: redirectUri,
+          resource: `${origin}/v1/mcp`,
+        }),
+      });
+      expect(token.status).toBe(200);
+    };
     const memberKey = await personalKey(member, acme.accountId);
     const ownerKey = await personalKey(owner, acme.accountId);
     const otherKey = await personalKey(otherOwner, other.accountId);
@@ -232,6 +302,39 @@ describe("organization admins manage organization integrations", () => {
     ).toBe(404);
     expect(
       (await send(admin, org(acme.accountId, `/personal-api-keys/${memberKey}`), "DELETE")).status,
+    ).toBe(204);
+    // Only an owner revokes the owner's keys or disconnects the owner's agents,
+    // so an admin can never cut the owner off.
+    expect(seen.apiKeys.find((key) => key.id === ownerKey)?.canRevoke).toBe(false);
+    expect(seen.apiKeys.find((key) => key.id === memberKey)?.canRevoke).toBe(true);
+    expect(
+      (await send(admin, org(acme.accountId, `/personal-api-keys/${ownerKey}`), "DELETE")).status,
+    ).toBe(403);
+    await connectAgent(owner, acme.accountId);
+    await connectAgent(member, acme.accountId);
+    const connections = (await agents(admin, acme.accountId)).connections;
+    const ownerAgent = connections.find((each) => each.connectedBy.subjectId === owner.subjectId)!;
+    const memberAgent = connections.find(
+      (each) => each.connectedBy.subjectId === member.subjectId,
+    )!;
+    expect(ownerAgent.canDisconnect).toBe(false);
+    expect(memberAgent.canDisconnect).toBe(true);
+    expect(
+      (await send(admin, org(acme.accountId, `/mcp-connections/${ownerAgent.id}`), "DELETE"))
+        .status,
+    ).toBe(403);
+    expect(
+      (await send(admin, org(acme.accountId, `/mcp-connections/${memberAgent.id}`), "DELETE"))
+        .status,
+    ).toBe(204);
+    const ownerView = await agents(owner, acme.accountId);
+    expect(ownerView.connections.every((each) => each.canDisconnect === true)).toBe(true);
+    expect(
+      (await send(owner, org(acme.accountId, `/mcp-connections/${ownerAgent.id}`), "DELETE"))
+        .status,
+    ).toBe(204);
+    expect(
+      (await send(owner, org(acme.accountId, `/personal-api-keys/${ownerKey}`), "DELETE")).status,
     ).toBe(204);
 
     // Organization API keys and service accounts: an admin manages the

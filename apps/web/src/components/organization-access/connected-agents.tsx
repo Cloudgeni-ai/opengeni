@@ -419,7 +419,7 @@ export function ConnectedAgentPage({
         }
         meta={[mine ? "Acts as you" : `Acts as ${connection.connectedBy.name}`]}
         actions={
-          mine || canManageAll ? (
+          (connection.canDisconnect ?? (mine || canManageAll)) ? (
             <MoreMenu label={`More for ${connection.clientName}`}>
               <DropdownMenuItem variant="destructive" onSelect={() => setConfirming(true)}>
                 Disconnect
