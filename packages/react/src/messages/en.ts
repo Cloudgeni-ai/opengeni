@@ -3131,6 +3131,8 @@ export const englishMessages = {
   "messageTimeline.toolCallNotReplayedAfterReconnecting":
     "This tool call wasn't replayed. After reconnecting, send a new message to try again.",
   "messageTimeline.videoGenerationFailed": "Video generation failed",
+  "messageTimeline.voiceHandoff": "Voice handoff",
+  "messageTimeline.voiceRequest": "Voice request",
   "messageTimeline.workerCompleted": "Worker completed",
   "messageTimeline.workerFailed": "Worker failed",
   "messageTimeline.workerPaused": "Worker paused",
@@ -5270,6 +5272,8 @@ export const englishMessages = {
   "timeline.projection.tryAgainAfterYourQuota":
     "Try again after your quota resets, or switch to another model or provider.",
   "timeline.projection.usageLimitReached": "Usage limit reached",
+  "timeline.projection.voiceSessionEnded":
+    "Voice session ended. Remaining conversation context was sent to the agent.",
   "timeline.projection.waiting": "Waiting",
   "timeline.projection.waitingForAnAccount": "Waiting for an account.",
   "timeline.projection.waitingForYou": "Waiting for you",
