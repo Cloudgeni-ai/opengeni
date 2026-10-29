@@ -4471,6 +4471,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       /** Page targets that currently host a virtual authenticator. */
       authenticators: primitives.nonnegativeInteger,
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
+      /** Sent only when the caller opts into backup-flag negotiation. */
+      supportsBackupFlags: z.literal(true).optional(),
     })
     .strict(),
 );

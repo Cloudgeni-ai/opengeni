@@ -776,7 +776,25 @@ export class BrowserControlServer {
           409,
         );
       }
-      return success(await this.supervisor.passkeySync(sync.data));
+      const response = await this.supervisor.passkeySync(sync.data);
+      if (url.searchParams.get("backupFlags") === "1") {
+        return success({ ...response, supportsBackupFlags: true });
+      }
+      // Older APIs strictly parse registration material too. Keep their wire
+      // shape unchanged; the pending event retains its original flags until
+      // acknowledged, so an upgraded caller can still retrieve them.
+      return success({
+        ...response,
+        events: response.events.map((event) => {
+          if (event.type !== "registered") return event;
+          const {
+            backupEligibility: _eligibility,
+            backupState: _state,
+            ...credential
+          } = event.credential;
+          return { ...event, credential };
+        }),
+      });
     }
     if (segments.length === 4 && segments[3] === "recordings") {
       if (request.method !== "POST") {

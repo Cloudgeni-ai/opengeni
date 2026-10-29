@@ -79,13 +79,20 @@ precisely what it is:
   item that needs approval for each use is never loaded into a browser. Only
   ECDSA P-256 passkeys, the kind these providers create, can be used.
   Browser imports preserve per-credential backup eligibility (BE) and backup
-  state (BS) when supplied. Bitwarden/Vaultwarden credentials use BE=true and
-  BS=true, matching the Bitwarden authenticator; a false BE on an imported
+  state (BS) when supplied. Bitwarden/Vaultwarden and Proton Pass credentials
+  use BE=true and BS=true, matching their authenticators; a false BE on an imported
   assertion can be rejected even when its signature is correct. Hosted
   registrations retain the flags Chromium reported. Older hosted items and
   providers that do not supply flags retain the existing false defaults; do
   not change all authenticators to backed-up credentials, because a relying
   party requires BE to match the original registration.
+  The private sync negotiates flag support without changing older controllers'
+  strict payload shape. Those controllers still load credentials with their
+  existing false defaults; backed-up credentials need an updated controller.
+  Keeper's public record format does not supply these flags, and its
+  authenticator's registration flags have not been verified. Keeper imports
+  therefore keep the existing defaults; this does not establish compatibility
+  with relying parties that enforce BE continuity for Keeper registrations.
   1Password's SDK does not expose passkeys, so a 1Password login's passkey is
   kept untouched by every update but not usable: agents sign in with that
   item's password or one-time password, or the passkey is kept in a provider

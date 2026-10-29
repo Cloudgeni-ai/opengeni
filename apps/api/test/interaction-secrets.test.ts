@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   type AccessGrant,
-  type BrowserPasskeyCredential,
+  BrowserPasskeyCredential,
   type BrowserPasskeyEvent,
   type BrowserPasskeySyncRequest,
   type BrowserPasskeySyncResponse,
@@ -370,6 +370,73 @@ describe("syncBrowserPasskeys", () => {
         };
       },
     };
+  }
+
+  test("device-bound hosted credentials keep the legacy shape without a probe", async () => {
+    const { store } = fakeStore();
+    store.lease = async () => [{ ...stored, backupEligibility: false, backupState: false }];
+    const client = fakeClient([]);
+    await syncBrowserPasskeys({
+      port: { ...port({}), passkeys: store },
+      grant: agentGrant,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      client,
+    });
+    expect(client.requests).toHaveLength(1);
+    expect(client.requests[0]!.credentials).toEqual([stored]);
+  });
+
+  for (const supportsBackupFlags of [false, true]) {
+    test(`negotiates backup flags without breaking legacy sync (${supportsBackupFlags})`, async () => {
+      const legacyCredential = BrowserPasskeyCredential.omit({
+        backupEligibility: true,
+        backupState: true,
+      }).strict();
+      const credentials = [
+        stored,
+        { ...stored, credentialId: "ZmFsc2U=", backupEligibility: false, backupState: false },
+        { ...stored, credentialId: "dHJ1ZQ==", backupEligibility: true, backupState: true },
+      ];
+      // Reproduce the previous rollout regression against the old strict shape.
+      expect(legacyCredential.safeParse(credentials[1]).success).toBe(false);
+      const { store } = fakeStore();
+      store.lease = async () => credentials;
+      const client = fakeClient([]);
+      const sync = client.passkeySync.bind(client);
+      client.passkeySync = async (request) => {
+        if (!supportsBackupFlags) {
+          for (const credential of request.credentials ?? []) {
+            expect(legacyCredential.safeParse(credential).success).toBe(true);
+          }
+        }
+        return {
+          ...(await sync(request)),
+          ...(supportsBackupFlags ? { supportsBackupFlags: true as const } : {}),
+        };
+      };
+      const input = {
+        port: { ...port({}), passkeys: store },
+        grant: agentGrant,
+        browserSessionId: BROWSER,
+        controllerGeneration: "controller-1",
+        client,
+        refresh: true,
+      };
+      expect(await syncBrowserPasskeys(input)).toEqual({ saved: 0, asserted: 0 });
+      expect(client.requests.map((request) => request.credentials?.length ?? null)).toEqual([0, 3]);
+      const sent = client.requests[1]!.credentials!;
+      expect(sent[1]).not.toHaveProperty("backupEligibility");
+      expect(sent[1]).not.toHaveProperty("backupState");
+      expect(sent[2]).toEqual({
+        ...stored,
+        credentialId: "dHJ1ZQ==",
+        ...(supportsBackupFlags ? { backupEligibility: true, backupState: true } : {}),
+      });
+      await syncBrowserPasskeys(input);
+      expect(client.requests).toHaveLength(3); // cached negotiation survives lease refresh
+      expect(credentials[2]!.backupEligibility).toBe(true); // never alter vault material
+    });
   }
 
   test("loads leased passkeys, saves registrations and writes sign counts back", async () => {

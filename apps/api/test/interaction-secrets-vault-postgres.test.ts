@@ -129,9 +129,8 @@ const credential: BrowserPasskeyCredentialMaterial = {
 describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
   "vault-backed interaction secrets (PostgreSQL)",
   () => {
-    test.each([undefined, false, true])(
-      "passkeys: save, lease, count and release with backup eligibility %s",
-      async (backupEligibility) => {
+    for (const backupEligibility of [undefined, false, true]) {
+      test(`passkeys: save, lease, count and release with backup eligibility ${backupEligibility}`, async () => {
         if (!client) return;
         const db = client.db;
         const { principal } = await agentAttempt();
@@ -210,8 +209,8 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         const taken = await store.lease(principal, "browser-b", 600);
         expect(taken.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
         await store.release("browser-b");
-      },
-    );
+      });
+    }
 
     test("connected password manager passkeys: found, leased live, counted back", async () => {
       if (!client) return;

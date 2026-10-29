@@ -248,6 +248,7 @@ type PasskeySessionState = {
   leasedAtMs: number;
   credentials: BrowserPasskeyCredential[];
   unsupported: boolean;
+  supportsBackupFlags?: boolean;
 };
 
 /** Per-process lease cache: renew at most once a minute per browser session
@@ -331,7 +332,14 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
   if (state?.unsupported) return null;
   const lease = async (): Promise<BrowserPasskeyCredential[]> => {
     const credentials = await store.lease(principal, holder, PASSKEY_LEASE_TTL_SECONDS);
-    state = { leasedAtMs: now(), credentials, unsupported: false };
+    state = {
+      leasedAtMs: now(),
+      credentials,
+      unsupported: false,
+      ...(state?.supportsBackupFlags === undefined
+        ? {}
+        : { supportsBackupFlags: state.supportsBackupFlags }),
+    };
     passkeySessions.delete(cacheKey);
     passkeySessions.set(cacheKey, state);
     while (passkeySessions.size > PASSKEY_SESSION_CACHE_LIMIT) {
@@ -346,7 +354,16 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     protocolVersion: INTERACTION_PROTOCOL_VERSION,
     browserSessionId: input.browserSessionId,
     controllerGeneration: input.controllerGeneration,
-    credentials,
+    // Absent already means false to both legacy and current controllers.
+    // Never send new keys to a strict legacy schema, even when they are false.
+    credentials:
+      credentials?.map(({ backupEligibility, backupState, ...credential }) => ({
+        ...credential,
+        ...(state?.supportsBackupFlags && backupEligibility === true
+          ? { backupEligibility: true }
+          : {}),
+        ...(state?.supportsBackupFlags && backupState === true ? { backupState: true } : {}),
+      })) ?? null,
     acknowledgeEventIds,
   });
   try {
@@ -355,7 +372,19 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     const credentials = due ? await lease() : null;
     let response: BrowserPasskeySyncResponse;
     try {
+      if (
+        state?.supportsBackupFlags === undefined &&
+        credentials?.some((credential) => credential.backupEligibility || credential.backupState)
+      ) {
+        // Negotiate with an empty set before loading true flags, so a pending
+        // assertion cannot use another principal's previous credentials during
+        // discovery. Events remain pending. Older controllers ignore the opt-in
+        // query and return their original shape. Cache per binding/attempt.
+        const probe = await input.client.passkeySync(request([], []));
+        state!.supportsBackupFlags = probe.supportsBackupFlags === true;
+      }
       response = await input.client.passkeySync(request(credentials, []));
+      if (state) state.supportsBackupFlags = response.supportsBackupFlags === true;
     } catch (error) {
       if (isUnsupportedSync(error)) {
         passkeySessions.set(cacheKey, {
