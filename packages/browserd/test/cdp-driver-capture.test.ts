@@ -450,9 +450,58 @@ test("a slow full-page screenshot does not end the live view of its tab", async 
   }
 }, 20_000);
 
-test("a frame capture the renderer never answers still ends the live view", async () => {
-  // Only a capture still within its own deadline holds frames back without
-  // counting; one past it is a renderer that stopped drawing.
+/** The next frame of a stream, or what ended it, or "pending" when neither
+ * came within `ms`. */
+async function nextFrameWithin(
+  next: Promise<IteratorResult<unknown>>,
+  ms: number,
+): Promise<"frame" | "closed" | "pending" | Error> {
+  const settled = next.then(
+    (result) => (result.done ? ("closed" as const) : ("frame" as const)),
+    (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      settled,
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test("the live view of a page busy for longer than three frame deadlines resumes once it answers", async () => {
+  // A page whose main thread is busy answers none of a frame's commands.
+  // Three timed-out frames (about 6 s) used to end the stream for good.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    fixture.setPageBusy(true);
+    const next = iterator.next();
+    // Drain the frame that may already be in flight.
+    let outcome = await nextFrameWithin(next, 1_000);
+    const pending = outcome === "frame" ? iterator.next() : next;
+    outcome = await nextFrameWithin(pending, 9_000);
+    expect(outcome).toBe("pending");
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(pending, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("a frame capture the renderer does not answer holds the live view until it does", async () => {
+  // A capture past its own deadline no longer counts toward ending the
+  // stream: the tab may be one its browser is not drawing yet.
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
   try {
@@ -462,22 +511,31 @@ test("a frame capture the renderer never answers still ends the live view", asyn
     expect((await iterator.next()).done).toBe(false);
     fixture.stallNext("Page.captureScreenshot");
     await fixture.waitUntilStalled();
-    const ended = (async () => {
-      try {
-        while (!(await iterator.next()).done);
-        return "closed";
-      } catch (error) {
-        return error;
-      }
-    })();
+    const next = iterator.next();
     // Before the connection gives up on the stalled capture at 10 s.
-    const outcome = await Promise.race([
-      ended,
-      new Promise((resolve) => setTimeout(() => resolve("still streaming"), 9_000)),
-    ]);
-    expect(outcome).toBeInstanceOf(Error);
+    expect(await nextFrameWithin(next, 9_000)).toBe("pending");
+    fixture.replyToStalled();
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
   } finally {
     fixture.replyToStalled();
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("frames that keep failing for another reason still end the live view", async () => {
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    fixture.failMethod("Page.captureScreenshot", "synthetic capture failure");
+    let outcome = await nextFrameWithin(iterator.next(), 3_000);
+    while (outcome === "frame") outcome = await nextFrameWithin(iterator.next(), 3_000);
+    expect(outcome).toBeInstanceOf(Error);
+  } finally {
     await frames?.close();
     await fixture.driver.close();
   }
@@ -1012,6 +1070,10 @@ async function captureFixture(
   let reachedStall = () => {};
   let waitingForStall = Promise.resolve();
   const delays = new Map<string, number>();
+  // A page whose main thread is busy: commands to the tab wait until it is not.
+  let pageBusy = false;
+  const heldByBusyPage: Array<(typeof calls)[number]> = [];
+  const failures = new Map<string, string>();
   const socket = new EventTarget() as EventTarget & {
     readyState: number;
     binaryType: string;
@@ -1123,7 +1185,18 @@ async function captureFixture(
     const command = JSON.parse(raw) as (typeof calls)[number];
     calls.push(command);
     if (viewportOn.has(command.method)) viewport = viewportOn.get(command.method);
-    if (command.method === stalledMethod && (!stalledWhen || stalledWhen(command.params))) {
+    const failure = failures.get(command.method);
+    if (failure !== undefined) {
+      queueMicrotask(() =>
+        socket.dispatchEvent(
+          new MessageEvent("message", {
+            data: JSON.stringify({ id: command.id, error: { code: -32000, message: failure } }),
+          }),
+        ),
+      );
+    } else if (pageBusy && command.sessionId) {
+      heldByBusyPage.push(command);
+    } else if (command.method === stalledMethod && (!stalledWhen || stalledWhen(command.params))) {
       stalledMethod = null;
       stalledWhen = null;
       stalled = command;
@@ -1186,6 +1259,13 @@ async function captureFixture(
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {
       delays.set(method, delayMs);
+    },
+    setPageBusy(busy: boolean) {
+      pageBusy = busy;
+      if (!busy) for (const command of heldByBusyPage.splice(0)) reply(command);
+    },
+    failMethod(method: string, message: string) {
+      failures.set(method, message);
     },
     stallNext(method: string, when?: (params: Record<string, any> | undefined) => boolean) {
       stalledMethod = method;
