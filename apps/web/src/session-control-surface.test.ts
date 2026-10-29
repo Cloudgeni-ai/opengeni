@@ -109,9 +109,15 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
+    // The status row and the composer region share one gutter (narrower when
+    // the chat sits in a panel beside a Site).
     expect(route).toContain(
-      'className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6"',
+      'const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";',
     );
+    expect(route).toContain(
+      'className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}',
+    );
+    expect(route.match(/\bgutter,\n\s+readOnlyArchive && "hidden"/g)).toHaveLength(1);
     // The wait status is a chip in SessionChrome, not a separate banner row.
     expect(route).not.toContain("<LazySessionWaitStatus");
   });

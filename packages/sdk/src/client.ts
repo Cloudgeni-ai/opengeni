@@ -11393,14 +11393,21 @@ export class OpenGeniClient {
     );
   }
 
-  /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
-  async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
-    // A JSON body even though the route reads none: signed-in browsers are
-    // admitted to subscription mutations only as same-origin JSON requests.
+  /**
+   * Begin device-code login: show `userCode` at `verificationUri`, then poll
+   * with `state`. `scope: "user"` connects the person's own subscription from
+   * this workspace; it is kept in their own Personal workspace.
+   */
+  async codexConnectStart(
+    workspaceId: string,
+    options: { scope?: "user" } = {},
+  ): Promise<CodexConnectStart> {
+    // Always a JSON body: signed-in browsers are admitted to subscription
+    // mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
-      {},
+      options.scope ? { scope: options.scope } : {},
     );
   }
 

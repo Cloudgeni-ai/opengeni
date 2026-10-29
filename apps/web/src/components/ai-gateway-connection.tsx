@@ -1992,6 +1992,7 @@ export function ProviderConnectPage({
     );
   return (
     <ModelsFormPage
+      connectStep
       backLabel={state.connected ? config.title : listLabel}
       headerAside={<ProviderTile provider={config.provider} />}
       title={

@@ -745,10 +745,11 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(remaining.accounts[0]).toMatchObject({ label: "Organization Grok", active: true });
   });
 
-  test("private accounts: only from the owner's Personal workspace, managed there", async () => {
+  test("private accounts: connected from any workspace, kept and managed in Personal", async () => {
     // This organization's switch row is enabled (above). A private connect
-    // from a shared workspace the person belongs to is refused at start,
-    // before any xAI sign-in.
+    // from a shared workspace the person belongs to starts in place; the
+    // account is kept in their own Personal workspace (see
+    // subscription-own-in-place-postgres.test.ts for the full flow).
     const before = deviceSequence;
     const elsewhere = await browserWorkspaceRequest(
       managedSharedWorkspaceId,
@@ -757,13 +758,10 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       { scope: "user" },
     );
     expect({ status: elsewhere.status, body: await elsewhere.json() }).toMatchObject({
-      status: 409,
-      body: {
-        message:
-          "Private SuperGrok accounts are connected and managed from your Personal workspace",
-      },
+      status: 200,
+      body: { scope: "user" },
     });
-    expect(deviceSequence).toBe(before);
+    expect(deviceSequence).toBe(before + 1);
 
     // In the Personal workspace the person connects a personal connection.
     providerSubject = "xai-core-personal";

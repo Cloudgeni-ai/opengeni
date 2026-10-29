@@ -281,6 +281,7 @@ import {
   verifyCodexRedemptionConfirmation,
 } from "../codex-redemption-security";
 import { parseRequestBody } from "../http/request-body";
+import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
 
 const CODEX_OVERVIEW_STALE_MS = 15 * 60_000;
 const CODEX_REDEMPTION_CONFIRMATION_SECONDS = 5 * 60;
@@ -686,6 +687,11 @@ type CodexConnectState = {
   actorSubjectId?: string;
   deviceAuthId?: string;
   userCode?: string;
+  /**
+   * `user`: the person's own Codex subscription, connected from this
+   * workspace and kept in their own Personal workspace.
+   */
+  scope?: "user";
   iat?: number;
 };
 
@@ -1027,6 +1033,21 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     if (await managedCookieHuman(c, deps)) requireSameOriginBrowserMutation(c, deps);
+    const body = (await c.req.json().catch(() => null)) as { scope?: unknown } | null;
+    if (body?.scope !== undefined && body.scope !== "user" && body.scope !== "workspace")
+      throw new HTTPException(400, { message: "invalid Codex scope" });
+    const personal = body?.scope === "user";
+    // The person's own subscription: the verified person, with their own
+    // Personal workspace in this organization, refused before the sign-in.
+    if (personal)
+      await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        workspaceId,
+        "user",
+        "Codex",
+        "own_personal_workspace",
+      );
     // The device-code start touches no account state.
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
@@ -1042,6 +1063,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       actorSubjectId: grant.subjectId,
       deviceAuthId: start.deviceAuthId,
       userCode: start.userCode,
+      ...(personal ? { scope: "user" } : {}),
     });
     return c.json({
       userCode: start.userCode,
@@ -1066,12 +1088,30 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload.workspaceId !== workspaceId ||
       payload.actorSubjectId !== grant.subjectId ||
       !payload.deviceAuthId ||
-      !payload.userCode
+      !payload.userCode ||
+      (payload.scope !== undefined && payload.scope !== "user")
     ) {
       throw new HTTPException(400, {
         message: "codex connect state is invalid or expired",
       });
     }
+    // The person's own subscription: re-checked now, before any sign-in
+    // result is read, and written in their own Personal workspace.
+    const ownWorkspace = async () => {
+      const owner = await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        workspaceId,
+        "user",
+        "Codex",
+        "own_personal_workspace",
+      );
+      if (owner.subjectId !== grant.subjectId || owner.accountId !== grant.accountId)
+        throw new HTTPException(403, { message: "Codex connection identity changed" });
+      return owner.workspaceId;
+    };
+    const personal = payload.scope === "user";
+    const startedIn = personal ? await ownWorkspace() : workspaceId;
     // The device code itself expires 15 minutes after start; surface that to the
     // client (the 1-hour signed-state TTL is longer than the device window).
     if (
@@ -1121,11 +1161,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The core writer decides authority from the grant's subject: an
     // organization administrator (new or reconnected shared account), a
     // workspace administrator (reconnect of an account this workspace
-    // manages), or the person in their own Personal workspace.
+    // manages), or the person in their own Personal workspace (also when
+    // they connect their own from another workspace of the organization).
+    if (personal && (await ownWorkspace()) !== startedIn)
+      throw new HTTPException(403, { message: "Codex connection identity changed" });
     return await coreCodexConnected(c, deps, {
       accountId: grant.accountId,
-      workspaceId,
+      workspaceId: startedIn,
       subjectId: grant.subjectId,
+      ...(personal ? { personal: true } : {}),
       credential: {
         credentialEncrypted: encryptEnvironmentValue(
           key,

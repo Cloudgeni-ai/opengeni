@@ -25,7 +25,11 @@ import {
   marketplacePluginCapabilityItem,
   PLUGIN_CAPABILITY_ID_PREFIX,
 } from "../integrations/marketplace-plugin-catalog";
-import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import {
+  SITE_FRAME_HEADER,
+  siteFrameBodyRefusal,
+  withoutFileResources,
+} from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
   sessionScheduleTargets,
@@ -842,7 +846,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // capabilities. Ordinary session creation resolves the viewer's settings.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
       if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
-        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        // The console's own Site view (this request names the Site's id and
+        // version without a frame marker; Site code is always marked)
+        // attaches the person's files to the first message, as it does to
+        // every later one. Site code still may not, and neither does an
+        // origin carried over from elsewhere in the request.
+        const consoleSiteView =
+          Boolean(origin?.siteId) && c.req.header(SITE_FRAME_HEADER) === undefined;
+        const refused = siteFrameBodyRefusal(
+          "sessions.create",
+          "/sessions",
+          consoleSiteView ? withoutFileResources(payload) : payload,
+        );
         if (refused)
           return c.json(
             {
