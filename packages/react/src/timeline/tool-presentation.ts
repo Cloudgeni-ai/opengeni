@@ -1887,7 +1887,10 @@ export function toolRowPresentation(
   item = invokedToolCall(item);
   const row = presentedToolRow(t, item, context);
   const presented = context.details === "plain" ? plainToolRow(t, item, row, context) : row;
-  return item.awaitingApproval ? awaitingApprovalRow(t, presented) : presented;
+  if (item.awaitingApproval) return awaitingApprovalRow(t, presented);
+  return item.approvalRejected
+    ? rejectedApprovalRow(t, presented, item.approvalRejected === "automatic")
+    : presented;
 }
 
 /** A call waiting for the person's approval has not run: say so, never "Done". */
@@ -1901,6 +1904,30 @@ function awaitingApprovalRow(t: OpenGeniText, row: ToolRowPresentation): ToolRow
     cancelled: false,
     detailPreview: false,
     preview: textPreview(t("timeline.toolRenderers.waitingForYourApproval")),
+  };
+}
+
+/** A rejected call never ran: say so and by whom, never "Done" or "Interrupted". */
+function rejectedApprovalRow(
+  t: OpenGeniText,
+  row: ToolRowPresentation,
+  automatic: boolean,
+): ToolRowPresentation {
+  return {
+    ...row,
+    iconTone: "muted",
+    running: false,
+    chip: undefined,
+    failed: false,
+    cancelled: false,
+    detailPreview: false,
+    preview: textPreview(
+      t(
+        automatic
+          ? "timeline.toolRenderers.declinedAutomatically"
+          : "timeline.toolRenderers.youRejectedThis",
+      ),
+    ),
   };
 }
 
