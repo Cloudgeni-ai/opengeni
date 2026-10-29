@@ -1,5 +1,6 @@
 import {
   CapabilityCatalogItem,
+  mcpEndpointIdentity,
   pluginMcpUnavailableReason,
   type PluginDiscoveryItem,
 } from "@opengeni/contracts";
@@ -43,13 +44,39 @@ export function pluginCapabilityId(item: Pick<PluginDiscoveryItem, "provider" | 
 }
 
 /** What installing it adds, by the same rule the install flow uses. */
-function installableParts(item: PluginDiscoveryItem): { skills: string[]; servers: string[] } {
+function installableParts(item: PluginDiscoveryItem): {
+  skills: string[];
+  servers: string[];
+  endpoints: string[];
+} {
+  const servers = (item.mcpServers ?? []).filter(
+    (server) => pluginMcpUnavailableReason(server) === null,
+  );
   return {
     skills: (item.skills ?? []).map((skill) => skill.name),
-    servers: (item.mcpServers ?? [])
-      .filter((server) => pluginMcpUnavailableReason(server) === null)
-      .map((server) => server.name),
+    servers: servers.map((server) => server.name),
+    endpoints: servers.flatMap((server) => {
+      const key = mcpConnectionEndpointKey(server.endpoint);
+      return key ? [key] : [];
+    }),
   };
+}
+
+/**
+ * How a plugin's MCP server and a catalogue connection are recognised as the
+ * same endpoint: the endpoint identity without a trailing slash.
+ */
+export function mcpConnectionEndpointKey(url: string | null | undefined): string | null {
+  const identity = mcpEndpointIdentity(url);
+  return identity ? identity.replace(/\/+$/u, "") : null;
+}
+
+/** The endpoint keys of the MCP servers installing this plugin would add. */
+export function pluginMcpEndpointKeys(item: CapabilityCatalogItem): string[] {
+  const endpoints = item.metadata.mcpEndpoints;
+  return Array.isArray(endpoints)
+    ? endpoints.filter((endpoint): endpoint is string => typeof endpoint === "string")
+    : [];
 }
 
 function hostname(url: string | null): string | null {
@@ -81,7 +108,7 @@ function catalogItem(
     kind: "plugin",
     source: "public_registry",
     name: item.displayName.replace(/-/g, " "),
-    description: `${item.description} Plugin with ${contents}.`,
+    description: `${item.description.trim().replace(/(?<![.!?])$/u, ".")} Plugin with ${contents}.`,
     category: item.category?.toLowerCase() || "plugin",
     tags: [...new Set(["plugin", ...item.keywords, ...parts.skills, ...parts.servers])]
       .filter((tag) => tag.trim().length > 0)
@@ -105,6 +132,7 @@ function catalogItem(
       provider: item.provider,
       skills: parts.skills,
       mcpServers: parts.servers,
+      mcpEndpoints: parts.endpoints,
       recommendationOnly: true,
     },
   });
@@ -150,21 +178,35 @@ export async function marketplacePluginCapabilityItem(
   );
 }
 
-/** How an agent sees a plugin's setup: installed, or for a person to install from its card. */
+/**
+ * How an agent sees a plugin's setup: installed, or for a person to install
+ * from its card. A plugin installs for the whole workspace; when the catalogue
+ * also offers its MCP server as a connection, a request about the person's own
+ * account (their mailbox, calendar or files) needs that connection, so an
+ * uninstalled plugin's setup names it.
+ */
 export function pluginCapabilitySetup(
   item: CapabilityCatalogItem,
+  connections: readonly { capabilityId: string; name: string }[] = [],
 ):
   | { status: "ready"; action: null; detail: string }
   | { status: "authorization_required"; action: "enable"; detail: string } {
-  return item.enabled
-    ? {
-        status: "ready",
-        action: null,
-        detail: `The ${item.name} plugin is installed in this workspace. Its Skills are available; if you need its MCP servers' tools and they are not in this chat, search the catalog for them.`,
-      }
-    : {
-        status: "authorization_required",
-        action: "enable",
-        detail: `Not installed. The person can review what the ${item.name} plugin adds and install it for the workspace from its card.`,
-      };
+  if (item.enabled)
+    return {
+      status: "ready",
+      action: null,
+      detail: `The ${item.name} plugin is installed in this workspace. Its Skills are available; if you need its MCP servers' tools and they are not in this chat, search the catalog for them.`,
+    };
+  const named = connections
+    .map((connection) => `the ${connection.name} connection (${connection.capabilityId})`)
+    .join(" or ");
+  return {
+    status: "authorization_required",
+    action: "enable",
+    detail:
+      `Not installed. The person can review what the ${item.name} plugin adds and install it for the workspace from its card.` +
+      (named
+        ? ` For the person's own account, offer ${named} instead: call capability_authorization_request with its capabilityId. Installing the plugin is for everyone in the workspace.`
+        : ""),
+  };
 }
