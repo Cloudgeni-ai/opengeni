@@ -1644,6 +1644,50 @@ describe("generic lazy tool dispatch", () => {
     ).toContain("skill_save");
   });
 
+  test("a search for a tool every request carries says it is already in the tool list", async () => {
+    const human = firstPartyTool(
+      "request_human_input",
+      "Pause this turn and request structured human input from the person",
+    );
+    const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+    const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
+    const agent = new Agent({
+      name: "visible-search",
+      instructions: "Use tools.",
+      model: "scripted",
+      tools: [human, exec, skillSave],
+    });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const visible = await agent.getAllTools(undefined as never);
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+    const named = JSON.parse(
+      (await runtime.prepareSearch({ query: "", names: ["request_human_input"] })).output,
+    ) as { tools: unknown[]; unavailable: string[]; alreadyAvailable?: string };
+    expect(named.tools).toEqual([]);
+    expect(named.unavailable).toEqual([]);
+    expect(named.alreadyAvailable).toBe(
+      "request_human_input is already in your tool list; call it directly.",
+    );
+
+    const ranked = JSON.parse(
+      (await runtime.prepareSearch({ query: "request structured human input from the person" }))
+        .output,
+    ) as { alreadyAvailable?: string };
+    expect(ranked.alreadyAvailable).toBe(
+      "request_human_input is already in your tool list; call it directly.",
+    );
+
+    // A deferred tool still loads as before, with no notice.
+    const deferred = JSON.parse(
+      (await runtime.prepareSearch({ query: "", names: ["skill_save"] })).output,
+    ) as { tools: Array<{ name: string }>; alreadyAvailable?: string };
+    expect(deferred.tools.map((entry) => entry.name)).toEqual(["skill_save"]);
+    expect(deferred).not.toHaveProperty("alreadyAvailable");
+  });
+
   test("searches, restores provider history, and executes the real tool pipeline", async () => {
     let approvalChecks = 0;
     let executions = 0;
