@@ -7,6 +7,7 @@ import {
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
   CREDIT_EXHAUSTION_MESSAGE,
+  creditExhaustionText,
   composerSubmissionErrorMessage,
   composerSubmissionCanRetry,
   formatClockTime,
@@ -257,6 +258,25 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion({ error: "connection reset by peer" })).toBe(false);
     expect(isCreditExhaustion({ segmentLimit: "max_turns" })).toBe(false);
     expect(isCreditExhaustion({ error: null, detail: null, segmentLimit: null })).toBe(false);
+  });
+
+  test("own-key and API refusals are credit stops with their own sentences", () => {
+    const ownKey = "Activity task failed: Add credits to use your own key.";
+    const api = "API usage uses credits, not your plan credit.";
+    expect(isCreditExhaustion(ownKey)).toBe(true);
+    expect(isCreditExhaustion({ detail: api })).toBe(true);
+    expect(humanizeFailureReason(englishText, ownKey)).toBe(
+      "Add credits to use your own key. The conversation is preserved.",
+    );
+    expect(humanizeFailureReason(englishText, api)).toBe(
+      "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+    );
+    expect(creditExhaustionText(englishText, null, ownKey)).toBe(
+      "Add credits to use your own key. The conversation is preserved.",
+    );
+    expect(creditExhaustionText(englishText, "insufficient workspace credits")).toBe(
+      CREDIT_EXHAUSTION_MESSAGE(englishText),
+    );
   });
 });
 

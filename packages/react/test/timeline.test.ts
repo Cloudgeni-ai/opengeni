@@ -5595,6 +5595,33 @@ describe("credit exhaustion", () => {
     expect(items[1]).toMatchObject({ kind: "notice", tone: "failed" });
   });
 
+  test("an own-key or API credit stop keeps its own sentence on the turn and the notice", () => {
+    for (const [payload, text] of [
+      [
+        { type: "turn.failed", error: "Activity task failed: Add credits to use your own key." },
+        "Add credits to use your own key. The conversation is preserved.",
+      ],
+      [
+        {
+          type: "turn.completed",
+          detail: "API usage uses credits, not your plan credit.",
+          segmentLimit: "budget_exhausted",
+        },
+        "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+      ],
+    ] as const) {
+      reset();
+      const { type, ...rest } = payload;
+      const items = buildTimeline(englishText, [event(type, rest)]);
+      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+        outcome: "failed",
+        failureText: text,
+      });
+      expect(items.find((item) => item.kind === "notice")).toMatchObject({ tone: "failed", text });
+      expect(creditExhaustedFromEvents([event(type, rest)])).toBe(true);
+    }
+  });
+
   test("ordinary turn.completed is untouched — complete turn-end, no notice", () => {
     reset();
     const items = buildTimeline(englishText, [

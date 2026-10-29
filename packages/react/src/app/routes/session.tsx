@@ -40,7 +40,11 @@ import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
-import { isPaymentRequiredError } from "../lib/model-access";
+import {
+  isPaymentRequiredError,
+  paymentRefusalCode,
+  type PaymentRefusalCode,
+} from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { waitingDescendants } from "../lib/descendant-requests";
@@ -2303,6 +2307,7 @@ function SessionChatPane(props: {
     sessionId: string;
     model: string;
     message: string;
+    code: PaymentRefusalCode | null;
   } | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
@@ -2970,6 +2975,7 @@ function SessionChatPane(props: {
           sessionId: props.session.id,
           model: refusedModelId(error, input) ?? props.session.model,
           message: error.message,
+          code: paymentRefusalCode(error),
         });
         void modelCatalog.refresh();
       }
@@ -3937,6 +3943,7 @@ function SessionChatPane(props: {
             preferredModel: modelCatalog.defaultSelection?.model,
           })}
           message={sessionCreditRefusal.message}
+          refusalCode={sessionCreditRefusal.code}
           workspaceId={props.session.workspaceId}
           accountId={workspaceAccountId}
           canReadBilling={

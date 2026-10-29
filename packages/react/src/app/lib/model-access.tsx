@@ -9,3 +9,13 @@ export function isPaymentRequiredError(error: unknown): error is OpenGeniApiErro
     error instanceof OpenGeniApiError && error.status === 402 && error.code === "payment_required"
   );
 }
+
+/** A refusal only credits fix: the own-key platform fee, or API use. */
+export type PaymentRefusalCode = "byok_paid_credit_required" | "api_credits_required";
+
+/** Which credit a payment refusal needs, when it is more specific than "no credit". */
+export function paymentRefusalCode(error: unknown): PaymentRefusalCode | null {
+  if (!isPaymentRequiredError(error)) return null;
+  const code = error.details?.code;
+  return code === "byok_paid_credit_required" || code === "api_credits_required" ? code : null;
+}

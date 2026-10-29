@@ -35,7 +35,7 @@ import {
   sessionUsageLimitReachedMessage,
 } from "@opengeni/sdk/session-usage-limits";
 import {
-  CREDIT_EXHAUSTION_MESSAGE,
+  creditExhaustionText,
   presentFailure,
   isCreditExhaustion,
   tryParseJson,
@@ -1669,12 +1669,13 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE(t)));
+          const creditText = creditExhaustionPayloadText(t, payload);
+          items.push(turnEndItem(event, "failed", creditText));
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: CREDIT_EXHAUSTION_MESSAGE(t),
+            text: creditText,
             occurredAt: event.occurredAt,
           });
           break;
@@ -1781,7 +1782,7 @@ export function buildTimeline(
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
           : creditExhausted
-            ? CREDIT_EXHAUSTION_MESSAGE(t)
+            ? creditExhaustionPayloadText(t, payload)
             : (presented?.reason ?? null);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
@@ -2402,6 +2403,15 @@ const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+
  * the summary line stays a neutral fact instead of repeating remedy prose.
  */
 const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
+
+/** The credit-stop sentence for a turn-end payload (own key, API use, or none). */
+function creditExhaustionPayloadText(t: OpenGeniText, payload: Record<string, unknown>): string {
+  return creditExhaustionText(
+    t,
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
