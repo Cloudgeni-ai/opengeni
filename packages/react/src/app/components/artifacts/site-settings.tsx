@@ -75,8 +75,6 @@ export function useSiteManagement({
     hasWorkspacePermission(accessContext, workspaceId, "workspace:admin") ||
     isPersonalWorkspace(workspace, context.managedSelfContext);
   const workspaceName = workspace?.name ?? "this workspace";
-  // A Personal workspace has nobody to share with, so there is no audience.
-  const showAudience = !isPersonalWorkspace(workspace, context.managedSelfContext);
   const publication = useSitePublication({ client, workspaceId, siteId, enabled: manageData });
   const audience = useSiteAudience({
     client,
@@ -122,7 +120,6 @@ export function useSiteManagement({
     isAdmin,
     manageData,
     workspaceName,
-    showAudience,
     publication,
     audience,
     statusBusy,
@@ -194,34 +191,32 @@ export function SiteSettings({
           />
         )
       ) : null}
-      {management.showAudience ? (
-        <Section title="Workspace access" variant="group">
-          <SettingRowGroup>
-            <SettingRow
-              label={onlyMe ? "Only me" : "Workspace"}
-              description={
-                onlyMe
-                  ? "Only you can see and open this Site."
-                  : `Everyone in ${management.workspaceName} can see and open this Site.`
-              }
-              hint={owner ? undefined : "Only its owner can change this."}
-              control={
-                audience.share ? (
-                  <Button type="button" size="sm" variant="outline" onClick={audience.share}>
-                    <UsersIcon aria-hidden="true" />
-                    Share with workspace
-                  </Button>
-                ) : audience.limit ? (
-                  <Button type="button" size="sm" variant="outline" onClick={audience.limit}>
-                    <LockKeyholeIcon aria-hidden="true" />
-                    Limit to me
-                  </Button>
-                ) : undefined
-              }
-            />
-          </SettingRowGroup>
-        </Section>
-      ) : null}
+      <Section title="Workspace access" variant="group">
+        <SettingRowGroup>
+          <SettingRow
+            label={onlyMe ? "Only me" : "Workspace"}
+            description={
+              onlyMe
+                ? "Only you can see and open this Site."
+                : `Everyone in ${management.workspaceName} can see and open this Site.`
+            }
+            hint={owner ? undefined : "Only its owner can change this."}
+            control={
+              audience.share ? (
+                <Button type="button" size="sm" variant="outline" onClick={audience.share}>
+                  <UsersIcon aria-hidden="true" />
+                  Share with workspace
+                </Button>
+              ) : audience.limit ? (
+                <Button type="button" size="sm" variant="outline" onClick={audience.limit}>
+                  <LockKeyholeIcon aria-hidden="true" />
+                  Limit to me
+                </Button>
+              ) : undefined
+            }
+          />
+        </SettingRowGroup>
+      </Section>
       {management.canPublish && artifact.currentVersion ? (
         <Section title="Duplicate" variant="group">
           <SettingRowGroup>

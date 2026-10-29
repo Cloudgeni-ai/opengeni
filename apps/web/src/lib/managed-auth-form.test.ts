@@ -88,6 +88,17 @@ describe("managed auth form", () => {
     });
   });
 
+  test("explains an unapproved address instead of asking to try again", () => {
+    const failure = managedAuthFailure(
+      "signup",
+      new AuthApiError(403, "SIGNUP_EMAIL_NOT_ALLOWED", null, "signup email not allowed"),
+    );
+    expect(failure).toMatchObject({ fields: {}, switchTo: "signin" });
+    expect(failure.message).toContain("Only approved email addresses");
+    expect(failure.message).toContain("Ask whoever runs this service to allow your email address");
+    expect(failure.message).not.toContain("try again");
+  });
+
   test("explains a signup that created an account without a browser session", () => {
     expect(
       managedAuthFailure("signup", new ManagedAuthSessionUnavailableError("signup")),

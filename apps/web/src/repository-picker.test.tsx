@@ -160,6 +160,70 @@ describe("repository picker GitHub App links", () => {
   });
 });
 
+describe("repository picker GitHub load failure", () => {
+  function failedLoadProps(onRefresh: () => Promise<void>) {
+    return {
+      setupMode: "platform" as const,
+      configured: true,
+      // A failed first status load leaves the picker on its "disabled" fallback.
+      status: "disabled" as const,
+      installUrl: null,
+      linkUrl: null,
+      installations: [],
+      repositories: [],
+      groups: [],
+      selectedRepoIds: new Set<number>(),
+      selectedRepoRefs: {},
+      selectedInstallationId: null,
+      manualRepos: [],
+      manualOpen: false,
+      githubAppOpen: false,
+      org: "",
+      pending: false,
+      repoBusy: false,
+      githubLoadFailed: true,
+      githubAppBusy: false,
+      onRefresh,
+      onToggleRepo: () => {},
+      onRefChange: () => {},
+      onManualOpenChange: () => {},
+      onManualAdd: () => {},
+      onManualUpdate: () => {},
+      onManualRemove: () => {},
+      onGitHubAppOpenChange: () => {},
+      onOrgChange: () => {},
+      onStartGitHubApp: () => {},
+      onConnectWorkspaceApp: () => {},
+      onConfigureInstallation: async () => {},
+      onDisconnectInstallation: async () => {},
+    };
+  }
+
+  test("says GitHub couldn't load and offers a refresh instead of setup", async () => {
+    let refreshes = 0;
+    const rendered = await renderComponent(
+      createElement(
+        RepositoryContextMenuBody,
+        failedLoadProps(async () => {
+          refreshes += 1;
+        }),
+      ),
+    );
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("Couldn't load GitHub");
+    expect(text).not.toContain("unavailable");
+    expect(text).not.toContain("No repositories");
+    const refresh = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Refresh list",
+    );
+    expect(refresh).toBeTruthy();
+    await actRun(() => refresh!.click());
+    await actRun(() => Promise.resolve());
+    expect(refreshes).toBe(1);
+    await rendered.unmount();
+  });
+});
+
 describe("additive repository picker", () => {
   const personalRepository: PersonalGitHubRepositoryCatalogItem = {
     repositoryId: "9007199254740993123",

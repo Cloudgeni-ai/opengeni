@@ -388,7 +388,7 @@ function EmbeddedSiteSettings({
           />
         )}
       </div>
-      {management.showAudience ? management.audience.dialog : null}
+      {management.audience.dialog}
     </div>
   );
 }
@@ -578,7 +578,7 @@ function ArtifactDetailPage({
       setDetail((current) => (current ? { ...current, artifact } : current)),
     onStatusChanged: load,
   });
-  const { manageData, publication, audience, showAudience, statusBusy, setSiteStatus } = management;
+  const { manageData, publication, audience, statusBusy, setSiteStatus } = management;
   if (error) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
@@ -634,17 +634,15 @@ function ArtifactDetailPage({
             leading={<ArtifactKindTile kind="site" />}
             title={artifact.title}
             chips={
-              showAudience || archived || publicationHeader.chip ? (
-                <>
-                  {showAudience ? audience.chip : null}
-                  {publicationHeader.chip}
-                  {archived ? (
-                    <StatusBadge tone="neutral" icon="auto">
-                      Archived
-                    </StatusBadge>
-                  ) : null}
-                </>
-              ) : null
+              <>
+                {audience.chip}
+                {publicationHeader.chip}
+                {archived ? (
+                  <StatusBadge tone="neutral" icon="auto">
+                    Archived
+                  </StatusBadge>
+                ) : null}
+              </>
             }
             meta={[
               artifact.currentVersion ? `Version ${artifact.currentVersion.revision}` : null,
@@ -655,7 +653,7 @@ function ArtifactDetailPage({
             actions={
               canPublish ? (
                 <>
-                  {showAudience ? audience.shareButton : null}
+                  {audience.shareButton}
                   {manageData && !archived ? (
                     <SitePublishButton load={publication.load} onOpen={() => setTab("settings")} />
                   ) : null}
@@ -789,7 +787,7 @@ function ArtifactDetailPage({
           ) : null}
         </LineTabs>
       </DetailPage>
-      {showAudience ? audience.dialog : null}
+      {audience.dialog}
     </ContentPage>
   );
 }

@@ -3977,11 +3977,12 @@ export type CreateSessionRequest = {
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   /**
-   * First-party tools `modelContext` is for, such as the tool that reaches the
-   * open document it names. The first turn loads them before its first model
-   * request, as a tool search by name would, so it can use them without
-   * searching; the session's tools are unchanged. Decided once at creation;
-   * names outside the session's tool selection are ignored.
+   * Tools `modelContext` is for, such as the tool that reaches the open
+   * document it names, or the tools an application's MCP server publishes for
+   * the record it names (by their published names). The first turn loads them
+   * before its first model request, as a tool search by name would, so it can
+   * use them without searching; the session's tools are unchanged. Decided
+   * once at creation; names outside the session's tool selection are ignored.
    */
   modelContextTools?: string[] | undefined;
   /**
