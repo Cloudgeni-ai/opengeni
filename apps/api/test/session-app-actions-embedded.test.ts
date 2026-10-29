@@ -365,7 +365,10 @@ describe("app actions for a person in an embedded chat", () => {
       // route checks through a helper or inside a measured phase.
       "getUsage",
       "getWorkspaceInsights",
+      // The workspace budget is for people signed in to Opengeni; the route
+      // refuses anyone acting through another product.
       "getWorkspaceAllowance",
+      "getWorkspaceAllowanceState",
     ])
       expect(offered).not.toContain(id);
     for (const id of offered) {
