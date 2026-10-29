@@ -164,7 +164,7 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   last_input_tokens: { why: "its own measurements", expected: fresh(null) },
   compact_requested: { why: "its own measurements", expected: fresh(false) },
   // The fork routines start from the source row and clear only the request;
-  // its label is inert without one (migration 1100), so it may ride along.
+  // its label is inert without one (migration 1101), so it may ride along.
   compact_request_trigger: {
     why: "a label read only while compact_requested is true",
     expected: ({ source }) => source.compact_request_trigger,

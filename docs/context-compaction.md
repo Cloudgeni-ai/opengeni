@@ -738,7 +738,7 @@ own next turn, so the request never pulls their future-dated wake forward. Set
 `OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED=false` (default `true`) to turn the
 idle request off for a deployment.
 
-`sessions.compact_request_trigger` (migration 1100) labels the pending request:
+`sessions.compact_request_trigger` (migration 1101) labels the pending request:
 `operator` for `/compact`, `proactive` for the idle request. An operator request
 always relabels a pending request as `operator`; an idle request never relabels
 a pending one. A request written by an older binary, or created by a model
