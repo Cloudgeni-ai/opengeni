@@ -7,8 +7,8 @@ import {
 } from "../../timeline";
 import {
   creditRefusalHeadline,
-  creditRefusalKindFromText,
   isModelUnavailableSubmissionError,
+  type CreditRefusalKind,
 } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
@@ -121,6 +121,7 @@ import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
 import {
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   conversationTimeline,
   approvalsDecidable,
   projectPendingApprovals,
@@ -716,6 +717,8 @@ export function SessionRoute({
   // healthy-looking. Track the terminal credit state from the last turn-end so
   // the banner shows for idle-but-broke sessions too, not only failed ones.
   const creditExhausted = useMemo(() => creditExhaustedFromEvents(events), [events]);
+  // The one fix (own-key fee or API use) that stop names, from the same turn end.
+  const creditRefusal = useMemo(() => creditRefusalFromEvents(events), [events]);
   const failure = useMemo(
     () =>
       session && (session.status === "failed" || creditExhausted)
@@ -1442,6 +1445,7 @@ export function SessionRoute({
       humanInput={humanInput}
       failure={failure}
       creditExhausted={creditExhausted}
+      creditRefusal={creditRefusal}
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
@@ -2121,6 +2125,8 @@ function SessionChatPane(props: {
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   /** The last turn ended budget_exhausted — the workspace is out of credits. */
   creditExhausted: boolean;
+  /** The one-fix refusal (own-key fee or API use) the last turn ended on, if any. */
+  creditRefusal: CreditRefusalKind | null;
   goal: ReturnType<typeof useGoal>;
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
@@ -3069,9 +3075,7 @@ function SessionChatPane(props: {
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
   // An own-key or API stop names its one fix; no model choice or free credit fixes it.
-  const stopRefusal = props.creditExhausted
-    ? creditRefusalKindFromText(props.failure?.recordedDetail, props.failure?.reason)
-    : null;
+  const stopRefusal = props.creditExhausted ? props.creditRefusal : null;
   // Free credit can still cover other models after this model's credit ran out.
   const creditGap =
     props.creditExhausted && !stopRefusal
@@ -3859,6 +3863,7 @@ function SessionChatPane(props: {
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
+            creditRefusal={stopRefusal}
             freeCreditGap={creditGap}
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}

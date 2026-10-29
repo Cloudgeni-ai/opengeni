@@ -5,6 +5,7 @@ import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
 import { failedSessionCopy } from "../../lib/failed-session-copy";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
+import type { CreditRefusalKind } from "../../../lib/format";
 import { analyticsAction } from "../../../ui/analytics-actions";
 import {
   noteTurnFailureAction,
@@ -27,6 +28,7 @@ const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: fa
 export function FailedSessionBanner({
   failure,
   creditExhausted,
+  creditRefusal: stopRefusal,
   freeCreditGap = null,
   onChooseModel,
   workspaceId,
@@ -48,6 +50,8 @@ export function FailedSessionBanner({
   /** Stable identity of this failure for the consent-gated recovery journey. */
   analyticsKey?: string | undefined;
   creditExhausted?: boolean | undefined;
+  /** The one-fix refusal the last turn ended on (`creditRefusalFromEvents`), if known. */
+  creditRefusal?: CreditRefusalKind | null | undefined;
   /** Free credit remains for other models but not this one. */
   freeCreditGap?: FreeCreditGap | null | undefined;
   /** Select a model in the composer; offered for a covered model after a free-credit gap. */
@@ -97,7 +101,7 @@ export function FailedSessionBanner({
     dailyLimit,
     compaction,
     creditRefusal,
-  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
+  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap, stopRefusal);
   // Offer the switch until the composer selects a model that can run. An
   // own-key or API stop has one fix, never another model.
   const switchTo =
@@ -309,7 +313,6 @@ function UpgradeLink({ workspaceId }: { workspaceId: string }) {
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
         search={{ section: "billing" }}
-        onClick={() => noteTurnFailureAction("buy_credits")}
       >
         Upgrade to Pro
       </Link>

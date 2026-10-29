@@ -207,6 +207,11 @@ export function failedSessionCopy(
   canChooseModel = false,
   /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
   freeCreditGap: FreeCreditGap | null = null,
+  /**
+   * The refusal the last turn ended on (`creditRefusalFromEvents`); null when
+   * it named none. Omitted, the recorded failure text decides.
+   */
+  stopRefusal?: CreditRefusalKind | null,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -347,7 +352,9 @@ export function failedSessionCopy(
   // An own-key or API stop names its one fix; free credit for another model
   // can't pay for either.
   const creditRefusal = creditExhausted
-    ? creditRefusalKindFromText(failure.recordedDetail, failure.reason)
+    ? stopRefusal !== undefined
+      ? stopRefusal
+      : creditRefusalKindFromText(failure.recordedDetail, failure.reason)
     : null;
   if (creditRefusal) {
     return {

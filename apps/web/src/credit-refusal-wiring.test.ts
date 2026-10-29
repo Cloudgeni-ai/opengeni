@@ -26,9 +26,13 @@ describe("credit refusal wiring", () => {
 
   test("a stopped chat's composer names the refusal's fix, never another model", async () => {
     const session = await source("routes/session.tsx");
+    // The refusal comes from the last turn end, so a stop between model calls names it too.
+    expect(session).toContain("useMemo(() => creditRefusalFromEvents(events), [events])");
+    expect(session).toContain("creditRefusal={creditRefusal}");
     expect(session).toContain(
-      "creditRefusalKindFromText(props.failure?.recordedDetail, props.failure?.reason)",
+      "const stopRefusal = props.creditExhausted ? props.creditRefusal : null;",
     );
+    expect(session).toContain("creditRefusal={stopRefusal}");
     expect(session).toMatch(/const creditGap =\s*props\.creditExhausted && !stopRefusal/);
     expect(session).toMatch(
       /stopRefusal\s*\?\s*creditRefusalHeadline\(t, stopRefusal\)\s*:\s*creditGap/,

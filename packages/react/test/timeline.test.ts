@@ -15,6 +15,7 @@ import {
 import {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
@@ -5690,6 +5691,51 @@ describe("credit exhaustion", () => {
     const turnGroup = groups.find((group) => group.kind === "turn");
     expect(turnGroup?.outcome).toBe("failed");
     expect(turnGroup?.failureText).toBe(CREDIT_EXHAUSTION_MESSAGE(englishText));
+  });
+});
+
+describe("creditRefusalFromEvents", () => {
+  test("names the one fix of a stop between model calls from the last turn end", () => {
+    reset();
+    const stop = (detail: string, turnId: string) =>
+      event("turn.completed", { detail, segmentLimit: "budget_exhausted" }, { turnId });
+    expect(creditRefusalFromEvents([stop("Add credits to use your own key.", "turn-1")])).toBe(
+      "byok_paid_credit_required",
+    );
+    reset();
+    expect(creditRefusalFromEvents([stop("Upgrade to Pro to use your own key.", "turn-1")])).toBe(
+      "byok_upgrade_required",
+    );
+    reset();
+    expect(
+      creditRefusalFromEvents([stop("API usage uses credits, not your plan credit.", "turn-1")]),
+    ).toBe("api_credits_required");
+  });
+
+  test("an older refusal never names the latest stop's fix", () => {
+    reset();
+    expect(
+      creditRefusalFromEvents([
+        event(
+          "turn.failed",
+          { error: "Upgrade to Pro to use your own key." },
+          { turnId: "turn-1" },
+        ),
+        event(
+          "turn.completed",
+          { detail: "insufficient Opengeni credits", segmentLimit: "budget_exhausted" },
+          { turnId: "turn-2" },
+        ),
+      ]),
+    ).toBeNull();
+    reset();
+    expect(
+      creditRefusalFromEvents([
+        event("turn.failed", { error: "Add credits to use your own key." }, { turnId: "turn-1" }),
+        event("turn.completed", {}, { turnId: "turn-2" }),
+      ]),
+    ).toBeNull();
+    expect(creditRefusalFromEvents([])).toBeNull();
   });
 });
 

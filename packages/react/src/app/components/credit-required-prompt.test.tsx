@@ -197,6 +197,9 @@ describe("credit required prompt", () => {
     expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
       "Add credits",
     ]);
+    // The (visually hidden) description matches what is on screen.
+    expect(container.textContent).toContain("Add credits on Billing.");
+    expect(container.textContent).not.toContain("Stripe Checkout");
   });
 
   test("the notice follows selected-model funding rather than the total credit balance", async () => {
