@@ -563,6 +563,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      settings: runSettings,
       // Live per change, the same check the API makes before running it.
       authority: async () =>
         (

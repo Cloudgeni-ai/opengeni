@@ -167,3 +167,63 @@ test("catalog uses live account state and omits unavailable setup entirely", asy
     controller.dispose();
   }
 });
+test("the ownership question is skipped when it has only one sensible answer", async () => {
+  const submitted: unknown[] = [];
+  const begin: ConnectTransport["begin"] = async (workspaceId, input) => {
+    submitted.push(input);
+    return {
+      id: "attempt",
+      workspaceId,
+      providerId: input.providerId,
+      ownership: input.ownership,
+      revision: 1,
+      state: "requires_user_action",
+      nextAction: { type: "none" },
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "connection",
+      expiresAt: "2030-01-01T00:00:00Z",
+    };
+  };
+  const choose = async (
+    providers: ConnectProvider[],
+    props: { personalOnly?: boolean } = {},
+  ): Promise<{ asked: boolean }> => {
+    const controller = new ConnectController(
+      transport(async () => providers, begin),
+      "workspace",
+    );
+    const rendered = await renderComponent(
+      <ConnectChooser controller={controller} returnUrl="https://host.example" {...props} />,
+    );
+    try {
+      await actRun(() => {
+        const select = rendered.container.querySelector("select")!;
+        select.value = providers[0]!.id;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      const asked =
+        rendered.container.textContent?.includes("Who can use this connection?") ?? false;
+      await actRun(() => {
+        rendered.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      return { asked };
+    } finally {
+      await rendered.unmount();
+      controller.dispose();
+    }
+  };
+  // Alone in the workspace: nobody to share with, so it is their own account.
+  expect(await choose([provider], { personalOnly: true })).toEqual({ asked: false });
+  expect(submitted.at(-1)).toMatchObject({ providerId: "ready", ownership: "personal" });
+  // A provider that only connects personal accounts has no choice to offer.
+  expect(await choose([{ ...provider, id: "own", ownership: ["personal"] }])).toEqual({
+    asked: false,
+  });
+  expect(submitted.at(-1)).toMatchObject({ providerId: "own", ownership: "personal" });
+  // With other people in the workspace, the person still decides.
+  expect(await choose([provider])).toEqual({ asked: true });
+  expect(submitted).toHaveLength(2);
+});

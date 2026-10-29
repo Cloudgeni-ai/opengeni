@@ -342,6 +342,26 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     expect(calls).toHaveLength(1);
   });
 
+  test("a webhook source tool gets the value only in signingSecret", async () => {
+    for (const toolName of ["event_sources_create_webhook", "event_sources_update"]) {
+      const entry = { source: "opengeni" as const, identity: { serverId: "opengeni", toolName } };
+      expect(secretArgumentMode(entry, { signingSecret: ref("App/secret") })).toBe("literal");
+      expect(secretArgumentMode(entry, { name: ref("App/secret") })).toBe("handoff");
+      expect(secretArgumentMode(entry)).toBe("handoff");
+
+      const { resolver, calls } = fakeResolver({ "App/secret": VALUE, "GitHub/token": "other" });
+      const args = {
+        name: `Hooks ${ref("GitHub/token")}`,
+        format: { type: { value: ref("GitHub/token") } },
+        signingSecret: ref("App/secret"),
+      };
+      const { seen, call } = await runCall("opengeni", args, resolver, "model", toolName);
+      expect(seen[0]).toEqual({ ...args, signingSecret: VALUE });
+      expect(JSON.stringify(call.arguments)).not.toContain(VALUE);
+      expect(calls.map((item) => item.refs)).toEqual([[ref("App/secret")]]);
+    }
+  });
+
   test("a literal connector call still receives the value next to a hand-off call", async () => {
     const { resolver, calls } = fakeResolver({ "GitHub/token": VALUE });
     const used = await run("mcp", ref("GitHub/token"), resolver, "model", "session_send_message");

@@ -544,7 +544,7 @@ export function RootRouteComponent() {
     // Fixed app canvas: never let the document scroll. Page surfaces own
     // overflow via ContentPage / session panes. `min-h-screen` used to let
     // main grow past the viewport when a child mis-owned scroll.
-    <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
+    <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice

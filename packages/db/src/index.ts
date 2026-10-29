@@ -2307,13 +2307,25 @@ export async function turnCanChangeWorkspaceSettings(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
 ): Promise<boolean> {
+  return (await turnWorkspaceSettingsAccess(db, input)) !== null;
+}
+
+/**
+ * How this turn's app actions can change the workspace's settings: "confirm"
+ * when each change waits for the person's yes in the chat, "full_access" when
+ * changes run straight away, or null when they can't change them.
+ */
+export async function turnWorkspaceSettingsAccess(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<"confirm" | "full_access" | null> {
   const authority = await resolveSessionAppActionAuthority(db, input);
-  if (authority.kind === "unavailable" || authority.kind === "read_only") return false;
+  if (authority.kind === "unavailable" || authority.kind === "read_only") return null;
   if (authority.kind === "confirm" && !authority.permissions.includes("workspace:admin")) {
-    return false;
+    return null;
   }
   const { subjectId } = authority;
-  return await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
+  const allowed = await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
     const membership = await getWorkspaceGrant(tx, subjectId, input.workspaceId);
     if (membership?.accountId === input.accountId) {
       return membership.permissions.includes("workspace:admin");
@@ -2323,6 +2335,7 @@ export async function turnCanChangeWorkspaceSettings(
       (await resolveNamedManagedPersonalWorkspaceGrant(tx, { ...input, subjectId })) !== null
     );
   });
+  return allowed ? authority.kind : null;
 }
 
 export const allAccountPermissions: Permission[] = [
@@ -22641,6 +22654,7 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     workspaceId: row.workspaceId,
     name: row.name,
     description: row.description ?? null,
+    avatar: storedSessionAvatar(row.avatar),
     pinned: row.pinned,
     sortOrder: row.sortOrder,
     createdBy: row.createdBy ?? null,
@@ -22656,6 +22670,7 @@ export async function createChannel(
     workspaceId: string;
     name: string;
     description?: string | null;
+    avatar?: SessionAvatar | null;
     createdBy?: string | null;
   },
 ): Promise<Channel> {
@@ -22680,6 +22695,7 @@ export async function createChannel(
             workspaceId: input.workspaceId,
             name: input.name,
             description: input.description ?? null,
+            avatar: input.avatar ?? null,
             sortOrder: nextSortOrder,
             createdBy: input.createdBy ?? null,
           })
@@ -22735,6 +22751,7 @@ export async function updateChannel(
   input: {
     name?: string | undefined;
     description?: string | null | undefined;
+    avatar?: SessionAvatar | null | undefined;
     pinned?: boolean | undefined;
   },
 ): Promise<Channel | null> {
@@ -22745,6 +22762,7 @@ export async function updateChannel(
         .set({
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
           ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
           updatedAt: new Date(),
         })
@@ -92862,9 +92880,12 @@ export * from "./recordings";
 export * from "./recording-live";
 export {
   cosineSimilarity,
+  memberVoiceprints,
   recordingVoiceChannel,
   suggestSpeakersByVoice,
+  voiceMatchingVoiceprints,
   VOICE_SUGGESTION_THRESHOLD,
+  type KnownVoice,
   type RecordingSpeakerVoice,
   type RecordingVoiceChannel,
 } from "./recording-voices";

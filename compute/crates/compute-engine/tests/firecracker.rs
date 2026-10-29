@@ -11,8 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig, FirecrackerVm};
 use compute_engine::{
-    CancellationToken, Completion, Drive, Engine, Found, MemorySource, RestoreFiles, SnapshotFiles,
-    SnapshotKind, VmSpec, vsock,
+    CancellationToken, Completion, Drive, Engine, Found, MemorySource, RestoreFiles, RoomKept,
+    SnapshotFiles, SnapshotKind, VmSpec, vsock,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -616,4 +616,100 @@ async fn only_a_vmm_seen_running_counts_as_a_launch() {
         "a VMM that refused its snapshot did not count: {error}"
     );
     std::fs::remove_dir_all(&spec.logs).unwrap();
+}
+
+/// Page cache charged to the VMs' group, as their disks and VMs that ended
+/// leave it, is dropped once it fills the reserve under their limit, and
+/// only by what the reserve lacks (ADR 24).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_vms_reserve_is_kept_free_of_page_cache() {
+    const MIB: u64 = 1 << 20;
+    const RESERVE: u64 = 512 * MIB;
+    let Some(lab) = lab() else { return };
+    let parent = PathBuf::from(format!(
+        "/sys/fs/cgroup/compute-test-room-{}",
+        std::process::id()
+    ));
+    let engine = Firecracker::new(FirecrackerConfig {
+        firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
+        jailer: lab.join("bin/jailer"),
+        cgroup_parent: parent.clone(),
+    })
+    .unwrap();
+    // 1 GiB of clean cache, written and read by a group under the VMs'
+    // that then ends, leaving its cache to them: twice the reserve, so
+    // that dropping all of it shows.
+    let ended = parent.join("ended");
+    std::fs::create_dir(&ended).unwrap();
+    let file = lab.join(format!("room-cache-{}", std::process::id()));
+    let script = format!(
+        "echo $$ > {group}/cgroup.procs && dd if=/dev/zero of={file} bs=1M count=1024 \
+         conv=fsync status=none && cat {file} > /dev/null",
+        group = ended.display(),
+        file = file.display(),
+    );
+    let status = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .status()
+        .unwrap();
+    assert!(status.success(), "{script}: {status}");
+    std::fs::remove_dir(&ended).unwrap();
+    let current = || -> u64 {
+        std::fs::read_to_string(parent.join("memory.current"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let before = current();
+    assert!(
+        before >= 800 * MIB,
+        "the cache was not left to the VMs' group: {before} bytes"
+    );
+    // A limit that leaves 128 MiB of the reserve free.
+    let high = before + 128 * MIB;
+    let engine = engine.with_memory_high(Some(high)).unwrap();
+    let RoomKept::Dropping(asked) = engine.keep_memory_room(RESERVE) else {
+        panic!("nothing was dropped with 128 MiB of a 512 MiB reserve free");
+    };
+    assert!(
+        asked.abs_diff(RESERVE - 128 * MIB) <= 16 * MIB,
+        "asked {asked} bytes"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while high.saturating_sub(current()) + 16 * MIB < RESERVE {
+        if engine.keep_memory_room(RESERVE) == RoomKept::Unsupported {
+            eprintln!("skipped: this kernel cannot drop page cache alone (Linux 6.9)");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reserve was never freed: {} bytes free of {RESERVE}",
+            high.saturating_sub(current())
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let after = current();
+    eprintln!(
+        "room: asked {} MiB, dropped {} MiB of {} MiB, {} MiB of the reserve free",
+        asked / MIB,
+        before.saturating_sub(after) / MIB,
+        before / MIB,
+        high.saturating_sub(after) / MIB
+    );
+    if high.saturating_sub(after) + 16 * MIB >= RESERVE {
+        // Some kernels take more than a write asks (Linux 7.0 with the
+        // multi-generation LRU takes about half the cache per write), so
+        // the drop is held only to leaving a good share of the cache.
+        assert!(
+            after >= before / 4,
+            "dropped {} bytes of {before} for {asked} asked",
+            before.saturating_sub(after)
+        );
+        assert_eq!(engine.keep_memory_room(RESERVE), RoomKept::Free);
+    }
+    let _ = engine.with_memory_high(None);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir(&parent);
 }

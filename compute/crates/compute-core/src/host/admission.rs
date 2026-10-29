@@ -265,7 +265,10 @@ impl Sandbox {
     }
 
     /// Bytes it takes running: its request, or what it was last seen to
-    /// use if more.
+    /// use if more. What the kernel compressed of it counts as the host
+    /// memory its compressed copies take, not at its original size: pages
+    /// it compressed and does not touch take no more until they are
+    /// touched, and then what it borrowed is held back again (ADR 24).
     fn awake_bytes(&self) -> u64 {
         self.size.request.max(self.resident_bytes())
     }
@@ -887,8 +890,11 @@ impl Host {
     /// recently used idle sandboxes deeper until the expected available
     /// memory reaches the high watermark, after ending ready spare VMs,
     /// and squeezes sandboxes in use above their request when that is not
-    /// enough; lets their balloons go once there is room for what they
-    /// gave. Returns whether anything changed.
+    /// enough, on a host without the memory rule of ADR 24: with it, the
+    /// bounds of those in use hold them back, and their balloons would
+    /// only slow their guests and hide what a shrink frees. Lets balloons
+    /// go once there is room for what they gave. Returns whether anything
+    /// changed.
     pub(super) fn relieve_pressure(&mut self, now: At) -> bool {
         let (Some(memory), Some(available)) = (self.policy.memory, self.available_memory) else {
             return false;
@@ -908,7 +914,8 @@ impl Host {
             return released;
         }
         let (pushed, rest) = self.push_idle(now, needed, Measure::Resident);
-        released | pushed | (rest > 0 && self.squeeze_busy(now, memory, rest))
+        let squeeze = rest > 0 && memory.outgrowth.is_none();
+        released | pushed | (squeeze && self.squeeze_busy(now, memory, rest))
     }
 
     /// Pushes idle sandboxes deeper, least recently used first, until
@@ -1026,6 +1033,14 @@ pub(super) fn pushable(slot: &Sandbox, now: At, grace: Duration) -> bool {
         && !slot.in_flight.is_some_and(|flight| flight.step.wakes())
         && slot.fresh_until.is_none()
         && now.saturating_since(slot.last_activity) >= grace
+}
+
+/// Whether `slot` is idle in the sense of memory pressure: it is
+/// [`pushable`] and has a level deeper that pressure may push it to. One
+/// that never sleeps, such as a CI runner, is in use however quiet it is:
+/// its work goes on with nobody calling it (ADR 24).
+pub(super) fn releasable(slot: &Sandbox, now: At, grace: Duration) -> bool {
+    pushable(slot, now, grace) && slot.policy().relief_target(slot.state.level).is_some()
 }
 
 /// Bytes of the budget `slot` takes once it reached `reached`.

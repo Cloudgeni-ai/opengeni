@@ -105,14 +105,23 @@ pub const RESULTS: [&str; 14] = [
 /// Which way a stream's bytes went.
 pub const DIRECTIONS: [&str; 2] = ["to_guest", "to_client"];
 /// Things that must never happen.
-pub const ALARMS: [&str; 6] = [
+pub const ALARMS: [&str; 8] = [
     "only_copy_kept",
     "verification_failed",
     "quarantined",
     "copy_lost",
     "broken",
     "programs_lost",
+    "ended_for_memory",
+    "oom_killed",
 ];
+/// How a guest asked to shrink for host memory answered.
+pub const SHRINK_OUTCOMES: [&str; 3] = ["freed", "spent", "failed"];
+/// Whether a running sandbox counts as idle or in use.
+pub const ACTIVITIES: [&str; 2] = ["idle", "busy"];
+/// How much of the last ten seconds all of a running sandbox's threads
+/// stalled on memory: under 1 %, 1 to 10 %, 10 to 40 %, and 40 % up.
+pub const STALLS: [&str; 4] = ["none", "light", "heavy", "severe"];
 /// The paths the canary runs.
 pub const CANARY_PATHS: [&str; 4] = ["resume", "restore", "remote", "create"];
 /// How a canary run ended.
@@ -151,6 +160,10 @@ const LEVEL: Label = Label {
     name: "compute.level",
     values: &LEVELS,
 };
+const ACTIVITY: Label = Label {
+    name: "compute.activity",
+    values: &ACTIVITIES,
+};
 
 const fn sum(name: &'static str, unit: &'static str, description: &'static str) -> Metric {
     Metric {
@@ -188,7 +201,7 @@ const fn by(metric: Metric, labels: &'static [Label]) -> Metric {
 
 /// Every metric a host exports: its own, and its process's as
 /// OpenTelemetry's semantic conventions name them.
-pub const METRICS: [Metric; 29] = [
+pub const METRICS: [Metric; 42] = [
     by(
         sum(
             "compute.step.count",
@@ -411,6 +424,92 @@ pub const METRICS: [Metric; 29] = [
         "compute.transfer.background",
         "{transfer}",
         "Background object-storage transfers.",
+    ),
+    gauge(
+        "compute.memory.requested",
+        "By",
+        "Memory running sandboxes requested.",
+    ),
+    gauge(
+        "compute.memory.borrowed",
+        "By",
+        "Host memory running sandboxes hold above their requests.",
+    ),
+    gauge(
+        "compute.memory.compressed",
+        "By",
+        "Host memory running sandboxes' compressed pages take.",
+    ),
+    gauge(
+        "compute.memory.swapped",
+        "By",
+        "Memory of running sandboxes out of RAM, at its original size.",
+    ),
+    by(
+        gauge(
+            "compute.memory.stalled",
+            "{sandbox}",
+            "Running sandboxes by how long they stalled on memory lately.",
+        ),
+        &[Label {
+            name: "compute.stall",
+            values: &STALLS,
+        }],
+    ),
+    by(
+        gauge(
+            "compute.memory.level",
+            "By",
+            "Borrowed memory each running sandbox may keep now.",
+        ),
+        &[ACTIVITY],
+    ),
+    by(
+        gauge(
+            "compute.memory.held_back",
+            "{sandbox}",
+            "Running sandboxes the borrowed-memory level holds back now.",
+        ),
+        &[ACTIVITY],
+    ),
+    gauge(
+        "compute.memory.shortfall",
+        "By",
+        "How far the host is short of memory with every sandbox at its request and what is \
+         on its way back counted: what guests are shrunk for.",
+    ),
+    gauge(
+        "compute.memory.relief",
+        "By",
+        "Memory on its way back: sandboxes the host is putting to sleep and spares ending. \
+         The borrowed-memory levels count it as available.",
+    ),
+    gauge(
+        "compute.memory.over_bound",
+        "{sandbox}",
+        "Running sandboxes holding more than their bound while the host is below its low \
+         watermark: memory the kernel cannot compress.",
+    ),
+    by(
+        sum(
+            "compute.memory.shrink.count",
+            "{shrink}",
+            "Guests asked to shrink for host memory, by answer.",
+        ),
+        &[Label {
+            name: "compute.outcome",
+            values: &SHRINK_OUTCOMES,
+        }],
+    ),
+    sum(
+        "compute.memory.shrink.freed",
+        "By",
+        "Memory guests freed when asked to shrink.",
+    ),
+    sum(
+        "compute.memory.processes.ended",
+        "{process}",
+        "Processes guests ended to shrink for host memory.",
     ),
     by(
         sum("process.cpu.time", "s", "Processor time the agent used."),
