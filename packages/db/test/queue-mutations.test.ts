@@ -1606,6 +1606,8 @@ describe("canonical queue commands", () => {
           tools: [],
           model: "scripted-model",
           reasoningEffort: "low",
+          // The person picked this policy, so the draft holds it instead of following the chat.
+          policyFollowsSession: false,
         }),
     );
     const operationKey = crypto.randomUUID();
