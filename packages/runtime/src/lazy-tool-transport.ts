@@ -1024,13 +1024,18 @@ export class LazyToolRuntime {
     if (parsed.names !== undefined) {
       const resolve = this.exactMcpNameResolver();
       const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
+      const loaded = this.withCandidatesNotice({
+        version: 2,
+        output: this.genericSearchOutput(exact),
+        tools: structuredClone(this.searchDisclosure(exact)),
+      });
+      // Loading one account's tools by exact name (after browsing a group,
+      // say) names the person's other accounts once per turn, as a ranked
+      // search reaching that account does.
+      const accounts = this.connectedAccountsNotice(loaded);
       return this.remembered(
         this.withAlreadyAvailable(
-          this.withCandidatesNotice({
-            version: 2,
-            output: this.genericSearchOutput(exact),
-            tools: structuredClone(this.searchDisclosure(exact)),
-          }),
+          accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded,
           query,
           parsed.names,
         ),
@@ -1229,9 +1234,12 @@ export class LazyToolRuntime {
     if (this.connectedAccountsNamed || !this.connectedAccounts) return undefined;
     const accounts = this.connectedAccounts();
     if (!accounts.size) return undefined;
-    // Native search outputs carry only loaded definitions, never candidates.
+    // The tools the result gives the model: those it loaded, or, when it
+    // loaded none, the candidates it lists (in the generic output, or in the
+    // notice that follows a native result). Accounts reached only through a
+    // lower suggestion are still named as others worth checking.
     const listed =
-      (this.transport === "generic_dispatch"
+      (this.transport === "generic_dispatch" || !result.tools?.length
         ? (JSON.parse(result.output) as { tools?: { name?: unknown }[] }).tools
         : result.tools) ?? [];
     const shown = new Map<string, ConnectedToolAccount>();

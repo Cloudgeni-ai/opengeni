@@ -38,6 +38,13 @@ not loaded follow the result as a short note. With a decision model, a repeated
 search in the same turn lists candidates it has not listed before. Tools already in
 the agent's tool list are reported as available rather than as unavailable.
 
+When the person has several connected accounts that serve the same need (Gmail and
+Outlook Mail, say), the first search or exact-name load in a turn that gives the
+agent one account's tools names the others, so a request for "my email" checks
+each. With several accounts of one connector, each tool's description starts with
+the account it reaches; ranking reads past that line, and previews show the account
+and then what the tool does.
+
 ## Configuration
 
 | Capability | Setting | Without it |

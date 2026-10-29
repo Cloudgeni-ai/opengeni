@@ -15,7 +15,15 @@ import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
 import { createHttpDecisionModel } from "@opengeni/decisions";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
+import { toolDescriptor } from "../src/tool-discovery-catalog";
 import { rankToolPool } from "../src/codex-tool-search";
+import {
+  CONNECTED_TOOL_CATALOG,
+  GMAIL_TOOLS,
+  OUTLOOK_MAIL_TOOLS,
+  withAccount,
+  type CatalogTool,
+} from "./fixtures/connected-tool-catalog";
 import {
   catalogConnectableIntegrationLookup,
   connectableIntegrationNotice,
@@ -71,6 +79,8 @@ const judge =
       probability: table[c.name] ?? 0,
     }));
   };
+const catalogTool = (t: CatalogTool) =>
+  candidate(`${t.source}__${t.name}`, t.description, t.inputSchema);
 const call = (id: string, name: string, args: unknown) => ({
   type: "function_call" as const,
   callId: id,
@@ -150,6 +160,45 @@ describe("tool discovery ranking", () => {
     expect(index.rank("the and of", 8)).toEqual([]);
     expect(index.rank("unmatched qqq", 8)).toEqual([]);
     expect(index.rank("hent faktura", 1)).toEqual([entry]);
+  });
+  test("ranks a connected account's tools past their account line", () => {
+    // With several accounts of one connector every description starts with
+    // the same account line; it must not stand in for the capability sentence.
+    const plain = CONNECTED_TOOL_CATALOG.map(catalogTool);
+    const lined = CONNECTED_TOOL_CATALOG.map((t) =>
+      t.source === "mcp__gmail" ? withAccount([t], t.source, "Gmail (a@example.com)")[0]! : t,
+    ).map(catalogTool);
+    expect((lined[0] as { description: string }).description).toStartWith(
+      "Account: Gmail (a@example.com). Use only this account;",
+    );
+    for (const query of [
+      "Search and read user's email inbox recent unread emails",
+      "send an email",
+      "list my email labels",
+      "show the open issues",
+    ]) {
+      expect(names(new ToolSearchIndex(lined).rank(query, 8))).toEqual(
+        names(new ToolSearchIndex(plain).rank(query, 8)),
+      );
+      expect(names(new ToolSearchIndex(lined).bestMatches(query))).toEqual(
+        names(new ToolSearchIndex(plain).bestMatches(query)),
+      );
+    }
+  });
+  test("a compact preview names the account, then what the tool does", () => {
+    const [search] = withAccount(GMAIL_TOOLS, "mcp__gmail", "Gmail (a@example.com)").filter(
+      (t) => t.name === "search_messages",
+    );
+    const descriptor = toolDescriptor(catalogTool(search!) as Tool & { name: string });
+    expect(descriptor.description).toStartWith(
+      "Account: Gmail (a@example.com). Searches individual messages using Gmail query syntax",
+    );
+    expect(Array.from(descriptor.description)).toHaveLength(160);
+    // A description without the runtime's account line is previewed unchanged.
+    const plain = candidate("x__y", "Account: one line someone wrote.\nMore.");
+    expect(toolDescriptor(plain as Tool & { name: string }).description).toBe(
+      "Account: one line someone wrote.\nMore.",
+    );
   });
 });
 
@@ -920,6 +969,15 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     expect(approvals).toBe(1);
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).not.toContain('"required"');
+    // The tie loads one guess; on native routes the other tool follows the
+    // result as a candidate, so the exact load is one call away.
+    if (transport !== "generic_dispatch")
+      expect(model.requests[1]!.input).toContainEqual({
+        type: "message",
+        role: "developer",
+        content:
+          'Close candidates this search did not load:\n- tasks__read: Read a task\nLoad one that fits with tool_search names:["<exact name>"] and query:"".',
+      });
     expect(JSON.stringify(model.requests[2]!.input)).toContain('"required"');
     for (let i = 1; i < model.requests.length; i++) {
       expect(model.requests[i]!.tools).toEqual(model.requests[0]!.tools);
@@ -1684,22 +1742,38 @@ describe("searches that reach one of several connected accounts", () => {
       expect(second.notice).toBeUndefined();
     });
 
-    test(`${transport}: one connected account, first-party tools and names loads change nothing`, async () => {
+    test(`${transport}: one connected account and first-party tools change nothing`, async () => {
       for (const [accounts, args] of [
         [ONLY_GMAIL, { query: "search gmail for new email", limit: 2 }],
+        [ONLY_GMAIL, { query: "", names: [GMAIL_SEARCH] }],
         [BOTH, { query: "notify the person on their phone" }],
-        [BOTH, { query: "", names: [GMAIL_SEARCH] }],
+        [BOTH, { query: "", names: ["opengeni__notify_user"] }],
       ] as const) {
         const runtime = runtimeWith(transport, accounts);
         expect(await runtime.prepareSearch(args)).toEqual(
           await runtimeWith(transport).prepareSearch(args),
         );
-        // Neither kind of search spends the run's one notice.
+        // Neither search spends the turn's one notice.
         if (accounts === BOTH) {
           const later = await runtime.prepareSearch({ query: "search gmail for new email" });
           expect(JSON.parse(later.output).connectedAccounts).toBe(NOTICE);
         }
       }
+    });
+
+    test(`${transport}: loading one account's tools by exact name names the others`, async () => {
+      // Browsing a group and loading exact names reaches an account the same
+      // way a ranked search does.
+      const runtime = runtimeWith(transport, BOTH);
+      const load = await runtime.prepareSearch({ query: "", names: [GMAIL_SEARCH, GMAIL_SEND] });
+      expect(loaded(load)).toEqual([GMAIL_SEARCH, GMAIL_SEND]);
+      const output = JSON.parse(load.output);
+      expect(output.schemasLoaded).toBe(true);
+      expect(output.connectedAccounts).toBe(NOTICE);
+      expect(load.notice).toBe(transport === "generic_dispatch" ? undefined : NOTICE);
+      const again = await runtime.prepareSearch({ query: "", names: [GMAIL_SEARCH] });
+      expect(JSON.parse(again.output).connectedAccounts).toBeUndefined();
+      expect(again.notice).toBeUndefined();
     });
 
     test(`${transport}: a search reaching every connected account names none`, async () => {
@@ -1874,6 +1948,67 @@ describe("searches that reach one of several connected accounts", () => {
     // An uncertain match lists its unloaded candidates first.
     expect(result.notice).toStartWith("Close candidates this search did not load:\n");
     expect(result.notice).toEndWith(`\n${output.notConnected}\n${NOTICE}`);
+  });
+
+  describe("a vague email search with Gmail and Outlook Mail connected", () => {
+    // The real Gmail tools, and Outlook Mail tools in the shape the OpenAPI
+    // compiler gives Microsoft Graph operations.
+    const gmailTools = GMAIL_TOOLS.map(catalogTool);
+    const outlookTools = OUTLOOK_MAIL_TOOLS.map(catalogTool);
+    const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
+      ...gmailTools.map((t) => [(t as { name: string }).name, gmail] as const),
+      ...outlookTools.map((t) => [(t as { name: string }).name, outlook] as const),
+    ]);
+    const mailRuntime = (transport: "generic_dispatch" | "openai_native" | "codex_native") => {
+      const runtime = runtimeWith(transport, accounts);
+      runtime.refresh([...pool().slice(3), ...gmailTools, ...outlookTools]);
+      return runtime;
+    };
+    // The exact first search of a turn that asked "Have I got any new emails?".
+    const STAGING = { query: "Search and read user's email inbox recent unread emails", limit: 2 };
+
+    for (const transport of ["openai_native", "codex_native"] as const) {
+      test(`${transport}: loads the best candidate, lists the next and names the other mailbox`, async () => {
+        // No tool's own words include "email" or "inbox", so nothing clearly
+        // matches. The search still loads its best candidate and lists the
+        // next one, instead of reading as "No matching tools found".
+        const runtime = mailRuntime(transport);
+        const result = await runtime.prepareSearch(STAGING);
+        expect(loaded(result)).toEqual(["mcp__gmail__search_messages"]);
+        expect(result.notice).toStartWith(
+          "Close candidates this search did not load:\n- mcp__gmail__search_threads: ",
+        );
+        expect(result.notice).toEndWith(`\n${NOTICE}`);
+        // Loading a candidate by exact name follows; the turn's notice is spent.
+        const load = await runtime.prepareSearch({
+          query: "",
+          names: ["mcp__gmail__search_threads"],
+        });
+        expect(loaded(load)).toEqual(["mcp__gmail__search_threads"]);
+        expect(load.notice).toBeUndefined();
+      });
+
+      test(`${transport}: a query nothing ranks for still shows nothing`, async () => {
+        const runtime = mailRuntime(transport);
+        const result = await runtime.prepareSearch({ query: "book a flight to Paris", limit: 2 });
+        expect(loaded(result)).toEqual([]);
+        expect(JSON.parse(result.output).tools).toEqual([]);
+        expect(result.notice).toBeUndefined();
+        // Nothing shown, so the turn's notice is still unspent.
+        expect((await runtime.prepareSearch(STAGING)).notice).toEndWith(NOTICE);
+      });
+    }
+
+    test("generic_dispatch: loads the best candidate and lists the next", async () => {
+      const result = await mailRuntime("generic_dispatch").prepareSearch(STAGING);
+      expect(loaded(result)).toEqual(["mcp__gmail__search_messages"]);
+      const output = JSON.parse(result.output);
+      expect(output.schemasLoaded).toBe(true);
+      expect(output.suggestions.map((t: { name: string }) => t.name)).toContain(
+        "mcp__gmail__search_threads",
+      );
+      expect(output.connectedAccounts).toBe(NOTICE);
+    });
   });
 });
 
