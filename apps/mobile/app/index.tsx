@@ -1,3 +1,4 @@
+import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { homeSessionSections } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
@@ -10,6 +11,7 @@ import {
   HEADING_MAX_FONT_SCALE,
   ModelPickerSheet,
   fontStyle,
+  ModelMark,
   Icon,
   SectionLabel,
   SessionComposer,
@@ -188,6 +190,7 @@ function Home() {
         : { workspaceId, model, effort, latencyMode }),
       ...patch,
     }));
+  const pill = model ? compactModelPill(t, models, model, effort) : null;
   const sections = useMemo(
     () => homeSessionSections(t, lists.sessions, lists.pinned, HOME_RECENT_LIMIT),
     [t, lists],
@@ -472,9 +475,13 @@ function Home() {
             liftWithKeyboard={false}
             bottomInset={0}
             options={
-              model ? (
+              pill ? (
                 <ComposerPill
-                  label="Model"
+                  label={pill.name}
+                  detail={pill.effort}
+                  fast={latencyMode === "fast"}
+                  ultrafast={latencyMode === "ultrafast"}
+                  leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();
                     setPickerOpen(true);

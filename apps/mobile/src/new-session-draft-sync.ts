@@ -48,7 +48,7 @@ export function useHomeDraftSync(input: {
     modelProvided: input.modelProvided,
     selectedProjectChannelId: choices.channelId,
     options: {
-      ...(options.ready ? { visibility: choices.visibility } : {}),
+      ...(options.ready && options.visibilityChosen ? { visibility: choices.visibility } : {}),
       ...(choices.targetSandboxId ? { targetSandboxId: choices.targetSandboxId } : {}),
       ...(choices.excludedConnectorIds.length > 0
         ? { excludedMcpServerIds: choices.excludedConnectorIds }
