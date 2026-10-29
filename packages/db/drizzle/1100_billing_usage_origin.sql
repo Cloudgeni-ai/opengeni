@@ -413,3 +413,174 @@ CASE (billing_attribution ->> 'kind'::text)
     WHEN 'turn'::text THEN ((COALESCE((billing_attribution ->> 'turnId'::text), ''::text) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text) AND (((billing_attribution -> 'initiatingHumanSubjectId'::text) = 'null'::jsonb) OR ((jsonb_typeof((billing_attribution -> 'initiatingHumanSubjectId'::text)) = 'string'::text) AND ((octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) >= 1) AND (octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) <= 1024)))))
     ELSE false
 END, false))) NOT VALID;
+
+-- A task's funding origin is billing, not execution: marking a task API
+-- (an API caller's edit or manual run) must not change its execution digest
+-- or advance a personal-resource task's authority revision, which would leave
+-- it without an authority snapshot. Same-signature bodies with
+-- billing_origin excluded; digests from before the column existed never
+-- included it, so stored digests stay valid.
+DO $install$
+DECLARE
+  data_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION set_scheduled_task_execution_digest() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', %1$I, 'pg_temp'
+    AS $$
+BEGIN
+  NEW.execution_digest := pg_catalog.encode(
+    pg_catalog.sha256(pg_catalog.convert_to(
+      (
+        ((pg_catalog.to_jsonb(NEW) - 'subscription_authority') - 'authority_inserted_at')
+          - ARRAY[
+            'name',
+            'status',
+            'updated_at',
+            'authority_revision',
+            'execution_digest', 'owner_subject_id', 'visibility', 'billing_origin'
+          ]::text[]
+          - (CASE WHEN NEW.creator_first_party_mcp_tools IS NULL
+              THEN ARRAY['creator_first_party_mcp_tools'] ELSE ARRAY[]::text[] END)
+          - (CASE WHEN NEW.creator_first_party_mcp_permissions IS NULL
+              THEN ARRAY['creator_first_party_mcp_permissions'] ELSE ARRAY[]::text[] END)
+          - (CASE WHEN NEW.creator_session_policy IS NULL
+              THEN ARRAY['creator_session_policy'] ELSE ARRAY[]::text[] END)
+          - (CASE WHEN NEW.vault_policy = '{"mode":"all"}'::jsonb
+              THEN ARRAY['vault_policy'] ELSE ARRAY[]::text[] END)
+      )::text,
+      'UTF8'
+    )),
+    'hex'
+  );
+  RETURN NEW;
+END
+$$;
+  $create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION scheduled_task_execution_digest(p_task scheduled_tasks) RETURNS text
+    LANGUAGE sql IMMUTABLE
+    SET search_path TO 'pg_catalog', %1$I, 'pg_temp'
+    AS $$
+  SELECT pg_catalog.encode(
+    pg_catalog.sha256(pg_catalog.convert_to(
+      (
+        ((pg_catalog.to_jsonb(p_task) - 'subscription_authority') - 'authority_inserted_at')
+          - ARRAY[
+            'name',
+            'status',
+            'updated_at',
+            'authority_revision',
+            'execution_digest', 'owner_subject_id', 'visibility', 'billing_origin'
+          ]::text[]
+          - (CASE WHEN p_task.creator_first_party_mcp_tools IS NULL
+              THEN ARRAY['creator_first_party_mcp_tools'] ELSE ARRAY[]::text[] END)
+          - (CASE WHEN p_task.creator_first_party_mcp_permissions IS NULL
+              THEN ARRAY['creator_first_party_mcp_permissions'] ELSE ARRAY[]::text[] END)
+          - (CASE WHEN p_task.creator_session_policy IS NULL
+              THEN ARRAY['creator_session_policy'] ELSE ARRAY[]::text[] END)
+          - (CASE WHEN p_task.vault_policy = '{"mode":"all"}'::jsonb
+              THEN ARRAY['vault_policy'] ELSE ARRAY[]::text[] END)
+      )::text,
+      'UTF8'
+    )),
+    'hex'
+  )
+$$;
+  $create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION scheduled_task_execution_state(p_task scheduled_tasks) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT pg_catalog.to_jsonb(p_task) - ARRAY[
+    'name', 'status', 'deleted_at', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id', 'visibility', 'billing_origin'
+  ]::text[]
+$$;
+  $create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION fence_scheduled_task_personal_resource_execution_update() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', %1$I, 'pg_temp'
+    AS $$
+DECLARE
+  execution_changed boolean;
+  has_personal_authority boolean := false;
+  capability_inserted boolean := false;
+  affected integer;
+BEGIN
+  IF NEW.authority_revision IS DISTINCT FROM OLD.authority_revision
+    AND NEW.authority_revision <> OLD.authority_revision + 1
+  THEN
+    RAISE EXCEPTION 'scheduled personal-resource authority revision update is invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  execution_changed := (
+    pg_catalog.to_jsonb(NEW) - ARRAY[
+      'name',
+      'status',
+      'updated_at',
+      'authority_revision',
+      'execution_digest', 'owner_subject_id', 'visibility', 'billing_origin'
+    ]::text[]
+  ) IS DISTINCT FROM (
+    pg_catalog.to_jsonb(OLD) - ARRAY[
+      'name',
+      'status',
+      'updated_at',
+      'authority_revision',
+      'execution_digest', 'owner_subject_id', 'visibility', 'billing_origin'
+    ]::text[]
+  );
+
+  IF NOT execution_changed THEN
+    RETURN NEW;
+  END IF;
+
+  INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'task_write')
+  ON CONFLICT DO NOTHING;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  capability_inserted := affected = 1;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM scheduled_task_personal_resource_authorities authority
+    WHERE authority.task_id = OLD.id
+  ) INTO has_personal_authority;
+
+  IF capability_inserted THEN
+    DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'task_write';
+    capability_inserted := false;
+  END IF;
+
+  IF has_personal_authority THEN
+    -- A current writer already supplies OLD + 1 and freezes/clones that exact
+    -- revision in the same transaction. A rolling legacy writer supplies no
+    -- revision, so advance it here and leave no matching snapshot: run
+    -- admission then fails closed instead of reusing stale personal authority.
+    NEW.authority_revision := OLD.authority_revision + 1;
+  END IF;
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  IF capability_inserted THEN
+    DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'task_write';
+  END IF;
+  RAISE;
+END
+$$;
+  $create$, data_schema);
+END
+$install$;

@@ -29,6 +29,7 @@ import {
   requireAccessGrant,
   requireEventSource,
   requireEventTriggersEnabled,
+  resolveTurnBillingOrigin,
   rotateEventSourceSecret,
   scheduledTaskViewerForGrant,
   sendTestEvent,
@@ -177,14 +178,16 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/event-sources/:sourceId/test", async (c) => {
-    const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
     const body = await c.req.json().catch(() => ({}));
     const request = parseRequestBody(SendTestEventRequest, body ?? {}, {
       status: 400,
       message: "invalid test event",
     });
-    const result = await sendTestEvent({ db, viewer, source, request });
+    // An API caller's test makes the automations it fires API use.
+    const billingOrigin = await resolveTurnBillingOrigin(db, { grant });
+    const result = await sendTestEvent({ db, viewer, source, request, billingOrigin });
     return c.json(SendTestEventResponse.parse(result), 201);
   });
 
@@ -198,7 +201,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(
     "/v1/workspaces/:workspaceId/event-sources/:sourceId/deliveries/:deliveryId/replay",
     async (c) => {
-      const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
+      const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
       const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
       const deliveryId = c.req.param("deliveryId");
       if (!z.string().uuid().safeParse(deliveryId).success) {
@@ -209,6 +212,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
         settings: deps.settings,
         source,
         deliveryId,
+        billingOrigin: await resolveTurnBillingOrigin(db, { grant }),
       });
       return c.json(ReplayEventDeliveryResponse.parse({ delivery }), 201);
     },

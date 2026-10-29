@@ -28,6 +28,7 @@ import {
   type DbClient,
   type PlanCreditPeriodInput,
 } from "../src";
+import { rawRows } from "../src/database";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
@@ -480,8 +481,20 @@ test("an API caller's edit or manual run makes a schedule set up in the app API 
     await manualScheduledTaskRunBillingOrigin(client.db, { ...ref, callerOrigin: "api" }),
   ).toBe("api");
 
+  const execution = () =>
+    withRlsContext(client!.db, ref, async (tx) => {
+      const [row] = await rawRows<{ execution_digest: string; authority_revision: number }>(
+        tx,
+        sql`SELECT execution_digest, authority_revision FROM scheduled_tasks
+          WHERE workspace_id = ${ref.workspaceId}::uuid AND id = ${ref.taskId}::uuid`,
+      );
+      return { digest: row!.execution_digest, revision: Number(row!.authority_revision) };
+    });
+  const before = await execution();
   await markScheduledTaskApiBilled(client.db, ref);
   expect(await readScheduledTaskBillingOrigin(client.db, ref)).toBe("api");
+  // Who pays is billing, not execution: the digest and authority revision stay.
+  expect(await execution()).toEqual(before);
   // Every later run, including a person's, is API use.
   expect(
     await manualScheduledTaskRunBillingOrigin(client.db, { ...ref, callerOrigin: "app" }),

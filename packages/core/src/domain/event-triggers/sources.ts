@@ -77,6 +77,7 @@ import {
 } from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
 import { errorMessage } from "@opengeni/contracts/values";
+import type { BillingOrigin } from "@opengeni/contracts";
 
 /**
  * Event sources and the webhook intake. A webhook source is a URL a person
@@ -687,6 +688,8 @@ export async function replayEventDelivery(input: {
   settings: Settings;
   source: EventSourceRecord;
   deliveryId: string;
+  /** Who replays: an API caller makes the automations it fires API use. */
+  billingOrigin?: BillingOrigin;
 }): Promise<EventDelivery> {
   const { source } = input;
   const stored = await getEventDeliveryForReplay(
@@ -749,6 +752,7 @@ export async function replayEventDelivery(input: {
     headers: stored.headers,
     replayOfDeliveryId: stored.delivery.id,
     match: eventMatchesTrigger,
+    ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
   });
   return recorded.delivery;
 }
@@ -762,6 +766,8 @@ export async function sendTestEvent(input: {
   viewer: ScheduledTaskViewer;
   source: EventSourceRecord;
   request: ParsedSendTestEventRequest;
+  /** Who sends it: an API caller makes the automations it fires API use. */
+  billingOrigin?: BillingOrigin;
 }): Promise<SendTestEventResponse> {
   const { source } = input;
   if (source.status !== "active") {
@@ -809,6 +815,7 @@ export async function sendTestEvent(input: {
     headers: {},
     events: streamKeys.map((streamKey) => ({ ...bounded, streamKey })),
     match: eventMatchesTrigger,
+    ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
   });
   const [stored] = await getInboundEvents(input.db, source.workspaceId, recorded.eventIds);
   if (!stored) throw new Error("test event was not stored");

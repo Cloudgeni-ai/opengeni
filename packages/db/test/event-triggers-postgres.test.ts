@@ -539,6 +539,60 @@ describe("deliveries and matching", () => {
     expect(events.events.map((entry) => entry.id)).toEqual(first.eventIds);
   });
 
+  test("a test event or replay an API caller starts makes the automations it fires API use", async () => {
+    const space = await workspace();
+    const source = await webhookSource(space);
+    const fired = await task(space);
+    const quiet = await task(space);
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: fired.id,
+      triggers: [{ sourceId: source.id, ...everything, eventTypes: ["deploy.finished"] }],
+    });
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: quiet.id,
+      triggers: [{ sourceId: source.id, ...everything, eventTypes: ["deploy.started"] }],
+    });
+    const origins = async () =>
+      withWorkspaceRls(client.db, space.workspaceId, async (scoped) =>
+        Object.fromEntries(
+          (
+            await rawRows<{ id: string; billing_origin: string | null }>(
+              scoped,
+              sql`select id, billing_origin from scheduled_tasks
+                where workspace_id = ${space.workspaceId}::uuid
+                  and id in (${fired.id}::uuid, ${quiet.id}::uuid)`,
+            )
+          ).map((row) => [row.id, row.billing_origin]),
+        ),
+      );
+    const send = (billingOrigin?: "app" | "api") =>
+      recordEventDelivery(client.db, {
+        accountId: space.accountId,
+        workspaceId: space.workspaceId,
+        sourceId: source.id,
+        status: "accepted",
+        reason: "Test event sent from Opengeni",
+        dedupeKey: `test:${crypto.randomUUID()}`,
+        body: null,
+        bodyBytes: 2,
+        bodySha256: createHash("sha256").update("{}").digest("hex"),
+        headers: {},
+        events: [event("deploy.finished")],
+        match,
+        settleMs: 0,
+        ...(billingOrigin ? { billingOrigin } : {}),
+      });
+    // An inbound delivery, or a person's test, leaves who set it up paying.
+    expect((await send()).matchedTaskIds).toEqual([fired.id]);
+    expect((await send("app")).matchedTaskIds).toEqual([fired.id]);
+    expect(await origins()).toEqual({ [fired.id]: null, [quiet.id]: null });
+    // An API caller's: only the automation it fired becomes API use.
+    expect((await send("api")).matchedTaskIds).toEqual([fired.id]);
+    expect(await origins()).toEqual({ [fired.id]: "api", [quiet.id]: null });
+  });
+
   test("matching queues events for active automations whose owner can see the source", async () => {
     const space = await workspace();
     const source = await webhookSource(space, "private");

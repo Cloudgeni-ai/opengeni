@@ -33,11 +33,17 @@ inherit the origin of the chat they run in, never the credential's.
   a chat's first turn, the parent chat's. Nothing to inherit stays null, which
   is billed as app (today's behaviour).
 - `scheduled_tasks.billing_origin` is the origin of whoever set the task up.
-  Once an API caller edits a task or runs it by hand, it is API from then on
-  (`markScheduledTaskApiBilled`), so a key cannot spend plan credit through a
-  schedule set up in the app. Pausing leaves it alone, and a task is never
-  turned back into app. A manual run is checked at the edge as API when the
-  caller or the task is API (`manualScheduledTaskTriggerBillingOrigin`).
+  Once an API caller edits a task, runs it by hand, or fires it with an event
+  source's test event or a replayed delivery, it is API from then on
+  (`markScheduledTaskApiBilled`, and in the delivery's own transaction for
+  events), so a key cannot spend plan credit through a schedule or automation
+  set up in the app. The pause endpoints leave it alone (a status change
+  through an ordinary update counts as an edit), and a task is never turned
+  back into app. A manual run is checked at the edge as API when the caller or
+  the task is API (`manualScheduledTaskTriggerBillingOrigin`). If a manual run
+  fails to start after the mark commits, the task stays API. The origin is
+  billing, not execution: it is excluded from a task's execution digest and
+  never advances a personal-resource task's authority revision.
 - `credit_ledger_entries.usage_origin` records the origin each usage debit was
   charged under. The debit writers resolve it from the explicit input, the
   attribution metadata, the turn, then the ambient request scope.

@@ -277,7 +277,10 @@ export async function withAccessGrantSessionRlsContext<T>(
         : (rememberedLearning(deps.db, verifiedKey) ?? (await freezeLearning(verified)));
     rememberLearning(deps.db, verifiedKey, learning);
     // Tools and sub-agents of a chat are billed like the chat.
-    const billingOrigin = await agentTurnBillingOrigin(deps, grant, actor.turnId);
+    const billingOrigin = fundedBillingOrigin(
+      grant.accountId,
+      await agentTurnBillingOrigin(deps, grant, actor.turnId),
+    );
     return await withCreditDebitAttribution(
       {
         kind: "turn",

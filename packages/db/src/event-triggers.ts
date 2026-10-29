@@ -3,6 +3,7 @@ import {
   DEFAULT_EVENT_RUNS_PER_HOUR,
   EventCondition,
   InboundEventSummary,
+  type BillingOrigin,
   type EventActor,
   type EventDelivery,
   type EventDeliveryStatus,
@@ -657,6 +658,12 @@ export type RecordEventDeliveryInput = {
   match: EventTriggerMatcher;
   /** How long the dispatcher waits for more events before starting a run. */
   settleMs?: number;
+  /**
+   * Who started this delivery by hand (a test event or a replay). An API
+   * caller makes the automations it fires API use, in the same transaction,
+   * so their runs never pay from plan credit.
+   */
+  billingOrigin?: BillingOrigin;
 };
 
 export type RecordEventDeliveryResult = {
@@ -784,6 +791,14 @@ export async function recordEventDeliveryInTransaction(
     if (row) inserted.push({ id: row.id, event });
   }
   const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
+  if (input.billingOrigin === "api" && matched.length > 0) {
+    await tx.execute(
+      sql`UPDATE scheduled_tasks SET billing_origin = 'api'
+        WHERE account_id = ${input.accountId}::uuid AND workspace_id = ${input.workspaceId}::uuid
+          AND id = ANY(${`{${matched.join(",")}}`}::uuid[])
+          AND billing_origin IS DISTINCT FROM 'api'`,
+    );
+  }
   const [updated] = await tx
     .update(schema.eventDeliveries)
     .set({ eventCount: inserted.length })
