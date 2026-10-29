@@ -219,7 +219,7 @@ describe("chips in tool payloads, commands and reviews", () => {
     ]);
   });
 
-  test("an exec row title chips the command's references without nesting a link", async () => {
+  test("an exec row's command chips its references without nesting a link", async () => {
     let sequence = 0;
     const event = (type: string, payload: unknown): SessionEvent => {
       sequence += 1;
@@ -248,8 +248,15 @@ describe("chips in tool payloads, commands and reviews", () => {
       />,
       linkingUi,
     );
+    // The row's title says what the command did; the command is in its body.
+    const row = Array.from(container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
+      (node) => node.textContent?.includes("Ran a command"),
+    );
+    expect(row).toBeTruthy();
+    row!.click();
+    await flush();
     const refs = chips(container).map((chip) => chip.getAttribute("data-og-secret-ref"));
-    // The user message and the exec row title.
+    // The user message and the exec row's command.
     expect(refs.filter((ref) => ref === "{{secret:Deploy/token}}").length).toBeGreaterThanOrEqual(
       2,
     );

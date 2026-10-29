@@ -132,6 +132,34 @@ export function tourEvents(): SessionEvent[] {
     turn,
   );
 
+  // exec_command — a download from a signed storage link: the row reads
+  // "Downloaded email-review.json", and the link's signature is never shown.
+  log.tool(
+    {
+      name: "exec_command",
+      id: "call-exec-signed",
+      arguments: {
+        cmd: "curl -fsSL 'https://exports.blob.core.windows.net/mail/email-review.json?sv=2024-11-04&se=2026-10-29T10%3A00Z&sr=b&sp=r&sig=Zm9vYmFyYmF6cXV4' -o /workspace/email-review.json",
+        workdir: "/workspace",
+      },
+      output: "Chunk ID: 5e6f70\nWall time: 0.8100 seconds\nProcess exited with code 0\nOutput:\n",
+    },
+    turn,
+  );
+  // exec_command — a connector tool called through the tool client reads as the tool.
+  log.tool(
+    {
+      name: "exec_command",
+      id: "call-exec-ogtool",
+      arguments: {
+        cmd: `ogtool call mcp_ce39f0__search_messages '{"query":"payment warning","limit":20}' | jq '.messages[] | {from, subject}'`,
+        workdir: "/workspace",
+      },
+      output:
+        'Chunk ID: 7a8b9c\nWall time: 1.2200 seconds\nProcess exited with code 0\nOutput:\n{"from":"billing@example.com","subject":"Payment failed"}\n',
+    },
+    turn,
+  );
   // exec_command — exit 0 (REAL: Chrome launch)
   log.tool(
     {

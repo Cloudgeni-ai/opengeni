@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
+import { redactSignedUrls } from "./command-step";
 import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
@@ -437,10 +438,10 @@ function TermBlockView({
   failed,
 }: {
   /**
-   * The command shown in the prompt header. Pass `null` when the row title
-   * already carries it (e.g. an exec row titled `$ cmd`): the header then drops
-   * the command — and the whole prompt line if there is no workdir either — so
-   * the command never reads twice, stacked, above the output.
+   * The command shown in full above the output (a command row's title says
+   * what it did in plain words, so this is where the command itself reads).
+   * Pass `null` when the row title already carries it: the header then drops
+   * the command, and the whole prompt line if there is no workdir either.
    */
   command: string | null;
   workdir?: string | null | undefined;
@@ -481,10 +482,10 @@ function TermBlockView({
       )}
     >
       {showHeader ? (
-        <div className="flex items-center gap-2 pb-1">
+        <div className="flex items-start gap-2 pb-1">
           <span className="select-none text-og-status-idle">$</span>
           {command != null ? (
-            <span className="min-w-0 flex-1 truncate font-og-mono text-og-sm text-og-fg-muted">
+            <span className="max-h-64 min-w-0 flex-1 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-sm text-og-fg-muted">
               <SecretRefText text={command} />
             </span>
           ) : (
@@ -532,7 +533,8 @@ export function PayloadBlock({
   failed?: boolean | undefined;
 }) {
   const plain = useToolDetails() === "plain";
-  const text = typeof value === "string" ? value : stringifyPayload(value);
+  // Signed links never show their signature.
+  const text = redactSignedUrls(typeof value === "string" ? value : stringifyPayload(value));
   // Raw arguments and output are developer detail: plain tool details never show them.
   if (plain || !text || text.trim() === "") {
     return null;

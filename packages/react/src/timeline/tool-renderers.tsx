@@ -190,7 +190,7 @@ function PresentedBody({ body }: { body: ToolBody }) {
     case "term":
       return (
         <>
-          {/* Exec rows pass command={null}: the row title already carries `$ cmd`. */}
+          {/* A command row's title says what it did; the command itself heads its output here. */}
           <TermBlock
             command={body.command}
             {...(body.workdir !== null || body.command === null ? { workdir: body.workdir } : {})}

@@ -32,6 +32,7 @@ export {
 export type { ActivityGroup, ReadableWorkOptions, TurnGroup } from "./timeline/work-presentation";
 export { timelineGroupContainsPresentedImage } from "./timeline/presented-image";
 export { mcpToolLeaf, toolDisplayName } from "./timeline/tool-display-name";
+export { commandStepTitle, redactSignedUrls } from "./timeline/command-step";
 export {
   connectorLogo,
   connectorLogoIndex,
