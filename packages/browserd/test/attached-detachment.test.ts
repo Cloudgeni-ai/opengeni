@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { BrowserInteractionController } from "@opengeni/interaction";
+import {
+  BrowserInteractionController,
+  InteractionDefiniteDriverError,
+} from "@opengeni/interaction";
 import type { BrowserActionCommand } from "@opengeni/contracts";
 import { AgentBrowserDriver, type BrowserCdpConnection } from "../src/cdp-driver";
 import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
-import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
+import { CdpCommandTimeoutError, CdpProtocolError, CdpTransportError } from "../src/cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 
 class DetachmentBridge implements AttachedBrowserBridgeTransport {
@@ -1309,6 +1312,100 @@ for (const after of ["a lost and refused reattach", "an unresponsive tab"] as co
       );
       if (after === "a lost and refused reattach")
         expect(receipt.error?.message).toStartWith("The tab disconnected while browser input");
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });
+
+// How a permission setting ends, and what the action then reports: a definite
+// refusal (the browser's, or one its connection reports before applying it,
+// or a connection that could not be opened) is a failure; a setting that
+// went out and got no answer may have applied.
+for (const [ending, expected] of [
+  ["the browser refuses it", { state: "failed", code: "invalid_action" }],
+  ["its connection refuses it", { state: "failed", code: "permission_denied" }],
+  ["no connection can be opened for it", { state: "failed", code: "unsupported" }],
+  ["the browser does not answer it", { state: "outcome_unknown", code: "driver_failed" }],
+] as const)
+  test(`a permission setting that ends because ${ending} reports ${expected.state}`, async () => {
+    const bridge = new DetachmentBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    const wrapped: BrowserCdpConnection = {
+      on: connection.on.bind(connection),
+      waitForEvent: connection.waitForEvent.bind(connection),
+      close: connection.close.bind(connection),
+      async send<T>(
+        method: string,
+        params: Readonly<Record<string, unknown>> = {},
+        options: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+      ) {
+        if (method !== "Browser.setPermission")
+          return await connection.send<T>(method, params, options);
+        if (ending === "the browser refuses it")
+          throw new CdpProtocolError(method, -32_000, "Permission can't be granted.");
+        if (ending === "its connection refuses it")
+          throw new InteractionDefiniteDriverError("permission_denied", "refused before applying");
+        throw new CdpCommandTimeoutError(method, options.sessionId);
+      },
+    };
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `fixture-${randomUUID()}`;
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      engine: "chrome",
+      focusEmulation: false,
+      runner: {
+        async run<T>() {
+          return { cdpUrl: "opengeni-attached://local" } as T;
+        },
+      },
+      connect: async () => wrapped,
+    });
+    await driver.start();
+    if (ending === "no connection can be opened for it") {
+      // The connection fails as the permission action asks for it, before
+      // anything is sent.
+      const internals = driver as unknown as {
+        dispatchPermissionAction: (...args: unknown[]) => Promise<void>;
+        ensureConnection: () => Promise<BrowserCdpConnection>;
+      };
+      const dispatch = internals.dispatchPermissionAction;
+      internals.dispatchPermissionAction = async (...args) => {
+        const ensure = internals.ensureConnection;
+        internals.ensureConnection = async () => {
+          internals.ensureConnection = ensure;
+          throw new InteractionDefiniteDriverError("unsupported", "no browser connection");
+        };
+        return await dispatch.apply(driver, args);
+      };
+    }
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const observation = await controller.observe("7");
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId,
+        controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        action: { type: "permission", permission: "geolocation", setting: "granted" },
+      });
+      expect({ state: receipt.state, code: receipt.error?.code }).toEqual(expected);
+      if (expected.state === "failed")
+        expect(receipt.error?.message).not.toContain("do not replay");
     } finally {
       await driver.close().catch(() => undefined);
       connection.close();
