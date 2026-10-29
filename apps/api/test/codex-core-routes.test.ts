@@ -1271,3 +1271,35 @@ describe("the organization account list's wire shape", () => {
     expect("ownInWorkspaceIds" in codexAccountJson(account)).toBe(false);
   });
 });
+
+describe("the organization access editor for an organization API key", () => {
+  test("offers Personal workspaces for every organization key, like a subscription", async () => {
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
+    mock("getOrganizationAdministrationOverview", async () => ({
+      workspaces: [{ id: WS, name: "Research" }],
+    }));
+    mock("listOrganizationModelProviderCustomModels", async () => []);
+    const read = mock("getModelConnectionAccess", async () => ({
+      allowedModels: null,
+      allowedWorkspaces: [WS],
+      allowPersonalWorkspaces: false,
+      version: 2,
+    }));
+    for (const kind of ["openrouter", "vercel_gateway", "opper"]) {
+      const response = await app().fetch(
+        organizationAdminRequest(
+          `/v1/organizations/${ACCOUNT}/model-connections/${kind}/current/access`,
+        ),
+      );
+      expect({ kind, status: response.status }).toEqual({ kind, status: 200 });
+      expect(await response.json()).toMatchObject({
+        policy: { allowedWorkspaces: [WS], allowPersonalWorkspaces: false, version: 2 },
+        personalWorkspacesSupported: true,
+      });
+    }
+    // Read at organization scope: no workspace, so never a Personal workspace's own row.
+    expect(
+      read.mock.calls.every((call) => (call[1] as { workspaceId: unknown }).workspaceId === null),
+    ).toBe(true);
+  });
+});

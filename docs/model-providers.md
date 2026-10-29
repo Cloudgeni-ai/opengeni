@@ -298,9 +298,9 @@ not connected) and save nothing. Products are
 kind `direct-azure-organization`), use Responses with the `azure-openai` wire
 profile with reasoning controls (the same default and allowed efforts as the
 built-in provider), no hosted web search, and send the key as Azure's `api-key` header on
-`<endpoint>/responses`. They inherit into current and future shared workspaces
-only (Personal workspaces stay local, by the same RLS rule as the other
-organization API-key rails), are billed to the organization's Azure account with
+`<endpoint>/responses`. They inherit into current and future workspaces,
+Personal workspaces included (the same reach rule as the other organization
+API-key rails), are billed to the organization's Azure account with
 no Opengeni credits, and are narrowed by
 `/v1/organizations/:id/model-connections/azure_openai/current/access`. The
 workspace catalog reads the endpoint without decrypting; the worker loads the
@@ -745,8 +745,10 @@ deployment names). Active products use `organization-gateway/`,
 `organization-openrouter/`, `organization-opper/`, `organization-openai/`, or
 `organization-azure-openai/`,
 are externally billed to
-the organization provider account, and inherit into current and future shared
-workspaces only. Canonical Personal workspaces remain local. Workspace provider
+the organization provider account, and inherit into current and future
+workspaces of the organization, Personal workspaces included, narrowed by each
+connection's "Available in" (migration 1092; never another organization's
+workspaces). Workspace provider
 connections coexist under their existing IDs; no payer rail falls back or
 migrates implicitly.
 
@@ -1215,8 +1217,8 @@ model definition, so Opengeni never calls Opper `GET /models` at runtime:
 
 Organization owners/admins connect Opper once (`OrganizationModelProviderKind`
 `opper`) and curate exact ids. `organization-opper/<upstream>` products inherit
-into current and future shared workspaces only; Personal workspaces stay local,
-and per-connection access policies (`/model-connections/opper/...`) narrow
+into current and future workspaces, Personal workspaces included, and
+per-connection access policies (`/model-connections/opper/...`) narrow
 models and workspaces exactly as for OpenRouter.
 
 ### Runtime quirks
