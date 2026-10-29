@@ -519,7 +519,11 @@ export class CuaComputerBackend implements ComputerBackend {
                 true,
               );
             if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
-              await this.writeTextField(acted, operation);
+              // A password field's text cannot be read back, so nothing
+              // confirms it holds the value, only that it took a value of
+              // its length the way the field changes what is typed.
+              if ((await this.writeTextField(acted, operation)) === "unread")
+                unconfirmedInput = true;
               continue;
             }
             // CUA's own wording names its raw tools; say what the caller does.
@@ -2368,7 +2372,14 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            ...(this.identity.platform === "windows" && node.bounds
+            // Only the element's own control may be written, and the control
+            // is found by the element's area: when another settable element
+            // here has the very same area (a text box filling a container
+            // that is itself shown as a text field), the control in that
+            // area may be that other element's, so none is written.
+            ...(this.identity.platform === "windows" &&
+            node.bounds &&
+            !sharesArea(observed.roots, node)
               ? { textField: node.bounds }
               : {}),
             // A slider is only checked when the window reads its value as a
@@ -2688,8 +2699,10 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Windows: after CUA refused set_value, sets the text of the text field
    * the element is through the field's own control, as typing would and
    * without bringing its window forward (see windows-text.ts). Returns once
-   * the field reads the value; otherwise throws what the write came to. */
-  private async writeTextField(acted: Target, operation: Operation): Promise<void> {
+   * the field reads the value ("read"), or for a password field, whose text
+   * cannot be read, once it took a value it would hold as the value
+   * ("unread"); otherwise throws what the write came to. */
+  private async writeTextField(acted: Target, operation: Operation): Promise<"read" | "unread"> {
     const value = operation.args.value;
     const written =
       this.textFields && operation.textField && typeof value === "string"
@@ -2701,7 +2714,9 @@ export class CuaComputerBackend implements ComputerBackend {
       new ComputerBackendError(code, message, false, false);
     switch (written.kind) {
       case "replaced":
-        return;
+        return "read";
+      case "replaced_unread":
+        return "unread";
       case "no_control":
         throw refused(
           "unsupported",
@@ -3327,6 +3342,26 @@ function inputFailures(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** Whether another settable element of the window has exactly `node`'s
+ * bounds. */
+function sharesArea(
+  nodes: readonly InteractionSemanticNodeValue[],
+  node: InteractionSemanticNodeValue,
+): boolean {
+  const area = node.bounds;
+  return nodes.some(
+    (other) =>
+      other.ref !== node.ref &&
+      other.actions.includes("set_value") &&
+      other.bounds !== undefined &&
+      area !== undefined &&
+      other.bounds.x === area.x &&
+      other.bounds.y === area.y &&
+      other.bounds.width === area.width &&
+      other.bounds.height === area.height,
+  );
 }
 
 /** What a person must do before this login session's windows can be read or

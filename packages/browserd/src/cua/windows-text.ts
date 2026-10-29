@@ -20,7 +20,9 @@
  * whose window rectangle is exactly the element's bounds: UI Automation gives
  * such a control's element the rectangle of the control's own window. When no
  * control or more than one has that rectangle, nothing is written, so a
- * control nested in the element or around it never is. A read-only or
+ * control nested in the element or around it never is. (The CUA backend
+ * also writes nothing when another settable element has the very same
+ * bounds, since the control there may be that element's.) A read-only or
  * disabled control is refused before anything is sent.
  */
 
@@ -56,6 +58,10 @@ export type Win32TextControls = {
 export type TextFieldWrite =
   /** The field reads the value now. */
   | { kind: "replaced" }
+  /** A password field, whose text cannot be read: it took the replacement,
+   * and what it holds has the value's length and would read as the value
+   * once the field changed its letters the way it changes typed ones. */
+  | { kind: "replaced_unread" }
   /** Nothing was sent. */
   | { kind: "no_control" }
   | { kind: "read_only" }
@@ -85,6 +91,8 @@ export function windowsTextFields(): WindowsTextFields {
 }
 
 const ES_MULTILINE = 0x0004;
+const ES_UPPERCASE = 0x0008;
+const ES_LOWERCASE = 0x0010;
 const ES_PASSWORD = 0x0020;
 const ES_READONLY = 0x0800;
 
@@ -135,7 +143,7 @@ export function replaceFieldText(
   if (!win.isEnabled(control)) return { kind: "disabled" };
   const multiline = (style & ES_MULTILINE) !== 0;
   if (!multiline && /[\r\n]/u.test(value)) return { kind: "single_line" };
-  if (style & ES_PASSWORD) return replacePassword(win, control, value);
+  if (style & ES_PASSWORD) return replacePassword(win, control, style, value);
   if (!win.replaceAll(control, multiline ? lines(value).replace(/\n/gu, "\r\n") : value))
     return { kind: "no_answer" };
   const reads = win.text(control);
@@ -147,8 +155,17 @@ export function replaceFieldText(
  * a field that ignored the replacement can have the value's length already.
  * The control marks its text edited when it takes a replacement, so it is
  * marked unedited first: a field that is still unedited afterwards did not
- * take it, and gets back the mark it had. */
-function replacePassword(win: Win32TextControls, control: number, value: string): TextFieldWrite {
+ * take it, and gets back the mark it had. A field that turns letters into
+ * capitals or small letters (ES_UPPERCASE, ES_LOWERCASE) holds the value
+ * only when the value has no letters it would change. What the app itself
+ * may do to the text is not seen, so the field is not said to read the
+ * value even then. */
+function replacePassword(
+  win: Win32TextControls,
+  control: number,
+  style: number,
+  value: string,
+): TextFieldWrite {
   const edited = win.modified(control);
   if (edited === null || (edited && !win.setModified(control, false))) return { kind: "no_answer" };
   if (!win.replaceAll(control, value)) return { kind: "no_answer" };
@@ -160,7 +177,11 @@ function replacePassword(win: Win32TextControls, control: number, value: string)
   }
   const length = win.textLength(control);
   if (length === null) return { kind: "no_answer" };
-  return length === value.length ? { kind: "replaced" } : { kind: "not_applied" };
+  const held =
+    style & ES_UPPERCASE ? value.toUpperCase() : style & ES_LOWERCASE ? value.toLowerCase() : value;
+  return length === value.length && held === value
+    ? { kind: "replaced_unread" }
+    : { kind: "not_applied" };
 }
 
 const GWL_STYLE = -16;

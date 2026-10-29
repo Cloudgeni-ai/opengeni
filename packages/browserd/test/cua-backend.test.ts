@@ -1371,6 +1371,9 @@ describe("CUA desktop boundary", () => {
     // it disables the window for the write, and the field then refuses it.
     const refusal =
       "set_value: element [1] does not implement ValuePattern or RangeValuePattern. For controls with TogglePattern (CheckBox) or SelectionItemPattern (RadioButton / ComboBoxItem), use the `click` tool instead.";
+    // A text box filling the field: another settable element with the very
+    // same area (a container shown as a text field, and the text box in it).
+    let filled = false;
     class RefusingFixture extends WindowsFixture {
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const response = await super.callTool(name, argumentsJson);
@@ -1378,7 +1381,19 @@ describe("CUA desktop boundary", () => {
           return { text: refusal, images: [], isError: true, degraded: false, rawJson: "{}" };
         if (name === "get_window_state") {
           const state = JSON.parse(response.structuredJson!);
-          if (state.elements) state.elements[1].frame = { x: 60, y: 70, w: 120, h: 40 };
+          if (state.elements) {
+            state.elements[1].frame = { x: 60, y: 70, w: 120, h: 40 };
+            if (filled)
+              state.elements.push({
+                element_index: 4,
+                element_token: `s${this.snapshot}:4`,
+                parent_index: 1,
+                role: "Edit",
+                label: "Inside",
+                actions: ["set_value"],
+                frame: { x: 60, y: 70, w: 120, h: 40 },
+              });
+          }
           response.structuredJson = JSON.stringify(state);
         }
         return response;
@@ -1387,6 +1402,7 @@ describe("CUA desktop boundary", () => {
     const fixture = new RefusingFixture();
     const writes: unknown[] = [];
     let outcome: TextFieldWrite["kind"] = "replaced";
+    let unconfirmed = 0;
     const backend = await CuaComputerBackend.open(fixture, "windows", {
       frontWindow: {
         front: async (windowId) => {
@@ -1405,15 +1421,19 @@ describe("CUA desktop boundary", () => {
     const setValue = async (value: string) => {
       const observation = await backend.observe((await backend.targets())[0]!.id);
       const field = observation.roots.find((node) => node.name === "Value")!;
-      return await backend.dispatch({
-        ...command(observation),
-        action: {
-          type: "semantic",
-          locator: { kind: "ref", ref: field.ref },
-          action: "set_value",
-          value,
+      return await backend.dispatch(
+        {
+          ...command(observation),
+          action: {
+            type: "semantic",
+            locator: { kind: "ref", ref: field.ref },
+            action: "set_value",
+            value,
+          },
         },
-      });
+        undefined,
+        () => (unconfirmed += 1),
+      );
     };
     try {
       await setValue("Hello from Opengeni");
@@ -1425,6 +1445,24 @@ describe("CUA desktop boundary", () => {
         },
       ]);
       expect(fixture.calls.some((call) => call.name === "(front)")).toBe(false);
+      expect(unconfirmed).toBe(0);
+      // With another settable element in the very same area, the control
+      // there may be that element's: nothing is written, definitely.
+      filled = true;
+      writes.length = 0;
+      await expect(setValue("Hello")).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message:
+          "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+      });
+      expect(writes).toEqual([]);
+      filled = false;
+      // A password field took a value it holds as the value, but its text
+      // cannot be read back: the input is reported as unconfirmed.
+      outcome = "replaced_unread";
+      await setValue("foobar");
+      expect(unconfirmed).toBe(1);
       for (const [kind, expected] of [
         [
           "read_only",

@@ -16,6 +16,8 @@ type Control = {
 const WINDOW = 100;
 const FIELD = 200;
 const ES_MULTILINE = 0x4;
+const ES_UPPERCASE = 0x8;
+const ES_LOWERCASE = 0x10;
 const ES_PASSWORD = 0x20;
 const ES_READONLY = 0x800;
 
@@ -120,7 +122,9 @@ describe("Windows text fields", () => {
     expect(replaceFieldText(limited, WINDOW, bounds, "Hello")).toEqual({ kind: "not_applied" });
     // A password field's text cannot be read: its length is compared.
     const password = new Desktop({ className: "Edit", rect, style: ES_PASSWORD, text: "" });
-    expect(replaceFieldText(password, WINDOW, bounds, "secret")).toEqual({ kind: "replaced" });
+    expect(replaceFieldText(password, WINDOW, bounds, "secret")).toEqual({
+      kind: "replaced_unread",
+    });
     const short = new Desktop({ className: "Edit", rect, style: ES_PASSWORD, text: "", limit: 2 });
     expect(replaceFieldText(short, WINDOW, bounds, "secret")).toEqual({ kind: "not_applied" });
   });
@@ -154,7 +158,14 @@ class NestedDesktop implements Win32TextControls {
     const control = this.at(handle)!;
     if (control.hung) return false;
     if (control.ignoresReplace) return true;
-    control.text = text.slice(0, control.limit ?? text.length);
+    // As Windows' edit control does, it changes the letters it is given.
+    const cased =
+      control.style & ES_UPPERCASE
+        ? text.toUpperCase()
+        : control.style & ES_LOWERCASE
+          ? text.toLowerCase()
+          : text;
+    control.text = cased.slice(0, control.limit ?? text.length);
     control.modified = true;
     return true;
   };
@@ -258,13 +269,27 @@ describe("Windows text fields: a password field", () => {
     expect(replaceFieldText(ignored, WINDOW, bounds, "foobar")).toEqual({ kind: "not_applied" });
     expect(ignored.controls.get(301)!.modified).toBe(true);
     const taken = field({ modified: true });
-    expect(replaceFieldText(taken, WINDOW, bounds, "foobar")).toEqual({ kind: "replaced" });
+    expect(replaceFieldText(taken, WINDOW, bounds, "foobar")).toEqual({ kind: "replaced_unread" });
     expect(taken.controls.get(301)!).toMatchObject({ text: "foobar", modified: true });
   });
 
-  test("that takes the replacement is set", () => {
+  test("that takes the replacement is set, but never said to read the value", () => {
     const desktop = field({});
-    expect(replaceFieldText(desktop, WINDOW, bounds, "foobar")).toEqual({ kind: "replaced" });
+    expect(replaceFieldText(desktop, WINDOW, bounds, "foobar")).toEqual({
+      kind: "replaced_unread",
+    });
     expect(desktop.controls.get(301)!.text).toBe("foobar");
+  });
+
+  test("that changes the letters it is given is set only to a value it holds unchanged", () => {
+    // CharacterCasing.Upper or Lower on a WinForms password box.
+    const upper = field({ style: ES_PASSWORD | ES_UPPERCASE, text: "FOOBAR" });
+    expect(replaceFieldText(upper, WINDOW, bounds, "foobar")).toEqual({ kind: "not_applied" });
+    expect(upper.controls.get(301)!.text).toBe("FOOBAR");
+    const lower = field({ style: ES_PASSWORD | ES_LOWERCASE });
+    expect(replaceFieldText(lower, WINDOW, bounds, "FooBar")).toEqual({ kind: "not_applied" });
+    expect(
+      replaceFieldText(field({ style: ES_PASSWORD | ES_UPPERCASE }), WINDOW, bounds, "AB-12"),
+    ).toEqual({ kind: "replaced_unread" });
   });
 });
