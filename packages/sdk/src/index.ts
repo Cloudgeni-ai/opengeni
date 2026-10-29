@@ -1402,6 +1402,7 @@ export type {
   SessionListTotals,
   SiteConversationGroup,
   SessionListEntry,
+  SessionListLatestTurn,
   SessionListEntryResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,
