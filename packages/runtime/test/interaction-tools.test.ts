@@ -4462,6 +4462,74 @@ describe("interaction attempt tools", () => {
     expect(unchanged).not.toContain(line);
   });
 
+  test("a Computer batch whose input the driver could not confirm and that changed no element says it may not have taken effect", async () => {
+    const target = computerTarget();
+    const reading = {
+      ...computerObservation(target),
+      semantic: {
+        kind: "snapshot" as const,
+        roots: Array.from({ length: 8 }, (_, index) => ({
+          ref: `e${index + 1}`,
+          role: "textbox",
+          name: `Field ${index}`,
+          states: [],
+          actions: ["set_value"],
+        })),
+        nodeCount: 8,
+      },
+    };
+    let unconfirmed = true;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
+        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => ({ ...reading, observationId: randomUUID() }),
+        // The computer runs the batch as one operation and reports its key
+        // press as sent with nothing confirming it, as CUA does.
+        actInComputer: async (_workspaceId, _computerSessionId, value) => ({
+          ...computerReceipt(value.operationId, { ...reading, observationId: randomUUID() }),
+          ...(unconfirmed ? { unconfirmedInput: true as const } : {}),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const act = async () => {
+      const result = await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "Meta+L" },
+              { type: "keyboard", action: "type", value: "example.com" },
+              { type: "keyboard", action: "press", value: "Enter" },
+            ],
+          },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return result;
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    // The first reading in this attempt is shown whole.
+    expect((await act()).structuredContent).toMatchObject({ unconfirmedInput: true });
+    const text = ((await act()).content[0] as { text: string }).text;
+    expect(text.split("\n").slice(0, 2)).toEqual([
+      `Batch completed on ${target.id}: 3 actions.`,
+      line,
+    ]);
+    unconfirmed = false;
+    const confirmed = await act();
+    expect(confirmed.structuredContent).not.toHaveProperty("unconfirmedInput");
+    expect((confirmed.content[0] as { text: string }).text).not.toContain(line);
+  });
+
   test("a browser action's outline shows only what changed since the outline the model last saw", async () => {
     const target = browserTarget();
     const links = Array.from({ length: 8 }, (_, index) => ({
