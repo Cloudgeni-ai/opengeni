@@ -5,7 +5,11 @@ import {
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
 } from "../../timeline";
-import { isModelUnavailableSubmissionError } from "../../lib/format";
+import {
+  creditRefusalHeadline,
+  creditRefusalKindFromText,
+  isModelUnavailableSubmissionError,
+} from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
@@ -3001,13 +3005,18 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
-  // Free credit can still cover other models after this model's credit ran out.
-  const creditGap = props.creditExhausted
-    ? freeCreditGap(modelCatalog.rows, props.session.model, {
-        selectedModel: composerPolicy?.model,
-        preferredModel: modelCatalog.defaultSelection?.model,
-      })
+  // An own-key or API stop names its one fix; no model choice or free credit fixes it.
+  const stopRefusal = props.creditExhausted
+    ? creditRefusalKindFromText(props.failure?.recordedDetail, props.failure?.reason)
     : null;
+  // Free credit can still cover other models after this model's credit ran out.
+  const creditGap =
+    props.creditExhausted && !stopRefusal
+      ? freeCreditGap(modelCatalog.rows, props.session.model, {
+          selectedModel: composerPolicy?.model,
+          preferredModel: modelCatalog.defaultSelection?.model,
+        })
+      : null;
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
@@ -4504,11 +4513,13 @@ function SessionChatPane(props: {
                       ? // "Send a message to revive" is a dead end without credits —
                         // the reply turn dies the same budget death. With free
                         // credit left for other models, a covered model revives it.
-                        creditGap
-                        ? creditGap.selectionUsable
-                          ? "Send a follow-up…"
-                          : "Your free credits don't cover this model — choose another model or add credits."
-                        : "Out of Opengeni credits — add credits to continue."
+                        stopRefusal
+                        ? creditRefusalHeadline(t, stopRefusal)
+                        : creditGap
+                          ? creditGap.selectionUsable
+                            ? "Send a follow-up…"
+                            : "Your free credits don't cover this model — choose another model or add credits."
+                          : "Out of Opengeni credits — add credits to continue."
                       : "Send a follow-up…"
                 }
                 controls={

@@ -152,7 +152,10 @@ export function creditRefusalKindFromText(
   return null;
 }
 
-/** The refusal kind of a 402 from the API: its stable code, then its action. */
+/**
+ * The refusal kind of a 402 from the API: its stable code, then its action
+ * (on the Free plan the server offers Upgrade to Pro as the fix).
+ */
 export function creditRefusalKind(error: unknown): CreditRefusalKind | null {
   if (!(error instanceof OpenGeniApiError) || error.status !== 402) return null;
   const details = error.details as { code?: unknown; action?: { type?: unknown } } | undefined;
@@ -163,11 +166,6 @@ export function creditRefusalKind(error: unknown): CreditRefusalKind | null {
       : "byok_paid_credit_required";
   }
   return null;
-}
-
-/** The one action that fixes a refusal of this kind. */
-export function creditRefusalFix(kind: CreditRefusalKind): "upgrade" | "add_credits" {
-  return kind === "byok_upgrade_required" ? "upgrade" : "add_credits";
 }
 
 const CREDIT_REFUSAL_KEYS = {

@@ -157,11 +157,14 @@ describe("credit required prompt", () => {
     const container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    const render = async (refusalCode: "byok_upgrade_required" | "byok_paid_credit_required") =>
+    const render = async (
+      refusalCode: "byok_upgrade_required" | "byok_paid_credit_required" | "api_credits_required",
+      billingClient: object = client,
+    ) =>
       act(async () =>
         root!.render(
           <CreditRequiredPromptView
-            client={client as never}
+            client={billingClient as never}
             open
             workspaceId="workspace-a"
             accountId="account-a"
@@ -177,9 +180,23 @@ describe("credit required prompt", () => {
       "Upgrade to Pro",
     ]);
     await render("byok_paid_credit_required");
-    expect(container.textContent).toContain("Add credits to use your own key.");
+    expect(container.querySelector("h2")!.textContent).toBe("Add credits to use your own key");
     expect(container.textContent).not.toContain("Use your own provider account");
     expect(container.textContent).not.toContain("choose another model");
+    // Without checkout here, Billing is still the one fix, not a dead end.
+    await render("api_credits_required", {
+      getBilling: mock(async () => ({ mode: "disabled" as const })),
+      createBillingCheckout,
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector("h2")!.textContent).toBe(
+      "API usage uses credits, not your plan credit",
+    );
+    expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
+      "Add credits",
+    ]);
   });
 
   test("the notice follows selected-model funding rather than the total credit balance", async () => {

@@ -145,9 +145,9 @@ export function CreditRequiredPromptView({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Upgrade to Pro to use your own key</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className={canBuyCredits ? "sr-only" : undefined}>
               {canBuyCredits
-                ? "Own keys use paid credit, which Pro includes."
+                ? "Upgrade to Pro on Billing."
                 : "Ask an organization owner to upgrade to Pro."}
             </DialogDescription>
           </DialogHeader>
@@ -159,7 +159,6 @@ export function CreditRequiredPromptView({
                   params={{ workspaceId }}
                   search={{ section: "billing" }}
                   onClick={() => onOpenChange(false)}
-                  {...analyticsAction("buy_credits")}
                 >
                   Upgrade to Pro
                 </Link>
@@ -176,16 +175,27 @@ export function CreditRequiredPromptView({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {purpose === "topup" ? "Add Opengeni credits" : "Add Opengeni credits to continue"}
+            {purpose === "topup"
+              ? "Add Opengeni credits"
+              : refusalCode === "byok_paid_credit_required"
+                ? "Add credits to use your own key"
+                : refusalCode === "api_credits_required"
+                  ? "API usage uses credits, not your plan credit"
+                  : "Add Opengeni credits to continue"}
           </DialogTitle>
-          <DialogDescription>
+          {/* A refusal's title names its fix; the line below it says how. */}
+          <DialogDescription
+            className={
+              purpose === "required" && refusalCode && !(canBuyCredits && stripeEnabled)
+                ? "sr-only"
+                : undefined
+            }
+          >
             {purpose === "topup"
               ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
-              : refusalCode === "byok_paid_credit_required"
-                ? "Add credits to use your own key."
-                : refusalCode === "api_credits_required"
-                  ? "API usage uses credits, not your plan credit."
-                  : "Add credits to use this model, or choose another model."}
+              : refusalCode
+                ? "Choose an amount and pay in Stripe Checkout."
+                : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
@@ -222,6 +232,21 @@ export function CreditRequiredPromptView({
               ? "Ask an organization owner to add credits."
               : "Ask an organization owner to add credits, or an admin to connect a model."}
           </p>
+        ) : refusalCode && purpose === "required" ? (
+          // Checkout isn't available here (yet): Billing still has the one fix.
+          <DialogFooter>
+            <Button asChild type="button">
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "billing" }}
+                onClick={() => onOpenChange(false)}
+                {...analyticsAction("buy_credits")}
+              >
+                Add credits
+              </Link>
+            </Button>
+          </DialogFooter>
         ) : null}
         {/* Own-key and API refusals have one fix: credits. */}
         {purpose === "required" && !refusalCode ? (
