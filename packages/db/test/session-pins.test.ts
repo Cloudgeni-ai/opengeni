@@ -529,7 +529,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const compact = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
     const row = compact.pinned[0]!;
     const { sessionListEntry } = await import("@opengeni/contracts/session-list-entries");
-    expect(row).toEqual(sessionListEntry(full.pinned[0]!));
+    // Only the compact projection reads the latest turn; this session has none.
+    expect(row).toEqual({ ...sessionListEntry(full.pinned[0]!), latestTurn: null });
     expect(row.siteOrigin).toEqual({ siteId, title: "Example Site" });
     expect(row.scheduledTaskId).toBe("generated-task");
     expect(row.createdBy.label).toBe("Example member");

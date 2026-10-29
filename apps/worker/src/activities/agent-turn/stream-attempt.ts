@@ -2293,7 +2293,11 @@ export async function runTurnStreamAttempt(
                                 eventing.preparedTools?.mcpServers ?? [],
                                 approval,
                               ),
-                              { workspaceId: input.workspaceId, sessionId: input.sessionId },
+                              {
+                                workspaceId: input.workspaceId,
+                                sessionId: input.sessionId,
+                                settings: eventing.modelRunSettings,
+                              },
                             ),
                           ),
                         ),
