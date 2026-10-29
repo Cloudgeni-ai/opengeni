@@ -995,11 +995,15 @@ type BlankCreatedFrames = {
  *   page, a site the person took its access from).
  * - Every frame that runs this extension's script says so to its parent, so
  *   a parent knows which of its frames (`unseen`) did not.
- * - A parent's unseen frames hold other extensions' pages only when each
+ * - A parent's unseen frame holds another extension's page only when each
  *   frame Chrome reports in that parent ran the script (so none of them is
- *   unseen), every frame that ran it was heard, and Chrome's debugging
- *   targets hold at least as many other extensions' pages as there are
- *   unseen frames.
+ *   unseen), every frame that ran it was heard, Chrome reports no frame
+ *   after the search that it did not report before (a frame the page added
+ *   meanwhile may be among the unseen), the parent has exactly one unseen
+ *   frame, and Chrome's debugging targets hold at least as many other
+ *   extensions' pages as there are unseen frames. Those targets are counted
+ *   across the whole browser, since Chrome does not say which tab holds
+ *   them, so they alone cannot single out this tab's frames.
  * Otherwise nothing found this way is removed. Returns the parents whose
  * unseen frames are other extensions', or null.
  */
@@ -1045,12 +1049,17 @@ async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedF
     // A frame that ran the script but was not heard may be among the unseen.
     if (round >= 2) return null;
   }
+  const reportedAfter =
+    (await withinFrameRemovalTimeout(chrome.webNavigation.getAllFrames({ tabId }))) ?? [];
+  const reportedBefore = new Set(reported.map((frame) => frame.frameId));
+  if (reportedAfter.some((frame) => !reportedBefore.has(frame.frameId))) return null;
   const unscripted = new Set(
     reported
       .filter((frame) => frame.frameId !== 0 && !ran.has(frame.frameId))
       .map((frame) => frame.parentFrameId),
   );
   const holding = reports.filter((report) => report.unseen > 0 && !unscripted.has(report.frameId));
+  if (holding.some((report) => report.unseen !== 1)) return null;
   const unseen = holding.reduce((sum, report) => sum + report.unseen, 0);
   if (unseen === 0 || unseen > extensionFrames.length) return null;
   const extensions = new Set(extensionFrames);

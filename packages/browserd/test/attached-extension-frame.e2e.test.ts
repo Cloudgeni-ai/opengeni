@@ -47,7 +47,21 @@ document.addEventListener("keydown", (event) => {
 // page posts itself again, as in a payment challenge.
 const PAGE_FRAMES = ["error", "hopping", "posted"] as const;
 
-function page(menu: "src" | "blank", otherOrigin: string, pageFrames: boolean): string {
+// "adding": the page adds frames of its own, each created blank and loaded
+// from another origin by script, as pages add ad and widget frames. It adds
+// one whenever a frame posts it a message, which is also when the extension
+// is searching the page for another extension's frames, so the frame appears
+// during that search.
+// "menu-open": another tab of the same site, with the password manager's
+// menu open; no agent drives it.
+type PageMode = "agent" | "adding" | "menu-open";
+
+function page(
+  menu: "src" | "blank",
+  otherOrigin: string,
+  pageFrames: boolean,
+  mode: PageMode = "agent",
+): string {
   const frames = pageFrames
     ? `<iframe id="error" title="Error"></iframe><iframe id="hopping" title="Hopping"></iframe>
 <iframe id="posted" name="posted" title="Posted"></iframe>
@@ -58,6 +72,27 @@ document.getElementById("hopping").contentWindow.location.href = ${JSON.stringif
 document.getElementById("post").submit();
 </script>`
     : "";
+  const adding =
+    mode === "adding"
+      ? `<script>
+let made = 0;
+addEventListener("message", () => {
+  if (made >= 40) return;
+  const frame = document.createElement("iframe");
+  frame.id = "added-" + made++;
+  frame.title = frame.id;
+  document.body.appendChild(frame);
+  frame.contentWindow.location.href = ${JSON.stringify(otherOrigin)} + "/widget";
+});
+</script>`
+      : "";
+  if (mode === "menu-open") {
+    return `<!doctype html><html data-menu="${menu}"><head><title>Other tab</title></head><body>
+<input id="email" aria-label="Email" value="b@example.com">
+<script>
+setTimeout(() => document.getElementById("email").dispatchEvent(new FocusEvent("focusin", { bubbles: true })), 300);
+</script></body></html>`;
+  }
   return `<!doctype html><html data-menu="${menu}"><head><title>Verify</title></head><body>
 <div id="box"><input id="email" aria-label="Email" value="a@example.com">
 <button type="button" id="send">Send code to email</button>
@@ -65,6 +100,7 @@ document.getElementById("post").submit();
 <p id="frames"></p>
 <iframe id="widget" title="Widget"></iframe>
 ${frames}
+${adding}
 <script>
 // The page's own frame, created blank and loaded from another origin by script.
 document.getElementById("widget").contentWindow.location.href = ${JSON.stringify(otherOrigin)} + "/widget";
@@ -73,6 +109,7 @@ setInterval(() => {
   // Tells the test which of its frames the page still holds, also while
   // the tab cannot be debugged.
   const held = [...document.querySelectorAll("iframe")].map((frame) => frame.id).filter(Boolean);
+  if (typeof made === "number") held.push("made-" + made);
   fetch("/frames", { method: "POST", body: held.join(",") }).catch(() => {});
 }, 50);
 // The person presses Escape (see /escape).
@@ -93,7 +130,11 @@ document.getElementById("send").onclick = () => {
 
 type Fixture = Awaited<ReturnType<typeof launch>>;
 
-async function launch(menu: "src" | "blank", pageFrames: boolean) {
+async function launch(
+  menu: "src" | "blank",
+  pageFrames: boolean,
+  options: { mode?: PageMode; menuTabs?: number } = {},
+) {
   const directory = await mkdtemp("/tmp/ogb-extension-frame-e2e-");
   const extension = join(directory, "extension");
   const build = Bun.spawnSync(
@@ -142,7 +183,8 @@ async function launch(menu: "src" | "blank", pageFrames: boolean) {
         return new Response("");
       }
       if (path === "/escape") return new Response(escape ? "yes" : "no");
-      return new Response(page(menu, `http://localhost:${other.port}`, pageFrames), {
+      const mode = (new URL(request.url).searchParams.get("mode") ?? "agent") as PageMode;
+      return new Response(page(menu, `http://localhost:${other.port}`, pageFrames, mode), {
         headers: { "content-type": "text/html" },
       });
     },
@@ -302,7 +344,11 @@ process.stdin.on("end", () => process.exit(0));
       code === "driver_rejected" ? { extensionCode: reply.error.code } : undefined,
     );
   };
-  await request({ type: "tabs.create", url: `http://127.0.0.1:${site.port}/` });
+  const agentPath = `/?mode=${options.mode ?? "agent"}`;
+  await request({ type: "tabs.create", url: `http://127.0.0.1:${site.port}${agentPath}` });
+  for (let tab = 0; tab < (options.menuTabs ?? 0); tab++) {
+    await request({ type: "tabs.create", url: `http://127.0.0.1:${site.port}/?mode=menu-open` });
+  }
   const connection = new AttachedChromeCdpConnection(
     { request, close: () => undefined },
     { browserName: "Chrome", browserVersion: "155.0.0.0" },
@@ -329,7 +375,8 @@ process.stdin.on("end", () => process.exit(0));
   let targetId = "";
   for (let attempt = 0; attempt < 50 && !targetId; attempt++) {
     const targets = await driver.listTargets();
-    targetId = targets.find((target) => target.url.includes(`127.0.0.1:${site.port}`))?.id ?? "";
+    targetId =
+      targets.find((target) => target.url.includes(`127.0.0.1:${site.port}${agentPath}`))?.id ?? "";
     if (!targetId) await Bun.sleep(100);
   }
   const observe = async () => await controller.observe(targetId);
@@ -382,8 +429,9 @@ async function withFixture(
   menu: "src" | "blank",
   run: (fixture: Fixture) => Promise<void>,
   pageFrames = false,
+  options: { mode?: PageMode; menuTabs?: number } = {},
 ) {
-  const fixture = await launch(menu, pageFrames);
+  const fixture = await launch(menu, pageFrames, options);
   try {
     await run(fixture);
   } finally {
@@ -515,4 +563,51 @@ e2e(
     });
   },
   90_000,
+);
+
+e2e(
+  "frames the page adds while the menu is removed stay, even when other tabs have the menu open",
+  async () => {
+    await withFixture(
+      "blank",
+      async ({ observe, act, heldFrames }) => {
+        // Every frame the page added so far is still there.
+        const expectAddedFramesHeld = () => {
+          const held = heldFrames();
+          const made = Number(held.find((id) => id.startsWith("made-"))?.slice(5) ?? "0");
+          const missing = Array.from({ length: made }, (_, index) => `added-${index}`).filter(
+            (id) => !held.includes(id),
+          );
+          expect(missing).toEqual([]);
+          expect(held).toContain("widget");
+        };
+        let observation: BrowserObservation | null = await observe();
+        // The menu shows three times; each time the extension searches for it
+        // before attaching again.
+        for (let shown = 0; shown < 3; shown++) {
+          if (observation) {
+            const arm = await act(observation, {
+              type: "click",
+              locator: ref(observation, "button", "Focus the email field"),
+            });
+            expect(["completed", "outcome_unknown"]).toContain(arm.state);
+          }
+          await Bun.sleep(2_000);
+          observation = null;
+          for (let attempt = 0; attempt < 3 && observation === null; attempt++) {
+            observation = await observe().catch((failure: Error) => {
+              expect(failure.message).toContain("could not be removed");
+              return null;
+            });
+            // The page reports its frames every 50 ms.
+            await Bun.sleep(200);
+            expectAddedFramesHeld();
+          }
+        }
+      },
+      false,
+      { mode: "adding", menuTabs: 2 },
+    );
+  },
+  120_000,
 );

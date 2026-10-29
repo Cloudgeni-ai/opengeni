@@ -45,12 +45,25 @@ function harness(
     // one it cannot (frame 4, an error page, say). With `unheard`, frame 3
     // runs the script but its parent does not hear it; with `noTarget`,
     // Chrome's debugging targets hold no other extension's page.
-    blank?: { pageFrameUnscripted?: boolean; unheard?: boolean; noTarget?: boolean };
+    // With `addedDuringSearch`, the page adds a cross-origin frame of its own
+    // (frame 5) during the search, so it is among the unseen and Chrome
+    // reports it only afterwards. With `secondUnseen`, the page holds one
+    // more unseen frame that Chrome does not report. With `otherTabMenus`,
+    // other tabs hold that many more of the password manager's menus.
+    blank?: {
+      pageFrameUnscripted?: boolean;
+      unheard?: boolean;
+      noTarget?: boolean;
+      addedDuringSearch?: boolean;
+      secondUnseen?: boolean;
+      otherTabMenus?: number;
+    };
   } = {},
 ) {
   const ports: any[] = [];
   const sent: string[] = [];
   let framePresent = false;
+  let searched = false;
   let removals = 0;
   let blankRemovals = 0;
   let hanging = options.hangingRemovals ?? 0;
@@ -113,7 +126,10 @@ function harness(
       detach: async () => {},
       getTargets: async () =>
         options.blank && framePresent && !options.blank.noTarget
-          ? [{ type: "other", url: `chrome-extension://${PASSWORD_MANAGER}/menu.html` }]
+          ? Array.from({ length: 1 + (options.blank.otherTabMenus ?? 0) }, () => ({
+              type: "other",
+              url: `chrome-extension://${PASSWORD_MANAGER}/menu.html`,
+            }))
           : [],
       sendCommand: async (_source: unknown, method: string) => {
         await options.beforeCommand?.(method);
@@ -139,11 +155,16 @@ function harness(
               { frameId: 3, result: "frame-3" },
             ];
           case "unseenFrames":
+            searched = true;
             return [
               {
                 frameId: 0,
                 result: {
-                  unseen: (blank && framePresent ? 1 : 0) + (blank?.pageFrameUnscripted ? 1 : 0),
+                  unseen:
+                    (blank && framePresent ? 1 : 0) +
+                    (blank?.pageFrameUnscripted ? 1 : 0) +
+                    (blank?.addedDuringSearch ? 1 : 0) +
+                    (blank?.secondUnseen ? 1 : 0),
                   heard: blank?.unheard ? [] : ["frame-3"],
                 },
               },
@@ -173,6 +194,9 @@ function harness(
         { frameId: 3, parentFrameId: 0, url: "https://widget.example.net/" },
         ...(options.blank?.pageFrameUnscripted
           ? [{ frameId: 4, parentFrameId: 0, url: "https://unreachable.example.net/" }]
+          : []),
+        ...(options.blank?.addedDuringSearch && searched
+          ? [{ frameId: 5, parentFrameId: 0, url: "https://ads.example.net/" }]
           : []),
       ],
     },
@@ -462,5 +486,23 @@ describe("another extension's frame created blank in an attached tab", () => {
     const send = await refused(h);
     for (let attempt = 0; attempt < 8; attempt++)
       expect((await send()).error.message).toContain("it could not be removed");
+  });
+
+  test("is not removed when the page adds a frame during the search, even with menus in other tabs", async () => {
+    // The added frame is unseen, and other tabs' menus make Chrome's
+    // debugging targets hold enough other extensions' pages to cover it.
+    const h = harness({ blank: { addedDuringSearch: true, otherTabMenus: 2 } });
+    const send = await refused(h);
+    expect((await send()).error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
+  });
+
+  test("is not removed when a parent holds more than one unseen frame", async () => {
+    // Chrome does not say which tab holds its debugging targets, so other
+    // tabs' menus cannot vouch for a second unseen frame in this one.
+    const h = harness({ blank: { secondUnseen: true, otherTabMenus: 2 } });
+    const send = await refused(h);
+    expect((await send()).error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
   });
 });
