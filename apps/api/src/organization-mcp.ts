@@ -26,6 +26,10 @@ import {
 } from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
 import { actionDescription } from "./mcp/action-descriptions";
+import {
+  stampActionAuditProvenance,
+  type ActionAuditProvenance,
+} from "./http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -189,6 +193,11 @@ export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
 
 export type OrganizationActionContext = {
   caller: OrganizationMcpCaller;
+  /**
+   * Who acts for the person (an agent session with admin access, a connected
+   * agent, a personal key), for audit records. Trusted server state only.
+   */
+  auditProvenance?: ActionAuditProvenance;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
   /** The web app's public origin, when configured; serves the PNG icon. */
@@ -491,6 +500,7 @@ export async function runOrganizationAction(
         workspaceScope: context.caller.access.workspaceScope,
       });
     }
+    if (context.auditProvenance) stampActionAuditProvenance(request, context.auditProvenance);
   }
   return {
     response: await context.dispatch(request),

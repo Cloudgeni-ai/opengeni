@@ -1538,6 +1538,26 @@ checks are unchanged. Any other set is a 42501 denial with its denial fact,
 which the terminal, Files, Git and viewer routes answer as a 403 rather than a
 500.
 
+Disconnects of model subscriptions and connectors are audited in the
+transaction that performs them (`packages/db/src/disconnect-audit.ts`): each
+successful disconnect writes one disconnect `audit_events` row, either
+`subscription_connection.disconnected` (Codex, Claude and SuperGrok accounts,
+workspace or organization) or `connection.disconnected` (workspace
+connections, 1Password and vault-provider connections, social connections,
+GitHub installations, the Teams bot and organization connected agents). The
+existing Slack bot lifecycle record is kept alongside it. The
+row's subject is the acting person or principal, its workspace is null for an
+organization-level removal, and its metadata names the target's provider and
+the `source`: `app` for a person signed in to the app, `api` for API,
+organization or personal keys and service principals, and `agent` for an
+agent attempt (with its session, turn and attempt ids) or an agent acting for
+a person through organization actions. The API derives the source only from
+authenticated provenance (`apps/api/src/http/disconnect-audit-actor.ts`).
+A refused, missing or repeated disconnect writes nothing, metadata never
+carries credentials, and a failed audit insert rolls the disconnect back.
+System revocations (refresh failures, setup rollbacks, deletion cascades) are
+not person-initiated disconnects and are not recorded this way.
+
 Signed object-storage URLs are the remaining deliberately-bounded bearer
 surface: provider-native signing has no revocation, so revocation prevents
 NEW mints immediately (every mint is route-time authorized against live

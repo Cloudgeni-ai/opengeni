@@ -275,6 +275,7 @@ import {
   resolveOrganizationMcpOAuthAccess,
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
+import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -1727,6 +1728,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
     };
     let caller: OrganizationMcpCaller;
+    let auditProvenance: ActionAuditProvenance | undefined;
     let organizationKeyAccountId: string | null = null;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
@@ -1739,6 +1741,13 @@ export function createAppComposition(deps: AppDependencies): {
           accountId: connection.accountId,
           subjectId: connection.subjectId,
           access: connection.organizationAccess,
+        };
+        // A connected agent (signed in with the person's Opengeni login).
+        auditProvenance = {
+          source: "agent",
+          principalKind: "organization_mcp_connection",
+          via: "organization_mcp",
+          organizationMcpConnectionId: connection.refreshFamilyId,
         };
       } else if (personalKey) {
         // A personal API key: the person who created it, with its access.
@@ -1753,6 +1762,11 @@ export function createAppComposition(deps: AppDependencies): {
             permissions: [...personalKey.permissions],
             workspaceScope: personalKey.workspaceScope,
           }),
+        };
+        auditProvenance = {
+          source: "api",
+          principalKind: "personal_api_key",
+          via: "organization_mcp",
         };
       } else {
         const context = await requireAccessContext(c, routeDeps);
@@ -1804,6 +1818,7 @@ export function createAppComposition(deps: AppDependencies): {
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
+      ...(auditProvenance ? { auditProvenance } : {}),
       origin: new URL(c.req.url).origin,
       publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       dispatch: async (request) => await app.fetch(request, c.env),
