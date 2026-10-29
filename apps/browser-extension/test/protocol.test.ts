@@ -11,8 +11,9 @@ import {
 } from "../src/protocol";
 
 describe("attached browser extension protocol", () => {
-  test("admits focus emulation but no other Emulation method", () => {
+  test("admits focus emulation and clearing a size, but no other Emulation method", () => {
     expect(isAllowedDebuggerMethod("Emulation.setFocusEmulationEnabled")).toBe(true);
+    expect(isAllowedDebuggerMethod("Emulation.clearDeviceMetricsOverride")).toBe(true);
     expect(isAllowedDebuggerMethod("Input.dispatchMouseEvent")).toBe(true);
     expect(isAllowedDebuggerMethod("Emulation.setDeviceMetricsOverride")).toBe(false);
     expect(isAllowedDebuggerMethod("Browser.close")).toBe(false);

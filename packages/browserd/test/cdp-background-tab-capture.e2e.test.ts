@@ -230,7 +230,7 @@ e2e(
             expect(frame.targetId).toBe(background.target.id);
           } catch (error) {
             expect((error as Error).message).toStartWith(
-              "browser screenshot stalled: Chrome did not draw this tab within 5 s",
+              "browser screenshot stalled: Chrome did not draw this tab,",
             );
             expect(error).toMatchObject({ code: "timeout", retryable: true });
             outcome = "stalled";

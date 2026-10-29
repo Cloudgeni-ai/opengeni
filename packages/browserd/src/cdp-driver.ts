@@ -209,25 +209,37 @@ const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
 /** A person's own Chrome cannot take the managed launch switch that copies a
  * fresh surface, so a capture of a tab another tab covers in its window waits
  * for a redraw Chrome may never show, while Chrome answers the next capture
- * request at once. Viewport captures of a tab the connection reports as not
- * in front ask again every CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS while none
- * has answered, and give up after this long with a plain reason instead of
+ * request at once. Captures of a tab the connection reports as not in front
+ * ask again every CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS while it has not
+ * answered (see captureAskingAgain), and give up after this long with a plain reason instead of
  * the whole capture deadline; a capture of a tab shown, or not known to be
  * hidden, has the whole capture deadline. */
 const CONNECTED_CHROME_CAPTURE_STALL_MS = 5_000;
 const CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS = 1_000;
+/** Small requests still sent, one a CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS,
+ * after the caller gave up on a full-page capture of a tab behind another,
+ * so Chrome answers it and puts the tab back (see captureFullPageBehind). */
+const HELD_FULL_PAGE_ASKS = 3;
 /** Longest a capture waits to learn whether its tab is shown; past it the tab
  * counts as shown. */
 const TAB_SHOWN_TIMEOUT_MS = 1_000;
 const CONNECTED_CHROME_CAPTURE_STALLED =
-  "browser screenshot stalled: Chrome did not draw this tab within 5 s, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
+  "browser screenshot stalled: Chrome did not draw this tab, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
 /** Chromium's own reply when it has no drawn surface to capture. */
 const CAPTURE_REFUSED_BY_CHROMIUM = "Unable to capture screenshot";
 /** Longest pause between captures Chromium refuses; pauses start at 25 ms
  * and double up to this until the attempt's bound. */
 const CAPTURE_REFUSAL_MAX_PAUSE_MS = 200;
 const CAPTURE_REFUSED =
-  "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe.";
+  "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; try again in a moment, or read it with browser_observe.";
+
+/** A request that only has Chrome draw a tab again, for a capture still
+ * waiting for a redraw (see captureAskingAgain and captureFullPageBehind):
+ * unclipped and never beyond the viewport, so Chromium changes no setting
+ * for it, and at the smallest JPEG quality, since its own image is not used. */
+function askAgainParams(): Record<string, unknown> {
+  return { format: "jpeg", quality: 1, fromSurface: true, captureBeyondViewport: false };
+}
 /** Longest a viewport capture waits for the compositor to present a just
  * changed emulated viewport before publishing what it has. */
 const STALE_SURFACE_SETTLE_MS = 1_500;
@@ -2129,26 +2141,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               }
               // Only a tab Chrome does not show can wait for a redraw it never
               // shows; a capture of the tab in front has the whole deadline.
-              const stallable =
-                this.engine === "chrome" &&
-                !normalized.fullPage &&
-                (await this.tabBehind(state, deadline));
+              const stallable = this.engine === "chrome" && (await this.tabBehind(state, deadline));
               const captureOnce = async () => {
                 const response = await this.screenshotRead(
                   "Page.captureScreenshot",
                   deadline,
                   async (timeoutMs) => {
                     // Every attempt, retries included, ends by one bound: the
-                    // stall bound for a hidden tab, else the capture deadline.
-                    const bounded = stallable && timeoutMs > CONNECTED_CHROME_CAPTURE_STALL_MS;
+                    // stall bound for a viewport capture of a hidden tab, else
+                    // the capture deadline.
+                    const behind = stallable && normalized.fullPage;
+                    const bounded =
+                      stallable &&
+                      !normalized.fullPage &&
+                      timeoutMs > CONNECTED_CHROME_CAPTURE_STALL_MS;
                     const until =
                       Date.now() + (bounded ? CONNECTED_CHROME_CAPTURE_STALL_MS : timeoutMs);
                     for (let refused = 0; ; refused += 1) {
                       try {
                         // Never overlaps a frame capture of the tab: a full-page
                         // capture is clipped (see sendCapture). Asking again
-                        // overlaps only its own unclipped requests, which leave
-                        // the tab's emulation alone (see captureAskingAgain).
+                        // overlaps only the capture's own requests (see
+                        // captureAskingAgain and captureFullPageBehind).
+                        if (behind) return await this.captureFullPageBehind(state, capture, until);
                         return stallable && !state.emulatedViewport
                           ? await this.captureAskingAgain(state, capture, until)
                           : await this.sendCapture<{ data?: unknown }>(
@@ -2157,7 +2172,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                               Math.max(1, until - Date.now()),
                             );
                       } catch (error) {
-                        if (bounded && error instanceof CdpCommandTimeoutError) {
+                        if ((bounded || behind) && error instanceof CdpCommandTimeoutError) {
                           throw new InteractionControllerError(
                             "timeout",
                             CONNECTED_CHROME_CAPTURE_STALLED,
@@ -5774,10 +5789,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  /** One capture of a tab behind another in its window. Chrome can leave such
-   * a request unanswered while it answers the next one at once, so it is
-   * asked again every CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS while none has
-   * answered. The first answer, image or error, is the result; every request
+  /** One viewport capture of a tab behind another in its window. Chrome can
+   * leave such a request waiting for a redraw it never shows while it draws
+   * for the next one, and then answers every request still waiting with that
+   * same drawing. So while the capture has not answered, Chrome is asked
+   * again every CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS with a small request
+   * (see askAgainParams) whose own image is not used; the capture's answer,
+   * image or error, is the result. Should a small request answer and the
+   * capture still not, the capture is asked again in full. Every request
    * ends by `until`, and none is sent after the result.
    *
    * It waits for any other capture of the tab first and counts as one
@@ -5791,6 +5810,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     until: number,
   ): Promise<{ data?: unknown }> {
     await this.captureTurn(state, until);
+    const small = askAgainParams();
     let done: () => void = () => undefined;
     const running = new Promise<void>((resolve) => {
       done = resolve;
@@ -5800,6 +5820,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await new Promise<{ data?: unknown }>((resolve, reject) => {
       let settled = false;
       let again: ReturnType<typeof setTimeout> | undefined;
+      let inFull = false;
       const settle = (finish: () => void) => {
         if (settled) return;
         settled = true;
@@ -5807,21 +5828,109 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         done();
         finish();
       };
-      const ask = () => {
-        this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+      const ask = (params: Readonly<Record<string, unknown>>, full: boolean) => {
+        this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", params, {
           timeoutMs: Math.max(1, until - Date.now()),
         }).then(
-          (reply) => settle(() => resolve(reply)),
-          (error: unknown) => settle(() => reject(error)),
+          (answer) => {
+            if (full) settle(() => resolve(answer));
+            else inFull = true;
+          },
+          (error: unknown) => {
+            if (full) settle(() => reject(error));
+          },
         );
         if (Date.now() + CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS < until) {
           again = setTimeout(() => {
-            if (!settled) ask();
+            if (settled) return;
+            const fullAgain = inFull;
+            inFull = false;
+            ask(fullAgain ? capture : small, fullAgain);
           }, CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS);
         }
       };
-      ask();
+      ask(capture, true);
     });
+  }
+
+  /** A full-page capture of a tab behind another in its window. Chromium
+   * serves it by changing the tab's emulation to the page's size, and Chrome
+   * can leave it waiting for a redraw it never shows. While it has not
+   * answered, a small request (see askAgainParams) every
+   * CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS has Chrome draw the tab at that size,
+   * which answers the capture with the whole page; its own image is not used.
+   * The capture's answer, image or error, is the result, and the caller's
+   * bound is `until`.
+   *
+   * Chromium puts back the emulation each request saw when it began, in the
+   * order they began, so a small request begun during the capture puts the
+   * capture's emulation back after the capture restored the tab's own. In a
+   * person's own Chrome this driver never emulates a device (the extension
+   * admits no Emulation command that sets one), so once every request has
+   * answered the emulation is cleared, before any other capture of the tab is
+   * sent: the capture counts as running until then. Should the caller give
+   * up first, up to HELD_FULL_PAGE_ASKS more small requests have Chrome
+   * answer the capture, so it does not hold the tab at the page's size. */
+  private async captureFullPageBehind(
+    state: TargetState,
+    capture: Readonly<Record<string, unknown>>,
+    until: number,
+  ): Promise<{ data?: unknown }> {
+    await this.captureTurn(state, until);
+    let done: () => void = () => undefined;
+    const running = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    state.capturesRunning.set(running, until);
+    void running.then(() => state.capturesRunning.delete(running));
+    const answered = this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+      timeoutMs: Math.max(SCREENSHOT_CAPTURE_TIMEOUT_MS, until - Date.now()),
+    });
+    const inChrome = answered.then(
+      () => true,
+      () => true,
+    );
+    void (async () => {
+      const asked: Promise<unknown>[] = [];
+      const lastAsk = until + HELD_FULL_PAGE_ASKS * CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS;
+      while (
+        !(await Promise.race([
+          inChrome,
+          delay(CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS).then(() => false),
+        ])) &&
+        Date.now() < lastAsk
+      ) {
+        asked.push(
+          this.sendTarget(state, "Page.captureScreenshot", askAgainParams(), {
+            timeoutMs: FRAME_CAPTURE_TIMEOUT_MS,
+          }).catch(() => undefined),
+        );
+      }
+      await inChrome;
+      await Promise.all(asked);
+      if (asked.length > 0 && !state.emulatedViewport) {
+        await this.sendTarget(
+          state,
+          "Emulation.clearDeviceMetricsOverride",
+          {},
+          { timeoutMs: FRAME_CAPTURE_TIMEOUT_MS },
+        ).catch(() => undefined);
+      }
+    })().finally(done);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        answered,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId)),
+            Math.max(0, until - Date.now()),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async screenshotRead<T>(

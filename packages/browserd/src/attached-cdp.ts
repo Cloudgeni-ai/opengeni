@@ -1681,6 +1681,7 @@ const READ_ONLY_TAB_METHODS = new Set([
   "DOM.getDocument",
   "DOM.querySelectorAll",
   "DOM.resolveNode",
+  "Emulation.clearDeviceMetricsOverride",
   "Emulation.setFocusEmulationEnabled",
   "Inspector.enable",
   "Log.enable",
