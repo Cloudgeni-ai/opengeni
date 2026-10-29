@@ -63,6 +63,7 @@ export * from "./first-party-tool-authorization";
 export * from "./model-availability";
 export * from "./model-residency";
 import { ClientModelResidencyV1 } from "./model-residency";
+import { InferenceFeatureAvailability } from "./inference-residency";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
   AgentConfigRequest,
@@ -906,7 +907,7 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
-    /** Content from an EU-only workspace may only reach other EU-only workspaces (HTTP 422). */
+    /** EU-only refusal (HTTP 422): content from an EU-only workspace may only reach other EU-only workspaces, and EU-only inference refuses a model-backed feature with no EU route (details.code "region_restricted"). */
     "region_restricted",
     /** The resource or route no longer exists (HTTP 410). */
     "gone",
@@ -2229,6 +2230,8 @@ export const TranscriptionErrorCode = /* @__PURE__ */ defineSchema(() =>
     "insufficient_credits",
     "allowance_exhausted",
     "monthly_model_cost_limit",
+    /** The workspace is EU-only and no speech-to-text route here is EU. */
+    "region_restricted",
   ]),
 );
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
@@ -22004,6 +22007,8 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
         "unsupported",
         // The workspace turned Opengeni credits off and this model spends them.
         "credits_disabled",
+        // The workspace is EU-only and this model's route is not EU.
+        "region_restricted",
       ])
       .nullable(),
     checkedAt: z.string().datetime().nullable(),
@@ -22208,6 +22213,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     codeSearch: z
       .object({ available: primitives.boolean, workspaceDefault: z.enum(["off", "on", "split"]) })
       .default({ available: false, workspaceDefault: "off" }),
+    // EU-only inference: each model-backed side feature's region availability
+    // for the caller's workspace. `unavailableReason: "region_restricted"`
+    // means the workspace is EU-only and the feature has no EU route here;
+    // show "Not supported in EU". Absent on older servers.
+    inferenceFeatures: z.array(InferenceFeatureAvailability).optional(),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional

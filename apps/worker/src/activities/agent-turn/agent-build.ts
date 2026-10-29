@@ -96,6 +96,13 @@ import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
 import { currentAttemptSecretValues } from "./secret-values";
 import {
+  decisionModelProcessingResidency,
+  gateImageGenerationOption,
+  gateVideoGenerationOption,
+  imageGenerationRoute,
+  videoGenerationRoute,
+} from "./side-feature-gates";
+import {
   attemptQuestionVaultValidator,
   createAttemptSecretResolver,
   secretsCapabilityEnabled,
@@ -301,7 +308,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         return Uint8Array.from(Buffer.from(read.content, "base64"));
       },
     });
-  const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
+  const unrestrictedImageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
     // Never expose a paid image operation unless its permanent artifact can
     // be committed. Failing after provider execution would leave an
     // unrecoverable outcome-unknown operation with no user-visible image.
@@ -510,6 +517,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
+  const imageGenerationOption = gateImageGenerationOption(
+    runSettings,
+    imageGenerationRoute({
+      nativeHosted: Boolean(nativeImageProviderBinding),
+      providerKind: resolvedModel?.provider.kind,
+    }),
+    unrestrictedImageGenerationOption,
+  );
   // The video tools are attached whenever the deployment has object storage,
   // a sandbox and the agent has the media tools, whatever the workspace's
   // policy. Each call reads the live policy and credential, so a turn that
@@ -551,7 +566,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     );
   };
-  const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
+  // The one live read of the video policy: each tool call reads it, never the
+  // turn's startup. The EU gate below reads the same way when EU applies.
+  const readVideoGenerationPolicy = () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  const unrestrictedVideoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
     !objectStorage ||
     eventing.modelRunSettings.sandboxBackend === "none" ||
     !resolveAgentToolFamilies(session.agent).media
@@ -575,7 +593,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                 sessionId: input.sessionId,
                 turnId: turn.id,
               }),
-            readPolicy: () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+            readPolicy: readVideoGenerationPolicy,
             resolveCredential: resolveVideoGenerationCredential,
             admit: async ({ policy, credential, toolInput, toolCallId }) => {
               const referenceSandbox = await resolveVideoReferenceSandboxAccess(
@@ -635,6 +653,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             },
           }),
         };
+  // EU-only inference: no video route is EU, so under EU the tools are not
+  // offered; each call also checks the route its live funding policy names.
+  const videoGenerationOption = gateVideoGenerationOption(
+    runSettings,
+    async () => videoGenerationRoute((await readVideoGenerationPolicy()).fundingSource),
+    unrestrictedVideoGenerationOption,
+  );
   const serviceTier = serviceTierForLatencyMode(
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
@@ -914,6 +939,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               modelId,
               usage,
               requestId,
+              processingResidency: decisionModelProcessingResidency(runSettings),
             }),
         }),
         ...(eventing.toolPreparationReady

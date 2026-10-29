@@ -1,0 +1,568 @@
+import {
+  isEuResidency,
+  modelCallProcessingResidency,
+  modelEndpointDeployment,
+  ModelResidencyDeclaration,
+  ModelResidencyV1,
+  UNKNOWN_MODEL_RESIDENCY,
+  type ModelCallProcessingResidencyV1,
+  type InferenceFeatureId,
+} from "@opengeni/contracts";
+import { z } from "zod";
+
+/**
+ * EU-only inference for side features: every model-backed feature besides
+ * the chat model (web search, media, voice, transcription, Knowledge
+ * embeddings, decision models) sends content over a named
+ * route, and each route has a residency record from the same contracts types
+ * as chat models. A route's EU status comes only from that record: a
+ * code-owned rule where the provider has no EU option, or an operator
+ * declaration in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` where a deployment
+ * could be EU. Undeclared is unknown, and unknown is never EU. Route ids name
+ * the integration, never a region, and are never read for EU status. See
+ * docs/eu-only-inference.md#side-features.
+ */
+
+type Rule = {
+  geography: ModelResidencyV1["geography"];
+  deploymentType: ModelResidencyV1["deploymentType"];
+  reference: string;
+};
+
+type RouteSpec = {
+  /** The user-facing features this route serves. */
+  features: readonly InferenceFeatureId[];
+  /** Operators may declare its residency (the deployment could be EU). */
+  declarable: boolean;
+  /**
+   * The route calls one named deployment on its endpoint (Azure: one resource
+   * can hold EU and global deployments), so a declaration names it too and
+   * covers only that deployment.
+   */
+  namedDeployment?: true;
+  /** Code-owned record for routes operators cannot declare. */
+  rule?: Rule;
+};
+
+const saas = (label: string): Rule => ({
+  geography: "unknown",
+  deploymentType: "provider_default",
+  reference: `${label} API: no EU processing option Opengeni can select.`,
+});
+const gateway = (label: string): Rule => ({
+  geography: "global",
+  deploymentType: "gateway",
+  reference: `${label} runs through Vercel AI Gateway, which can process in any region.`,
+});
+const subscription = (label: string): Rule => ({
+  geography: "us",
+  deploymentType: "subscription",
+  reference: `${label} subscription offers no regional processing control.`,
+});
+
+const WEB = ["web_search"] as const;
+const TRANSCRIPTION = ["voice_input", "meeting_transcription"] as const;
+// A live transcript's client connects to the provider itself with a secret
+// the server mints, so these routes describe where that connection lands.
+const LIVE = ["live_transcription"] as const;
+// Tool routing also uses the decision model, and falls back to local ranking
+// (no model call) when the route may not run, so only code search switches off.
+const DECISIONS = ["code_search"] as const;
+
+export const SIDE_FEATURE_ROUTES = {
+  // Hosted search runs inside the model provider's request, on the provider's
+  // own search backend, not on the model deployment.
+  "web_search.hosted": {
+    features: WEB,
+    declarable: false,
+    rule: {
+      geography: "global",
+      deploymentType: "provider_default",
+      reference:
+        "Hosted provider web search (OpenAI, Azure OpenAI, Anthropic, SuperGrok) runs on the provider's search backend outside the model deployment's region.",
+    },
+  },
+  "web_search.tinyfish": { features: WEB, declarable: false, rule: saas("TinyFish") },
+  "web_search.parallel": { features: WEB, declarable: false, rule: saas("Parallel") },
+  "web_search.perplexity": { features: WEB, declarable: false, rule: saas("Perplexity") },
+  "web_search.exa": { features: WEB, declarable: false, rule: saas("Exa") },
+  "web_search.tavily": { features: WEB, declarable: false, rule: saas("Tavily") },
+  "web_search.brave": { features: WEB, declarable: false, rule: saas("Brave Search") },
+  // These run at an operator base URL and can be self-hosted.
+  "web_search.firecrawl": { features: WEB, declarable: true },
+  "web_search.jina": { features: WEB, declarable: true },
+  "web_search.searxng": { features: WEB, declarable: true },
+  "image_generation.openai_hosted": {
+    features: ["image_generation"],
+    declarable: false,
+    rule: {
+      geography: "us",
+      deploymentType: "provider_default",
+      reference: "OpenAI hosted image generation on api.openai.com processes in the US.",
+    },
+  },
+  "image_generation.ai_gateway": {
+    features: ["image_generation"],
+    declarable: false,
+    rule: gateway("Image generation"),
+  },
+  "image_generation.codex_subscription": {
+    features: ["image_generation"],
+    declarable: false,
+    rule: subscription("ChatGPT Codex"),
+  },
+  "image_generation.supergrok_subscription": {
+    features: ["image_generation"],
+    declarable: false,
+    rule: subscription("SuperGrok"),
+  },
+  "video_generation.ai_gateway": {
+    features: ["video_generation"],
+    declarable: false,
+    rule: gateway("Video generation"),
+  },
+  "video_generation.supergrok_subscription": {
+    features: ["video_generation"],
+    declarable: false,
+    rule: subscription("SuperGrok"),
+  },
+  // The deployment's own Azure resource.
+  "realtime_voice.azure_live": {
+    features: ["realtime_voice"],
+    declarable: true,
+    namedDeployment: true,
+  },
+  "realtime_voice.ai_gateway": {
+    features: ["realtime_voice"],
+    declarable: false,
+    rule: gateway("Live voice"),
+  },
+  "realtime_voice.codex_subscription": {
+    features: ["realtime_voice"],
+    declarable: false,
+    rule: subscription("ChatGPT Codex"),
+  },
+  "realtime_voice.supergrok_subscription": {
+    features: ["realtime_voice"],
+    declarable: false,
+    rule: subscription("SuperGrok"),
+  },
+  "realtime_voice.elevenlabs": {
+    features: ["realtime_voice"],
+    declarable: false,
+    rule: saas("ElevenLabs (workspace key)"),
+  },
+  "transcription.openai": {
+    features: TRANSCRIPTION,
+    declarable: false,
+    rule: {
+      geography: "us",
+      deploymentType: "provider_default",
+      reference: "OpenAI transcription on api.openai.com processes in the US.",
+    },
+  },
+  // The deployment's own Azure OpenAI and Azure Speech resources.
+  "transcription.azure-openai": {
+    features: TRANSCRIPTION,
+    declarable: true,
+    namedDeployment: true,
+  },
+  "transcription.azure-speech": { features: TRANSCRIPTION, declarable: true },
+  "transcription.openai-realtime": {
+    features: LIVE,
+    declarable: false,
+    rule: {
+      geography: "us",
+      deploymentType: "provider_default",
+      reference: "OpenAI Realtime on api.openai.com processes in the US.",
+    },
+  },
+  // The Realtime API on the deployment's Azure OpenAI resource; its own
+  // declaration, since a batch deployment's region says nothing about it.
+  "transcription.azure-openai-realtime": {
+    features: LIVE,
+    declarable: true,
+    namedDeployment: true,
+  },
+  "transcription.elevenlabs": {
+    features: TRANSCRIPTION,
+    declarable: false,
+    rule: saas("ElevenLabs (workspace key)"),
+  },
+  "transcription.codex-subscription": {
+    features: TRANSCRIPTION,
+    declarable: false,
+    rule: subscription("ChatGPT Codex"),
+  },
+  "transcription.supergrok-subscription": {
+    features: TRANSCRIPTION,
+    declarable: false,
+    rule: subscription("SuperGrok"),
+  },
+  // The deployment's embedding endpoint (OpenAI or Azure OpenAI). The local
+  // deterministic embedder sends nothing and needs no route.
+  "knowledge.embeddings": { features: ["knowledge_embeddings"], declarable: true },
+  "decision_model.jev": { features: DECISIONS, declarable: false, rule: gateway("Jev") },
+  "decision_model.openrouter": {
+    features: DECISIONS,
+    declarable: false,
+    rule: {
+      geography: "global",
+      deploymentType: "gateway",
+      reference: "OpenRouter routes requests to upstream providers in any region.",
+    },
+  },
+  // An OpenAI-compatible endpoint the operator chooses.
+  "decision_model.openai": { features: DECISIONS, declarable: true },
+} as const satisfies Record<string, RouteSpec>;
+
+export type SideFeatureRouteId = keyof typeof SIDE_FEATURE_ROUTES;
+export const SIDE_FEATURE_ROUTE_IDS = Object.keys(SIDE_FEATURE_ROUTES) as SideFeatureRouteId[];
+
+export function isSideFeatureRouteId(value: string): value is SideFeatureRouteId {
+  return Object.hasOwn(SIDE_FEATURE_ROUTES, value);
+}
+
+/** The features a route serves. */
+export function sideFeatureRouteFeatures(route: SideFeatureRouteId): readonly InferenceFeatureId[] {
+  return SIDE_FEATURE_ROUTES[route].features;
+}
+
+/** Routes whose residency an operator declares for one endpoint. */
+export type DeclarableSideFeatureRouteId = {
+  [K in SideFeatureRouteId]: (typeof SIDE_FEATURE_ROUTES)[K]["declarable"] extends true ? K : never;
+}[SideFeatureRouteId];
+/** Routes with a code-owned rule, the same wherever they are called. */
+export type CodeOwnedSideFeatureRouteId = Exclude<SideFeatureRouteId, DeclarableSideFeatureRouteId>;
+
+/**
+ * What a side-feature call names: a code-owned route, or a route with the
+ * endpoint the call actually sends to and, for a route that calls a named
+ * deployment, the deployment it calls. A declaration describes one endpoint
+ * (and deployment), so a declarable route without them is unknown.
+ */
+export type SideFeatureTarget =
+  | CodeOwnedSideFeatureRouteId
+  | {
+      route: SideFeatureRouteId;
+      endpoint: string | null | undefined;
+      deployment?: string | null | undefined;
+    };
+
+/** Whether a route calls one named deployment, which its declaration names. */
+export function sideFeatureRouteNamesDeployment(route: SideFeatureRouteId): boolean {
+  return (SIDE_FEATURE_ROUTES[route] as RouteSpec).namedDeployment === true;
+}
+
+/**
+ * Whether an endpoint is a bare resource origin (no path beyond `/`, no query
+ * or fragment, no `/deployments/` marker). A named-deployment route appends
+ * its own path to the endpoint, so any path there could call another
+ * deployment than the one named; such an endpoint is unknown.
+ */
+function bareResourceEndpoint(endpoint: string | null | undefined): boolean {
+  if (!endpoint) return false;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  return (
+    (url.pathname === "" || url.pathname === "/") &&
+    url.search === "" &&
+    url.hash === "" &&
+    modelEndpointDeployment(url) === null
+  );
+}
+
+/** A deployment name as Azure reads it: plain `[A-Za-z0-9._-]+`, not `.` or `..`. */
+function plainDeploymentName(value: string | null | undefined): string | null {
+  if (!value || value === "." || value === "..") return null;
+  return /^[A-Za-z0-9._-]+$/u.test(value) ? value : null;
+}
+
+export function sideFeatureTargetRoute(target: SideFeatureTarget): SideFeatureRouteId {
+  return typeof target === "string" ? target : target.route;
+}
+
+export type SideFeatureResidencySettings = {
+  /** `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`: declarable route id to residency declaration. */
+  sideFeatureResidencyJson?: string | undefined;
+  /** Per run: set when the workspace is EU-only (see `settingsWithInferenceResidency`). */
+  requiredModelGeography?: "eu" | undefined;
+};
+
+const SIDE_FEATURE_RULES_REVIEWED_AT = "2026-10-26";
+
+/**
+ * Vendor default hosts of declarable routes: no deployment there is the
+ * operator's own, so they carry a code-owned non-EU rule and cannot be
+ * declared.
+ */
+const VENDOR_DEFAULT_HOSTS: Record<string, Rule> = {
+  "api.openai.com": {
+    geography: "us",
+    deploymentType: "provider_default",
+    reference: "OpenAI's default API host api.openai.com processes in the US.",
+  },
+  "s.jina.ai": saas("Jina Search"),
+  "r.jina.ai": saas("Jina Reader"),
+  "api.firecrawl.dev": saas("Firecrawl"),
+};
+
+/**
+ * The origin a URL sends to, or null when it is not an http(s) URL. The host
+ * is normalised the way DNS reads it (lowercase, no trailing dot), so
+ * `api.openai.com.` is the vendor host too.
+ */
+export function sideFeatureEndpointOrigin(endpoint: string | null | undefined): string | null {
+  if (!endpoint) return null;
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    const host = url.hostname.toLowerCase().replace(/\.+$/u, "");
+    if (!host) return null;
+    return `${url.protocol}//${host}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One operator declaration: the residency of the deployment at `endpoint`
+ * (and, for a route that calls a named deployment, of `deployment` there).
+ */
+const SideFeatureResidencyDeclaration = z.object({
+  endpoint: z.string().trim().min(1),
+  deployment: z.string().trim().min(1).optional(),
+  residency: ModelResidencyDeclaration,
+});
+
+const SideFeatureResidencyDeclarations = z
+  .record(z.string(), SideFeatureResidencyDeclaration)
+  .superRefine((value, context) => {
+    for (const [key, declaration] of Object.entries(value)) {
+      if (!isSideFeatureRouteId(key)) {
+        context.addIssue({ code: "custom", path: [key], message: "unknown side-feature route" });
+      } else if (!(SIDE_FEATURE_ROUTES[key] as RouteSpec).declarable) {
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message: "this route's residency is a code-owned rule and cannot be declared",
+        });
+      }
+      const origin = sideFeatureEndpointOrigin(declaration.endpoint);
+      if (!origin) {
+        context.addIssue({
+          code: "custom",
+          path: [key, "endpoint"],
+          message: "must be the http(s) URL this route sends to",
+        });
+      } else if (Object.hasOwn(VENDOR_DEFAULT_HOSTS, new URL(origin).hostname)) {
+        context.addIssue({
+          code: "custom",
+          path: [key, "endpoint"],
+          message: "a vendor default host has a code-owned rule and cannot be declared",
+        });
+      }
+      // A missing or unreadable `deployment` is not an issue here: it leaves
+      // the route unknown (see sideFeatureResidencyDeclarationWarnings), so a
+      // config mismatch never stops a running service.
+    }
+  });
+
+/**
+ * Problems in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` that leave a declaration
+ * without effect rather than failing boot: an Azure deployment route whose
+ * declaration names no plain deployment is unknown (so not EU), and a
+ * `deployment` on any other route is ignored. Boot logs them once. Empty when
+ * the value is unset or invalid (boot rejects an invalid value).
+ */
+export function sideFeatureResidencyDeclarationWarnings(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  const parsed = SideFeatureResidencyDeclarations.safeParse(raw);
+  if (!parsed.success) return [];
+  const warnings: string[] = [];
+  for (const [route, declaration] of Object.entries(parsed.data)) {
+    if (!isSideFeatureRouteId(route)) continue;
+    if (sideFeatureRouteNamesDeployment(route)) {
+      if (!plainDeploymentName(declaration.deployment)) {
+        warnings.push(
+          `${route} must name the deployment it calls in "deployment" ([A-Za-z0-9._-]+), since one Azure resource can hold EU and global deployments; until it does, the route is unknown (not EU)`,
+        );
+      } else if (!bareResourceEndpoint(declaration.endpoint)) {
+        warnings.push(
+          `${route} must declare the bare Azure resource URL as "endpoint" (no path, query or /deployments/), since the route appends its own path; until it does, the route is unknown (not EU)`,
+        );
+      }
+    } else if (declaration.deployment !== undefined) {
+      warnings.push(`${route} does not call a named deployment; its "deployment" is ignored`);
+    }
+  }
+  return warnings;
+}
+
+/** A parsed declaration: the endpoint origin (and deployment) it describes and its residency. */
+export type SideFeatureResidencyDeclarationV1 = {
+  endpoint: string;
+  deployment?: string;
+  residency: ModelResidencyV1;
+};
+
+/** Parse `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`; throws a readable error when invalid. */
+export function parseSideFeatureResidencyJson(
+  value: string,
+): Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON must be a JSON object");
+  }
+  const parsed = SideFeatureResidencyDeclarations.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(
+      `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON is invalid: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+  const declarations: Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> = {};
+  for (const [route, { endpoint, deployment, residency }] of Object.entries(parsed.data)) {
+    declarations[route as SideFeatureRouteId] = {
+      endpoint: sideFeatureEndpointOrigin(endpoint)!,
+      // Only a readable deployment on a route that calls one, at a bare
+      // resource endpoint; otherwise the declaration names none and the
+      // route stays unknown.
+      ...(sideFeatureRouteNamesDeployment(route as SideFeatureRouteId) &&
+      plainDeploymentName(deployment) &&
+      bareResourceEndpoint(endpoint)
+        ? { deployment: deployment! }
+        : {}),
+      residency: ModelResidencyV1.parse({
+        geography: residency.geography,
+        deploymentType: residency.deploymentType,
+        // Sorted and deduplicated, like chat model declarations.
+        regions: [...new Set(residency.regions)].sort(),
+        evidence: residency.evidence,
+      }),
+    };
+  }
+  return declarations;
+}
+
+const declarationsCache = new Map<
+  string,
+  Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>>
+>();
+
+function declaredSideFeatureResidency(
+  settings: SideFeatureResidencySettings,
+): Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> {
+  const raw = settings.sideFeatureResidencyJson?.trim();
+  if (!raw) return {};
+  let declarations = declarationsCache.get(raw);
+  if (!declarations) {
+    try {
+      declarations = parseSideFeatureResidencyJson(raw);
+    } catch {
+      // Boot validation rejects this; anything that still reaches here
+      // declares nothing, so every declarable route stays unknown.
+      declarations = {};
+    }
+    declarationsCache.set(raw, declarations);
+  }
+  return declarations;
+}
+
+function ruleResidency(rule: Rule): ModelResidencyV1 {
+  return {
+    geography: rule.geography,
+    deploymentType: rule.deploymentType,
+    regions: [],
+    evidence: {
+      source: "built_in_rule",
+      reference: rule.reference,
+      verifiedAt: SIDE_FEATURE_RULES_REVIEWED_AT,
+    },
+  };
+}
+
+/**
+ * Where a side-feature call processes data. A code-owned route has its rule.
+ * A declarable route is resolved from the endpoint the call sends to: a
+ * vendor default host has its code-owned rule; otherwise the operator's
+ * declaration applies only when it names that same endpoint origin and, for
+ * a route that calls a named deployment, that same deployment at a bare
+ * resource endpoint (no path, query or `/deployments/`). An undeclared route,
+ * a missing endpoint or deployment, or a different one is unknown.
+ * Nothing in a request (its body model or a query parameter) is read.
+ */
+export function sideFeatureRouteResidency(
+  settings: SideFeatureResidencySettings,
+  target: SideFeatureTarget,
+): ModelResidencyV1 {
+  const route = sideFeatureTargetRoute(target);
+  const spec: RouteSpec = SIDE_FEATURE_ROUTES[route];
+  if (!spec.declarable) return spec.rule ? ruleResidency(spec.rule) : UNKNOWN_MODEL_RESIDENCY;
+  const origin = sideFeatureEndpointOrigin(typeof target === "string" ? null : target.endpoint);
+  if (!origin) return UNKNOWN_MODEL_RESIDENCY;
+  const vendor = VENDOR_DEFAULT_HOSTS[new URL(origin).hostname];
+  if (vendor) return ruleResidency(vendor);
+  const declaration = declaredSideFeatureResidency(settings)[route];
+  if (!declaration || declaration.endpoint !== origin) return UNKNOWN_MODEL_RESIDENCY;
+  if (spec.namedDeployment) {
+    // The route appends its own path to a bare resource endpoint; a path,
+    // query or deployment marker there could call another deployment.
+    if (typeof target === "string" || !bareResourceEndpoint(target.endpoint)) {
+      return UNKNOWN_MODEL_RESIDENCY;
+    }
+    const called = plainDeploymentName(target.deployment);
+    if (!called || called !== declaration.deployment) return UNKNOWN_MODEL_RESIDENCY;
+  }
+  return declaration.residency;
+}
+
+/** Whether the route is EU by its residency record. */
+export function sideFeatureRouteIsEu(
+  settings: SideFeatureResidencySettings,
+  target: SideFeatureTarget,
+): boolean {
+  return isEuResidency(sideFeatureRouteResidency(settings, target));
+}
+
+/**
+ * Whether a side-feature call may use this route under the settings'
+ * residency requirement. Without a requirement every route may run; under
+ * `eu` only a route whose record is EU may. There is no other route to fall
+ * back to.
+ */
+export function sideFeatureRouteAllowed(
+  settings: SideFeatureResidencySettings,
+  target: SideFeatureTarget,
+): boolean {
+  return settings.requiredModelGeography !== "eu" || sideFeatureRouteIsEu(settings, target);
+}
+
+/**
+ * What a side-feature call records about where it ran: its route's residency
+ * claim (geography, deployment type, regions), never the evidence, whose
+ * reference text may name internal resources. The same shape model call
+ * facts record.
+ */
+/** Where a side-feature call ran: the same claim a model-call fact records. */
+export type SideFeatureProcessingResidency = ModelCallProcessingResidencyV1;
+
+export function sideFeatureProcessingResidency(
+  settings: SideFeatureResidencySettings,
+  target: SideFeatureTarget,
+): SideFeatureProcessingResidency {
+  return modelCallProcessingResidency(sideFeatureRouteResidency(settings, target));
+}

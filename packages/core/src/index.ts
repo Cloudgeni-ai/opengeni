@@ -89,6 +89,8 @@ export * from "./xai-operation-availability";
 export * from "./recording-transcription-azure";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
+export * from "./side-feature-availability";
+export * from "./side-feature-routes";
 export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";

@@ -4448,6 +4448,7 @@ export type ModelAvailabilityV1 = {
     | "policy_blocked"
     | "unsupported"
     | "credits_disabled"
+    | "region_restricted"
     | null;
   checkedAt: string | null;
 };

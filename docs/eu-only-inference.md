@@ -206,3 +206,142 @@ before calls carried one (migration 1030). A stored `eu` claim reads back as
 type and, for Azure and Bedrock, EU regions only); anything else reads as
 `unknown`. Insights calls expose each call's `processingGeography`; it is
 undefined in responses from servers older than this release.
+
+## Side features
+
+Every server feature that sends content to a model or AI provider outside the
+chat model has its own routes, each with a residency record from the same
+`ModelResidencyV1` types (`SIDE_FEATURE_ROUTES` in
+`packages/config/src/side-feature-residency.ts`). A route's id names an
+integration, never a region, and is never read for EU status.
+
+- **Code-owned rules** cover providers with no EU option Opengeni can select:
+  hosted provider search (OpenAI, Azure, Anthropic, SuperGrok `x_search`),
+  SaaS search APIs (TinyFish, Parallel, Perplexity, Exa, Tavily, Brave),
+  OpenAI hosted image generation, Vercel AI Gateway (images, video, live
+  voice), the Codex and SuperGrok subscriptions, ElevenLabs, OpenAI
+  transcription and OpenAI Realtime live transcripts, and the Jev and
+  OpenRouter decision models. None is EU.
+- **Operator declarations** cover routes a deployment can place in the EU:
+  Firecrawl, Jina and SearXNG search (self-hosted), Azure Live voice, Azure
+  OpenAI and Azure Speech transcription, Azure OpenAI Realtime live
+  transcripts (`transcription.azure-openai-realtime`, declared separately
+  from batch transcription), the Knowledge embedding endpoint, and
+  an OpenAI-compatible decision model. Each declaration describes one
+  endpoint: it applies only when the call sends to that same origin, so a
+  changed base URL, an Azure resource other than the declared one, or a
+  missing endpoint is unknown. One Azure resource can hold an EU Data Zone
+  deployment and a global one, so the Azure deployment routes
+  (`realtime_voice.azure_live`, `transcription.azure-openai` and
+  `transcription.azure-openai-realtime`) also name the `deployment`: the
+  declaration applies only when the call names that same deployment
+  (`OPENGENI_AZURE_LIVE_DEPLOYMENT`, `OPENGENI_VOICE_INPUT_AZURE_DEPLOYMENT`).
+  The check reads the configured deployment, never a model in the request
+  body or a `?deployment=` query. These routes append their own path, so
+  their endpoint (configured and declared) must be the bare resource URL: one
+  with a path, query or `/deployments/` segment is unknown, and such a
+  declaration logs a warning once. Without a matching declaration a route is
+  unknown, so not EU. `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` maps route ids to
+  `{ endpoint, deployment?, residency }` and is validated at boot; it rejects
+  unknown routes, routes with a code-owned rule, non-http(s) endpoints and
+  vendor default hosts. A missing deployment never stops the service: an Azure
+  deployment route declared without a plain `[A-Za-z0-9._-]+` deployment
+  boots, logs a warning once and stays unknown (EU-only workspaces see
+  `region_restricted`), and a `deployment` on any other route is ignored with
+  a warning:
+
+  ```json
+  {
+    "web_search.searxng": {
+      "endpoint": "https://search.internal.example",
+      "residency": {
+        "geography": "eu",
+        "deploymentType": "self_hosted",
+        "regions": ["fsn1"],
+        "evidence": {
+          "source": "operator_declaration",
+          "reference": "SearXNG on the deployment's own host",
+          "verifiedAt": "2026-10-26"
+        }
+      }
+    }
+  }
+  ```
+
+- **Vendor default hosts** of declarable routes keep a code-owned rule and
+  cannot be declared: `api.openai.com` (US; an OpenAI decision model or
+  embedder without a base URL sends there), `s.jina.ai`, `r.jina.ai` and
+  `api.firecrawl.dev` (unknown).
+
+Under EU (`settings.requiredModelGeography === "eu"` in a turn, or the
+workspace's EU-only setting for work outside a turn), a side-feature call runs
+only on a route whose record is EU for the endpoint it calls. The check runs
+before any byte is sent (`assertSideFeatureRoute`, and `sideFeatureRouteFetch`,
+which checks each request's own URL), refuses with
+`InferenceRegionRestrictedError` (`region_restricted`), and never falls back to
+another route. An unresolved run context, or a workspace whose EU-only setting
+cannot be read, refuses too.
+
+Provider-hosted tools run on the provider's own services, not on the model
+route (Azure web search uses Grounding with Bing, outside the geo boundary).
+Under EU the model transport therefore admits only tools Opengeni executes
+itself, even on an EU model route: `function`, `custom`, `local_shell`,
+`apply_patch`, `computer*`, Anthropic `bash_*`, `text_editor_*` and
+`memory_*`, `tool_search` with `execution: "client"`, `shell` with no or a
+local environment, `namespace` when every nested tool passes, and untyped
+entries with `name` and `input_schema`. Every other entry, including types
+added later, is refused unless its route's record is EU. Non-empty
+`web_search_options`, `search_parameters`, `mcp_servers`, `plugins` and
+`data_sources` body keys are refused too.
+
+| Feature | Under EU |
+| --- | --- |
+| Session titles | Use the chat model's route checks (see Enforcement). |
+| Meeting summaries | An ordinary chat on a subscription model. In an EU-only workspace only a model whose route is EU is chosen, before any session exists; with none, nothing starts (`region_restricted`). |
+| Image generation | Off: no route is EU. The tool is not offered and refuses if called. |
+| Video generation | Off. Funding options report "Not supported in EU"; the video Skill is hidden. |
+| Web search | Hosted search is off. Provider search keeps only declared-EU providers, and failover skips the rest. Self-hosted SearXNG with a declaration stays on. |
+| Live voice | Only a declared-EU Azure Live deployment. Admission refuses others with `422 region_restricted`; nothing substitutes another model. |
+| Voice input and transcription | Only declared-EU Azure OpenAI or Azure Speech. Dictation fallback stays on EU providers; recordings and uploads are refused otherwise. The local diarizer stays on. |
+| Live transcripts | The client connects to the provider with a secret the server mints, past the transport guard, so the mint itself is refused (`422 region_restricted`) unless the provider's live route is declared EU. Only Azure OpenAI Realtime can be; OpenAI Realtime and ElevenLabs are refused. |
+| Knowledge embeddings | Only a declared-EU embedding endpoint. Otherwise search falls back to keyword (`fallbackReason: "region_restricted"`) and indexing waits. The local deterministic embedder stays on. |
+| Code search and tool routing | Only a declared-EU OpenAI-compatible decision model. Otherwise code search is off and tool routing uses local ranking. |
+| Site viewer conversations | Only EU models, for the model and its fallback. |
+| Document parsing | Local OCR; no model call. |
+
+### Availability
+
+Clients read one list from `GET /v1/config/client?workspaceId=`:
+`inferenceFeatures[]` holds `{ id, available, unavailableReason }` for
+`web_search`, `image_generation`, `video_generation`, `realtime_voice`,
+`voice_input`, `meeting_transcription`, `live_transcription`,
+`knowledge_embeddings` and
+`code_search`, with `unavailableReason: "region_restricted"` when the
+deployment has a route for the feature but EU-only inference allows none of
+them. A feature with no route here at all is `available: false` with
+`unavailableReason: null`, so clients don't show it as an EU limit (media
+and live voice always count as having one, since a person can connect a
+subscription). The answer follows the routes the deployment is configured
+to use (its search providers, embedder, decision model, voice and
+transcription endpoints), so a declaration for an unused provider changes
+nothing. Outside EU every entry is available; whether a feature is
+configured is reported where it always was. Existing lists carry the same code: model
+availability `reason: "region_restricted"` (client config and the workspace
+model catalog), realtime catalog `unavailableCode`, recording models
+`unavailableReason` (an entry keeps only the capabilities its region allows;
+with none left it stays listed, switched off; `liveTranscript` is false when
+every live route is refused, so recorders don't start one), video funding options `unavailableCode` (beside the
+"Not supported in EU" `unavailableReason`), and agent capabilities `code`
+(beside `reason`). Agents are not offered tools that are switched off, and the
+session's effective tools omit them.
+
+### Recording the region
+
+Usage events for side-feature calls (web search, live voice, transcription,
+embeddings, decision models, credit-funded image generation) and for the
+standalone model-call API (`/v1/chat/completions`, which has no model call
+fact) record `processing_residency`: the route's geography, deployment type
+and regions, never its evidence. A route whose record cannot be read is
+recorded as unknown. The claim is the model-call fact's
+(`modelCallProcessingResidency`, `ModelCallProcessingResidencyV1`), so the
+same eu rules apply.

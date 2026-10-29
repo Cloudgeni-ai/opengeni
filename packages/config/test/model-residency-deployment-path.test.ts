@@ -91,9 +91,19 @@ describe("deployment-path endpoints and residency", () => {
       "/openai/deployments%20/gpt-global/responses",
       "/openai/Deployments;x/gpt-global/responses",
       "/openai/x%2Fdeployments/gpt-global/responses",
+      // Decoded dot segments around the name.
+      "/openai/deployments/gpt-eu%2F..%2Fgpt-global/",
+      "/openai/deployments/gpt-eu%2F.%2F/responses",
+      "/openai/%2E%2E%2Fdeployments/gpt-eu",
     ]) {
       expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("");
     }
+    expect(
+      modelResidencyRouteProblems(euDataZone, {
+        baseUrl: "https://res.openai.azure.com/openai/deployments/gpt-eu%2F..%2Fgpt-global/",
+        upstreamModelId: "gpt-eu",
+      }),
+    ).toHaveLength(1);
     // Ordinary Azure deployment paths still resolve, query string and all.
     for (const path of [
       "chat/completions",

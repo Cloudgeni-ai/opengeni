@@ -31,6 +31,7 @@ import {
   createFirstPartyInteractionAttemptToolDefinitions,
   createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
+  sideFeatureRouteRunnable,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
@@ -87,6 +88,7 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
+import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -576,7 +578,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           videoGenerationEnabled:
             skillConfiguration !== null &&
             skillConfiguration.defaultModelId !== null &&
-            skillConfiguration.enabledModelIds.length > 0,
+            skillConfiguration.enabledModelIds.length > 0 &&
+            sideFeatureRouteRunnable(
+              runSettings,
+              videoGenerationRoute(skillConfiguration.fundingSource),
+            ),
         });
   const selectedSkills = [
     ...bundledSkills,
@@ -751,6 +757,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionId: input.sessionId,
         turnId: turn.id,
         turnAttemptId: input.attemptId,
+        processingResidency: decisionModelProcessingResidency(runSettings, true),
       };
       if (usage.decisionInputTokens !== null)
         await recordUsageEvent(db, {
