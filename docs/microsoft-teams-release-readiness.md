@@ -84,9 +84,17 @@ allowlist is explicit operator approval of a Teams actor, not proof that the
 actor holds a Microsoft tenant administrator role. Keep it empty until the
 operator has independently approved the intended installer. Personal messages use
 the dedicated Teams private-conversation authority seam to create an owner-only
-session inside that shared workspace; this does not allow binding a Personal
-workspace or grant the bot a canonical managed-browser session. Channel sessions
-remain workspace-visible. Both incoming work and outgoing replies recheck the
+session. Like a Slack bot DM, a new 1:1 chat lands in the sender's own Personal
+workspace (named by their active organization membership) while Personal
+workspaces are on and they can start chats there; otherwise it stays in the
+installation's shared workspace. A chat that starts landing in the Personal
+workspace is a fresh conversation, and turning Personal workspaces off returns
+to the earlier one; a first message still waiting to start its Personal chat
+then gets the usual admission notice. The bot is still installed in, and its link still belongs
+to, the shared workspace, so losing access there stops the chat. This does not
+grant the bot a canonical managed-browser session. Channel and group-chat
+sessions stay in the shared workspace and remain workspace-visible. Both
+incoming work and outgoing replies recheck the
 current session audience: a direct message requires the exact linked owner and
 `user_private` visibility; a channel requires shared visibility. A later audience
 change blocks both directions rather than reusing a stale route grant. Human approvals happen in the authenticated Opengeni
