@@ -154,6 +154,29 @@ describe("local unit selection", () => {
     }
   });
 
+  test("keep-going is also accepted alongside a shard plan, and CI's plan arguments stay fail-fast", () => {
+    const directory = mkdtempSync(join(tmpdir(), "opengeni-unit-keep-going-plan-"));
+    try {
+      const planPath = join(directory, "plan.json");
+      writeFileSync(planPath, JSON.stringify({ schemaVersion: 1, unitTests: [] }));
+      const shardArgs = ["--plan", planPath, "--shard", "0", "--shards", "2"];
+      expect(resolveUnitTestSelection(process.cwd(), shardArgs)).toEqual({
+        selected: [],
+        index: 0,
+        count: 2,
+        keepGoing: false,
+      });
+      expect(resolveUnitTestSelection(process.cwd(), [...shardArgs, "--keep-going"])).toEqual({
+        selected: [],
+        index: 0,
+        count: 2,
+        keepGoing: true,
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("rejects ambiguous full and shard selection", () => {
     expect(() => resolveUnitTestSelection(process.cwd(), ["--all", "--shard", "0"])).toThrow(
       "--all cannot be combined",
@@ -292,12 +315,17 @@ describe("bounded unit process execution", () => {
 
   test("keep-going admits every task after a failure and returns the first failing status", async () => {
     const started: number[] = [];
+    let active = 0;
+    let maximumActive = 0;
     const status = await runBoundedTestProcesses(
       [0, 1, 2, 3, 4],
       2,
       async (task) => {
         started.push(task);
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
         await Bun.sleep(1);
+        active -= 1;
         return task === 1 ? 3 : task === 3 ? 9 : 0;
       },
       { keepGoing: true },
@@ -305,6 +333,7 @@ describe("bounded unit process execution", () => {
 
     expect(status).toBe(3);
     expect([...started].sort()).toEqual([0, 1, 2, 3, 4]);
+    expect(maximumActive).toBe(2);
   });
 });
 
@@ -343,13 +372,92 @@ describe("unit phase accounting", () => {
       status: 1,
       plannedFiles: 4,
       ranFiles: 1,
-      failedFiles: ["a.test.ts"],
+      failedProcesses: [["a.test.ts"]],
+      stoppedInPhase: "parallel",
     });
     const summary = describeUnitTestRun(result, { keepGoing: false, shard: "1/1" });
-    expect(summary).toContain("ran 1 of 4 planned files");
-    expect(summary).toContain("INCOMPLETE RUN: 3 of 4 planned files were SKIPPED");
+    expect(summary).toContain("FAILED: 1 failing file(s); ran 1 of 4 planned files.");
+    expect(summary).toContain(
+      "INCOMPLETE RUN: 3 of 4 planned files were SKIPPED because the run stops at the first failure (in the parallel phase).",
+    );
     expect(summary).toContain("bun run test:unit:all");
     expect(summary).toContain("failed: a.test.ts");
+  });
+
+  test("fail-fast counts files that were already running when another file failed", async () => {
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    const execution = runUnitTestPhases([
+      {
+        name: "parallel",
+        processes: [
+          { files: ["fails.test.ts"], isolated: false },
+          { files: ["slow-1.test.ts", "slow-2.test.ts"], isolated: false },
+          { files: ["never.test.ts"], isolated: false },
+        ],
+        concurrency: 2,
+        execute: async (task) => {
+          started.push(...task.files);
+          if (task.files.includes("fails.test.ts")) return 5;
+          await gate;
+          return 0;
+        },
+      },
+      {
+        name: "serial",
+        processes: [{ files: ["later.test.ts"], isolated: true }],
+        concurrency: 1,
+        execute: async () => 0,
+      },
+    ]);
+    while (started.length < 3) await Bun.sleep(1);
+    await Bun.sleep(1);
+    release();
+    const result = await execution;
+
+    expect(started).toEqual(["fails.test.ts", "slow-1.test.ts", "slow-2.test.ts"]);
+    expect(result).toEqual({
+      status: 5,
+      plannedFiles: 5,
+      ranFiles: 3,
+      failedProcesses: [["fails.test.ts"]],
+      stoppedInPhase: "parallel",
+    });
+    expect(describeUnitTestRun(result, { keepGoing: false, shard: "1/1" })).toContain(
+      "2 of 5 planned files were SKIPPED",
+    );
+  });
+
+  test("attributes a failing multi-file process to all of its files without counting them as individual failures", async () => {
+    const result = await runUnitTestPhases(
+      [
+        {
+          name: "parallel",
+          processes: [
+            { files: ["b1.test.ts", "b2.test.ts"], isolated: false },
+            { files: ["c.test.ts"], isolated: false },
+          ],
+          concurrency: 2,
+          execute: async (task) => (task.files.includes("b2.test.ts") ? 1 : 0),
+        },
+      ],
+      { keepGoing: true },
+    );
+
+    expect(result).toEqual({
+      status: 1,
+      plannedFiles: 3,
+      ranFiles: 3,
+      failedProcesses: [["b1.test.ts", "b2.test.ts"]],
+    });
+    const summary = describeUnitTestRun(result, { keepGoing: true, shard: "1/1" });
+    expect(summary).toContain(
+      "FAILED: 1 failing test process(es); files that shared a process are listed together; ran 3 of 3 planned files.",
+    );
+    expect(summary).toContain("failed: b1.test.ts, b2.test.ts");
   });
 
   test("keep-going runs every file in every phase and lists all failures", async () => {
@@ -363,7 +471,7 @@ describe("unit phase accounting", () => {
       status: 1,
       plannedFiles: 4,
       ranFiles: 4,
-      failedFiles: ["a.test.ts", "d.test.ts"],
+      failedProcesses: [["a.test.ts"], ["d.test.ts"]],
     });
     const summary = describeUnitTestRun(result, { keepGoing: true, shard: "1/1" });
     expect(summary).toContain("FAILED: 2 failing file(s); ran 4 of 4 planned files.");
@@ -375,7 +483,7 @@ describe("unit phase accounting", () => {
   test("a passing run reports the planned file count", async () => {
     const result = await runUnitTestPhases(phases(new Set(), []), { keepGoing: true });
 
-    expect(result).toEqual({ status: 0, plannedFiles: 4, ranFiles: 4, failedFiles: [] });
+    expect(result).toEqual({ status: 0, plannedFiles: 4, ranFiles: 4, failedProcesses: [] });
     expect(describeUnitTestRun(result, { keepGoing: false, shard: "2/3" })).toBe(
       "[unit-shard] shard 2/3 passed (4 files)\n",
     );

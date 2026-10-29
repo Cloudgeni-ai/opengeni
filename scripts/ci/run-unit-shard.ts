@@ -289,7 +289,12 @@ export type UnitTestRunResult = {
   status: number;
   plannedFiles: number;
   ranFiles: number;
-  failedFiles: string[];
+  // Failures are known per Bun process. With the default of one file per
+  // process each entry names exactly the failing file; a larger batch names
+  // every file that shared the failing process.
+  failedProcesses: string[][];
+  // The phase whose failure ended a fail-fast run.
+  stoppedInPhase?: string;
 };
 
 /**
@@ -307,8 +312,9 @@ export async function runUnitTestPhases(
     0,
   );
   let ranFiles = 0;
-  const failedFiles: string[] = [];
+  const failedProcesses: string[][] = [];
   let status = 0;
+  let stoppedInPhase: string | undefined;
   for (const phase of phases) {
     const phaseStatus = await runBoundedTestProcesses(
       phase.processes,
@@ -316,36 +322,51 @@ export async function runUnitTestPhases(
       async (task) => {
         const exitCode = await phase.execute(task);
         ranFiles += task.files.length;
-        if (exitCode !== 0) failedFiles.push(...task.files);
+        if (exitCode !== 0) failedProcesses.push([...task.files]);
         return exitCode;
       },
       { keepGoing },
     );
     if (phaseStatus !== 0 && status === 0) status = phaseStatus;
-    if (status !== 0 && !keepGoing) break;
+    if (status !== 0 && !keepGoing) {
+      stoppedInPhase = phase.name;
+      break;
+    }
   }
-  return { status, plannedFiles, ranFiles, failedFiles: failedFiles.sort() };
+  failedProcesses.sort((left, right) => left.join("\0").localeCompare(right.join("\0")));
+  return {
+    status,
+    plannedFiles,
+    ranFiles,
+    failedProcesses,
+    ...(stoppedInPhase === undefined ? {} : { stoppedInPhase }),
+  };
 }
 
 export function describeUnitTestRun(
   result: UnitTestRunResult,
   options: { keepGoing: boolean; shard: string },
 ): string {
-  const { status, plannedFiles, ranFiles, failedFiles } = result;
+  const { status, plannedFiles, ranFiles, failedProcesses } = result;
   const skipped = plannedFiles - ranFiles;
   if (status === 0 && skipped === 0) {
     return `[unit-shard] shard ${options.shard} passed (${plannedFiles} files)\n`;
   }
+  const batched = failedProcesses.some((files) => files.length > 1);
+  const failureCount = batched
+    ? `${failedProcesses.length} failing test process(es); files that shared a process are listed together`
+    : `${failedProcesses.length} failing file(s)`;
   const lines = [
     "",
     "[unit-shard] ================================================================",
-    `[unit-shard] FAILED: ${failedFiles.length} failing file(s); ran ${ranFiles} of ${plannedFiles} planned files.`,
-    ...failedFiles.map((path) => `[unit-shard]   failed: ${path}`),
+    `[unit-shard] FAILED: ${failureCount}; ran ${ranFiles} of ${plannedFiles} planned files.`,
+    ...failedProcesses.map((files) => `[unit-shard]   failed: ${files.join(", ")}`),
   ];
   if (skipped > 0) {
+    const where = result.stoppedInPhase ? ` (in the ${result.stoppedInPhase} phase)` : "";
     lines.push(
-      `[unit-shard] INCOMPLETE RUN: ${skipped} of ${plannedFiles} planned files were SKIPPED because the run stops at the first failure.`,
-      "[unit-shard] This is NOT full coverage. Run every file with: bun run test:unit:all (or append --keep-going).",
+      `[unit-shard] INCOMPLETE RUN: ${skipped} of ${plannedFiles} planned files were SKIPPED because the run stops at the first failure${where}.`,
+      "[unit-shard] This is NOT full coverage. To run every file locally: bun run test:unit:all (or append --keep-going).",
     );
   } else if (options.keepGoing) {
     lines.push("[unit-shard] Keep-going run: every planned file ran.");
