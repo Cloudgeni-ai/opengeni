@@ -76,6 +76,35 @@ const SITE_PERMISSION_LIMIT_REACHED =
 const SITE_PERMISSION_REFUSED =
   "The browser extension in the person's Chrome refused this permission request; nothing was set.";
 
+/** What the agent is told when the extension does not set a permission.
+ * Anything else (Chrome's own refusal, a lost connection) is reported as for
+ * any other command. */
+function sitePermissionRefusal(error: AttachedBrowserBridgeError): Error {
+  // The extension could not read the request: nothing reached Chrome.
+  if (error.code === "invalid_request")
+    return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_REFUSED);
+  if (error.code !== "driver_rejected") return error;
+  switch (error.extensionCode) {
+    case "consent_required":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_REQUIRED,
+      );
+    case "tab_changed":
+      return new InteractionDefiniteDriverError(
+        "document_stale",
+        SITE_PERMISSION_TAB_CHANGED,
+        true,
+      );
+    case "unsupported_site":
+      return new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED_SITE);
+    case "limit_reached":
+      return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_LIMIT_REACHED);
+    default:
+      return error;
+  }
+}
+
 const EXTENSION_RESTRICTED_SCHEMES = [
   "about:",
   "chrome:",
@@ -1471,35 +1500,6 @@ function requireTab(value: unknown): AttachedTab {
 function tabUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0) return null;
   return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
-}
-
-/** What the agent is told when the extension does not set a permission.
- * Anything else (Chrome's own refusal, a lost connection) is reported as for
- * any other command. */
-function sitePermissionRefusal(error: AttachedBrowserBridgeError): Error {
-  // The extension could not read the request: nothing reached Chrome.
-  if (error.code === "invalid_request")
-    return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_REFUSED);
-  if (error.code !== "driver_rejected") return error;
-  switch (error.extensionCode) {
-    case "consent_required":
-      return new InteractionDefiniteDriverError(
-        "permission_denied",
-        SITE_PERMISSION_CONSENT_REQUIRED,
-      );
-    case "tab_changed":
-      return new InteractionDefiniteDriverError(
-        "document_stale",
-        SITE_PERMISSION_TAB_CHANGED,
-        true,
-      );
-    case "unsupported_site":
-      return new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED_SITE);
-    case "limit_reached":
-      return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_LIMIT_REACHED);
-    default:
-      return error;
-  }
 }
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
