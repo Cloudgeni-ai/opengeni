@@ -745,10 +745,11 @@ version never starts two (the chat is keyed by the version).
   when the meeting has notes, even cleared ones, and its
   `meeting_notes_save` writes only the first notes or revises the notes
   that same chat saved; anything else answers `notes_changed`.
-- **Automations.** When the meeting's owner has an active automation of
-  their own that runs on `recording.transcript.ready` (such as the
-  "Meeting notes" template) and event triggers are on, that automation
-  writes the notes and the built-in summary does not start.
+- **Automations.** An automation that runs on `recording.transcript.ready`
+  (such as the "Meeting notes" template) does not stop it; nothing can tell
+  whether an automation writes notes at all. Whichever saves notes first
+  keeps them: the built-in summary and the template both save only the
+  first notes. To leave the notes to an automation, turn the switch off.
 - **Failures are quiet.** If it can't start, the worker only logs why; the
   meeting keeps its transcript and shows "No notes yet", and anyone can
   still ask an agent to write notes.

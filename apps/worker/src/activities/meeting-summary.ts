@@ -93,7 +93,6 @@ export async function startMeetingSummary(
     subjectId: input.ownerSubjectId,
     recordingId: input.recordingId,
     versionId: input.versionId,
-    eventTriggersEnabled: service.settings.eventTriggersEnabled,
   });
   if (!candidate.start) return { started: false, reason: candidate.reason };
   const { recording } = candidate;
