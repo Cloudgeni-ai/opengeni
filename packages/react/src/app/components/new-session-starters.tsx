@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { linearLogo, slackLogo } from "./new-session-starter-logos";
 import { Button } from "../../ui/button";
+import type { SessionAppStarter } from "../lib/app-host";
 
 // Plain editable prompts, not service identifiers or a connector resolver.
 export const NEW_SESSION_STARTERS = [
@@ -148,25 +149,49 @@ const STARTER_CLASS =
 
 /**
  * Six starters under the new-chat composer. The set follows the signup
- * answer: people who want help with everyday things get six everyday asks;
- * people adding agents to a product get their own agent and the playground
- * demo first; everyone else gets the general six.
+ * answer: people adding agents to a product get their own agent and the
+ * playground demo first; people running agents in the cloud get the general
+ * six; everyone else gets six everyday asks. A host that passes its own
+ * starters (such as the Excel add-in's workbook tasks) gets those instead.
  */
 export function NewSessionStarters({
   onSelect,
   disabled = false,
   set = "general",
+  host,
   workspaceId,
   fileUploads = false,
 }: {
   onSelect: (prompt: string) => void;
   disabled?: boolean | undefined;
   set?: StarterSet | undefined;
+  /** The host's own starters, in place of the set's. Empty shows none. */
+  host?: readonly SessionAppStarter[] | undefined;
   /** The deployment accepts attachments, so an everyday ask may offer a photo. */
   fileUploads?: boolean | undefined;
   /** Where the playground demo opens (product set). */
   workspaceId?: string | undefined;
 }) {
+  if (host) {
+    if (host.length === 0) return null;
+    return (
+      <StarterSection>
+        {host.map((starter) => (
+          <Button
+            key={starter.id}
+            type="button"
+            variant="outline"
+            disabled={disabled}
+            className={STARTER_CLASS}
+            data-starter={starter.id}
+            onClick={() => onSelect(starter.prompt)}
+          >
+            <StarterText title={starter.title} description={starter.description} />
+          </Button>
+        ))}
+      </StarterSection>
+    );
+  }
   if (set === "everyday") {
     return (
       <StarterSection>
@@ -277,11 +302,13 @@ function StarterSection({ children }: { children: ReactNode }) {
   );
 }
 
-function StarterText({ title, description }: { title: string; description: string }) {
+function StarterText({ title, description }: { title: string; description?: string | undefined }) {
   return (
     <span className="min-w-0">
       <span className="block text-sm">{title}</span>
-      <span className="mt-1 block text-xs font-normal text-fg-muted">{description}</span>
+      {description ? (
+        <span className="mt-1 block text-xs font-normal text-fg-muted">{description}</span>
+      ) : null}
     </span>
   );
 }

@@ -121,7 +121,7 @@ describe("browser e2e", () => {
     await pageA.getByTestId("model-picker-content").waitFor({ timeout: 10_000 });
     await pageA.keyboard.press("Escape");
     await pageA
-      .getByPlaceholder("Describe a task for the agent…")
+      .getByPlaceholder("Ask anything, or describe what you need…")
       .fill("run a slow browser e2e session");
     await pageA.getByRole("button", { name: "Send message", exact: true }).click();
     await waitFor(() => /\/workspaces\/[^/]+\/sessions\/[^/]+$/.test(pageA.url()), {
@@ -209,7 +209,7 @@ describe("browser e2e", () => {
         browserWindow.__opengeniFirstSendTrace = { failures, main, observer };
       });
       await page
-        .getByPlaceholder("Describe a task for the agent…")
+        .getByPlaceholder("Ask anything, or describe what you need…")
         .fill("E2E HOLD INITIAL DIRECTION");
       await page.getByRole("button", { name: "Send message", exact: true }).click();
       await waitFor(() => /\/workspaces\/[^/]+\/sessions\/[^/]+$/.test(page.url()), {
@@ -603,7 +603,9 @@ describe("browser e2e", () => {
     await more.focus();
     expect(await more.evaluate((element) => element === document.activeElement)).toBe(true);
 
-    await page.getByPlaceholder("Describe a task for the agent…").fill("inspect the screenshot");
+    await page
+      .getByPlaceholder("Ask anything, or describe what you need…")
+      .fill("inspect the screenshot");
     const send = page.getByRole("button", { name: "Send message" });
     await waitFor(async () => !(await send.isDisabled()), {
       timeoutMs: 10_000,

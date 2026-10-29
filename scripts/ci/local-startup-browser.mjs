@@ -8,7 +8,7 @@ try {
   await page.goto(`http://127.0.0.1:${process.env.OPENGENI_WEB_PORT}/`, {
     waitUntil: "domcontentloaded",
   });
-  await page.getByText("What should the agent do?", { exact: true }).waitFor({ timeout: 60_000 });
+  await page.getByText("What can I help with?", { exact: true }).waitFor({ timeout: 60_000 });
   if (errors.length) throw new Error(errors.join("\n"));
 } finally {
   await browser.close();

@@ -25,8 +25,9 @@ export type SessionUiFeatures = Readonly<{
   /** The Opengeni logo and wordmark at the top of the chat list and the mobile header. */
   brand: boolean;
   /**
-   * Opengeni's suggested first tasks under the new-chat composer (connect
-   * Slack, GitHub or Linear, schedule a brief, and so on).
+   * Suggested first tasks under the new-chat composer: the host's own
+   * `starters` when it passes them, otherwise Opengeni's (everyday asks, or
+   * connecting Slack, GitHub or Linear, scheduling a brief, and so on).
    */
   starters: boolean;
   /**
@@ -94,6 +95,19 @@ export type SessionUiFeatureOverrides = Partial<SessionUiFeatures> & {
   /** @deprecated Use `keyboardShortcuts`. */
   newChatShortcut?: boolean | undefined;
 };
+
+/**
+ * A host that passes its own new-chat starters wants them shown: they turn
+ * the `starters` feature on, unless the host set that switch itself.
+ */
+export function featuresWithHostStarters(
+  features: SessionUiFeatureOverrides | undefined,
+  hostStarters: boolean,
+): SessionUiFeatureOverrides | undefined {
+  return hostStarters && features?.starters === undefined
+    ? { ...features, starters: true }
+    : features;
+}
 
 export function SessionUiFeaturesProvider(props: {
   preset?: SessionUiPreset | undefined;

@@ -164,7 +164,7 @@ A preset decides which features show and single keys switch them:
 | `adminAccess`: workspace-admin access indicator and grant | on | off | off |
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
-| `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
+| `starters`: suggested first tasks under the new-chat composer (the host's own `starters`, or Opengeni's) | on | on | off |
 | `shareLinks`: Share in the chat header, a read-only link anyone holding it can open | on | on | off |
 | `addCredits`: the new-chat page's "Add credits" button for people who manage billing (card billing only); the credits notice still shows when a model's credits run out | on | off | on |
 
@@ -195,6 +195,14 @@ the HTTP API, send the same names as `modelContextTools` next to
 `modelContext` when creating a session; the session proxy forwards them only
 with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
+
+`starters` replaces Opengeni's new-chat suggestions with the host's own, such
+as tasks for the document the person has open (the Excel add-in suggests
+summarizing the sheet, making a chart or explaining a formula). Each has an
+`id`, a `title`, an optional `description` and the `prompt` that choosing it
+puts in the composer; nothing is sent until the person sends it. Passing them
+turns the `starters` feature on unless `features.starters` says otherwise, and
+an empty list shows no suggestions.
 
 Links in agent messages to Opengeni objects (files, Sites, editable
 artifacts) open in the dock when it is on, and otherwise open the object's

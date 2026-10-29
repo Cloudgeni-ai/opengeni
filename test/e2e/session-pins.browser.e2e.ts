@@ -4561,7 +4561,7 @@ async function workspaceFromPage(
   if (groupBy !== null) {
     // The rail is available before draft hydration performs its initial autofocus.
     await page
-      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .getByRole("textbox", { name: "Ask anything", exact: true })
       .and(page.locator(":focus"))
       .waitFor();
     await page.getByRole("button", { name: /^Session view/ }).press("Enter");

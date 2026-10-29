@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { registerDom, renderComponent } from "../../../test/render-hook";
 import {
+  featuresWithHostStarters,
   SessionUiFeaturesProvider,
   useSessionUiFeature,
   type SessionUiFeatureOverrides,
@@ -46,5 +47,22 @@ describe("the new-chat page's Add credits button", () => {
   test("stays on for customer embeds unless the host switches it off", async () => {
     expect(await addCreditsIn({ preset: "embed" })).toBe(true);
     expect(await addCreditsIn({ preset: "embed", features: { addCredits: false } })).toBe(false);
+  });
+});
+
+describe("a host's own new-chat starters", () => {
+  test("turn the starters feature on unless the host set it", () => {
+    expect(featuresWithHostStarters(undefined, true)).toEqual({ starters: true });
+    expect(featuresWithHostStarters({ dock: false }, true)).toEqual({
+      dock: false,
+      starters: true,
+    });
+    expect(featuresWithHostStarters({ starters: false }, true)).toEqual({ starters: false });
+  });
+
+  test("leave the features alone when the host passes none", () => {
+    const features = { dock: false };
+    expect(featuresWithHostStarters(features, false)).toBe(features);
+    expect(featuresWithHostStarters(undefined, false)).toBeUndefined();
   });
 });

@@ -38166,6 +38166,7 @@
       "SESSION_UI_PRESETS": "value",
       "SessionApp": "value",
       "SessionAppProps": "type",
+      "SessionAppStarter": "type",
       "SessionAppSurfaces": "type",
       "SessionShellSlots": "type",
       "SessionUiFeatures": "type",

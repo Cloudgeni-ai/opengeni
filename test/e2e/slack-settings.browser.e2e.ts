@@ -274,13 +274,13 @@ test("workspace default machine saves once and schedules show its current name",
     expect(state.defaultExecutionTarget).toEqual({ kind: "machine", targetSandboxId: machineId });
     await page.screenshot({ path: `${evidence}/workspace-default-machine.png` });
     await page.goto(`${baseUrl}/workspaces/${siblingId}/sessions`);
-    await page.getByRole("textbox", { name: "Message the agent" }).waitFor();
+    await page.getByRole("textbox", { name: "Ask anything" }).waitFor();
     const savedDraft = page.waitForResponse(
       (response) =>
         response.url().endsWith("/new-session-draft") && response.request().method() === "PUT",
     );
     await page
-      .getByRole("textbox", { name: "Message the agent" })
+      .getByRole("textbox", { name: "Ask anything" })
       .fill("Check the workspace default machine.");
     await savedDraft;
     await page.getByRole("button", { name: "More composer actions" }).click();

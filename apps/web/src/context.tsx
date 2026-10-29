@@ -180,7 +180,7 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : "product",
+        : "general",
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` and
   // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.

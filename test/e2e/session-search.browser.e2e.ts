@@ -230,7 +230,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
           await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
         }
         const search = page.getByRole("button", { name: "Search sessions", exact: true });
-        const composer = page.getByRole("textbox", { name: "Message the agent", exact: true });
+        const composer = page.getByRole("textbox", { name: "Ask anything", exact: true });
         const dialog = await openSearchDialog(page);
         await page.keyboard.press("Escape");
         await dialog.waitFor({ state: "hidden" });
