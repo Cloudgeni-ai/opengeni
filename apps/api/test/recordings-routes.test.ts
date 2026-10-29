@@ -1185,6 +1185,84 @@ describe("recording routes", () => {
     ).toBe(400);
   });
 
+  test("a live transcript the deployment pays for is admitted against credits and charged for the audio it streamed", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const settled: { sourceId: string; seconds: number | undefined; model: string }[] = [];
+    let credits = false;
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async () => {
+          if (credits) return;
+          throw new TranscriptionBillingRefusedError({
+            code: "insufficient_credits",
+            message: "No credits.",
+          });
+        },
+        settle: async (input) => {
+          settled.push({
+            sourceId: input.billing.sourceId,
+            seconds: input.billing.trustedDurationSeconds,
+            model: input.model,
+          });
+          return { creditCostMicros: 1 };
+        },
+      },
+    };
+    const minted: string[] = [];
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        minted.push(new Request(input, init).url);
+        return Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 });
+      }) as typeof fetch,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const start = async () =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+    // Without credits no secret is minted, so no audio reaches the model.
+    expect(await start()).toMatchObject({
+      status: 402,
+      body: { error: { code: "payment_required", details: { code: "insufficient_credits" } } },
+    });
+    expect(minted).toEqual([]);
+    credits = true;
+    expect(await start()).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    const append = async (streamedMilliseconds: number) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+        trackNumber: 0,
+        streamedMilliseconds,
+        segments: [],
+      });
+    expect(await append(30_000)).toMatchObject({ status: 200, body: { saved: 0, ended: false } });
+    // A retry and an older total add no audio; only what is new is charged, once.
+    expect((await append(30_000)).status).toBe(200);
+    expect((await append(20_000)).status).toBe(200);
+    expect((await append(45_000)).body).not.toHaveProperty("addedMilliseconds");
+    expect(settled).toEqual([
+      { sourceId: `${recordingId}:live:0:30000`, seconds: 30, model: "gpt-4o-transcribe" },
+      { sourceId: `${recordingId}:live:0:45000`, seconds: 15, model: "gpt-4o-transcribe" },
+    ]);
+  });
+
   test("EU-only: a live secret is minted only for a Realtime endpoint declared EU", async () => {
     const AI = "https://ai.example.cognitiveservices.azure.com";
     const residency = {

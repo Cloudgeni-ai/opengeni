@@ -98,16 +98,23 @@ export type AppendRecordingLiveSegmentsInput = RecordingActor & {
 /**
  * Save finished live text. A segment number already saved keeps its first
  * copy. Once a transcript is ready the preview is over and nothing is saved.
+ * `addedMilliseconds` is how far this call moved the track's stored streamed
+ * total: the recording row lock orders a recording's appends, so each
+ * millisecond is counted by exactly one call however often a client retries.
  */
 export async function appendRecordingLiveSegments(
   db: Database,
   input: AppendRecordingLiveSegmentsInput,
-): Promise<{ saved: number; ended: boolean }> {
+): Promise<{ saved: number; ended: boolean; addedMilliseconds: number }> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const recording = await lockOwnRecording(tx, input);
     if (recording.state !== "capturing" && recording.state !== "processing") {
-      return { saved: 0, ended: recording.state === "ready" };
+      return { saved: 0, ended: recording.state === "ready", addedMilliseconds: 0 };
     }
+    const [before] = await tx
+      .select({ streamed: schema.recordingTracks.liveStreamedMilliseconds })
+      .from(schema.recordingTracks)
+      .where(trackWhere(input));
     const [track] = await tx
       .update(schema.recordingTracks)
       .set({
@@ -122,7 +129,11 @@ export async function appendRecordingLiveSegments(
         "no_live_session",
       );
     }
-    if (input.segments.length === 0) return { saved: 0, ended: false };
+    const addedMilliseconds = Math.max(
+      0,
+      input.streamedMilliseconds - Number(before?.streamed ?? 0),
+    );
+    if (input.segments.length === 0) return { saved: 0, ended: false, addedMilliseconds };
     const saved = await tx
       .insert(schema.recordingLiveSegments)
       .values(
@@ -139,7 +150,7 @@ export async function appendRecordingLiveSegments(
       )
       .onConflictDoNothing()
       .returning({ segmentNumber: schema.recordingLiveSegments.segmentNumber });
-    return { saved: saved.length, ended: false };
+    return { saved: saved.length, ended: false, addedMilliseconds };
   });
 }
 

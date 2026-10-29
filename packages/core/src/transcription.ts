@@ -228,6 +228,13 @@ export type TranscriptionService = {
     workspaceId: string;
     attribution: CreditDebitAttribution;
   }): Promise<void>;
+  /**
+   * The credit admission and settlement behind `admit`, for deployment-paid
+   * audio the API meters itself: the live transcript streams straight to the
+   * provider, so the API admits it before minting the grant and charges what
+   * each track streamed.
+   */
+  billing?: TranscriptionBilling;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
 };
 

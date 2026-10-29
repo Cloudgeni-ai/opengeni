@@ -205,6 +205,7 @@ export function createTranscriptionService(input: {
     );
   return {
     limits: () => limits,
+    billing,
     async available(context) {
       return Boolean(await firstAvailable(ordered(context ?? {}), context ?? {}));
     },

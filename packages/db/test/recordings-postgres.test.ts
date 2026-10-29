@@ -1557,7 +1557,7 @@ describe("recordings", () => {
         costUsdMicros: 400,
         segments: [segment(0, 100, "Hei alle."), segment(1, 2_000, "Kan dere høre meg?")],
       }),
-    ).toEqual({ saved: 2, ended: false });
+    ).toEqual({ saved: 2, ended: false, addedMilliseconds: 4_000 });
     // A retry keeps the first copy, and an older total never lowers the stored one.
     expect(
       await appendRecordingLiveSegments(db, {
@@ -1568,7 +1568,28 @@ describe("recordings", () => {
         costUsdMicros: 300,
         segments: [segment(1, 2_000, "changed")],
       }),
-    ).toEqual({ saved: 0, ended: false });
+    ).toEqual({ saved: 0, ended: false, addedMilliseconds: 0 });
+    // Only audio past the stored total counts, once: the live charge's measure.
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 5_500,
+        costUsdMicros: 550,
+        segments: [],
+      }),
+    ).toEqual({ saved: 0, ended: false, addedMilliseconds: 1_500 });
+    expect(
+      await appendRecordingLiveSegments(db, {
+        ...actor,
+        recordingId,
+        trackNumber: 0,
+        streamedMilliseconds: 5_500,
+        costUsdMicros: 550,
+        segments: [],
+      }),
+    ).toEqual({ saved: 0, ended: false, addedMilliseconds: 0 });
     await appendRecordingLiveSegments(db, {
       ...actor,
       recordingId,
@@ -1604,7 +1625,7 @@ describe("recordings", () => {
     expect(newer.after).toBe(all.after);
     const viewed = await getRecording(db, { ...actor, recordingId });
     expect(viewed.tracks.map((track) => track.live)).toEqual([
-      { ...live, streamedMilliseconds: 4_000, costUsd: 0.0004 },
+      { ...live, streamedMilliseconds: 5_500, costUsd: 0.00055 },
       { ...live, streamedMilliseconds: 4_000, costUsd: 0.0004 },
     ]);
 
@@ -1694,7 +1715,7 @@ describe("recordings", () => {
         costUsdMicros: 600,
         segments: [segment(3, 5_000, "late")],
       }),
-    ).toEqual({ saved: 0, ended: true });
+    ).toEqual({ saved: 0, ended: true, addedMilliseconds: 0 });
     const [rows] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count from recording_live_segments where recording_id = ${recordingId}`;
     expect(rows!.count).toBe(0);
