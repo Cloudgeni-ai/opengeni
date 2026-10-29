@@ -2311,10 +2311,27 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * the URL annotation table that would make them resolvable. Keep the canonical
  * model-history item untouched, but never expose those unusable handles in the
  * human timeline. Ordinary markdown links and structured URL citations remain.
+ *
+ * A handle is U+E200, `cite` or `filecite`, U+E202-separated references such
+ * as `turn0search3`, then U+E201. It also reaches the timeline without its
+ * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
+ * text), cut short, or still streaming at the end of the text.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text.replace(/\s*cite(?:[^]+)+/gu, "");
+  return text
+    .replace(PROVIDER_CITATION_HANDLE, "")
+    .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+    .replace(PROVIDER_CITATION_DELIMITER, "")
+    .replace(BARE_PROVIDER_CITATION_HANDLE, "");
 }
+
+const PROVIDER_CITATION_HANDLE =
+  /\s*\u{E200}(?:file)?cite(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
+/** A handle whose end has not streamed in yet, or never will. */
+const UNFINISHED_PROVIDER_CITATION_HANDLE = /\s*\u{E200}[^\u{E201}\s]*$/u;
+const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
+/** `cite` or `filecite` glued to one or more references, which no prose writes. */
+const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+/gu;
 
 /**
  * The turn summary's short outcome for a usage ceiling. The adjacent notice row

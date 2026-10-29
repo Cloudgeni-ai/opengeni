@@ -164,7 +164,10 @@ export function createHttpDecisionModel(config: HttpDecisionModelOptions): Decis
         });
       } catch (cause) {
         options.signal?.throwIfAborted();
-        throw new DecisionUnavailableError("Decision provider request failed", { cause });
+        throw new DecisionUnavailableError("Decision provider request failed", {
+          cause,
+          code: "request_failed",
+        });
       }
       if (!response.ok) {
         await response.body?.cancel();

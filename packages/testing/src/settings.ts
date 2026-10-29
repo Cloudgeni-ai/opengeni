@@ -508,6 +508,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     documentEmbeddingDimensions: 3072,
     documentEmbeddingApiKey: undefined,
     documentEmbeddingBaseUrl: undefined,
+    documentEmbeddingAuth: "api_key",
     documentCurationProvider: "heuristic",
     documentCurationModel: "gpt-4o-mini",
     documentCurationApiKey: undefined,

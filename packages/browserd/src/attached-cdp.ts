@@ -43,6 +43,13 @@ const MAX_EVENT_LISTENERS = 16_384;
 // Chrome reports the debugger detach that ends a refused navigation on its own
 // event stream, usually just before or after the failed command's reply.
 const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
+// A page command's deadline when its caller sets none, as on a direct CDP
+// connection: a page that stops answering (a dialog it opened before the
+// debugger attached blocks it) must fail the command, not hold it forever.
+const PAGE_COMMAND_TIMEOUT_MS = 30_000;
+// A live page answers attaching in well under a second; one that has not
+// answered after this is blocked or hung.
+const ATTACH_TIMEOUT_MS = 10_000;
 // Retry bounds while the event stream is re-established after it broke.
 const RESYNC_RETRY_MIN_MS = 100;
 const RESYNC_RETRY_MAX_MS = 5_000;
@@ -157,6 +164,10 @@ type AttachedTab = {
   url: string | null;
   active: boolean;
   controllable: boolean;
+  /** Null when the extension does not say. */
+  windowId: number | null;
+  /** Whether Chrome unloaded the tab's page to save memory. */
+  discarded: boolean;
 };
 
 type BridgeDebuggerEvent = {
@@ -350,6 +361,15 @@ export function createAttachedChromeDriver(
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
+    // A dialog a page opened before Chrome's debugger attached blocks it and
+    // can be neither read nor answered: a tab whose page does not answer says
+    // so quickly, and handle_dialog dismiss hides the tab for a moment, which
+    // makes Chrome close it.
+    attachTimeoutMs: ATTACH_TIMEOUT_MS,
+    personDialogs: {
+      inFront: async (tabId) => await transport.connection.tabInFront(tabId),
+      hideForAMoment: async (tabId) => await transport.connection.hideTabForAMoment(tabId),
+    },
     ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
     // Chrome saves downloads in the person's own downloads folder; the
     // session keeps a copy of each one its tabs start.
@@ -644,10 +664,78 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.markActive();
     this.inFlight += 1;
     try {
-      return await this.sendNow<T>(method, params, options);
+      const sent = this.sendNow<T>(method, params, options);
+      if (!options.sessionId) return await sent;
+      return await withPageDeadline(
+        sent,
+        method,
+        options.sessionId,
+        options.timeoutMs ?? PAGE_COMMAND_TIMEOUT_MS,
+      );
     } finally {
       this.inFlight -= 1;
       this.lastActivityAt = Date.now();
+    }
+  }
+
+  /** Whether the tab is the one shown in its window. */
+  async tabInFront(tabId: string): Promise<boolean> {
+    if (this.stopped || this.failure) return false;
+    const listed = requireTabs(
+      (await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs,
+    );
+    return listed.find((entry) => entry.id === tabId)?.active === true;
+  }
+
+  /**
+   * Hide a tab in front for a moment with its debugger released. Chrome lets
+   * no extension read or answer a dialog (alert, confirm, prompt) a page
+   * opened while nothing debugged it, and holds every page command until
+   * someone does; it closes such a dialog, as Cancel, when the tab is hidden
+   * while nothing debugs it. The tab shown instead is a new blank one, so no
+   * page of the person's sees anything, or else another tab of the same
+   * window when the blank one opens in another window; anything created is
+   * closed again. The tab comes back to front only if the person did not
+   * show another one meanwhile. A tab not in front, or one another session
+   * here is debugging, is left be.
+   */
+  async hideTabForAMoment(tabId: string): Promise<"hidden" | "not_front" | "unavailable"> {
+    if (this.stopped || this.failure || this.debuggerHeldElsewhere(tabId)) return "unavailable";
+    const listTabs = async () =>
+      requireTabs((await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs);
+    const tab = (await listTabs()).find((entry) => entry.id === tabId);
+    if (!tab?.active) return "not_front";
+    if (tab.windowId === null) return "unavailable";
+    const blank = requireTab(
+      (
+        await this.bridge.request<{ tab: unknown }>({
+          type: "tabs.create",
+          url: "about:blank",
+        })
+      ).tab,
+    );
+    try {
+      let shown: AttachedTab | undefined = blank;
+      if (blank.windowId !== tab.windowId) {
+        const siblings = (await listTabs()).filter(
+          (entry) => entry.id !== tabId && entry.id !== blank.id && entry.windowId === tab.windowId,
+        );
+        // Showing a discarded tab would load its page again.
+        shown = siblings.find((entry) => !entry.discarded) ?? siblings[0];
+      }
+      if (!shown) return "unavailable";
+      if (this.attachedTabs.has(tabId)) {
+        await this.bridge.request({ type: "debugger.detach", tabId });
+        this.forgetReleasedAttachment(tabId);
+      }
+      await this.bridge.request({ type: "tabs.activate", tabId: shown.id });
+      // Give back only this switch, never one the person made meanwhile.
+      const now = await listTabs();
+      if (now.find((entry) => entry.id === shown.id)?.active === true)
+        await this.bridge.request({ type: "tabs.activate", tabId });
+      return "hidden";
+    } finally {
+      await this.bridge.request({ type: "tabs.close", tabId: blank.id }).catch(() => undefined);
     }
   }
 
@@ -1521,6 +1609,8 @@ function requireTab(value: unknown): AttachedTab {
     url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
+    windowId: Number.isSafeInteger(tab.windowId) ? (tab.windowId as number) : null,
+    discarded: tab.discarded === true,
   };
 }
 
@@ -1846,6 +1936,30 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
     throw new CdpTransportError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+/** A page command's result, or CdpCommandTimeoutError once its deadline
+ * passes; a late result is dropped. */
+async function withPageDeadline<T>(
+  sent: Promise<T>,
+  method: string,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new CdpCommandTimeoutError(method, sessionId)),
+      boundedTimeout(timeoutMs),
+    );
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([sent, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void sent.catch(() => undefined);
+  }
 }
 
 async function delay(milliseconds: number): Promise<void> {

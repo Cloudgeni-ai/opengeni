@@ -1327,7 +1327,6 @@ export type AddKind = "note" | "group";
 export function AddKnowledgePage({
   workspaceId,
   workspaceName,
-  personal,
   canWriteOrganization,
   defaultScope,
   collectionId,
@@ -1336,7 +1335,6 @@ export function AddKnowledgePage({
 }: {
   workspaceId: string;
   workspaceName: string;
-  personal: boolean;
   canWriteOrganization: boolean;
   defaultScope: KnowledgeEntryScope;
   collectionId?: string;
@@ -1352,9 +1350,11 @@ export function AddKnowledgePage({
   const [groupIds, setGroupIds] = useState<string[]>(collectionId ? [collectionId] : []);
   const [errors, setErrors] = useState<{ title?: string; content?: string }>({});
   const collectionTitle = useEntryTitleOptional(workspaceId, collectionId);
-  const scopes: KnowledgeEntryScope[] = personal
-    ? ["personal"]
-    : ["workspace", "personal", ...(canWriteOrganization ? (["organization"] as const) : [])];
+  const scopes: KnowledgeEntryScope[] = [
+    "workspace",
+    "personal",
+    ...(canWriteOrganization ? (["organization"] as const) : []),
+  ];
 
   return (
     <FormPage

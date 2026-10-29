@@ -66,4 +66,23 @@ describe("useGitHubHistoryRefresh", () => {
     expect(refreshGitHub).toHaveBeenCalledWith("workspace-1");
     await hook.unmount();
   });
+
+  test("refreshes quietly when the connection comes back", async () => {
+    jest.useFakeTimers();
+    const refreshGitHub = mock(async () => {});
+    const hook = await renderHook(
+      () => useGitHubHistoryRefresh("workspace-1", true, refreshGitHub),
+      undefined,
+    );
+
+    await actRun(() => window.dispatchEvent(new Event("online")));
+    await actRun(() => jest.advanceTimersByTime(2_000));
+    expect(refreshGitHub).toHaveBeenCalledTimes(1);
+    expect(refreshGitHub).toHaveBeenCalledWith("workspace-1");
+
+    await hook.unmount();
+    await actRun(() => window.dispatchEvent(new Event("online")));
+    await actRun(() => jest.advanceTimersByTime(2_000));
+    expect(refreshGitHub).toHaveBeenCalledTimes(1);
+  });
 });

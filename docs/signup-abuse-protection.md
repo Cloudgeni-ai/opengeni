@@ -71,6 +71,12 @@ ledger history remains unchanged. Purchased credit and paid-plan allowances stay
 usable. Already-dispatched usage settles against its original funding; a hold does
 not manufacture a refund. Releasing a hold restores the remaining funds.
 
+A hold blocks Free and promotional funding for accounts with no purchased credit
+and no paid plan: admission counts only non-held funds, so those accounts are
+refused. An account with purchased credit or a paid-plan allowance is treated as a
+paying customer. Its usage passes admission, and settlement includes held funds, so
+that usage may consume held Free credit. This is intentional.
+
 Legacy unrestricted signup amounts that cannot be distinguished safely from paid
 funds are left untouched. Scoped signup grants and identifiable legacy Free plan
 period funding are covered. The billing UI shows available funds and free credit

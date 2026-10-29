@@ -12,6 +12,45 @@ prompt or tool text changes, and earlier messages are unaffected. The
 timeline also shows the handoff's stored notice, "Voice session ended…", in
 the reader's language instead of always in English.
 
+Tool search returns the right tool on every route. No system prompt or tool
+description text changes; what changes is what a `tool_search` result carries,
+always appended after that result, so nothing an earlier request sent changes.
+
+- Native routes (OpenAI/Azure Responses and Codex) carry only loaded
+  definitions, so the candidates the generic output lists were dropped, and a
+  search that loaded nothing read as "No matching tools found". A developer
+  message right after the result now lists what the search did not load:
+  `No authorized tool is named "<name>".` for requested names no authorized
+  tool has, then `Close candidates this search did not load:` (or
+  `No tool loaded. Close candidates:`), one `- name: preview` line per
+  candidate with the 160-character preview `tool_list` shows, and
+  `Load one that fits with tool_search names:["<exact name>"] and query:"".`
+- A search that names or clearly matches a tool every request already carries
+  (such as `request_human_input` or `exec_command`) adds `alreadyAvailable`:
+  `<name> is already in your tool list; call it directly.`, instead of listing
+  it as unavailable.
+- Names resolve in the forms agents write them: the full model name, the
+  published `server.tool` form, and `projects.search`, `projects_search` or
+  `projects-search`, including for tools whose model names are shortened digest
+  aliases. A name several shortened aliases could stand for becomes candidates
+  instead of loading all of them.
+- A query is split into its requests (semicolons or new lines). Without a
+  decision model, the best candidate for each request is loaded and the next
+  ones listed; before, only a single clear keyword match was loaded. With one,
+  every candidate it judges to belong to the requested actions is loaded, with
+  no cap below the search's `limit`, the next candidates are listed when the
+  choice was unclear, and the keyword shortcut past the decision model is
+  removed. A search never comes back empty while candidates exist.
+- When the deployment has a document embedding model, ranking matches meaning
+  as well as keywords.
+- A load by exact name now carries the once-per-turn `connectedAccounts`
+  notice, and every tool a result shows, loaded or listed, counts as shown for
+  it, so loading Gmail tools after browsing a group still names Outlook Mail.
+  With several accounts of one connector, ranking reads past each tool's
+  `Account: … Use only this account…` first line (the same tool ranks the same
+  with or without it), and previews read `Account: <label>.` then the tool's
+  own text instead of being cut inside the account guidance.
+
 A blocked routine, reversible step no longer ends the turn with a question.
 Autonomy and persistence adds one general principle: take the conventional
 default without changing user or machine configuration, say which default was

@@ -110,6 +110,7 @@ import {
   BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
+  NO_OWN_TAB_IN_PERSONS_BROWSER,
   expandRefShorthand,
   type ResolvedBrowserSession,
   type ResolvedBrowserTarget,
@@ -1075,6 +1076,9 @@ const ComputerActionBatchReceipt = z
     /** Actions that acted on an element of another role than the one named,
      * by their index in the batch. */
     roleStandIns: ComputerActionReceipt.shape.roleStandIns,
+    /** An action of the batch delivered raw input (a key press, a click)
+     * with nothing confirming that the app acted on it. */
+    unconfirmedInput: ComputerActionReceipt.shape.unconfirmedInput,
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -1318,6 +1322,9 @@ export function createInteractionAttemptToolDefinitions(
       ),
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
+    personsBrowser: async (browserSessionId) =>
+      (await input.transport.getBrowserSession(input.workspaceId, browserSessionId)).placement
+        .kind === "attached_device",
   });
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
@@ -1642,6 +1649,19 @@ export function createInteractionAttemptToolDefinitions(
       if (tab && isGoneBrowserTabError(error))
         currentTab.forgetTarget(tab.browserSessionId, tab.targetId);
       else if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      // The tab the agent was working in is gone. In the person's own
+      // browser, with no other tab of its own left, say so plainly rather
+      // than that an ID the agent never named does not exist.
+      if (tab?.implicitTarget && isMissingBrowserTabError(error)) {
+        const next = await currentTab
+          .target({ browserSessionId: tab.browserSessionId })
+          .catch((resolution: unknown) => resolution);
+        if (
+          next instanceof BrowserTargetResolutionError &&
+          next.message === NO_OWN_TAB_IN_PERSONS_BROWSER
+        )
+          throw next;
+      }
       if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) {
         throw await explainMissingSession(error, "BrowserSession", value.browserSessionId);
       }
@@ -4010,6 +4030,7 @@ async function actInComputerBatch(
   let observedAfterLastAction = true;
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
   const roleStandIns: NonNullable<z.output<typeof ComputerActionBatchReceipt>["roleStandIns"]> = [];
+  let unconfirmedInput = false;
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
@@ -4102,6 +4123,7 @@ async function actInComputerBatch(
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
     for (const standIn of receipt.roleStandIns ?? [])
       roleStandIns.push({ ...standIn, actionIndex: index });
+    if (receipt.unconfirmedInput) unconfirmedInput = true;
     if (receipt.observation) observation = receipt.observation;
     if (receipt.state !== "completed") {
       observedAfterLastAction = receipt.observation !== null;
@@ -4130,6 +4152,7 @@ async function actInComputerBatch(
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
     ...(roleStandIns.length ? { roleStandIns } : {}),
+    ...(unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -4244,6 +4267,7 @@ async function actInComputerNativeBatch(
     observation,
     observationPrecedesStop: false,
     ...(receipt.roleStandIns?.length ? { roleStandIns: receipt.roleStandIns } : {}),
+    ...(receipt.unconfirmedInput ? { unconfirmedInput: true as const } : {}),
   };
 }
 
@@ -6247,6 +6271,17 @@ function isGoneBrowserTabError(error: unknown): boolean {
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
     /(?:^|: )browser target does not exist\b/u.test(error.message)
+  );
+}
+
+/** Either way a controller says a tab it was asked for does not exist: the
+ * driver's "browser target does not exist…", or the controller's own check,
+ * which names the tab ("browser target \"10\" does not exist…"). */
+function isMissingBrowserTabError(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    /(?:^|: )browser target (?:"[^"]*" )?does not exist\b/u.test(error.message)
   );
 }
 

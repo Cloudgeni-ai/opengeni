@@ -82,6 +82,20 @@
 //! what they use. A guest that does not trim keeps its disk's file as
 //! large as its guest ever filled it.
 //!
+//! When the host is short of memory and a sandbox holds more than it
+//! requested, the host may ask its guest to give memory back (ADR 24):
+//!
+//! ```text
+//! shrink free=<bytes> keep=<bytes>
+//! ```
+//!
+//! The guest drops its file cache, then ends the processes its kernel's
+//! out-of-memory killer would end first, never those its init supervises,
+//! until `free` more bytes are free or no more than `keep` are in use, and
+//! answers `shrunk freed=<bytes> spent=<0|1> ended=<count> names=<a,b>`:
+//! what it freed, whether nothing is left that it may end, and what it
+//! ended. A guest of a release before this does not answer.
+//!
 //! Last, while a sandbox runs the host connects to the port every so often
 //! without sending a line, and closes the connection again: a guest reads
 //! its end and ignores it. The guest's kernel takes a connection to a
@@ -417,6 +431,97 @@ pub async fn ask_sync(vsock_socket: &Path, port: u32, limit: Duration) -> io::Re
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer sync"))?
 }
 
+/// How a guest answered `shrink`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shrunk {
+    /// Bytes more free in the guest than before.
+    pub freed: u64,
+    /// Whether nothing is left that it may end.
+    pub spent: bool,
+    /// How many processes it ended.
+    pub ended: u32,
+    /// The names of some of them.
+    pub names: Vec<String>,
+}
+
+/// The longest answer to `shrink` the host reads.
+const MAX_SHRUNK: usize = 512;
+
+/// Parses the guest's answer to `shrink`, without its newline.
+fn parse_shrunk(line: &str) -> Option<Shrunk> {
+    let mut words = line.split_whitespace();
+    if words.next()? != "shrunk" {
+        return None;
+    }
+    let (mut freed, mut spent, mut ended, mut names) = (None, None, 0, Vec::new());
+    for field in words {
+        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+        match key {
+            "freed" => freed = value.parse().ok(),
+            "spent" => spent = Some(value == "1"),
+            "ended" => ended = value.parse().unwrap_or(0),
+            "names" => {
+                names = value
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    Some(Shrunk {
+        freed: freed?,
+        spent: spent?,
+        ended,
+        names,
+    })
+}
+
+/// Asks a running guest to free `free` bytes of memory for the host,
+/// keeping at least `keep` in use (see the module documentation), and
+/// waits at most `limit` for its answer.
+///
+/// # Errors
+///
+/// The guest could not be reached, did not answer in time (also a guest
+/// that does not know the request), or answered something else.
+pub async fn ask_shrink(
+    vsock_socket: &Path,
+    port: u32,
+    free: u64,
+    keep: u64,
+    limit: Duration,
+) -> io::Result<Shrunk> {
+    let asked = async {
+        let mut stream = vsock::connect(vsock_socket, port).await?;
+        stream
+            .write_all(format!("shrink free={free} keep={keep}\n").as_bytes())
+            .await?;
+        let mut answer = Vec::with_capacity(64);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_SHRUNK {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                return std::str::from_utf8(&answer)
+                    .ok()
+                    .and_then(parse_shrunk)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "unexpected answer to shrink")
+                    });
+            }
+            answer.push(byte[0]);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "answer to shrink too long",
+        ))
+    };
+    tokio::time::timeout(limit, asked)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer shrink"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +529,37 @@ mod tests {
     use tokio::net::UnixListener;
 
     const ORDER: Order = (2, 4, 9);
+
+    #[test]
+    fn reads_what_a_guest_freed_and_ended() {
+        assert_eq!(
+            parse_shrunk("shrunk freed=5242880 spent=0 ended=3 names=cc1plus,node later=x"),
+            Some(Shrunk {
+                freed: 5 << 20,
+                spent: false,
+                ended: 3,
+                names: vec!["cc1plus".into(), "node".into()],
+            })
+        );
+        assert_eq!(
+            parse_shrunk("shrunk freed=0 spent=1 ended=0 names="),
+            Some(Shrunk {
+                freed: 0,
+                spent: true,
+                ended: 0,
+                names: Vec::new(),
+            })
+        );
+        for line in [
+            "",
+            "ok",
+            "shrunk spent=1",
+            "shrunk freed=x spent=0",
+            "synced",
+        ] {
+            assert_eq!(parse_shrunk(line), None, "{line:?}");
+        }
+    }
 
     #[test]
     fn the_notice_carries_unix_nanoseconds_and_the_record_fence() {

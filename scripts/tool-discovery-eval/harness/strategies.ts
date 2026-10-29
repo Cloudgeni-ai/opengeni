@@ -1,4 +1,5 @@
 import type { Tool } from "@openai/agents";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   LazyToolRuntime,
   type LazyToolTransport,
@@ -8,6 +9,10 @@ import {
   createToolSelector,
   type ToolSelector,
 } from "../../../packages/runtime/src/tool-discovery-decision";
+import {
+  createEmbeddingToolRanker,
+  type EmbeddingToolRanker,
+} from "../../../packages/runtime/src/tool-discovery-meaning";
 import type { DecisionModel } from "../../../packages/decisions/src";
 import { cardText, type TaskCard } from "./cards";
 import { cosine, type ChatClient, type EmbeddingClient } from "./providers";
@@ -89,6 +94,30 @@ export function decisionToolSelector(model: DecisionModel, label: string): Coste
   };
 }
 
+// The embedding spend of the search running in this async context.
+const meaningSpend = new AsyncLocalStorage<{ usd: number }>();
+
+/** The runtime's own meaning ranker over an evaluation embedding client. */
+export type RuntimeMeaning = { label: string; ranker: EmbeddingToolRanker };
+
+export function runtimeMeaningRanker(client: EmbeddingClient): RuntimeMeaning {
+  return {
+    label: `meaning ${client.label}`,
+    ranker: createEmbeddingToolRanker(
+      {
+        space: client.label,
+        async embed(texts) {
+          const { vectors, costUsd } = await client.embed(texts);
+          const spend = meaningSpend.getStore();
+          if (spend) spend.usd += costUsd;
+          return vectors;
+        },
+      },
+      { onError: (error) => console.error("meaning ranking failed:", error) },
+    ),
+  };
+}
+
 /**
  * The real runtime search, exactly as an agent on that route gets it: the
  * generic dispatch result (loaded tools plus `suggestions`) or the native
@@ -100,14 +129,15 @@ export function runtimeStrategy(
   catalog: Catalog,
   transport: LazyToolTransport,
   selector?: { label: string; create(): CostedSelector },
+  meaning?: RuntimeMeaning,
 ): Strategy {
   const servers = new Map(
     catalog.tools.flatMap((tool) => (tool.server ? [[tool.name, tool.server] as const] : [])),
   );
   const serverIds = new Set(servers.values());
   const eager = new Set(catalog.tools.filter((tool) => tool.eager).map((tool) => tool.name));
-  const label = `runtime ${transport}${selector ? ` + ${selector.label}` : ""}`;
-  const description = `The runtime's own tool_search on the ${transport} route${selector ? ` with ${selector.label} as decision model` : ""}.`;
+  const label = `runtime ${transport}${meaning ? ` + ${meaning.label}` : ""}${selector ? ` + ${selector.label}` : ""}`;
+  const description = `The runtime's own tool_search on the ${transport} route${meaning ? `, ranking by keywords and ${meaning.label}` : ""}${selector ? ` with ${selector.label} as decision model` : ""}.`;
   const turn = (): Strategy => {
     const costed = selector?.create();
     const runtime = new LazyToolRuntime(
@@ -123,6 +153,10 @@ export function runtimeStrategy(
       undefined,
       () => eager,
       costed?.select,
+      undefined,
+      undefined,
+      undefined,
+      meaning?.ranker,
     );
     runtime.refresh(catalog.functionTools);
     return {
@@ -130,10 +164,13 @@ export function runtimeStrategy(
       description,
       async search({ query }) {
         costed?.drain();
+        const spend = { usd: 0 };
         const started = performance.now();
-        const marker = await runtime.prepareSearch({ query });
+        const marker = await meaningSpend.run(spend, () => runtime.prepareSearch({ query }));
         const latencyMs = performance.now() - started;
-        const { costUsd, decisions } = costed?.drain() ?? { costUsd: 0, decisions: [] };
+        const drained = costed?.drain() ?? { costUsd: 0, decisions: [] };
+        const { decisions } = drained;
+        const costUsd = drained.costUsd + spend.usd;
         const output = JSON.parse(marker.output) as {
           tools?: { name?: string }[];
           suggestions?: { name?: string }[];
