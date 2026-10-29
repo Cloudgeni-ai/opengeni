@@ -228,13 +228,16 @@ impl KeyBindings {
 
     /// Binds the planned keycodes and records this handle's claims on them and
     /// on any binding of another handle it presses. `guarded` says whether
-    /// `conn` already holds the server guard; otherwise it is taken here only
-    /// when something must be bound or claimed.
+    /// `conn` already holds the server guard; otherwise it is taken here
+    /// whenever the delivery binds something or presses a single-keysym key
+    /// this handle holds no claim on.
     ///
     /// # Errors
     ///
-    /// A retryable failure when a planned spare keycode was taken or a used
-    /// binding was released meanwhile; nothing stays bound then.
+    /// A retryable failure when a planned spare keycode was taken, or a pressed
+    /// key no longer gives the keysym it was planned with (another session
+    /// released or rebound it since the keymap was read); nothing stays bound
+    /// then.
     pub(super) fn claim(
         &self,
         conn: &RustConnection,
@@ -267,25 +270,15 @@ impl KeyBindings {
                 Err(PlatformError::os("X11 key bindings are unavailable"))
             };
         };
-        // Layout keys that happen to give a single keysym are not claimed.
-        let others = read_claims(conn, root, atom)?;
-        let shared: Vec<(u8, u32)> = unclaimed
-            .into_iter()
-            .filter(|(keycode, keysym)| {
-                others
-                    .iter()
-                    .any(|claim| claim.keycode == *keycode && claim.keysym == *keysym)
-            })
-            .collect();
-        if plan.bindings.is_empty() && shared.is_empty() {
-            return Ok(());
-        }
+        // Keys this handle holds no claim on are checked against the claims
+        // under the guard: read without it, another session could release or
+        // rebind one between that read and the key press.
         let guard = if guarded {
             None
         } else {
             Some(X11ServerGuard::acquire(conn)?)
         };
-        let result = self.claim_guarded(conn, root, owner, atom, plan, &shared);
+        let result = self.claim_guarded(conn, root, owner, atom, plan, &unclaimed);
         if let Some(guard) = guard {
             guard.release()?;
         }
@@ -299,14 +292,14 @@ impl KeyBindings {
         owner: Window,
         atom: Atom,
         plan: &KeyBindingPlan,
-        shared: &[(u8, u32)],
+        unclaimed: &[(u8, u32)],
     ) -> PlatformResult<()> {
         let mut claimed = self.claimed.lock().map_err(|_| poisoned())?;
         let mut claims = read_claims(conn, root, atom)?;
-        for (keycode, keysym) in shared {
-            if !binds_only(&read_keymap_row(conn, *keycode)?, *keysym) {
-                return Err(keyboard_layout_not_ready());
-            }
+        let shared = shared_bindings(conn, &claims, unclaimed)?;
+        if plan.bindings.is_empty() && shared.is_empty() {
+            // Only layout keys, which no session binds or restores.
+            return Ok(());
         }
         let mut bound: Vec<(u8, &[u32])> = Vec::with_capacity(plan.bindings.len());
         let applied = (|| {
@@ -352,10 +345,43 @@ impl KeyBindings {
         for (keycode, keysym, _) in &plan.bindings {
             claimed.keycodes.insert(*keycode, *keysym);
         }
-        claimed.keycodes.extend(shared.iter().copied());
+        claimed.keycodes.extend(shared);
         claimed.last_use = Some(Instant::now());
         Ok(())
     }
+}
+
+/// Of the pressed keys this handle holds no claim on, those that are another
+/// handle's binding, which this one must claim too; the rest are layout keys.
+/// Call under the server guard with `claims` read under it.
+///
+/// # Errors
+///
+/// The retryable not-ready failure when a key no longer gives only the keysym
+/// the delivery was planned with, or another glyph's claim holds it.
+fn shared_bindings(
+    conn: &RustConnection,
+    claims: &[Claim],
+    unclaimed: &[(u8, u32)],
+) -> PlatformResult<Vec<(u8, u32)>> {
+    let mut shared = Vec::new();
+    for &(keycode, keysym) in unclaimed {
+        if !binds_only(&read_keymap_row(conn, keycode)?, keysym) {
+            return Err(keyboard_layout_not_ready());
+        }
+        let mut held = claims
+            .iter()
+            .filter(|claim| claim.keycode == keycode)
+            .peekable();
+        if held.peek().is_none() {
+            continue;
+        }
+        if !held.any(|claim| claim.keysym == keysym) {
+            return Err(keyboard_layout_not_ready());
+        }
+        shared.push((keycode, keysym));
+    }
+    Ok(shared)
 }
 
 impl Drop for KeyBindings {
@@ -606,5 +632,158 @@ mod tests {
         plan.note_used(255, &[A, A, 0]);
         plan.note_used(9, &[0, 0]);
         assert_eq!(plan.used, BTreeMap::from([(255, A)]));
+    }
+
+    struct Server(std::process::Child);
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A private Xvfb display, or `None` without OPENGENI_XVFB.
+    fn start_server() -> Option<(Server, String)> {
+        use std::io::BufRead as _;
+        let binary = std::env::var_os("OPENGENI_XVFB")?;
+        let mut child = std::process::Command::new(binary)
+            .args(["-displayfd", "1", "-noreset", "-nolisten", "tcp"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("configured Xvfb must run");
+        let stdout = child.stdout.take().expect("Xvfb stdout");
+        let server = Server(child);
+        let mut number = String::new();
+        std::io::BufReader::new(stdout)
+            .read_line(&mut number)
+            .expect("Xvfb display number");
+        Some((server, format!(":{}", number.trim())))
+    }
+
+    /// Another session's handle: a connection with an owner window and a
+    /// claim on `keycode`, bound to `keysym`.
+    fn bind_as_other_session(display: &str, keycode: u8, keysym: u32) -> (RustConnection, Window) {
+        let owner = open_owner(&X11Display::named(display)).expect("owner window");
+        owner
+            .conn
+            .change_keyboard_mapping(1, keycode, 2, &[keysym, keysym])
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut claims = read_claims(&owner.conn, owner.root, owner.atom).unwrap();
+        claims.push(claim(owner.window, keycode, keysym));
+        write_claims(&owner.conn, owner.root, owner.atom, &claims).unwrap();
+        (owner.conn, owner.window)
+    }
+
+    fn plan_text(conn: &RustConnection, text: &str) -> KeyBindingPlan {
+        let input = opengeni_agent_proto::v1::DesktopInput {
+            channel_id: String::new(),
+            event: Some(opengeni_agent_proto::v1::desktop_input::Event::Key(
+                opengeni_agent_proto::v1::KeyEvent {
+                    key: text.into(),
+                    is_text: true,
+                    action: opengeni_agent_proto::v1::KeyAction::Press.into(),
+                },
+            )),
+        };
+        super::super::prepare_inputs(conn, &[input]).unwrap().1
+    }
+
+    fn wait_until_gone(conn: &RustConnection, window: Window) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while window_exists(conn, window) {
+            assert!(Instant::now() < deadline, "ended session's window remains");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A key planned as another session's binding is re-checked when it is
+    /// claimed: if that session ended and the key was restored, or rebound to
+    /// another glyph, by a session that started meanwhile, the delivery
+    /// refuses before any input instead of typing the wrong glyph or nothing.
+    #[test]
+    fn a_binding_released_or_rebound_after_planning_refuses_before_input() {
+        const O_SLASH: u32 = 0xf8;
+        let Some((_server, display)) = start_server() else {
+            eprintln!("SKIP: set OPENGENI_XVFB");
+            return;
+        };
+        for rebind in [Some(A), None] {
+            let (conn, screen) = X11Display::named(&display).connect().unwrap();
+            let root = conn.setup().roots[screen].root;
+            let keycode = *super::super::keyboard_mapping(&conn)
+                .unwrap()
+                .spare_keycodes()
+                .last()
+                .expect("a spare keycode");
+            let (ended, ended_window) = bind_as_other_session(&display, keycode, O_SLASH);
+            let bindings = KeyBindings::new(X11Display::named(&display));
+            bindings.prepare();
+            let plan = plan_text(&conn, "ø");
+            assert!(plan.bindings.is_empty());
+            assert_eq!(plan.used, BTreeMap::from([(keycode, O_SLASH)]));
+
+            // That session is killed, and a session starting meanwhile
+            // restores its key and, in the first round, binds it to 密.
+            drop(ended);
+            wait_until_gone(&conn, ended_window);
+            prune_ended_sessions(&conn, root);
+            let restored = read_keymap_row(&conn, keycode).unwrap();
+            assert!(restored.iter().all(|keysym| *keysym == 0));
+            let rebound = rebind.map(|keysym| bind_as_other_session(&display, keycode, keysym));
+
+            assert!(matches!(
+                bindings.claim(&conn, root, &plan, false),
+                Err(PlatformError::Timeout(_))
+            ));
+            // Planned again, ø gets a spare of its own.
+            let plan = plan_text(&conn, "ø");
+            assert_eq!(plan.bindings.len(), 1);
+            assert_ne!(plan.bindings[0].0, keycode);
+            bindings.claim(&conn, root, &plan, false).unwrap();
+            drop(bindings);
+            drop(rebound);
+        }
+    }
+
+    /// While the session that bound a key is alive, another one pressing it
+    /// claims it too, so it stays bound after the first one ends.
+    #[test]
+    fn a_live_binding_pressed_by_another_session_is_claimed_by_it() {
+        const O_SLASH: u32 = 0xf8;
+        let Some((_server, display)) = start_server() else {
+            eprintln!("SKIP: set OPENGENI_XVFB");
+            return;
+        };
+        let (conn, screen) = X11Display::named(&display).connect().unwrap();
+        let root = conn.setup().roots[screen].root;
+        let keycode = *super::super::keyboard_mapping(&conn)
+            .unwrap()
+            .spare_keycodes()
+            .last()
+            .expect("a spare keycode");
+        let (first, first_window) = bind_as_other_session(&display, keycode, O_SLASH);
+        let bindings = KeyBindings::new(X11Display::named(&display));
+        bindings.prepare();
+        let plan = plan_text(&conn, "ø plain");
+        bindings.claim(&conn, root, &plan, false).unwrap();
+        let (own, atom) = *bindings.identity.get().unwrap();
+        assert!(read_claims(&conn, root, atom)
+            .unwrap()
+            .contains(&claim(own, keycode, O_SLASH)));
+        drop(first);
+        wait_until_gone(&conn, first_window);
+        prune_ended_sessions(&conn, root);
+        assert!(binds_only(
+            &read_keymap_row(&conn, keycode).unwrap(),
+            O_SLASH
+        ));
+        assert_eq!(
+            read_claims(&conn, root, atom).unwrap(),
+            [claim(own, keycode, O_SLASH)]
+        );
     }
 }
