@@ -2339,8 +2339,9 @@ export const ComputerLocator = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerLocator = z.infer<typeof ComputerLocator>;
 
-/** Web-platform permissions which a managed browser can set for the exact
- * top-level origin currently fenced by a BrowserActionCommand. Names remain
+/** Web-platform permissions which a browser can set for the exact top-level
+ * origin currently fenced by a BrowserActionCommand (attached Chrome: camera,
+ * microphone, geolocation and notifications only). Names remain
  * provider-neutral; drivers map them to their native permission descriptors. */
 export const BrowserPermission = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -4411,6 +4412,8 @@ export const BrowserPasskeyCredentialMaterial = /* @__PURE__ */ defineSchema(() 
       userDisplayName: z.string().max(512).nullable(),
       privateKey: passkeyBinary,
       signCount: z.number().int().nonnegative().max(0xffff_ffff),
+      backupEligibility: z.boolean().optional(),
+      backupState: z.boolean().optional(),
     })
     .strict(),
 );
@@ -4483,6 +4486,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       /** Page targets that currently host a virtual authenticator. */
       authenticators: primitives.nonnegativeInteger,
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
+      /** Sent only when the caller opts into backup-flag negotiation. */
+      supportsBackupFlags: z.literal(true).optional(),
     })
     .strict(),
 );

@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`bc18cf52f355a5beb3acb4492124b1c4090657f7`: upstream `cua-driver-rs-v0.37.0`
+`81cf0b7f29dca5226478e62d942dedb77ee50f09`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -30,6 +30,8 @@ whose earlier step closed or hid its window can still open the app's menu.
 A `run_steps` step addressed to a window that reads no elements and is closed
 or off screen fails at once (`window_not_on_screen`) instead of waiting out
 its timeout.
+Popup options are chosen without pressing their items (`cu-popup-options`,
+below).
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -169,6 +171,24 @@ also closes any menu opened since, even one it could not tell for the
 button's. After pressing an item of such a menu, `set_value`
 reads the button's value back and fails plainly if it does not show the
 option.
+Pressing a Chromium `<select>`'s option through accessibility both chooses it
+and toggles the menu: an item of its open menu leaves the menu open again, and
+the one item a closed `<select>` lists (the option it shows) opens the menu,
+raising the browser window, and can bring the browser down. So a press on any
+pop-up button's option (an item of its open menu, or that listed item) chooses
+the option on the button as `set_value` does, and a menu still open after a
+choice is closed. An option with no text to choose it by is refused in the
+background (`popup_option_without_text`) instead of being pressed. `set_value` chooses a Chromium `<select>`'s option by
+type-ahead also while the browser is the front app with the select in another
+of its windows, instead of opening the menu, which ordered that window above
+the one in front. A background pixel click on the option a closed `<select>`
+shows is refused like one on the select. None of these refusals applies when
+the window is already the front window (its app is active and it is that app's
+topmost window), where the menu brings nothing forward, or to an ARIA menu
+button (`aria-haspopup`): Chromium gives it the same role, but it lists no
+options and its menu is drawn in the page. On a native combo box, `set_value`
+confirms the new value (`AXConfirm`, as Return does), so the app takes it as
+chosen; Opengeni shows such a box as a `combobox` that takes `set_value`.
 The walk asks an element once more when its one-request read times out with
 time left, and in a read with a time limit counts one that does not answer
 twice as unread, so the read reports truncation; a walk without a time limit
@@ -354,7 +374,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/bc18cf52f355a5beb3acb4492124b1c4090657f7/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/81cf0b7f29dca5226478e62d942dedb77ee50f09/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

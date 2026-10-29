@@ -728,6 +728,10 @@ const SettingsSchema = z.object({
   privacyOnlyMeAllowed: EnvBoolean.default(true),
   privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
   privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
+  // Read-only chat share links: a person can create a link to a chat that
+  // anyone holding it can read without signing in. Off, nobody can create
+  // one and existing links stop opening.
+  privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -1296,6 +1300,13 @@ const SettingsSchema = z.object({
   decisionModelId: z.string().trim().min(1).optional(),
   decisionModelApiKey: z.string().optional(),
   decisionModelBaseUrl: z.string().url().optional(),
+  // How an explicit decision model signs in. `deployment_identity` is for an
+  // Azure OpenAI v1 resource (provider openai with its /openai/v1 base URL):
+  // a Microsoft Entra token for the deployment's own identity, the standard
+  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
+  // AZURE_CLIENT_SECRET, instead of a static key.
+  // OPENGENI_DECISION_MODEL_AUTH
+  decisionModelAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -2571,7 +2582,32 @@ export type DecisionModelSettings = Pick<
   Settings,
   "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
 > &
+  Partial<
+    Pick<
+      Settings,
+      | "decisionModelAuth"
+      | "azureTenantId"
+      | "azureClientId"
+      | "azureFederatedTokenFile"
+      | "azureClientSecret"
+      | "azureAuthorityHost"
+    >
+  > &
   SideFeatureResidencySettings;
+
+/**
+ * A configured decision model. It signs in with a static key, or with a
+ * Microsoft Entra token for the deployment's own identity (Azure OpenAI only).
+ */
+export type DecisionModelConfiguration =
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | {
+      provider: "openai";
+      model: string;
+      baseUrl: string;
+      azureEntra: NonNullable<ReturnType<typeof deploymentAzureEntraCredential>>;
+    };
+
 /**
  * Explicit deployment credentials only. Compatibility is code-search-only.
  * Under EU-only inference a decision model whose route is not EU is not
@@ -2581,9 +2617,7 @@ export function decisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch = false,
-):
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
-  | undefined {
+): DecisionModelConfiguration | undefined {
   const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
   return config && sideFeatureRouteAllowed(settings, decisionModelTarget(config))
     ? config
@@ -2621,9 +2655,24 @@ function unrestrictedDecisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch: boolean,
-):
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
-  | undefined {
+): DecisionModelConfiguration | undefined {
+  if (settings.decisionModelAuth === "deployment_identity") {
+    // Azure OpenAI v1 only: it needs the resource's base URL and the deployment identity.
+    const azureEntra = deploymentAzureEntraCredential(settings);
+    if (
+      settings.decisionModelProvider !== "openai" ||
+      !settings.decisionModelId ||
+      !settings.decisionModelBaseUrl ||
+      !azureEntra
+    )
+      return undefined;
+    return {
+      provider: "openai",
+      model: settings.decisionModelId,
+      baseUrl: settings.decisionModelBaseUrl,
+      azureEntra,
+    };
+  }
   const explicit =
     settings.decisionModelProvider !== undefined ||
     settings.decisionModelId !== undefined ||
@@ -3508,6 +3557,7 @@ const RegistryModelSchema = z
     toolOutputTruncationTokens: z.number().int().positive().optional(),
     reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
+    hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     // Where this route processes data, overriding the provider's declaration.
@@ -4482,6 +4532,8 @@ export interface ConfiguredModel {
   toolOutputTruncationTokens?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
+  /** Operator route setting; absent preserves the hosted-search SDK default. */
+  hostedWebSearchContextSize?: "low" | "medium" | "high" | undefined;
 }
 
 /**
@@ -5678,6 +5730,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     privacyAdminScheduleSummariesRequired: optional(
       "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
     ),
+    privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
@@ -5852,6 +5905,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
     decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
     decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
+    decisionModelAuth: optional("OPENGENI_DECISION_MODEL_AUTH"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(
@@ -8689,6 +8743,9 @@ function definitionVersionFor(
     // changing it; it is intentionally not a second executable-definition
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
+    ...(model.hostedWebSearchContextSize === undefined
+      ? {}
+      : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
     pricing: model.pricing ?? null,
     // Where an operator declares a route processes data is executable
     // identity: moving it fails accepted turns instead of silently moving them.
@@ -9479,6 +9536,9 @@ export function configuredModels(
             : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
           reasoningEffort: capabilities.reasoning.runnable,
           hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+          ...(model.hostedWebSearchContextSize === undefined
+            ? {}
+            : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
         }),
       );
     }

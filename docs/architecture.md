@@ -39,6 +39,8 @@ before owned setup; see [run lifecycle](run-lifecycle.md#agent-loop-request-life
 
 Worker pre-dispatch timing, nested phase boundaries and the real-PostgreSQL
 comparison harness: [startup round trips](design/turn-predispatch-round-trips.md).
+HTTP/Temporal first-request measurements, independent metadata overlap and
+unchanged-request proof: [turn startup latency](design/turn-startup-latency.md).
 Continuation account resolution reuses the claim's locked session connector
 configuration, but reads live account authority in the same claim transaction.
 
@@ -2343,6 +2345,12 @@ A crashed renderer likewise reaches clients as a definite `tab_crashed`
 diagnosis with open-a-new-tab guidance, not as a retryable outage.
 Pre-input failures are definite; already-sent input retains uncertain effects and
 must not replay. Other tabs keep their independent authority and queues.
+
+Live browser frame sampling treats page-command timeouts as temporary: a busy
+renderer resumes the same subscription when it answers again. Sampling remains
+outside the action queue and preserves capture serialization. Lost targets,
+connections and repeated non-timeout capture failures still fail the subscription
+and reach the viewer through the stream's existing terminal error path.
 
 An attached tab's debugger disconnect invalidates only its cached target,
 document, frame and element authority. Read-only recovery can attach the same

@@ -14,6 +14,7 @@ const roles: Record<string, string> = {
   AXCheckBox: "checkbox",
   AXRadioButton: "radio",
   AXPopUpButton: "combobox",
+  AXComboBox: "combobox",
   AXSlider: "slider",
   AXGroup: "group",
   AXMenuItem: "menuitem",
@@ -560,6 +561,7 @@ export function projectElements(
                   "AXSecureTextField",
                   "AXSlider",
                   "AXPopUpButton",
+                  "AXComboBox",
                 ].includes(element.role)) ||
               numberField ||
               typedFields.has(element.element_index)

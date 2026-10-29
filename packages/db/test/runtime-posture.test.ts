@@ -1586,6 +1586,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 1092 adds the workspace-isolated chat share links with full runtime DML.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0981-0982: two read-only funding projections and append-only machine proof.
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 3
@@ -2039,6 +2045,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
@@ -2054,6 +2061,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // 1092 chat share links.
           1 + // 0998 managed-auth passkeys: runtime DML withheld for a release.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
@@ -4046,7 +4054,6 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
-      "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
