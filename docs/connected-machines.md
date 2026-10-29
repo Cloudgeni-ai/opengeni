@@ -14,7 +14,7 @@ agent" in the context of a session means the AI agent driving it.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Moving a running
+approval by the organization's owner or an admin. Only the owner may attach a user machine. Moving a running
 chat is explicit owner consent for that logical turn, even when another person,
 a schedule, or an agent started it. The route changes immediately; the next tool
 operation uses the new machine. Already dispatched work is not moved or replayed.
@@ -1357,7 +1357,9 @@ every enrollment and per-machine write):
   keeps needing `enrollments:manage`, so a read-only delegation never connects
   a machine; keys, services and agents acting as themselves are refused.
 - **This workspace**: `enrollments:manage`.
-- **Organization**: `enrollments:manage` and `account:admin`.
+- **Organization**: `enrollments:manage`, and the caller is the organization's
+  owner or an admin signed in as themselves (or a credential holding
+  `account:admin`). Being an admin of one organization grants nothing in another.
 
 The same rule covers declining a pairing code and, for an existing machine,
 removal, command policy, screen control, macOS privacy panes and agent updates.
@@ -1731,7 +1733,7 @@ machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
 (the scope rule above: the owner for an Only me machine, `enrollments:manage`
-for a workspace machine, also `account:admin` for organization machines; no body)
+for a workspace machine, also the organization's owner or an admin for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control

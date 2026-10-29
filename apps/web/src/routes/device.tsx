@@ -25,10 +25,8 @@ import { Button } from "@opengeni/react/ui/button";
 import { Input } from "@opengeni/react/ui/input";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import {
-  hasAccountPermission,
-  lacksWorkspacePermission,
-} from "@opengeni/react/app/lib/permissions";
+import { lacksWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
  * shape (the server is authoritative) — we just trim + uppercase what the user
@@ -196,7 +194,11 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
           accessContext.workspaceGrants.some(
             (grant) =>
               grant.workspaceId === lookup.workspaceId &&
-              hasAccountPermission(accessContext, grant.accountId, "account:admin"),
+              canAdministerOrganization({
+                accessContext,
+                clientConfig,
+                accountId: grant.accountId,
+              }),
           ),
         )}
         onApprove={(allowScreenControl, scope) => void approve(allowScreenControl, scope)}

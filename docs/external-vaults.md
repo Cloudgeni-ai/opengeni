@@ -295,7 +295,8 @@ Setup credentials are provider-specific:
 
 An Only-me connection can back only its owner's Only-me vaults. Shared
 workspace and organization connections retain their corresponding ownership;
-organization setup requires `account:admin`. Setup and reconnect use the
+organization setup requires the organization's owner or an admin
+(or a credential holding `account:admin`). Setup and reconnect use the
 existing `connections:write` and `secrets:write` gates and current ownership
 checks. Authorized agent attempts can manage shared connections through the
 same gates; Only-me setup still requires the verified personal-owner principal.

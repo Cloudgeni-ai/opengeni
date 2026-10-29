@@ -5,7 +5,8 @@
 //     enrollments:read (every teammate). Anyone holding enrollments:manage keeps
 //     the access it had.
 //   * This workspace (`workspace`): enrollments:manage.
-//   * Organization (`organization`): enrollments:manage plus account:admin.
+//   * Organization (`organization`): enrollments:manage, by the organization's
+//     owner or an admin (organization administration; never across organizations).
 //
 // Why this is safe for Only me machines: the owner is always the caller's own
 // organization membership (finalize_scoped_enrollment derives it from the
@@ -19,6 +20,7 @@
 
 import type { Permission, ResourceAuthorityScope } from "@opengeni/contracts";
 import {
+  authorizationHoldsOrganizationAdministration,
   hasPermission,
   missingPermissionOf,
   MissingPermissionRefusal,
@@ -122,10 +124,7 @@ export function machineScopeRefusal(
       ? REFUSALS.workspace.connect + CHOOSE_ONLY_ME
       : REFUSALS[scope][action];
   }
-  if (
-    scope === "organization" &&
-    authorization.accountGrant?.permissions.includes("account:admin") !== true
-  ) {
+  if (scope === "organization" && !authorizationHoldsOrganizationAdministration(authorization)) {
     return REFUSALS.organization[action];
   }
   return null;

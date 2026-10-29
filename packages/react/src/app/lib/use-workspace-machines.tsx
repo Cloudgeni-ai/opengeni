@@ -8,6 +8,7 @@ import {
 import { useAppContext } from "../app-context";
 import type { AccessContext } from "../types";
 import { hasWorkspacePermission } from "./permissions";
+import { canAdministerOrganization } from "./workspaces";
 
 const EMPTY_MACHINES: MachineView[] = [];
 const ignoreRefresh = async () => {};
@@ -38,10 +39,11 @@ export function isSignedInPerson(context: AccessContext | null, workspaceId: str
 // Stock-console reads follow the current workspace grant. The public React
 // hook remains usable by embedding hosts with their own authorization model.
 // Anyone who can see machines connects and changes their own Only me
-// machines; workspace machines need enrollments:manage (`canManage`).
+// machines; workspace machines need enrollments:manage (`canManage`), and
+// organization machines also the organization's owner or an admin.
 export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const { workspaceId } = useOpenGeni();
-  const { accessContext } = useAppContext();
+  const { accessContext, clientConfig } = useAppContext();
   const targetWorkspaceId = options.workspaceId ?? workspaceId;
   const canRead =
     (!options.sessionId ||
@@ -55,9 +57,23 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRead && hasWorkspacePermission(accessContext, targetWorkspaceId, "sessions:control");
   const fleet = useMachines({ ...options, enabled: canRead && options.enabled !== false });
   const machines = canRead ? fleet.machines : EMPTY_MACHINES;
-  /** Change this machine: your own Only me machine, or any with canManage. */
+  const administersOrganization = canAdministerOrganization({
+    accessContext,
+    clientConfig,
+    accountId: accessContext.workspaceGrants.find(
+      (grant) => grant.workspaceId === targetWorkspaceId,
+    )?.accountId,
+  });
+  /**
+   * Change this machine: your own Only me machine, a workspace machine with
+   * canManage, an organization machine with canManage as its owner or an admin.
+   */
   const canManageMachine = (machine: Pick<MachineView, "scope">) =>
-    machine.scope === "user" ? canConnect : canManage;
+    machine.scope === "user"
+      ? canConnect
+      : machine.scope === "organization"
+        ? canManage && administersOrganization
+        : canManage;
   const mayChange = (enrollmentId: string) => {
     const machine = machines.find((candidate) => candidate.enrollmentId === enrollmentId);
     return machine ? canManageMachine(machine) : canManage;
