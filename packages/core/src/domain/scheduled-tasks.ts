@@ -2630,7 +2630,6 @@ async function validateScheduledTaskAgentConfig(input: {
           )
         : null;
     const privateDestination =
-      workspace.kind === "personal" ||
       (target?.visibility === "user_private" &&
         target.ownerSubjectId === fileActor.privateFileOwnerSubjectId) ||
       (target?.memoryScope === "user" &&
