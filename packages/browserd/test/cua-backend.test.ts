@@ -4867,6 +4867,21 @@ describe("CUA desktop boundary", () => {
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
+        // An option with no text was not pressed: say how to choose one.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "popup_option_without_text",
+            message: "Not pressed: CUA's own reason, naming its own tools",
+          }),
+          expected: {
+            code: "unsupported",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
         // One that could not be proven to be in the window at all keeps
         // CUA's own reason, and is still a definite refusal.
         {

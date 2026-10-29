@@ -1444,6 +1444,13 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
+    if (cuaCode === "popup_option_without_text")
+      return new ComputerBackendError(
+        code,
+        "That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
+        false,
+        false,
+      );
     if (cuaCode === "element_in_attached_window")
       return new ComputerBackendError(
         code,
