@@ -205,8 +205,11 @@ export type ToolCallItem = {
    * when the person decides, its output arrives or the turn ends.
    */
   awaitingApproval?: true | undefined;
-  /** The person rejected this call when asked, so it never ran. */
-  approvalRejected?: true | undefined;
+  /**
+   * This call's approval was rejected, so it never ran: by the person when
+   * asked, or automatically (Opengeni refused it, or the approval expired).
+   */
+  approvalRejected?: "person" | "automatic" | undefined;
   occurredAt: string;
   /** Canonical textual projection of the settled tool output. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
@@ -471,7 +474,8 @@ export type NoticeItem = {
   approvalActions?: Array<{
     id: string;
     title: string | null;
-    decision?: "approve" | "reject";
+    /** automatic_reject: Opengeni declined it, not the person. */
+    decision?: "approve" | "reject" | "automatic_reject";
   }>;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;

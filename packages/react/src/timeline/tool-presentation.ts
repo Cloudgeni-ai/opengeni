@@ -1887,7 +1887,9 @@ export function toolRowPresentation(
   const row = presentedToolRow(t, item, context);
   const presented = context.details === "plain" ? plainToolRow(t, item, row, context) : row;
   if (item.awaitingApproval) return awaitingApprovalRow(t, presented);
-  return item.approvalRejected ? rejectedApprovalRow(t, presented) : presented;
+  return item.approvalRejected
+    ? rejectedApprovalRow(t, presented, item.approvalRejected === "automatic")
+    : presented;
 }
 
 /** A call waiting for the person's approval has not run: say so, never "Done". */
@@ -1904,8 +1906,12 @@ function awaitingApprovalRow(t: OpenGeniText, row: ToolRowPresentation): ToolRow
   };
 }
 
-/** A call the person rejected never ran: say so, never "Done" or "Interrupted". */
-function rejectedApprovalRow(t: OpenGeniText, row: ToolRowPresentation): ToolRowPresentation {
+/** A rejected call never ran: say so and by whom, never "Done" or "Interrupted". */
+function rejectedApprovalRow(
+  t: OpenGeniText,
+  row: ToolRowPresentation,
+  automatic: boolean,
+): ToolRowPresentation {
   return {
     ...row,
     iconTone: "muted",
@@ -1914,7 +1920,13 @@ function rejectedApprovalRow(t: OpenGeniText, row: ToolRowPresentation): ToolRow
     failed: false,
     cancelled: false,
     detailPreview: false,
-    preview: textPreview(t("timeline.toolRenderers.youRejectedThis")),
+    preview: textPreview(
+      t(
+        automatic
+          ? "timeline.toolRenderers.declinedAutomatically"
+          : "timeline.toolRenderers.youRejectedThis",
+      ),
+    ),
   };
 }
 

@@ -1421,15 +1421,20 @@ export function buildTimeline(
         // rather than waiting for the run to resume.
         if (event.duplicateOfEventId) break;
         const approvalId = stringValue(payload.approvalId);
-        const decision = payload.decision;
-        if (!approvalId || (decision !== "approve" && decision !== "reject")) break;
+        if (!approvalId || (payload.decision !== "approve" && payload.decision !== "reject")) break;
+        // Opengeni itself rejects a call it refused or whose approval expired;
+        // that is not the person's answer and never reads as theirs.
+        const automatic =
+          payload.decision === "reject" &&
+          (payload.refusal !== undefined || event.clientEventId?.startsWith("system:") === true);
+        const decision = automatic ? "automatic_reject" : payload.decision;
         // The call it names stops waiting too: an approved call runs now, a
         // rejected one never will.
         const call = callsById.get(approvalId);
         if (call?.kind === "tool-call" && call.awaitingApproval) {
           delete call.awaitingApproval;
           if (decision === "approve") call.status = "running";
-          else call.approvalRejected = true;
+          else call.approvalRejected = automatic ? "automatic" : "person";
         }
         const open = approvalWaitsById.get(approvalId);
         if (!open) break;

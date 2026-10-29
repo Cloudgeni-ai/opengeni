@@ -25,6 +25,10 @@ export function noticeDisplayText(
   // Without every answer (an older or partial replay), say only that it was answered.
   if (decided.length === 0 || decided.length !== actions.length)
     return t("timeline.noticePresentation.youRespondedToThisApproval");
+  // Declined by Opengeni rather than the person: never say "You".
+  const automatic = decided.filter((action) => action.decision === "automatic_reject").length;
+  if (automatic === decided.length) return t("timeline.noticePresentation.declinedAutomatically");
+  if (automatic > 0) return t("timeline.noticePresentation.youRespondedToThisApproval");
   const approved = decided.filter((action) => action.decision === "approve").length;
   const rejected = decided.length - approved;
   if (decided.length === 1) {

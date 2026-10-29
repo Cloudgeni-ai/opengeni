@@ -5129,6 +5129,7 @@ export const englishMessages = {
   "timeline.noticePresentation.waitingForAgentsSince_other":
     "Waiting for {count} agents · since {since}",
   "timeline.noticePresentation.waitingSince": "Waiting · since {since}",
+  "timeline.noticePresentation.declinedAutomatically": "Declined automatically.",
   "timeline.noticePresentation.youApprovedActions_one": "You approved {count} action.",
   "timeline.noticePresentation.youApprovedActions_other": "You approved {count} actions.",
   "timeline.noticePresentation.youApprovedAndRejected":
@@ -5581,6 +5582,7 @@ export const englishMessages = {
   "timeline.toolRenderers.viewPathbasename": "View {pathBasename}",
   "timeline.toolRenderers.waited": "Waited",
   "timeline.toolRenderers.waitingForYourApproval": "Waiting for your approval",
+  "timeline.toolRenderers.declinedAutomatically": "Declined automatically",
   "timeline.toolRenderers.youRejectedThis": "You rejected this",
   "timeline.toolRenderers.wasNotFound": "was not found",
   "timeline.toolStep.archiveDocument.done": "Archived a document",

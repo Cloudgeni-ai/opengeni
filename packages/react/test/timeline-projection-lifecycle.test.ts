@@ -158,6 +158,58 @@ describe("an answered approval", () => {
     );
     expect(noticeDisplayText(englishText, item)).toBe("You responded to this approval.");
   });
+
+  test("a rejection Opengeni made itself is never the person's", () => {
+    // An approval that expired, and a request Opengeni refused.
+    const expired = {
+      ...decide(4, "call-1", "reject"),
+      clientEventId: "system:interaction-intervention-expired:intervention-1",
+    };
+    const refused = event(
+      4,
+      "user.approvalDecision",
+      { approvalId: "call-1", decision: "reject", refusal: { code: "not_allowed" } },
+      null as unknown as string,
+    );
+    for (const decision of [expired, refused]) {
+      const items = buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        event(5, "agent.toolCall.created", { id: "call-1", name: "send_message", arguments: {} }),
+        decision,
+      ]);
+      expect(noticeDisplayText(englishText, notice(items))).toBe("Declined automatically.");
+    }
+    const mixed = buildTimeline(englishText, [
+      ...asking([sendEmail, { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } }]),
+      decide(4, "call-1", "approve"),
+      { ...decide(5, "call-2", "reject"), clientEventId: "system:interaction-request-refused:r" },
+    ]);
+    expect(noticeDisplayText(englishText, notice(mixed))).toBe("You responded to this approval.");
+  });
+});
+
+test("a call Opengeni declined itself says so, not that the person rejected it", () => {
+  const declined = buildTimeline(englishText, [
+    event(1, "turn.started"),
+    event(2, "agent.toolCall.created", { id: "call-1", name: "send_message", arguments: {} }),
+    event(3, "session.requiresAction", {
+      approvals: [{ id: "call-1", name: "send_message", rawItem: { callId: "call-1" } }],
+    }),
+    {
+      ...event(
+        4,
+        "user.approvalDecision",
+        { approvalId: "call-1", decision: "reject" },
+        null as unknown as string,
+      ),
+      clientEventId: "system:interaction-intervention-expired:intervention-1",
+    },
+  ]);
+  const item = declined.find((each): each is ToolCallItem => each.kind === "tool-call")!;
+  expect(toolRowPresentation(englishText, item).preview).toEqual({
+    kind: "text",
+    text: "Declined automatically",
+  });
 });
 
 test("an explicit empty-workspace selection is a durable notice, not an agent reply", () => {
