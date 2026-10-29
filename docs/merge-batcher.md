@@ -39,11 +39,15 @@ The numbered directories are listed in `NUMBERED_FILES`
    manifest commit as `batch/<id>`. A PR that conflicts with an earlier one in
    the same batch waits for the next batch.
 3. **Test.** The push runs `CI` (and any other workflow that runs on
-   `batch/**`, such as the previous-binary database check). CI plans the batch
-   like a PR: it runs exactly what the combined change affects, including
-   integration, end-to-end and browser lanes, from the batch's base on `main`.
-   It never builds or publishes images. Failed jobs are retried once to absorb
-   flaky tests.
+   `batch/**`, such as the previous-binary database check). CI runs on the
+   batch tip exactly what it runs on a `main` push: the full suite
+   (`impact.ts --full`, every unit, real-service, end-to-end and browser lane),
+   deployment artifacts, the artifact runtime and every workload image. Images
+   are built but never pushed or signed, and the API image builds beside the
+   lanes instead of waiting for the release-approval gate. A batch passes only
+   when `Typecheck and unit tests`, `Deployment artifacts` and
+   `Workload image builds` all passed, the same jobs canary admission requires
+   on a `main` SHA. Failed jobs are retried once to absorb flaky tests.
 4. **Land.** When every run on the batch tip passed and `main` has not moved,
    each PR lands as **one squash commit**, `<PR title> (#<n>)`, through GitHub's
    merge API, so the PR shows as merged. A Version PR lands as a true merge
@@ -56,6 +60,42 @@ The numbered directories are listed in `NUMBERED_FILES`
 A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
 new head or leaves the queue.
 
+## Main CI records the batch result
+
+When a batch lands, its last PR's squash commit has exactly the Git tree the
+batch's CI run tested. That push's CI run starts with the `Batch receipt` job
+(`scripts/ci/batch-receipt.ts`), which finds the batch from the `Batch: <id>`
+line in the commit message and checks, failing closed:
+
+- the commit is not a re-run, a Version merge, or a landing that changes
+  `.github/` workflows or actions, `scripts/ci/` or `scripts/batcher/`;
+- `batch/<id>` has exactly one tested tip, and its latest `CI` run completed
+  successfully;
+- the tip's manifest names this batch, its tree is the last member's tree, and
+  this commit sits on the batch's base with the members landed in order;
+- `Explain change impact`, `Typecheck and unit tests`, `Deployment artifacts`
+  and `Workload image builds` passed on that run, and its uploaded impact plan
+  is `full`.
+
+If all of that holds, the push is **attested**. Its test lanes are skipped,
+while deployment artifacts, the artifact runtime, workload images (signed and
+pushed as usual), landed-content verification and the `Full CI` status still
+run. Its `full-green-main.json`
+names the batch run in an `attestation` field. Canary admission accepts it,
+because the three required jobs passed on that exact SHA. Release admission
+refuses attested receipts, so a production release still needs a SHA tested in
+full on `main` (or a descendant of one).
+
+The earlier squash commits of a batch have trees no run tested on their own.
+They are **intermediate**: the receipt labels the run "Covered by batch
+`<id>` → `<final SHA>`" (the SHA the batch's tested tree landed as), and
+nothing else runs, so the run is never red. They get no `Full CI` status and
+no required job results, so canary admission refuses them; canary and staging
+pick the newest fully green SHA, which is the batch's last commit. The last
+commit's landed-content check covers them.
+
+Anything else, including missing or unreadable evidence, runs as before.
+
 ## Main CI cadence
 
 `main` itself runs the full CI suite (every test lane plus release images) on a
@@ -65,6 +105,8 @@ job, and `.github/workflows/main-approval-superseded.yml` re-runs the newest
 `main` SHA's run when no full run is in progress and the last one started at
 least 30 minutes ago (the repository variable `MAIN_CI_INTERVAL_MINUTES`
 changes that). Version merges always run in full on their own push.
+Batch landings are deferred like any other push, so while `MAIN_CI_DEFERRED`
+is `true` an attested push is cancelled before it records the batch result.
 
 If that full run fails, the same workflow re-runs its failed jobs once, as the
 batcher does for a batch, so one flaky test does not cost `main` its images for

@@ -50,6 +50,7 @@ import {
   type TeamsRoute,
 } from "@opengeni/db";
 import { parseRequestJson } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import {
   teamsBotConfigured,
   teamsTenantEnabled,
@@ -439,7 +440,10 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
     await browserHuman(c, deps);
     const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:admin");
     const i = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
-    if (i) await disconnectTeamsBot(deps.db, i);
+    if (i)
+      await disconnectTeamsBot(deps.db, i, {
+        audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
+      });
     return c.json({ ok: true });
   });
   app.post(`${ROOT}/link`, async (c) => {

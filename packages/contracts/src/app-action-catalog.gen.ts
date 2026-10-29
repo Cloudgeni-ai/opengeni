@@ -6767,6 +6767,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/secret-redactions",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/secret-redactions",
+    "request": [
+      "SecretRedactionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",

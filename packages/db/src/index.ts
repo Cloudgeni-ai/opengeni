@@ -39,6 +39,7 @@ export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
 export * from "./connected-machine-audience";
+export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
@@ -80,6 +81,11 @@ import {
   withConnectionSubjectRls,
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
+import {
+  CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  insertDisconnectAuditEventInScope,
+  type DisconnectAuditActor,
+} from "./disconnect-audit";
 export {
   getConnectionMetadata,
   getProviderConnectionHomeWorkspace,
@@ -500,6 +506,7 @@ export {
   disconnectSubscriptionCoreConnection,
   resolveSubscriptionCoreRouteConnectionId,
   type SubscriptionCoreConnectRefusal,
+  type SubscriptionCoreDisconnectAudit,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
 export * from "./subscription-core-xai-compat";
@@ -5955,6 +5962,8 @@ export async function deleteGitHubInstallationBinding(
     installationId: number;
     /** The deployment's event route secret: GitHub event routes are recomputed with it. */
     eventRouteSecret: Uint8Array | null;
+    /** Who removed the installation from the workspace: audited in the same transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -5971,6 +5980,20 @@ export async function deleteGitHubInstallationBinding(
         )
         .returning({ id: schema.githubInstallations.id });
       await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
+      if (input.audit && rows.length > 0) {
+        await insertDisconnectAuditEventInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+          actor: input.audit,
+          target: {
+            type: "github_installation",
+            id: String(input.installationId),
+            provider: "github",
+            providerDomain: "github.com",
+          },
+        });
+      }
       return rows.length > 0;
     },
   );
@@ -7212,6 +7235,11 @@ export type UpdateSocialConnectionCredentialInput = {
   credentialEncrypted?: string | null;
   status?: SocialConnectionStatus;
   tokenMetadata?: Record<string, unknown>;
+  /**
+   * A disconnect (status `disabled`) by this actor: audited in the same
+   * transaction when the connection was not already disabled.
+   */
+  audit?: DisconnectAuditActor | null;
 };
 
 export type CreateSocialPostInput = {
@@ -7277,6 +7305,8 @@ type RevokeWorkspaceProviderApiKeyConnectionsInput = {
   connectionId: string;
   expectedVersion: number;
   updatedBySubjectId: string;
+  /** Audit the disconnect, in its transaction, as this actor. */
+  audit?: DisconnectAuditActor | null;
 };
 
 export type UpsertWorkspaceVercelAiGatewayConnectionInput =
@@ -7369,6 +7399,8 @@ export type DisconnectConnectionIdempotentlyInput = {
   metadata: Record<string, unknown>;
   lastError?: string | null;
   updatedBySubjectId?: string | null;
+  /** Audit the disconnect, in its transaction, as this actor (never on a replay). */
+  audit?: DisconnectAuditActor | null;
 };
 
 export class ConnectionDisconnectIdempotencyError extends Error {
@@ -12445,6 +12477,7 @@ export async function revokeWorkspaceProviderApiKeyConnections(
           .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
           .for("update");
         let result = mapConnectionMetadata(targetRow);
+        const alsoRevokedConnectionIds: string[] = [];
         for (const row of providerRows) {
           const revoked = await revokeConnectionInScope(
             tx,
@@ -12457,6 +12490,14 @@ export async function revokeWorkspaceProviderApiKeyConnections(
             throw new Error(`${spec.label} connection changed during disconnect`);
           }
           if (row.id === input.connectionId) result = revoked;
+          else alsoRevokedConnectionIds.push(row.id);
+        }
+        // The target was live (an already revoked one returned above): one
+        // record for the disconnect, naming the older rows it also retired.
+        if (input.audit) {
+          await auditConnectionDisconnectInScope(tx, result, input.audit, {
+            ...(alsoRevokedConnectionIds.length > 0 ? { alsoRevokedConnectionIds } : {}),
+          });
         }
         return result;
       }),
@@ -13128,9 +13169,86 @@ export async function disconnectConnectionIdempotently(
       if (!updated) {
         throw new ConnectionDisconnectGenerationError();
       }
-      return mapConnectionMetadata(updated);
+      const disconnected = mapConnectionMetadata(updated);
+      if (input.audit && connection.status !== "revoked") {
+        await auditConnectionDisconnectInScope(scopedDb, disconnected, input.audit);
+      }
+      return disconnected;
     },
   );
+}
+
+/**
+ * Record one connection's disconnect (`connection.disconnected`) inside the
+ * transaction that revoked it. Only non-secret facts: the provider domain,
+ * the connection kind, its ownership and its credential role.
+ */
+async function auditConnectionDisconnectInScope(
+  tx: Database,
+  connection: ConnectionMetadataWithVerification,
+  actor: DisconnectAuditActor,
+  details: Record<string, string | readonly string[] | undefined> = {},
+): Promise<void> {
+  const credentialRole = connection.metadata.credentialRole;
+  await insertDisconnectAuditEventInScope(tx, {
+    accountId: connection.accountId,
+    workspaceId: connection.workspaceId,
+    action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+    actor,
+    target: { type: "connection", id: connection.id, providerDomain: connection.providerDomain },
+    details: {
+      connectionKind: connection.kind,
+      ownership: connection.subjectId === null ? "workspace" : "personal",
+      ...(typeof credentialRole === "string" ? { credentialRole } : {}),
+      ...details,
+    },
+  });
+}
+
+/**
+ * Revoke one connection and, when `audit` names the actor, record the
+ * disconnect in the same transaction. Only a transition from a live status is
+ * audited: re-revoking an already revoked row records nothing.
+ */
+async function revokeConnectionAuditedInScope(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  updatedBySubjectId: string | null | undefined,
+  expectedVersion: number | undefined,
+  audit: DisconnectAuditActor | null | undefined,
+): Promise<ConnectionMetadataWithVerification | null> {
+  if (!audit) {
+    return await revokeConnectionInScope(
+      db,
+      workspaceId,
+      connectionId,
+      updatedBySubjectId,
+      expectedVersion,
+    );
+  }
+  const [prior] = await db
+    .select({ status: schema.connections.status })
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        connectionSubjectVisibility(updatedBySubjectId),
+      ),
+    )
+    .for("update");
+  const revoked = await revokeConnectionInScope(
+    db,
+    workspaceId,
+    connectionId,
+    updatedBySubjectId,
+    expectedVersion,
+  );
+  if (revoked && prior && prior.status !== "revoked") {
+    await auditConnectionDisconnectInScope(db, revoked, audit);
+  }
+  return revoked;
 }
 
 async function revokeConnectionInScope(
@@ -13178,18 +13296,23 @@ export async function revokeConnection(
   connectionId: string,
   updatedBySubjectId?: string | null,
   expectedVersion?: number,
+  options: {
+    /** A person's, key's or agent's disconnect: audited in the same transaction. */
+    audit?: DisconnectAuditActor | null;
+  } = {},
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withConnectionSubjectRls(
     db,
     workspaceId,
     updatedBySubjectId,
     async (scopedDb) =>
-      await revokeConnectionInScope(
+      await revokeConnectionAuditedInScope(
         scopedDb,
         workspaceId,
         connectionId,
         updatedBySubjectId,
         expectedVersion,
+        options.audit,
       ),
   );
 }
@@ -15582,15 +15705,18 @@ export async function revokeConnectionWithSlackBotSuccessAudit(
   input: SlackBotLifecycleSuccessAuditInput & {
     connectionId: string;
     expectedVersion: number;
+    /** Also record the generic `connection.disconnected` row as this actor. */
+    audit?: DisconnectAuditActor | null;
   },
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
-    const connection = await revokeConnectionInScope(
+    const connection = await revokeConnectionAuditedInScope(
       scopedDb,
       input.workspaceId,
       input.connectionId,
       input.subjectId,
       input.expectedVersion,
+      input.audit,
     );
     if (!connection) return null;
     if (connection.accountId !== input.accountId) {
@@ -18803,6 +18929,20 @@ export async function updateSocialConnectionCredential(
     input.workspaceId,
     input.subjectId,
     async (scopedDb) => {
+      const audited = input.audit && input.status === "disabled" ? input.audit : null;
+      const [prior] = audited
+        ? await scopedDb
+            .select({ status: schema.socialConnections.status })
+            .from(schema.socialConnections)
+            .where(
+              and(
+                eq(schema.socialConnections.workspaceId, input.workspaceId),
+                eq(schema.socialConnections.id, input.connectionId),
+                socialConnectionSubjectVisibility(input.subjectId),
+              ),
+            )
+            .for("update")
+        : [];
       const [row] = await scopedDb
         .update(schema.socialConnections)
         .set({
@@ -18821,7 +18961,21 @@ export async function updateSocialConnectionCredential(
           ),
         )
         .returning();
-      return row ? mapSocialConnection(row) : null;
+      if (!row) return null;
+      if (audited && prior && prior.status !== "disabled") {
+        await insertDisconnectAuditEventInScope(scopedDb, {
+          accountId: row.accountId,
+          workspaceId: row.workspaceId,
+          action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+          actor: audited,
+          target: { type: "social_connection", id: row.id, provider: row.provider },
+          details: {
+            ownership: row.subjectId ? "personal" : "workspace",
+            accountHandle: row.accountHandle,
+          },
+        });
+      }
+      return mapSocialConnection(row);
     },
   );
 }
@@ -92713,6 +92867,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-secret-redaction";
 export * from "./session-archive";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";

@@ -82,6 +82,7 @@ import {
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   withWorkspaceSubjectRls,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import { atlassianKnowledgeSourceIdentity } from "@opengeni/documents/atlassian";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -680,6 +681,8 @@ export async function disconnectAtlassian(
     subjectId: string;
     connection: AtlassianConnectionRecord;
     payload: AtlassianDisconnectRequest;
+    /** Who disconnects: audited in the disconnect's transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ) {
   const metadata = requireAtlassianConnection(input.connection, input.subjectId);
@@ -703,6 +706,7 @@ export async function disconnectAtlassian(
       }),
       lastError: null,
       updatedBySubjectId: input.subjectId,
+      audit: input.audit ?? null,
     });
     await setSchedulePause(deps, input.workspaceId, input.connection.id, true);
     return disconnected;

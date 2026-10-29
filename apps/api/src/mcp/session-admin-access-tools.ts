@@ -276,6 +276,15 @@ export function createSessionAdminReach(input: {
               workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
             }),
     },
+    // The agent of this exact session turn acts for the person.
+    auditProvenance: {
+      source: "agent",
+      principalKind: grant.principalKind ?? null,
+      via: "session_admin_access",
+      sessionId,
+      turnId,
+      attemptId: typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : null,
+    },
     origin: access.origin,
     dispatch: access.dispatch,
     ...(access.signal ? { signal: access.signal } : {}),

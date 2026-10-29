@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import {
+  CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  insertDisconnectAuditEventInScope,
+  type DisconnectAuditActor,
+} from "./disconnect-audit";
 
 export type TeamsInstallation = {
   tenant_id: string;
@@ -222,8 +227,19 @@ export async function removeTeamsLink(db: Database, i: TeamsInstallation, subjec
     );
   });
 }
-export async function disconnectTeamsBot(db: Database, i: TeamsInstallation) {
+export async function disconnectTeamsBot(
+  db: Database,
+  i: TeamsInstallation,
+  options: {
+    /** Who disconnected the bot: audited in the same transaction when it was active. */
+    audit?: DisconnectAuditActor | null;
+  } = {},
+) {
   return teamsScoped(db, i, async (tx) => {
+    const [prior] = await rawRows<{ active: boolean }>(
+      tx,
+      sql`select active from teams_bot_installations where tenant_id=${i.tenant_id}::uuid for update`,
+    );
     await tx.execute(
       sql`update teams_bot_installations set active=false,generation=gen_random_uuid() where tenant_id=${i.tenant_id}::uuid`,
     );
@@ -233,6 +249,15 @@ export async function disconnectTeamsBot(db: Database, i: TeamsInstallation) {
     await tx.execute(
       sql`update teams_bot_outbox set state=case when state='sending' then 'unknown' else 'failed' end,error_code='installation_disconnected' where workspace_id=${i.workspace_id}::uuid and state in ('pending','sending')`,
     );
+    if (options.audit && prior?.active) {
+      await insertDisconnectAuditEventInScope(tx, {
+        accountId: i.account_id,
+        workspaceId: i.workspace_id,
+        action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+        actor: options.audit,
+        target: { type: "teams_bot_installation", id: i.tenant_id, provider: "microsoft_teams" },
+      });
+    }
   });
 }
 export async function enqueueTeamsMessage(

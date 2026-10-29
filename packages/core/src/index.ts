@@ -11,6 +11,8 @@ export * from "./domain/mcp-account-bindings";
 export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
+export * from "./domain/session-secret-redaction";
+export * from "./domain/session-secret-redaction-matchers";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";

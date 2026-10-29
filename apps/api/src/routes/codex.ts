@@ -268,6 +268,7 @@ import {
   requireNotAgent,
 } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import * as z from "zod/v4";
 import {
   CodexSourceRequest,
@@ -1016,6 +1017,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: null,
       subjectId: human.subjectId,
       connectionId: c.req.param("accountId"),
+      audit: disconnectAuditActor(c, { subjectId: human.subjectId }),
     });
   });
 
@@ -1313,6 +1315,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
       connectionId: c.req.param("accountId"),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
   });
 
@@ -1326,6 +1329,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
   });
 

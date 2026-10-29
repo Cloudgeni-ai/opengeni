@@ -4826,13 +4826,20 @@ describe("workflow contracts", () => {
       },
       "automation-admission": { result: "skipped" },
       "main-ci-cadence": { result: "skipped" },
+      "batch-receipt": { result: "skipped" },
       "artifact-runtime": { result: "success" },
       "release-image-validation": { result: "success" },
     };
     for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
       if (
         reports.has(name) ||
-        ["automation-admission", "main-ci-cadence", "merge-content", "full-green"].includes(name)
+        [
+          "automation-admission",
+          "main-ci-cadence",
+          "batch-receipt",
+          "merge-content",
+          "full-green",
+        ].includes(name)
       )
         continue;
       // Execute the checked-in boolean predicate with GitHub's documented
@@ -4840,18 +4847,23 @@ describe("workflow contracts", () => {
       const expression = job.if
         .slice(3, -2)
         .replace(/needs\.([a-z-]+)/g, (_match, key: string) => `needs[${JSON.stringify(key)}]`);
-      const select = new Function(
+      const selectWith = new Function(
         "github",
         "needs",
         "always",
         "cancelled",
+        "startsWith",
         `return (${expression});`,
       ) as (
         github: { event_name: string; ref?: string },
         needs: object,
         always: () => boolean,
         cancelled: () => boolean,
+        startsWith: (value: string, prefix: string) => boolean,
       ) => boolean;
+      const select = (
+        ...args: [{ event_name: string; ref?: string }, object, () => boolean, () => boolean]
+      ) => selectWith(...args, (value, prefix) => String(value).startsWith(prefix));
       for (const event of ["pull_request", "push", "schedule", "workflow_dispatch"]) {
         needs["automation-admission"].result =
           event === "workflow_dispatch" ? "success" : "skipped";
@@ -4893,7 +4905,10 @@ describe("workflow contracts", () => {
     // Pre-image validation depends on every non-image lane the final aggregate
     // checks, and on nothing that depends on an image (no cycle through the
     // final aggregates).
-    const nonImageLanes = (ci.jobs.test.needs as string[]).filter((need) => need !== "images");
+    // The aggregate's batch-receipt need only skips an intermediate batch member.
+    const nonImageLanes = (ci.jobs.test.needs as string[]).filter(
+      (need) => need !== "images" && need !== "batch-receipt",
+    );
     expect(gate.needs).toEqual(["automation-admission", ...nonImageLanes]);
     const dependsOnImage = (job: string, seen = new Set<string>()): boolean => {
       if (seen.has(job)) return false;
@@ -4943,6 +4958,7 @@ describe("workflow contracts", () => {
           "needs",
           "always",
           "cancelled",
+          "startsWith",
           `return (${expression
             .slice(3, -2)
             .replace(/needs\.([a-z-]+)/g, (_m, key: string) => `needs[${JSON.stringify(key)}]`)});`,
@@ -4952,6 +4968,7 @@ describe("workflow contracts", () => {
         needs,
         () => true,
         () => cancelled,
+        (value: string, prefix: string) => value.startsWith(prefix),
       );
     const plan = {
       result: "success",
@@ -4984,6 +5001,15 @@ describe("workflow contracts", () => {
         ).toBe(true);
       }
     }
+    // A batch candidate has no approval to order: the gate is skipped and the
+    // API image builds beside the lanes; the final aggregates still require
+    // every lane and image before the batcher lands it.
+    const batchPush = { event_name: "push", ref: "refs/heads/batch/0123456789ab" };
+    expect(
+      evaluate(gate.if, batchPush, { plan, "automation-admission": { result: "skipped" } }),
+    ).toBe(false);
+    expect(evaluate(api.if, batchPush, needsWith("push", "skipped"))).toBe(true);
+    expect(api.environment).not.toContain("batch/");
     // The gate itself runs after failed or skipped lanes so it can fail
     // closed, but never in a cancelled run or after failed admission.
     const gateNeeds = { plan, "automation-admission": { result: "skipped" } };
@@ -5197,11 +5223,11 @@ describe("workflow contracts", () => {
   test("shards selected work while preserving current acceptance and full-mode safety gates", () => {
     const plan = ci.jobs.plan;
     expect(plan.name).toBe("Explain change impact");
-    // main-ci-cadence is push-to-main only; plan tolerates its skipped result
-    // and stops when a push is deferred.
-    expect(plan.needs).toEqual(["automation-admission", "main-ci-cadence"]);
+    // main-ci-cadence and batch-receipt are push-to-main only; plan tolerates
+    // their skipped results and stops when a push is deferred.
+    expect(plan.needs).toEqual(["automation-admission", "main-ci-cadence", "batch-receipt"]);
     expect(plan.if).toBe(
-      "${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(plan.outputs).toEqual(
       expect.objectContaining({
@@ -5663,9 +5689,11 @@ describe("workflow contracts", () => {
       "deployment",
       "artifact-runtime",
       "images",
+      // Only to skip an intermediate batch member (docs/merge-batcher.md).
+      "batch-receipt",
     ]);
     expect(aggregate.if).toBe(
-      "${{ always() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}",
+      "${{ always() && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}",
     );
     expect(aggregate.permissions ?? ci.permissions).toEqual({
       contents: "read",
@@ -5692,8 +5720,11 @@ describe("workflow contracts", () => {
       ARTIFACT_RUNTIME_REQUIRED: "${{ needs.plan.outputs.artifact_runtime_required }}",
       BAKE_IMAGES: "${{ needs.plan.outputs.bake_images }}",
       BUILD_COUNT: "${{ needs.plan.outputs.build_count }}",
+      // Boolean JSON for jq; only a bound exact-tree batch receipt is true.
+      ATTESTED: "${{ needs.plan.outputs.attested == 'true' }}",
     });
     expect(requireLanes.run).toContain("scripts/ci/required-results.jq");
+    expect(requireLanes.run).toContain('--argjson attested "$ATTESTED"');
     expect(ci.jobs["automation-report"].needs).toEqual([
       "automation-admission",
       "test",
