@@ -19,6 +19,7 @@ import { ExternalIdentityReference } from "@opengeni/contracts/external-identiti
 import {
   accountScopedApiKeyWorkspaceAuthority,
   accessGrantAuthorizationFromContext,
+  externalActorContinuationForAuthorization,
   requireAccountAdminAuthorizationStamp,
   requireAccessContext,
   requireAccessGrantAuthorization,
@@ -87,10 +88,13 @@ export function requireAllowanceAuthority(
       return;
     // A person who can start chats in the workspace sees its budget (how much
     // it has and how members share it), never the roster's usage. Agents and
-    // session-bound tokens were refused above.
+    // session-bound tokens were refused above; a product's user acting through
+    // its organization key (asUser) is not such a person, so the key gains
+    // nothing by acting as a user.
     if (
       operation === "budget-read" &&
       !organizationKey &&
+      !externalActorContinuationForAuthorization(authorization) &&
       grant.principalKind === "human_session" &&
       !grant.serviceInitiator &&
       !context.subjectId.startsWith("api_key:") &&

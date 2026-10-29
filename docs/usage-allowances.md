@@ -173,8 +173,12 @@ so one call is never counted twice.
 | Read `/usage/me` | The authenticated member; external products assert their verified user through `asUser` |
 
 Reading the configuration shows a member the budget and how members share
-it, never anyone else's usage. Agents, services and other session-bound tokens
-can't read it, even when they carry `sessions:create`.
+it, never anyone else's usage. The person's own delegated apps acting for them
+can read it too. Agents, services and other session-bound tokens can't, even
+when they carry `sessions:create`, and neither can a product's user acting
+through an organization key (asUser), so the key gains no read it lacks.
+Viewers (`workspace:read` only) still see just their own usage through
+`/usage/me`.
 
 A workspace administrator cannot raise the workspace budget, clear it, or add
 grants merely by being an administrator. A workspace-scoped key is not a

@@ -636,6 +636,71 @@ describe("allowance authorization matrix", () => {
     ).toBe(200);
   });
 
+  test("asUser can't read the budget, even as a member who can start chats", async () => {
+    storage();
+    const api = app();
+    const externalSubject = "external_user:55555555-5555-4555-8555-555555555555";
+    track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+    track(
+      spyOn(db, "ensureExternalIdentity").mockResolvedValue({
+        id: "55555555-5555-4555-8555-555555555555",
+        accountId,
+        subjectId: externalSubject,
+        source: "product",
+        externalId: "Person",
+        personalWorkspaceId: "66666666-6666-4666-8666-666666666666",
+        organizationMembershipId: "77777777-7777-4777-8777-777777777777",
+        authorizationRevision: 1,
+      } as never),
+    );
+    track(
+      spyOn(db, "withWorkspaceSubjectRls").mockImplementation(
+        async (_db, _workspace, _subject, callback) => callback({} as never),
+      ),
+    );
+    track(
+      spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+        callback({} as never),
+      ),
+    );
+    track(
+      spyOn(db, "findWorkspaceByExternalIdentity").mockResolvedValue({ id: workspaceId } as never),
+    );
+    for (const keyPermissions of [
+      ["sessions:create", "members:manage"],
+      ["account:read", "workspace:admin"],
+    ] satisfies Permission[][]) {
+      const auth = organizationKey(keyPermissions);
+      track(
+        spyOn(db, "getWorkspaceGrant").mockResolvedValue({
+          accountId,
+          workspaceId,
+          subjectId: externalSubject,
+          principalKind: "human_session",
+          permissions: ["workspace:read", "sessions:create"],
+        }),
+      );
+      const headers = {
+        authorization: auth,
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({
+            mode: "external",
+            identity: { source: "product", externalId: "Person" },
+          }),
+        ),
+      };
+      for (const route of [
+        `${path}/allowance`,
+        `${path}/allowance/state`,
+        "/v1/workspaces/external/host/customer/allowance",
+        "/v1/workspaces/external/host/customer/allowance/state",
+      ])
+        expect((await api.request(route, { headers })).status, `${keyPermissions} ${route}`).toBe(
+          403,
+        );
+    }
+  });
+
   test("workspace keys and account-admin-only callers cannot administer members", async () => {
     storage();
     const api = app();
