@@ -6,8 +6,12 @@ import { useEffect, useState } from "react";
 
 export type WorkspaceSharingClient = {
   listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]>;
-  getAccessContext(): Promise<Pick<AccessContext, "subjectId">>;
+  getAccessContext(): Promise<SharingViewer>;
 };
+
+/** Who is looking at the card, as far as sharing is concerned. */
+export type SharingViewer = Pick<AccessContext, "subjectId"> &
+  Partial<Pick<AccessContext, "mode" | "credential">>;
 
 /** Membership changes rarely while a card is open; reuse one read briefly. */
 const CACHE_MS = 60_000;
@@ -32,20 +36,28 @@ export function workspaceHasNobodyToShareWith(
   if (cached && now() - cached.at < CACHE_MS) return cached.value;
   const value = Promise.resolve()
     .then(() => Promise.all([client.listWorkspaceMembers(workspaceId), client.getAccessContext()]))
-    .then(([members, access]) => soleWorkspacePerson(members, access.subjectId))
+    .then(([members, access]) => soleWorkspacePerson(members, access))
     .catch(() => false);
   byWorkspace.set(workspaceId, { at: now(), value });
   return value;
 }
 
-/** People are `user:` subjects; API keys and other principals are not someone to share with. */
+/**
+ * People are `user:` subjects, and on a local install the one local person
+ * signed in without a key. API keys and other principals are not someone to
+ * share with.
+ */
 export function soleWorkspacePerson(
   members: readonly Pick<WorkspaceMember, "subjectId">[],
-  viewerSubjectId: string,
+  viewer: SharingViewer,
 ): boolean {
-  if (!viewerSubjectId.startsWith("user:")) return false;
-  const people = members.filter((member) => member.subjectId.startsWith("user:"));
-  return people.length > 0 && people.every((member) => member.subjectId === viewerSubjectId);
+  const viewerIsPerson =
+    viewer.subjectId.startsWith("user:") || (viewer.mode === "local" && !viewer.credential);
+  if (!viewerIsPerson) return false;
+  const people = members.filter(
+    (member) => member.subjectId === viewer.subjectId || member.subjectId.startsWith("user:"),
+  );
+  return people.length > 0 && people.every((member) => member.subjectId === viewer.subjectId);
 }
 
 /** {@link workspaceHasNobodyToShareWith} for a component; false until known. */
