@@ -71,7 +71,7 @@ export function SitePublishingPage({
         onSubmitted={onBack}
         canManage={management.manageData}
       />
-      {management.showAudience ? audience.dialog : null}
+      {audience.dialog}
     </div>
   );
 }

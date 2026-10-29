@@ -301,10 +301,18 @@ export class BrowserPasskeyManager {
     credentials: NonNullable<BrowserPasskeySyncRequestValue["credentials"]>,
   ): Promise<void> {
     const next = new Map<string, DesiredCredential>();
+    const changedBackupFlags = new Set<string>();
     for (const supplied of credentials) {
       const key = credentialKey(supplied.credentialId);
       const local = this.desired.get(key);
       const { itemId, ...material } = supplied;
+      if (
+        local &&
+        ((local.material.backupEligibility ?? false) !== (material.backupEligibility ?? false) ||
+          (local.material.backupState ?? false) !== (material.backupState ?? false))
+      ) {
+        changedBackupFlags.add(key);
+      }
       next.set(key, {
         material: {
           ...material,
@@ -324,7 +332,11 @@ export class BrowserPasskeyManager {
       for (const key of removed) await this.uninstall(authenticator, key);
       for (const [key, entry] of this.desired) {
         const installed = authenticator.installed.get(key);
-        if (installed === undefined || installed < entry.material.signCount) {
+        if (
+          installed === undefined ||
+          installed < entry.material.signCount ||
+          changedBackupFlags.has(key)
+        ) {
           await this.install(authenticator, key, entry);
         }
       }
@@ -362,6 +374,7 @@ export class BrowserPasskeyManager {
       userDisplayName: credential.userDisplayName,
       privateKey: credential.privateKey,
       signCount: credential.signCount,
+      ...backupFlags(credential),
     };
     const entry: DesiredCredential = { material, itemId: null, unacknowledgedRegistration: true };
     this.desired.set(key, entry);
@@ -446,6 +459,7 @@ export class BrowserPasskeyManager {
               ? { userHandle: standardBase64(material.userHandle) }
               : {}),
             signCount: material.signCount,
+            ...backupFlags(material),
             ...(material.userName !== null ? { userName: material.userName } : {}),
             ...(material.userDisplayName !== null
               ? { userDisplayName: material.userDisplayName }
@@ -524,7 +538,21 @@ type CdpCredential = {
   userName: string | null;
   userDisplayName: string | null;
   signCount: number;
+  backupEligibility?: boolean;
+  backupState?: boolean;
 };
+
+function backupFlags(value: { backupEligibility?: unknown; backupState?: unknown }): {
+  backupEligibility?: boolean;
+  backupState?: boolean;
+} {
+  return {
+    ...(typeof value.backupEligibility === "boolean"
+      ? { backupEligibility: value.backupEligibility }
+      : {}),
+    ...(typeof value.backupState === "boolean" ? { backupState: value.backupState } : {}),
+  };
+}
 
 function cdpCredential(value: unknown): CdpCredential | null {
   if (typeof value !== "object" || value === null) return null;
@@ -546,6 +574,7 @@ function cdpCredential(value: unknown): CdpCredential | null {
     userName: text(record.userName, 512),
     userDisplayName: text(record.userDisplayName, 512),
     signCount,
+    ...backupFlags(record),
   };
 }
 

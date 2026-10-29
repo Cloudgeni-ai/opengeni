@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type postgres from "postgres";
 import { AttemptToolCatalogIntegrityError, createAttemptToolEnvironment } from "@opengeni/codemode";
 import type { AttemptToolCall, McpConnectionAccountBinding } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -187,6 +188,40 @@ function codemodeCall(
 }
 
 describe("durable attempt tool catalogs", () => {
+  test("fresh persistence verifies RETURNING without reloading the header; replay reads it", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const first = catalog(scope);
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const prior = driver.options.debug;
+    const queries: string[] = [];
+    driver.options.debug = (_connection, query) => {
+      queries.push(query);
+    };
+    const headerReads = () =>
+      queries.filter(
+        (query) => /^select\b/i.test(query) && query.includes('"session_attempt_tool_catalogs"'),
+      );
+    try {
+      expect(await persistAttemptToolCatalog(client.db, first)).toEqual(first);
+      expect(headerReads()).toHaveLength(0);
+      expect(
+        queries.some(
+          (query) =>
+            /^insert\b/i.test(query) &&
+            query.includes('"session_attempt_tool_catalogs"') &&
+            query.includes("returning"),
+        ),
+      ).toBe(true);
+      queries.length = 0;
+      const replay = catalog(scope, "search", new Date("2026-08-09T13:00:00.000Z"));
+      expect(await persistAttemptToolCatalog(client.db, replay)).toEqual(first);
+      expect(headerReads()).toHaveLength(1);
+    } finally {
+      driver.options.debug = prior;
+    }
+  });
+
   test("persists one exact verified catalog idempotently and reads it under RLS", async () => {
     if (!available) return;
     const scope = await fixture();

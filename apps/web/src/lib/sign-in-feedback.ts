@@ -1,4 +1,4 @@
-import { SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+import { SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
 
 const VERIFICATION_LINK_CALLBACK_ERROR =
   "This email verification link has expired or is no longer valid. Request a new verification email to finish setting up your account.";
@@ -22,6 +22,8 @@ export function signInCallbackError(code: string | null | undefined): string | n
       return "To create a new account, choose Sign up or enable Create a new account, then complete verification.";
     case "signup_disabled":
       return `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in with the method you used before.`;
+    case "signup_email_not_allowed":
+      return `${SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE} If you already have an account, sign in with the method you used before.`;
     case "account_not_linked":
     case "account_linking_disabled":
       return "This sign-in method isn't connected. Sign in with an existing method, then connect it in Personal settings → Security.";

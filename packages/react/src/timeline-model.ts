@@ -139,6 +139,7 @@ export { isActionableHumanInputRequest } from "./human-input";
 export {
   SESSION_STATUS_BADGE,
   SESSION_STATUS_PRESENTATION,
+  promptSendDestination,
   sessionAdmissionBlocked,
   sessionDisplayStatus,
 } from "./session-status-model";

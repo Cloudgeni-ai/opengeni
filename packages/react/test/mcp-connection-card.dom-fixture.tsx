@@ -1328,3 +1328,59 @@ test("a reviewed catalog service reads as the service; a hand-added server keeps
   expect(await render("library")).toEqual({ badge: null, provider: true });
   expect(await render("manual")).toEqual({ badge: "MCP server", provider: true });
 });
+
+test("the card asks who can use a connection only when someone else could", async () => {
+  const render = async (input: {
+    people: string[];
+    mcpUrl?: string;
+  }): Promise<{ asked: boolean; scope: string | null }> => {
+    const shown = {
+      ...item,
+      id: "service-sharing",
+      enabled: false,
+      connectionRef: null,
+      ...(input.mcpUrl ? { mcpUrl: input.mcpUrl } : {}),
+    } as CapabilityCatalogItem;
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [shown] }),
+        listWorkspaceMembers: async () => input.people.map((subjectId) => ({ subjectId })),
+        getAccessContext: async () => ({ subjectId: "user:me" }),
+        connectTransport: () => ({}),
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    ) as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId={`workspace-${input.people.join("-")}-${input.mcpUrl ?? ""}`}
+        capabilityId="service-sharing"
+        name="Example service"
+        returnUrl="https://host.example/"
+        dialogOnly
+      />,
+    );
+    await flush();
+    const result = {
+      asked: document.body.textContent?.includes("Who can use this connection?") ?? false,
+      scope: document.querySelector(".og-session-capability-scope")?.textContent ?? null,
+    };
+    await view.unmount();
+    return result;
+  };
+  // Alone in a shared workspace: the person's own account, no question.
+  expect(await render({ people: ["user:me", "api_key:ci"] })).toEqual({
+    asked: false,
+    scope: "Connects your own account. Only work you start can use it.",
+  });
+  // Someone else is here: the person decides, and sharing stays the default.
+  expect(await render({ people: ["user:me", "user:anna"] })).toMatchObject({ asked: true });
+  // Google's connectors only connect a person's own account, whoever else is here.
+  for (const mcpUrl of [
+    "https://gmailmcp.googleapis.com/mcp/v1",
+    "https://calendarmcp.googleapis.com/mcp/v1",
+  ])
+    expect(await render({ people: ["user:me", "user:anna"], mcpUrl })).toMatchObject({
+      asked: false,
+    });
+});

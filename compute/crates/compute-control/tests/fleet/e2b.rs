@@ -13,7 +13,7 @@ use bytes::Bytes;
 use compute_control::e2b::{self, Front, Settings, Template};
 use compute_control::store::{MemoryStore, Store as _};
 use compute_guest::{ENVD_PORT, GATEWAY_PORT, gateway as guest_gateway};
-use compute_protocol::host::{ErrorCode, Id, LevelName, Reply, Request};
+use compute_protocol::host::{ErrorCode, Id, LevelName, Reply, Request, SleepConfig};
 use http_body_util::{Full, StreamBody};
 use hyper::body::Frame;
 use hyper_util::rt::TokioIo;
@@ -481,11 +481,13 @@ async fn an_e2b_create_reaches_the_offers_its_team_is_given() {
     assert_eq!(reach_of(&other["sandboxID"]), Vec::<String>::new());
 }
 
-/// A sandbox killed at its timeout is never resumed, so it is not
-/// checkpointed while it runs; one that pauses at its timeout is, like any
-/// fleet sandbox. Both sleep the fleet's way otherwise.
+/// A sandbox killed at its timeout runs until then and never sleeps, as on
+/// E2B: a sleeping sandbox wakes only from outside, so work it does on its
+/// own, like a CI runner's, would stop for good. It is never resumed, so it
+/// is not checkpointed either. One that pauses at its timeout sleeps and is
+/// checkpointed like any fleet sandbox.
 #[tokio::test]
-async fn only_e2b_sandboxes_that_pause_at_their_timeout_are_checkpointed() {
+async fn only_e2b_sandboxes_that_pause_at_their_timeout_sleep_or_are_checkpointed() {
     let fleet = Fleet::start_with(None, |settings| {
         settings.sleep.checkpoint_every_ms = Some(600_000);
     })
@@ -513,12 +515,9 @@ async fn only_e2b_sandboxes_that_pause_at_their_timeout_are_checkpointed() {
             .create(json!({"templateID": "base", "autoPause": true}))
             .await["sandboxID"],
     );
-    assert_eq!(killed.checkpoint_every_ms, None);
+    assert_eq!(killed, SleepConfig::default(), "it never sleeps");
     assert_eq!(paused.checkpoint_every_ms, Some(600_000));
-    assert_eq!(
-        killed.pause_after_ms, paused.pause_after_ms,
-        "both still sleep when idle"
-    );
+    assert!(paused.pause_after_ms.is_some(), "it sleeps the fleet's way");
 }
 
 #[tokio::test]

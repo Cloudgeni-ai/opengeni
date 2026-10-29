@@ -38,6 +38,7 @@ import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
+import { useNobodyToShareWith } from "../../lib/workspace-sharing";
 import { SessionPluginCapabilityCard } from "./session-plugin-card";
 import { usePage } from "../../lib/navigation";
 import {
@@ -222,6 +223,9 @@ function ScopedSessionCapabilityCard({
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
+  // Read with the card rather than the dialog, so the answer is known before
+  // the person opens setup and the sharing question never flashes.
+  const nobodyToShareWith = useNobodyToShareWith(context.client, workspaceId);
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card
@@ -322,6 +326,7 @@ function ScopedSessionCapabilityCard({
           sessionId={sessionId}
           onClose={close}
           onComplete={finish}
+          nobodyToShareWith={nobodyToShareWith}
         />
       )}
     </SessionCapabilityFrame>
@@ -338,6 +343,7 @@ function SessionCapabilitySetup({
   sessionId,
   onClose,
   onComplete,
+  nobodyToShareWith,
 }: {
   busy: boolean;
   setBusy: (busy: boolean) => void;
@@ -348,6 +354,7 @@ function SessionCapabilitySetup({
   sessionId: string;
   onClose: () => void;
   onComplete: () => void;
+  nobodyToShareWith: boolean;
 }) {
   const page = usePage();
   const context = useAppContext();
@@ -659,6 +666,7 @@ function SessionCapabilitySetup({
             "capabilities:manage",
           )}
           onAction={(action) => void act(action)}
+          nobodyToShareWith={nobodyToShareWith}
           onRetryAuthInspection={
             needsAuthInspection
               ? () => {

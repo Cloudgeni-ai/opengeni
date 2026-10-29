@@ -54,12 +54,66 @@ function dollars(micros: number): string {
 }
 
 /**
- * Who reads the answer, for who can turn video on: whether this turn's app
+ * How this turn's app actions can change the workspace's settings: each
+ * change waits for the person's yes on a confirmation card in the chat
+ * ("confirm"), runs straight away ("full_access"), or can't run (null).
+ */
+export type VideoSettingsAccess = "confirm" | "full_access" | null;
+
+/**
+ * Who reads the answer, for who can turn video on: how this turn's app
  * actions can change the workspace's settings, and whether the sender uses
  * Opengeni through another product (and so has no Opengeni Settings page to
  * be pointed to).
  */
-export type VideoGenerationActor = { canChangeSettings: boolean; external: boolean };
+export type VideoGenerationActor = { settingsAccess: VideoSettingsAccess; external: boolean };
+
+/** "$0.78 (720p: $1.75)": a quoted clip's price in credits, by resolution. */
+function creditClipPrices(settings: Settings, modelId: string): string {
+  const price = (resolution: "480p" | "720p") =>
+    dollars(
+      calculateVideoGenerationCreditCostMicros(settings, {
+        modelId,
+        resolution,
+        durationSeconds: QUOTED_CLIP_SECONDS,
+      }),
+    );
+  return `${price("480p")} (720p: ${price("720p")})`;
+}
+
+/**
+ * The price a confirmation card adds when an app action turns on video paid
+ * with Opengeni credits, so the person's one yes is to a known cost; null for
+ * any other call, or where credits are not charged.
+ */
+export function videoPolicyCardPrice(settings: Settings, args: unknown): string | null {
+  let call: unknown = args;
+  if (typeof call === "string") {
+    try {
+      call = JSON.parse(call);
+    } catch {
+      return null;
+    }
+  }
+  const record = (value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const body = record(record(call)?.body);
+  if (
+    record(call)?.id !== "updateVideoGenerationPolicy" ||
+    body?.fundingSource !== "opengeni_credits" ||
+    typeof body.defaultModelId !== "string" ||
+    !Array.isArray(body.enabledModelIds) ||
+    !body.enabledModelIds.includes(body.defaultModelId) ||
+    !videoGenerationCreditsCharged(settings) ||
+    !VIDEO_GENERATION_MODEL_CATALOG.some((model) => model.modelId === body.defaultModelId) ||
+    !videoGenerationModelSupportsFundingSource(body.defaultModelId, "opengeni_credits")
+  ) {
+    return null;
+  }
+  return `A ${QUOTED_CLIP_SECONDS}-second 480p clip costs ${creditClipPrices(settings, body.defaultModelId)} in Opengeni credits.`;
+}
 
 /** False when this deployment can't make a video for any workspace. */
 export function videoGenerationSupported(settings: Settings): boolean {
@@ -102,7 +156,7 @@ export function videoGenerationOffResult(input: {
       "video_generation_off",
       `Video generation is off in this workspace. A workspace admin can turn it on. ${PLAIN_ENDING}`,
     );
-  if (actor.external && !actor.canChangeSettings) return externalOff();
+  if (actor.external && !actor.settingsAccess) return externalOff();
   const creditModel = VIDEO_GENERATION_MODEL_CATALOG.find((model) =>
     videoGenerationModelSupportsFundingSource(model.modelId, "opengeni_credits"),
   );
@@ -116,26 +170,25 @@ export function videoGenerationOffResult(input: {
       `Video generation is off in this workspace, and Opengeni credits can't pay for it here. A workspace admin can turn it on in Settings with ${ways}. ${PLAIN_ENDING}`,
     );
   }
-  const clipPrice = (resolution: "480p" | "720p") =>
-    dollars(
-      calculateVideoGenerationCreditCostMicros(settings, {
-        modelId: creditModel.modelId,
-        resolution,
-        durationSeconds: QUOTED_CLIP_SECONDS,
-      }),
-    );
-  const payment = videoGenerationCreditsCharged(settings)
-    ? `Opengeni credits can pay for it: a ${QUOTED_CLIP_SECONDS}-second 480p clip costs ${clipPrice("480p")} (720p: ${clipPrice("720p")}).`
+  const charged = videoGenerationCreditsCharged(settings);
+  const payment = charged
+    ? `Opengeni credits can pay for it: a ${QUOTED_CLIP_SECONDS}-second 480p clip costs ${creditClipPrices(settings, creditModel.modelId)}.`
     : "It can run on this deployment's video gateway, at no charge to this workspace.";
-  if (!actor.canChangeSettings) {
+  if (!actor.settingsAccess) {
     return unavailable(
       "video_generation_off",
       `Video generation is off in this workspace. ${payment} A workspace admin can turn it on in Settings. ${PLAIN_ENDING}`,
     );
   }
+  // A change that waits for a confirmation card is asked there, once; a
+  // change that runs straight away is asked in the chat first.
+  const ask =
+    actor.settingsAccess === "confirm"
+      ? `If the person wants a video, run the app action in turnOn: its confirmation card asks them whether to turn video on for every chat in this workspace${charged ? " and shows the price" : ""}, so don't ask them first. Then call this tool again.`
+      : "Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again.";
   return unavailable(
     "video_generation_off",
-    `Video generation is off in this workspace. ${payment} Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on${inSettings}.`,
+    `Video generation is off in this workspace. ${payment} ${ask} If you can't run it, they can turn it on${inSettings}.`,
     {
       id: "updateVideoGenerationPolicy",
       pathParameters: { workspaceId: input.workspaceId },
@@ -196,10 +249,10 @@ export function createVideoGenerationToolAdapter(deps: {
   /** The sender uses Opengeni through another product. */
   external: boolean;
   /**
-   * Whether this turn can change the workspace's settings, read only while
-   * video is off and possible here, to say who can turn it on.
+   * How this turn can change the workspace's settings, read only while video
+   * is off and possible here, to say who can turn it on and how.
    */
-  canChangeSettings: () => Promise<boolean>;
+  settingsAccess: () => Promise<VideoSettingsAccess>;
   readPolicy: () => Promise<VideoGenerationPolicy>;
   resolveCredential: (
     policy: VideoGenerationPolicy,
@@ -212,8 +265,8 @@ export function createVideoGenerationToolAdapter(deps: {
   }) => Promise<VideoGenerationToolResult>;
 }): VideoGenerationToolAdapter {
   // A failed read answers by who sent the message instead of failing the call.
-  const canChangeSettings = async () =>
-    videoGenerationSupported(deps.settings) && (await deps.canChangeSettings().catch(() => false));
+  const settingsAccess = async (): Promise<VideoSettingsAccess> =>
+    videoGenerationSupported(deps.settings) ? await deps.settingsAccess().catch(() => null) : null;
   const current = async () => {
     const policy = await deps.readPolicy();
     const credential = videoGenerationPolicyEnabled(policy)
@@ -226,7 +279,7 @@ export function createVideoGenerationToolAdapter(deps: {
           workspaceId: deps.workspaceId,
           policy,
           creditModelsAllowed: deps.creditModelsAllowed,
-          actor: { canChangeSettings: await canChangeSettings(), external: deps.external },
+          actor: { settingsAccess: await settingsAccess(), external: deps.external },
         }),
       } as const;
     }

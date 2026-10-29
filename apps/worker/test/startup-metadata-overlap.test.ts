@@ -1,87 +1,40 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { parseSync, type Node } from "oxc-parser";
 
-const pairs = [
-  {
-    name: "tool metadata",
-    file: "tool-environment.ts",
-    functionName: "prepareTurnToolRuntime",
-    bindings: ["skillConfiguration", "sharedSkillDescriptors"],
-    readers: ["getWorkspaceVideoGenerationPolicy", "listSkillDescriptors"],
+// Execute the production declarations with held I/O, not a second concurrency
+// implementation. The placement check pins the authority and history boundaries.
+const source = readFileSync(
+  new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+  "utf8",
+);
+const start = source.indexOf(
+  "const [workspaceResult, skillConfigurationResult, sharedSkillsResult]",
+);
+const end = source.indexOf("const selectedFirstPartyMcpTools", start);
+if (start < 0 || end < 0) throw new Error("Missing startup metadata stage");
+const stage = new Function(
+  "ports",
+  "options",
+  `
+  const { requireWorkspace, getWorkspaceVideoGenerationPolicy, listSkillDescriptors } = ports;
+  const db = {}, input = { accountId: "account", workspaceId: "workspace" }, turn = {};
+  const deps = { fileAuthoritySubjectId: "human" };
+  const toolFamilies = { skills: options.skills };
+  const videoSkillSelected = options.video;
+  const scheduledTurnMcpServerIds = () => options.scheduled ? [] : null;
+  return (async () => {
+    ${source.slice(start, end)}
+    return [workspaceResult.value, skillConfiguration, sharedSkillDescriptors];
+  })();
+`,
+) as (
+  ports: Record<string, (...args: unknown[]) => Promise<unknown>>,
+  options: {
+    skills: false | "read";
+    video: boolean;
+    scheduled: boolean;
   },
-] as const;
-
-// Agent build reads recovery truth once; the video tools read the live video
-// policy themselves, on every call, so it is no longer paired here.
-const agentBuild = {
-  name: "agent metadata",
-  file: "agent-build.ts",
-  functionName: "buildTurnAgent",
-  bindings: ["sessionInstructions"],
-  readers: ["recoveryAwareSessionInstructions"],
-} as const;
-
-function readPair(pair: (typeof pairs)[number] | typeof agentBuild) {
-  const source = readFileSync(
-    new URL(`../src/activities/agent-turn/${pair.file}`, import.meta.url),
-    "utf8",
-  );
-  const parsed = parseSync(pair.file, source);
-  expect(parsed.errors).toEqual([]);
-  const exported = parsed.program.body.find(
-    (node) =>
-      node.type === "ExportNamedDeclaration" &&
-      node.declaration?.type === "FunctionDeclaration" &&
-      node.declaration.id?.name === pair.functionName,
-  );
-  if (
-    exported?.type !== "ExportNamedDeclaration" ||
-    exported.declaration?.type !== "FunctionDeclaration"
-  ) {
-    throw new Error(`Missing ${pair.functionName}`);
-  }
-  const body = exported.declaration.body!.body;
-  const statements = body.filter(
-    (statement) =>
-      statement.type === "VariableDeclaration" &&
-      statement.declarations.some((declaration) => {
-        const ids =
-          declaration.id.type === "ArrayPattern" ? declaration.id.elements : [declaration.id];
-        return ids.some(
-          (id) => id?.type === "Identifier" && pair.bindings.some((name) => name === id.name),
-        );
-      }),
-  );
-  expect(statements.length).toBeGreaterThan(0);
-  const reads = statements.map((statement) => source.slice(statement.start, statement.end));
-  // Execute the actual production declarations, not a handwritten equivalent.
-  // The placement contract below pins the surrounding authority/write order.
-  const execute = new Function(
-    "ports",
-    "db",
-    "input",
-    "session",
-    "deps",
-    "afterReads",
-    `return (async () => {
-      const toolFamilies = { skills: "read" };
-      const videoSkillSelected = true;
-      const { ${pair.readers.join(", ")} } = ports;
-      ${reads.join("\n")}
-      await afterReads();
-      return { ${pair.bindings.join(", ")} };
-    })();`,
-  ) as (
-    ports: Record<string, (...args: unknown[]) => Promise<unknown>>,
-    db: object,
-    input: { accountId: string; workspaceId: string },
-    session: object,
-    deps: { fileAuthoritySubjectId: string },
-    afterReads: () => void,
-  ) => Promise<Record<string, unknown>>;
-  return { source, body, statements, execute };
-}
+) => Promise<unknown[]>;
 
 function deferred() {
   let resolve!: (value: unknown) => void;
@@ -90,142 +43,129 @@ function deferred() {
     resolve = yes;
     reject = no;
   });
-  // A held test read can be rejected even if a regressed serial path has not
-  // invoked it yet. Keep that negative control out of unhandled-rejection noise.
   void promise.catch(() => undefined);
   return { promise, resolve, reject };
 }
+const readers = ["requireWorkspace", "getWorkspaceVideoGenerationPolicy", "listSkillDescriptors"];
+const flush = async () => {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+};
 
-function fixture(pair: (typeof pairs)[number]) {
-  const reads = [deferred(), deferred()];
-  const calls: { name: string; args: unknown[] }[] = [];
-  const db = {};
-  const input = { accountId: "account", workspaceId: "workspace" };
-  const session = { id: "session", instructions: "Retain recovery truth" };
-  const deps = { fileAuthoritySubjectId: "human" };
-  let writes = 0;
+for (const first of [0, 1, 2]) {
+  test(`all metadata reads start before any settles; completion order ${first}`, async () => {
+    const reads = readers.map(deferred);
+    const calls: Array<{ name: string; args: unknown[] }> = [];
+    const running = stage(
+      Object.fromEntries(
+        readers.map((name, i) => [
+          name,
+          (...args: unknown[]) => {
+            calls.push({ name, args });
+            return reads[i]!.promise;
+          },
+        ]),
+      ),
+      { skills: "read", video: true, scheduled: false },
+    );
+    let settled = false;
+    void running.finally(() => {
+      settled = true;
+    });
+    expect(calls.map((call) => call.name)).toEqual(readers);
+    reads[first]!.resolve(first);
+    await flush();
+    expect(settled).toBe(false);
+    for (const [i, read] of reads.entries()) read.resolve(i);
+    expect(await running).toEqual([0, 1, 2]);
+    expect(calls[0]!.args[1]).toBe("workspace");
+    expect(calls[1]!.args[1]).toBe("workspace");
+    expect(calls[2]!.args[1]).toEqual({
+      accountId: "account",
+      workspaceId: "workspace",
+      subjectId: "human",
+    });
+  });
+}
+
+for (const failed of [0, 1, 2]) {
+  test(`failure ${failed} waits for every scope before propagating`, async () => {
+    const reads = readers.map(deferred);
+    const failure = new Error(`read ${failed} failed`);
+    const running = stage(
+      Object.fromEntries(readers.map((name, i) => [name, () => reads[i]!.promise])),
+      { skills: "read", video: true, scheduled: false },
+    );
+    let settled = false;
+    const observed = running.catch((error) => {
+      settled = true;
+      return error;
+    });
+    reads[failed]!.reject(failure);
+    await flush();
+    expect(settled).toBe(false);
+    for (const read of reads) read.resolve(null);
+    expect(await observed).toBe(failure);
+  });
+}
+
+test("scheduled and disabled metadata branches remain absent", async () => {
+  const calls: string[] = [];
   const ports = Object.fromEntries(
-    pair.readers.map((name, index) => [
+    readers.map((name) => [
       name,
-      (...args: unknown[]) => {
-        calls.push({ name, args });
-        return reads[index]!.promise;
+      async () => {
+        calls.push(name);
+        return name;
       },
     ]),
   );
-  const running = readPair(pair).execute(ports, db, input, session, deps, () => {
-    writes++;
-  });
-  void running.catch(() => undefined);
-  return { reads, calls, db, input, session, deps, running, writes: () => writes };
-}
+  expect(await stage(ports, { skills: false, video: false, scheduled: true })).toEqual([
+    null,
+    null,
+    [],
+  ]);
+  expect(calls).toEqual([]);
+  expect(await stage(ports, { skills: "read", video: false, scheduled: false })).toEqual([
+    readers[0],
+    null,
+    readers[2],
+  ]);
+  expect(calls).toEqual([readers[0]!, readers[2]!]);
+});
 
-for (const pair of pairs) {
-  describe(pair.name, () => {
-    for (const firstCompleted of [0, 1]) {
-      test(`starts both held reads before either settles; completion order ${firstCompleted}`, async () => {
-        const f = fixture(pair);
-        try {
-          expect(f.calls.map((call) => call.name)).toEqual([...pair.readers]);
-          expect(f.writes()).toBe(0);
-          f.reads[firstCompleted]!.resolve(`value-${firstCompleted}`);
-          await Promise.resolve();
-          await Promise.resolve();
-          expect(f.writes()).toBe(0);
-          f.reads[1 - firstCompleted]!.resolve(`value-${1 - firstCompleted}`);
-          expect(await f.running).toEqual({
-            [pair.bindings[0]]: "value-0",
-            [pair.bindings[1]]: "value-1",
-          });
-          expect(f.writes()).toBe(1);
-          expect(f.calls[0]!.args).toEqual([f.db, f.input.workspaceId]);
-          expect(f.calls[1]!.args).toEqual([
-            f.db,
-            {
-              accountId: f.input.accountId,
-              workspaceId: f.input.workspaceId,
-              subjectId: f.deps.fileAuthoritySubjectId,
-            },
-          ]);
-        } finally {
-          for (const [index, read] of f.reads.entries()) read.resolve(`value-${index}`);
-          await f.running;
-        }
-      });
-    }
+test("workspace error retains precedence and no independent read escapes the join", async () => {
+  const failures = readers.map((name) => new Error(name));
+  await expect(
+    stage(
+      Object.fromEntries(
+        readers.map((name, i) => [
+          name,
+          async () => {
+            throw failures[i];
+          },
+        ]),
+      ),
+      { skills: "read", video: true, scheduled: false },
+    ),
+  ).rejects.toBe(failures[0]);
+});
 
-    for (const failedRead of [0, 1]) {
-      test(`read ${failedRead} failure prevents writes even after the sibling finishes`, async () => {
-        const f = fixture(pair);
-        const failure = new Error(`metadata read ${failedRead} failed`);
-        try {
-          expect(f.calls.map((call) => call.name)).toEqual([...pair.readers]);
-          f.reads[failedRead]!.reject(failure);
-          await expect(f.running).rejects.toBe(failure);
-          expect(f.writes()).toBe(0);
-          f.reads[1 - failedRead]!.resolve("late sibling result");
-          await Promise.resolve();
-          await Promise.resolve();
-          expect(f.writes()).toBe(0);
-        } finally {
-          for (const read of f.reads) read.resolve("cleanup");
-          await f.running.catch(() => undefined);
-        }
-      });
-    }
-  });
-}
-
-function callOffsets(node: Node, name: string): number[] {
-  const offsets: number[] = [];
-  const visit = (current: Node): void => {
-    if (
-      current.type === "CallExpression" &&
-      current.callee.type === "Identifier" &&
-      current.callee.name === name
-    ) {
-      offsets.push(current.start);
-    }
-    for (const value of Object.values(current)) {
-      if (Array.isArray(value)) {
-        for (const child of value) {
-          if (child && typeof child === "object" && "type" in child) visit(child as Node);
-        }
-      } else if (value && typeof value === "object" && "type" in value) {
-        visit(value as Node);
-      }
-    }
-  };
-  visit(node);
-  return offsets;
-}
-
-test("paired reads retain authority placement, separate live video reads and fenced catalog ordering", () => {
-  const tools = readPair(pairs[0]);
-  const agent = readPair(agentBuild);
-  const toolNode = { type: "BlockStatement", body: tools.body } as Node;
-  const agentNode = { type: "BlockStatement", body: agent.body } as Node;
-  const toolRead = callOffsets(toolNode, "getWorkspaceVideoGenerationPolicy");
-  const agentRead = callOffsets(agentNode, "getWorkspaceVideoGenerationPolicy");
-  expect(toolRead).toHaveLength(1);
-  expect(agentRead).toHaveLength(1);
-  expect(callOffsets(toolNode, "getExternalLinkTurnAuthorization")[0]!).toBeLessThan(toolRead[0]!);
-  const linkedGuard = tools.body.find(
-    (statement) =>
-      statement.type === "IfStatement" &&
-      statement.consequent.type === "ThrowStatement" &&
-      tools.source.slice(statement.test.start, statement.test.end).includes("linkedAuthority"),
+test("linked authority precedes metadata; catalog history and live video checks stay ordered", () => {
+  expect(source.indexOf('throw new Error("Native identity link was revoked")')).toBeLessThan(start);
+  expect(end).toBeLessThan(source.indexOf("runtime.prepareTools("));
+  const agent = readFileSync(
+    new URL("../src/activities/agent-turn/agent-build.ts", import.meta.url),
+    "utf8",
   );
-  expect(linkedGuard).toBeDefined();
-  expect(linkedGuard!.end).toBeLessThan(tools.statements[0]!.start);
-  expect(callOffsets(agentNode, "recoveryAwareSessionInstructions")).toHaveLength(1);
-  expect(callOffsets(agentNode, "ensureSessionSkillCatalog")[0]!).toBeGreaterThan(
-    agent.statements.at(-1)!.end,
+  expect(agent.match(/await recoveryAwareSessionInstructions\(/g)).toHaveLength(1);
+  expect(agent.match(/getWorkspaceVideoGenerationPolicy\(/g)).toHaveLength(1);
+  expect(agent.indexOf("await recoveryAwareSessionInstructions(")).toBeLessThan(
+    agent.indexOf("await ensureSessionSkillCatalog("),
   );
-  expect(callOffsets(agentNode, "getExternalLinkTurnAuthorization")[0]!).toBeGreaterThan(
-    callOffsets(agentNode, "ensureSessionSkillCatalog")[0]!,
+  expect(agent.indexOf("await ensureSessionSkillCatalog(")).toBeLessThan(
+    agent.indexOf("await ensureSessionWorkspaceGovernance("),
   );
-  expect(callOffsets(agentNode, "sessionHasToolRouterHistory")[0]!).toBeGreaterThan(
-    callOffsets(agentNode, "getExternalLinkTurnAuthorization")[0]!,
+  expect(agent.indexOf("await ensureSessionWorkspaceGovernance(")).toBeLessThan(
+    agent.indexOf("await getExternalLinkTurnAuthorization("),
   );
 });
