@@ -3,7 +3,8 @@
 # systemd Linux machine with KVM (Ubuntu 24.04 and Debian 13 are tested).
 # Run as root from the unpacked bundle:
 #
-#   ./install.sh --config host.env [--authority ca.pem] [--state-device /dev/nvme0n1] [--no-start]
+#   ./install.sh --config host.env [--authority ca.pem] [--state-device /dev/nvme0n1]
+#                [--units-installed] [--no-start]
 #
 #   --config FILE        the host's configuration (see host.env.example),
 #                        installed as /etc/compute/host.env; without it the
@@ -16,6 +17,12 @@
 #                        at /var/lib/compute, unless a state volume is
 #                        already recorded for this host; without it
 #                        /var/lib/compute must already be a mount point
+#   --units-installed    the machine's own configuration installs this
+#                        bundle's systemd units and enables them, as NixOS
+#                        does from the unit files of the bundle it names:
+#                        install.sh checks that the units in place are this
+#                        bundle's (with the shared machine's drop-in where
+#                        COMPUTE_MACHINE=shared) and does not write them
 #   --no-start           install and check, but leave the services alone,
 #                        and get no certificate
 #
@@ -53,12 +60,14 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 config=
 authority=
 state_device=
+units_installed=
 start=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --config) config=$2; shift 2 ;;
     --authority) authority=$2; shift 2 ;;
     --state-device) state_device=$2; shift 2 ;;
+    --units-installed) units_installed=1; shift ;;
     --no-start) start=; shift ;;
     *) echo "install.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -226,27 +235,51 @@ if [ "$(cat /var/lib/compute/base.ref 2>/dev/null)" != "$base_id" ] || [ ! -f /v
   echo "$base_id" >/var/lib/compute/base.ref
 fi
 
-log "systemd units"
-for unit in compute-host-setup.service compute-guard.service compute-host.service \
-  compute-host-certificate.service compute-host-certificate.timer; do
-  install -m 644 "$here/$unit" "/etc/systemd/system/$unit"
-done
+units="compute-host-setup.service compute-guard.service compute-host.service
+  compute-host-certificate.service compute-host-certificate.timer"
 machine=${COMPUTE_MACHINE:-dedicated}
 case "$machine" in
-  shared)
-    install -d -m 755 /etc/systemd/system/compute-guard.service.d
-    install -m 644 "$here/compute-guard-shared.conf" \
-      /etc/systemd/system/compute-guard.service.d/shared-machine.conf
-    ;;
-  dedicated) rm -f /etc/systemd/system/compute-guard.service.d/shared-machine.conf ;;
+  dedicated | shared) ;;
   *) fail "COMPUTE_MACHINE must be dedicated or shared, not $machine" ;;
 esac
-# Releases before the control service issued certificates renewed them
-# with a script of their own.
-rm -f /usr/local/sbin/compute-host-certificate
-systemctl daemon-reload
-systemctl enable -q compute-host-setup.service compute-guard.service compute-host.service \
-  compute-host-certificate.timer
+if [ -n "$units_installed" ]; then
+  log "systemd units, as the machine's configuration installs them"
+  systemctl daemon-reload
+  for unit in $units; do
+    fragment=$(systemctl show -p FragmentPath --value "$unit")
+    if [ -z "$fragment" ] || ! cmp -s "$here/$unit" "$fragment"; then
+      fail "$unit is not this bundle's unit${fragment:+ ($fragment differs)}: the machine's configuration installs the units of the bundle it runs"
+    fi
+  done
+  # The shared machine's drop-in is in place exactly where this is one.
+  shared_dropin=
+  for dropin in $(systemctl show -p DropInPaths --value compute-guard.service); do
+    cmp -s "$here/compute-guard-shared.conf" "$dropin" && shared_dropin=$dropin
+  done
+  case "$machine:$shared_dropin" in
+    shared:) fail "compute-guard.service has no drop-in of this bundle's compute-guard-shared.conf on this shared machine" ;;
+    dedicated:?*) fail "compute-guard.service has the shared machine's drop-in ($shared_dropin) on a dedicated one" ;;
+  esac
+else
+  log "systemd units"
+  for unit in $units; do
+    install -m 644 "$here/$unit" "/etc/systemd/system/$unit"
+  done
+  case "$machine" in
+    shared)
+      install -d -m 755 /etc/systemd/system/compute-guard.service.d
+      install -m 644 "$here/compute-guard-shared.conf" \
+        /etc/systemd/system/compute-guard.service.d/shared-machine.conf
+      ;;
+    dedicated) rm -f /etc/systemd/system/compute-guard.service.d/shared-machine.conf ;;
+  esac
+  # Releases before the control service issued certificates renewed them
+  # with a script of their own.
+  rm -f /usr/local/sbin/compute-host-certificate
+  systemctl daemon-reload
+  systemctl enable -q compute-host-setup.service compute-guard.service compute-host.service \
+    compute-host-certificate.timer
+fi
 
 if [ -n "$start" ]; then
   log "certificate"

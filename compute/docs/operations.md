@@ -380,9 +380,14 @@ watchdog and hook, and a hardware watchdog resets the machine only if
 systemd itself stops. The other work can swap into compute's swap file
 under pressure; memory pinned for device passthrough never does, and a
 service kept out with `MemorySwapMax=0` does not. On a NixOS machine,
-declare the same units, drop-in and `host.env` instead of running
-`install.sh`, and hand the guard over with `compute-host hand-over-guard`
-when its binary changes, rather than letting a switch restart it.
+or any machine whose own configuration owns its systemd units, the
+configuration installs and enables the bundle's units (on a shared
+machine with `compute-guard-shared.conf` as the guard's drop-in), straight
+from the bundle it names, and mounts the state volume itself; then
+`install.sh --units-installed` (no `--state-device`) checks that the units
+in place are the bundle's, writes none, and does the rest, handing the
+guard over and restarting the agent. Keep a configuration switch from
+restarting the guard, which would kill the VMs.
 
 ### Opengeni's settings
 
