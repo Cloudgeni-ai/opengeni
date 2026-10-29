@@ -44,6 +44,10 @@ percent-encoded JSON object:
 external-members request body (1 or more permission names). It is accepted only
 in plain `external` mode; `linked_native` with a `membership` is a `400`.
 
+The browser session proxy (`createSessionProxyHandler`) states it the same way:
+when `resolve` returns `membership`, every forwarded request runs as
+`asUser(user, { source, membership })`.
+
 At request entry, for each shared workspace of the key's organization that the
 request authorizes, the user's grant there becomes exactly the stated set before
 the request is authorized:
