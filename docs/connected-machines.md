@@ -2247,13 +2247,18 @@ document gets fresh fences. Chrome ends debugging of a tab whenever another
 extension adds a frame of its own page (a password manager's inline menu); the
 extension removes such frames. A frame created blank and then loaded with the
 other extension's page, which its address does not show, is removed only when
-Chrome's own reports single it out: Chrome lists every other frame of its page
-to the extension (`webNavigation`), each of those ran the extension's script,
-the page added no frame while the extension searched, the frame's parent holds
-no other such frame, and Chrome's debugging targets hold another extension's
-page. Otherwise (the page also holds an error page, say, a site the person took
-the extension's access from, or keeps adding frames) no frame is removed, the
-call fails saying the frame could not be
+it is the one place the tab can hold that page. Chrome's debugging targets
+show other extensions' pages only for the whole browser, not per tab, and
+Chrome does not list every frame of a page to the extension (`webNavigation`
+omits other extensions' pages and some of the page's own, such as a data: page
+a blank frame was pointed at by script). So the frame must be the tab's only
+frame the extension cannot see into, hold no frames of its own, and every
+frame Chrome does list must have run the extension's script; the page must
+add no frame while the extension searches, hold no other extension's page
+found by its address, and Chrome's targets must hold another extension's page.
+Otherwise (the page also holds an error page, say, a data: frame of its own, a
+site the person took the extension's access from, or keeps adding frames) no
+frame is removed, the call fails saying the frame could not be
 removed, and the tab can be debugged again once the menu closes, still holding
 earlier observations of the same document. Chrome's
 `canceled_by_user` disconnect requires reconnecting the profile; it is never

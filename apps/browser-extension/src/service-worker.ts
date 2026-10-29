@@ -988,22 +988,25 @@ type BlankCreatedFrames = {
  * frame's address does not show it, and nothing tells this extension which
  * element holds it. It is found by what Chrome reports, never by a frame
  * merely not answering, which may be the page's own:
- * - Chrome reports every frame of the page to this extension
- *   (webNavigation.getAllFrames) except one holding another extension's page
- *   (or a blob: page), and lets this extension script every frame except one
- *   holding another extension's page or a page it may not access (an error
- *   page, a site the person took its access from).
+ * - Chrome reports most frames of the page to this extension
+ *   (webNavigation.getAllFrames), but not one holding another extension's
+ *   page, nor some of the page's own (a blob: page, or a data: page a frame
+ *   created blank was pointed at by script). It lets this extension script
+ *   every frame except those and pages it may not access (an error page, a
+ *   site the person took its access from).
  * - Every frame that runs this extension's script says so to its parent, so
  *   a parent knows which of its frames (`unseen`) did not.
- * - A parent's unseen frame holds another extension's page only when each
- *   frame Chrome reports in that parent ran the script (so none of them is
- *   unseen), every frame that ran it was heard, Chrome reports no frame
- *   after the search that it did not report before (a frame the page added
- *   meanwhile may be among the unseen), the parent has exactly one unseen
- *   frame, and Chrome's debugging targets hold at least as many other
- *   extensions' pages as there are unseen frames. Those targets are counted
- *   across the whole browser, since Chrome does not say which tab holds
- *   them, so they alone cannot single out this tab's frames.
+ * - Chrome's debugging targets list other extensions' pages, but across the
+ *   whole browser: they do not say which tab holds them. So an unseen frame
+ *   is taken for another extension's page only as the one place this tab can
+ *   hold it: the tab has exactly one unseen frame, which holds no frames of
+ *   its own; every frame Chrome reports ran the script (none can hide the
+ *   page instead, or be among the unseen); every frame that ran it was
+ *   heard and answered; Chrome reports no frame after the search that it did
+ *   not report before (a frame the page added meanwhile may be unseen); the
+ *   tab holds no other extension's page found by its address (which would
+ *   account for the targets instead); and the targets hold at least one
+ *   other extension's page.
  * Otherwise nothing found this way is removed. Returns the parents whose
  * unseen frames are other extensions', or null.
  */
@@ -1037,14 +1040,11 @@ async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedF
   const expected = announced.flatMap((result) =>
     result.frameId !== 0 && typeof result.result === "string" ? [result.result] : [],
   );
-  let reports: { frameId: number; unseen: number }[] = [];
+  let reports: { frameId: number; probe: UnseenFrames | null }[] = [];
   for (let round = 0; ; round++) {
     const results = await inEveryFrame(unseenFrames, [token]);
     const heard = new Set(results.flatMap((result) => result.result?.heard ?? []));
-    reports = results.map((result) => ({
-      frameId: result.frameId,
-      unseen: result.result?.unseen ?? 0,
-    }));
+    reports = results.map((result) => ({ frameId: result.frameId, probe: result.result ?? null }));
     if (expected.every((announcement) => heard.has(announcement))) break;
     // A frame that ran the script but was not heard may be among the unseen.
     if (round >= 2) return null;
@@ -1053,15 +1053,13 @@ async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedF
     (await withinFrameRemovalTimeout(chrome.webNavigation.getAllFrames({ tabId }))) ?? [];
   const reportedBefore = new Set(reported.map((frame) => frame.frameId));
   if (reportedAfter.some((frame) => !reportedBefore.has(frame.frameId))) return null;
-  const unscripted = new Set(
-    reported
-      .filter((frame) => frame.frameId !== 0 && !ran.has(frame.frameId))
-      .map((frame) => frame.parentFrameId),
-  );
-  const holding = reports.filter((report) => report.unseen > 0 && !unscripted.has(report.frameId));
-  if (holding.some((report) => report.unseen !== 1)) return null;
-  const unseen = holding.reduce((sum, report) => sum + report.unseen, 0);
-  if (unseen === 0 || unseen > extensionFrames.length) return null;
+  // A reported frame the script did not run in may hold the other
+  // extension's page instead, or be one of its parent's unseen frames.
+  if (reported.some((frame) => frame.frameId !== 0 && !ran.has(frame.frameId))) return null;
+  const probes = reports.map((report) => report.probe);
+  if (probes.some((probe) => probe === null || probe.addressed > 0 || probe.nested)) return null;
+  const holding = reports.filter((report) => (report.probe?.unseen ?? 0) > 0);
+  if (holding.length !== 1 || holding[0]!.probe!.unseen !== 1) return null;
   const extensions = new Set(extensionFrames);
   return {
     token,
@@ -1071,6 +1069,17 @@ async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedF
 }
 
 type FrameProbe = { token: string; heard: Map<MessageEventSource, string> };
+
+/** What unseenFrames finds in one frame. */
+type UnseenFrames = {
+  // Frames it cannot see into that did not announce themselves.
+  unseen: number;
+  // Whether one of them holds frames of its own.
+  nested: boolean;
+  // Frames whose address shows another extension's page.
+  addressed: number;
+  heard: string[];
+};
 
 /** Runs in every page frame, in this extension's isolated world: records
  * which of its frames say `token` to it (see blankCreatedExtensionFrames).
@@ -1112,9 +1121,11 @@ function announceFrame(token: string): string | null {
 /** Runs in every page frame, in this extension's isolated world, after its
  * frames announced themselves: keeps the frames this extension cannot see
  * into (no readable document, created blank, so their address names no page)
- * that did not say `token`, and returns how many there are, with the
- * announcements heard. Self-contained, since Chrome runs it from its source. */
-async function unseenFrames(token: string): Promise<{ unseen: number; heard: string[] } | null> {
+ * that did not say `token`, and returns how many there are, whether any holds
+ * frames of its own, how many frames show another extension's page by their
+ * address, and the announcements heard. Self-contained, since Chrome runs it
+ * from its source. */
+async function unseenFrames(token: string): Promise<UnseenFrames | null> {
   const probe = (globalThis as typeof globalThis & { __frameProbe?: FrameProbe }).__frameProbe;
   if (!probe || probe.token !== token) return null;
   // Messages from frames in other processes arrive a moment later.
@@ -1127,16 +1138,31 @@ async function unseenFrames(token: string): Promise<{ unseen: number; heard: str
     }
   };
   const unseen: Element[] = [];
+  let nested = false;
+  let addressed = 0;
   const visit = (root: Document | ShadowRoot): void => {
     for (const element of Array.from(root.querySelectorAll("*"))) {
+      const source =
+        element instanceof HTMLIFrameElement ||
+        element instanceof HTMLFrameElement ||
+        element instanceof HTMLEmbedElement
+          ? element.src
+          : element instanceof HTMLObjectElement
+            ? element.data
+            : "";
+      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(source)?.[1]?.toLowerCase();
+      if (id && id !== chrome.runtime.id) addressed += 1;
       if (
         (element instanceof HTMLIFrameElement || element instanceof HTMLFrameElement) &&
         /^(about:blank)?$/i.test((element.getAttribute("src") ?? "").trim()) &&
         element.contentWindow !== null &&
         element.contentDocument === null &&
         !probe.heard.has(element.contentWindow)
-      )
+      ) {
         unseen.push(element);
+        // A frame's count of its own frames is readable across origins.
+        if (element.contentWindow.length > 0) nested = true;
+      }
       const shadow = shadowRootOf(element);
       if (shadow) visit(shadow);
     }
@@ -1146,7 +1172,7 @@ async function unseenFrames(token: string): Promise<{ unseen: number; heard: str
     token,
     unseen,
   ];
-  return { unseen: unseen.length, heard: [...probe.heard.values()] };
+  return { unseen: unseen.length, nested, addressed, heard: [...probe.heard.values()] };
 }
 
 /** Runs in a page frame blankCreatedExtensionFrames found holding other

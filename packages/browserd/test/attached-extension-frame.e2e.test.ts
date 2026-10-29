@@ -54,7 +54,7 @@ const PAGE_FRAMES = ["error", "hopping", "posted"] as const;
 // during that search.
 // "menu-open": another tab of the same site, with the password manager's
 // menu open; no agent drives it.
-type PageMode = "agent" | "adding" | "menu-open";
+type PageMode = "agent" | "adding" | "menu-open" | "nested-data";
 
 function page(
   menu: "src" | "blank",
@@ -100,24 +100,36 @@ setTimeout(() => document.getElementById("email").dispatchEvent(new FocusEvent("
 <p id="frames"></p>
 <iframe id="widget" title="Widget"></iframe>
 ${frames}
+${mode === "nested-data" ? '<iframe id="holder" title="Page-owned container" src="/holder"></iframe>' : ""}
 ${adding}
 <script>
 // The page's own frame, created blank and loaded from another origin by script.
+const inputs = { mousedown: 0, focusin: 0, armed: 0 };
+document.addEventListener("mousedown", () => inputs.mousedown++);
+document.addEventListener("focusin", () => inputs.focusin++);
 document.getElementById("widget").contentWindow.location.href = ${JSON.stringify(otherOrigin)} + "/widget";
 setInterval(() => {
   document.getElementById("frames").textContent = "widget " + (document.getElementById("widget") ? "present" : "removed");
   // Tells the test which of its frames the page still holds, also while
   // the tab cannot be debugged.
-  const held = [...document.querySelectorAll("iframe")].map((frame) => frame.id).filter(Boolean);
+  const held = [];
+  const collect = (root) => {
+    for (const frame of root.querySelectorAll("iframe")) {
+      if (frame.id) held.push(frame.id);
+      try { if (frame.contentDocument) collect(frame.contentDocument); } catch {}
+    }
+  };
+  collect(document);
   if (typeof made === "number") held.push("made-" + made);
   fetch("/frames", { method: "POST", body: held.join(",") }).catch(() => {});
+  fetch("/input", { method: "POST", body: JSON.stringify(inputs) }).catch(() => {});
 }, 50);
 // The person presses Escape (see /escape).
 setInterval(async () => {
   const pressed = await fetch("/escape").then((response) => response.text()).catch(() => "");
   if (pressed === "yes") document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 }, 100);
-document.getElementById("arm").onclick = () => setTimeout(() => document.getElementById("email").focus(), 1200);
+document.getElementById("arm").onclick = () => { inputs.armed++; setTimeout(() => document.getElementById("email").focus(), 1200); };
 document.getElementById("send").onclick = () => {
   document.getElementById("box").innerHTML = '<input id="code" aria-label="Code"><button type="button" id="verify">Verify</button><p id="out"></p>';
   document.getElementById("code").focus();
@@ -172,17 +184,26 @@ async function launch(
     },
   });
   let heldFrames: string[] = [];
+  let inputEvents = { mousedown: 0, focusin: 0, armed: 0 };
   let escape = false;
   const site = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (request) => {
       const path = new URL(request.url).pathname;
+      if (path === "/input") {
+        inputEvents = await request.json() as typeof inputEvents;
+        return new Response("");
+      }
       if (path === "/frames") {
         heldFrames = (await request.text()).split(",").filter(Boolean);
         return new Response("");
       }
       if (path === "/escape") return new Response(escape ? "yes" : "no");
+      if (path === "/holder") return new Response(`<!doctype html><title>Page-owned container</title>
+<iframe id="inner-sb" title="Page-owned data content"></iframe><script>
+document.getElementById("inner-sb").contentWindow.location.href = "data:text/html,<title>Page content</title><p>Keep this page frame</p>";
+</script>`, { headers: { "content-type": "text/html" } });
       const mode = (new URL(request.url).searchParams.get("mode") ?? "agent") as PageMode;
       return new Response(page(menu, `http://localhost:${other.port}`, pageFrames, mode), {
         headers: { "content-type": "text/html" },
@@ -284,7 +305,7 @@ process.stdin.on("end", () => process.exit(0));
   const chrome = Bun.spawn(
     [
       process.env.OPENGENI_BROWSER_EXECUTABLE ?? "chromium",
-      "--headless=new",
+      ...(process.env.OPENGENI_BROWSERD_HEADED === "1" ? [] : ["--headless=new"]),
       "--no-first-run",
       "--no-default-browser-check",
       `--user-data-dir=${profile}`,
@@ -397,6 +418,7 @@ process.stdin.on("end", () => process.exit(0));
     observe,
     act,
     heldFrames: () => heldFrames,
+    inputEvents: () => inputEvents,
     pressEscape: () => {
       escape = true;
     },
@@ -437,6 +459,42 @@ async function withFixture(
   } finally {
     await fixture.close();
   }
+}
+
+for (const menuTabs of [0, 1]) {
+  e2e(
+    `a nested data frame stays when a blank-created menu opens (${menuTabs} other menu tabs)`,
+    async () => {
+      await withFixture("blank", async ({ observe, act, heldFrames, inputEvents, pressEscape }) => {
+        const before = await observe();
+        for (let attempt = 0; attempt < 30 && !heldFrames().includes("inner-sb"); attempt++)
+          await Bun.sleep(100);
+        expect(heldFrames()).toEqual(["widget", "holder", "inner-sb"]);
+        const focus = await act(before, {
+          type: "click",
+          locator: ref(before, "button", "Focus the email field soon"),
+        });
+        expect(focus.state).toBe("completed");
+        await Bun.sleep(1600);
+        expect(inputEvents()).toEqual({ mousedown: 1, focusin: 2, armed: 1 });
+        const failure = await observe().then(() => null, (error: Error) => error);
+        await Bun.sleep(100);
+        // Chrome does not report or script this page-owned data frame. Menus
+        // in another tab must not make it look safe to remove this tab's frame.
+        expect(heldFrames()).toEqual(["widget", "holder", "inner-sb"]);
+        expect(failure?.message).toContain("could not be removed");
+        pressEscape();
+        let recovered = false;
+        for (let attempt = 0; attempt < 20 && !recovered; attempt++) {
+          await Bun.sleep(200);
+          recovered = await observe().then(() => true, () => false);
+        }
+        expect(recovered).toBe(true);
+        expect(heldFrames()).toEqual(["widget", "holder", "inner-sb"]);
+      }, false, { mode: "nested-data", menuTabs });
+    },
+    90_000,
+  );
 }
 
 e2e(

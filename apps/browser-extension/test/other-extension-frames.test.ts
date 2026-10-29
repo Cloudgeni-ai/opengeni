@@ -50,6 +50,11 @@ function harness(
     // reports it only afterwards. With `secondUnseen`, the page holds one
     // more unseen frame that Chrome does not report. With `otherTabMenus`,
     // other tabs hold that many more of the password manager's menus.
+    // With `nestedUnseen`, frame 3 holds a frame of the page's own that
+    // Chrome neither reports nor lets the extension script (a data: page
+    // loaded by script). With `addressedMenu`, the page also holds a menu
+    // whose address shows it. With `unseenHoldsFrames`, the unseen frame
+    // holds frames of its own.
     blank?: {
       pageFrameUnscripted?: boolean;
       unheard?: boolean;
@@ -57,6 +62,9 @@ function harness(
       addedDuringSearch?: boolean;
       secondUnseen?: boolean;
       otherTabMenus?: number;
+      nestedUnseen?: boolean;
+      addressedMenu?: boolean;
+      unseenHoldsFrames?: boolean;
     };
   } = {},
 ) {
@@ -165,10 +173,20 @@ function harness(
                     (blank?.pageFrameUnscripted ? 1 : 0) +
                     (blank?.addedDuringSearch ? 1 : 0) +
                     (blank?.secondUnseen ? 1 : 0),
+                  nested: blank?.unseenHoldsFrames === true,
+                  addressed: blank?.addressedMenu ? 1 : 0,
                   heard: blank?.unheard ? [] : ["frame-3"],
                 },
               },
-              { frameId: 3, result: { unseen: 0, heard: [] } },
+              {
+                frameId: 3,
+                result: {
+                  unseen: blank?.nestedUnseen ? 1 : 0,
+                  nested: false,
+                  addressed: 0,
+                  heard: [],
+                },
+              },
             ];
           case "removeUnseenFrames": {
             blankRemovals += 1;
@@ -501,6 +519,34 @@ describe("another extension's frame created blank in an attached tab", () => {
     // Chrome does not say which tab holds its debugging targets, so other
     // tabs' menus cannot vouch for a second unseen frame in this one.
     const h = harness({ blank: { secondUnseen: true, otherTabMenus: 2 } });
+    const send = await refused(h);
+    expect((await send()).error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
+  });
+
+  test("is not removed when another frame holds an unseen frame of the page's own, even with a menu in another tab", async () => {
+    // Each parent holds one unseen frame, and the other tab's menu makes
+    // Chrome's debugging targets hold two other extensions' pages.
+    for (const otherTabMenus of [0, 1]) {
+      const h = harness({ blank: { nestedUnseen: true, otherTabMenus } });
+      const send = await refused(h);
+      expect((await send()).error.message).toContain("it could not be removed");
+      expect(h.blankRemovals()).toBe(0);
+    }
+  });
+
+  test("is not removed when the page also holds a menu found by its address", async () => {
+    // That menu accounts for Chrome's debugging target, so the unseen frame
+    // may be the page's own.
+    const h = harness({ blank: { addressedMenu: true } });
+    const send = await refused(h);
+    expect((await send()).error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
+  });
+
+  test("is not removed when the unseen frame holds frames of its own", async () => {
+    // It may be the page's own frame, holding the menu.
+    const h = harness({ blank: { unseenHoldsFrames: true } });
     const send = await refused(h);
     expect((await send()).error.message).toContain("it could not be removed");
     expect(h.blankRemovals()).toBe(0);
