@@ -8,7 +8,7 @@
 
 import { resolveWorkspaceRecordingSettings, type RecordingTrackSource } from "@opengeni/contracts";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
-import type { Database } from "./database";
+import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { recordingVoiceChannelValues } from "./recordings-schema";
 
@@ -116,6 +116,69 @@ export function suggestSpeakersByVoice(input: {
     used.add(pair.personId);
   }
   return suggestions;
+}
+
+/**
+ * Which of the voices diarized in one call is a known person's: the one most
+ * like their voiceprints, when it reaches the suggestion threshold and has
+ * enough speech to judge. Null when none does.
+ */
+export function voiceMatchingVoiceprints(input: {
+  voices: ReadonlyArray<{
+    speaker: string;
+    speechMilliseconds: number;
+    embedding: readonly number[];
+  }>;
+  model: string;
+  known: readonly KnownVoice[];
+}): string | null {
+  let speaker: string | null = null;
+  let best = VOICE_SUGGESTION_THRESHOLD;
+  for (const voice of input.voices) {
+    if (voice.speechMilliseconds < MIN_VOICE_SPEECH_MILLISECONDS) continue;
+    for (const known of input.known) {
+      if (known.model !== input.model) continue;
+      const score = cosineSimilarity(voice.embedding, known.embedding);
+      if (score >= best) {
+        best = score;
+        speaker = voice.speaker;
+      }
+    }
+  }
+  return speaker;
+}
+
+/**
+ * A workspace member's voiceprints, when they agreed to be remembered: how
+ * the person recording is found among the voices on their own microphone.
+ */
+export async function memberVoiceprints(
+  db: Database,
+  input: { workspaceId: string; memberSubjectId: string },
+): Promise<KnownVoice[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) =>
+    tx
+      .select({
+        personId: schema.recordingVoiceprints.personId,
+        model: schema.recordingVoiceprints.model,
+        embedding: schema.recordingVoiceprints.embedding,
+      })
+      .from(schema.recordingVoiceprints)
+      .innerJoin(
+        schema.recordingPeople,
+        and(
+          eq(schema.recordingPeople.workspaceId, schema.recordingVoiceprints.workspaceId),
+          eq(schema.recordingPeople.id, schema.recordingVoiceprints.personId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingVoiceprints.workspaceId, input.workspaceId),
+          eq(schema.recordingPeople.memberSubjectId, input.memberSubjectId),
+          isNotNull(schema.recordingPeople.voiceConsent),
+        ),
+      ),
+  );
 }
 
 /** Whether the workspace recognizes voices. */
