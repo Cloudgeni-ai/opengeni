@@ -2865,9 +2865,10 @@ function verifyReceiptBody(receipt, file, sha, runId, runAttempt) {
       receipt.sha === sha && receipt.mode === "full",
       "full-green receipt names another source or mode",
     );
-    // Receipts from the former merge batcher's main-push attestation skipped
-    // their test lanes. They stay valid green-main evidence for canary and
-    // merge-content audits, but a release source needs the full suite.
+    // An attested main push recorded its batch's exact-tree result and skipped
+    // its own test lanes (docs/merge-batcher.md "Main CI records the batch
+    // result"). It stays valid green-main evidence for canary and merge-content
+    // audits, but a release source needs the full suite on main.
     invariant(
       receipt.attestation === undefined,
       "full-green receipt reused Batch CI; a release source needs the full main suite",
