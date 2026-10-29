@@ -402,6 +402,20 @@ describe("web search tool plan", () => {
       paidHostedToolsChargeCredits({ billingMode: "stripe", billingLegacyAccountIds: [] }, legacy),
     ).toBe(true);
   });
+
+  test("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false turns the new charges off", () => {
+    const turn = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      chargesOpenGeniCredits: true,
+    };
+    const billed = { OPENGENI_ENV: "test", OPENGENI_USAGE_LIMITS_MODE: "managed" };
+    // On by default.
+    expect(getSettings(billed).paidHostedToolsCreditBilling).toBe(true);
+    expect(paidHostedToolsChargeCredits(getSettings(billed), turn)).toBe(true);
+    const off = getSettings({ ...billed, OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING: "false" });
+    expect(off.paidHostedToolsCreditBilling).toBe(false);
+    expect(paidHostedToolsChargeCredits(off, turn)).toBe(false);
+  });
 });
 
 describe("web search pricing", () => {

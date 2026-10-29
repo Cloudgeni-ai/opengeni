@@ -371,13 +371,15 @@ export function isLegacyBillingAccount(
  * replacing OpenAI hosted image generation on the deployment key. Turns on
  * the user's own keys or subscriptions, free models, billing-off deployments
  * and legacy accounts (CloudGeni's host account) are false and keep today's
- * free hosted tools.
+ * free hosted tools, as is every turn when the operator turned the charges
+ * off (`OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false`).
  */
 export function paidHostedToolsChargeCredits(
   settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode"> &
-    Partial<Pick<Settings, "billingLegacyAccountIds">>,
+    Partial<Pick<Settings, "billingLegacyAccountIds" | "paidHostedToolsCreditBilling">>,
   input: { accountId: string; chargesOpenGeniCredits: boolean },
 ): boolean {
+  if (settings.paidHostedToolsCreditBilling === false) return false;
   const billingLegacyAccountIds = settings.billingLegacyAccountIds ?? [
     ...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
   ];
@@ -2362,6 +2364,12 @@ const SettingsSchema = z.object({
         : value,
     z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
   ),
+  // On turns whose model Opengeni pays for while credit billing is active,
+  // paid tools the model provider hosts cost credit: Opengeni's billed web
+  // tools replace hosted search (or reported hosted searches are charged) and
+  // the priced Gateway image tool replaces OpenAI hosted image generation on
+  // the deployment key. False restores free hosted search and images.
+  paidHostedToolsCreditBilling: EnvBoolean.default(true),
   mcpServers: z
     .array(
       z.object({
@@ -6416,6 +6424,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
+    paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);

@@ -8,6 +8,7 @@ import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/sessio
 import {
   createModelResponseEventState,
   processModelResponseTerminalEvent,
+  recordModelUsageAndDebitCredits,
 } from "../src/activities/agent-turn/model-usage";
 useNoSessionUsageLimitForFakeDatabases();
 
@@ -75,13 +76,15 @@ const settings = testSettings({
   }),
 });
 
-async function settleResponse(externallyBilled: boolean) {
-  await processModelResponseTerminalEvent({
+async function settleResponse(externallyBilled: boolean, withUsage = true) {
+  return await processModelResponseTerminalEvent({
     event: new RunRawModelStreamEvent({
       type: "response_done",
       response: {
         id: "resp_hosted_search",
-        usage: { inputTokens: 1_000, outputTokens: 10, totalTokens: 1_010 },
+        ...(withUsage
+          ? { usage: { inputTokens: 1_000, outputTokens: 10, totalTokens: 1_010 } }
+          : {}),
         output: [
           { type: "hosted_tool_call", name: "web_search_call", status: "completed" },
           { type: "hosted_tool_call", name: "web_search_call", status: "completed" },
@@ -126,9 +129,39 @@ describe("hosted web search on a credit-billed turn", () => {
     expect(debits[0]).toMatchObject({
       type: "web_search_debit",
       amountMicros: 21_000,
-      usage: "gpt-hosted",
+      // Plan credit and grants listing the turn's model pay for the tool.
+      usage: { kind: "tool", modelId: "gpt-hosted" },
       idempotencyKey: `credit:web_search_debit:hosted:${TURN}:resp_hosted_search`,
       metadata: { requests: 2, providerCostMicros: 20_000, marginBps: 500 },
+    });
+  });
+
+  test("searches of a response without usage are settled by the aggregate usage fallback", async () => {
+    const debits = spyWrites();
+    const result = await settleResponse(false, false);
+    // Nothing to settle per response; the stream hands the count on.
+    expect(result).toMatchObject({ status: "processed", usageReported: false });
+    expect(result.status === "processed" && result.webSearchRequestsWithoutUsage).toBe(2);
+    expect(debits).toEqual([]);
+    await recordModelUsageAndDebitCredits(settings, {} as any, {
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: TURN,
+      turnAttemptId: "attempt-1",
+      model: "gpt-hosted",
+      externallyBilled: false,
+      chargesOpenGeniCredits: true,
+      countsTowardTokenCap: true,
+      usage: { inputTokens: 1_000, outputTokens: 10, totalTokens: 1_010 } as any,
+      webSearchRequests: 2,
+      sourceKey: "aggregate",
+    });
+    expect(debits).toHaveLength(1);
+    expect(debits[0]).toMatchObject({
+      type: "web_search_debit",
+      amountMicros: 21_000,
+      idempotencyKey: `credit:web_search_debit:hosted:${TURN}:aggregate`,
     });
   });
 

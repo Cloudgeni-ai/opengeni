@@ -114,7 +114,8 @@ describe("hosted web search settlement", () => {
       sourceId: `hosted:${TURN}:resp_1`,
       idempotencyKey: `credit:web_search_debit:hosted:${TURN}:resp_1`,
       // The plan and grants covering the response's model pay first.
-      usage: "priced-model",
+      // Plan credit and grants listing the response's model pay for the tool.
+      usage: { kind: "tool", modelId: "priced-model" },
       metadata: {
         turnId: TURN,
         initiatingHumanSubjectId: "user:1",
@@ -150,6 +151,38 @@ describe("hosted web search settlement", () => {
       settlement({ hostedWebSearchRequests: 1 }),
     );
     expect(searchDebits(active.calls).map((call) => call.input.amountMicros)).toEqual([10_500]);
+  });
+
+  test("the hosted-search debit is paid for the response's canonical model, like the model debit", async () => {
+    active = spyWrites();
+    await settleModelUsage(
+      testSettings({
+        billingMode: "stripe",
+        usageLimitsMode: "none",
+        modelProvidersJson: JSON.stringify([
+          {
+            id: "fixture",
+            api: "chat",
+            baseUrl: "https://model.example/v1",
+            apiKey: "fixture-key",
+            models: [{ id: "fixture/model", aliases: ["fixture-alias"] }],
+          },
+        ]),
+        modelPricingJson: JSON.stringify({
+          "fixture-alias": {
+            inputMicrosPerMillionTokens: 2_000_000,
+            outputMicrosPerMillionTokens: 8_000_000,
+          },
+        }),
+      }),
+      db,
+      settlement({ model: "fixture-alias" }),
+    );
+    const modelDebit = active.calls.find((call) => call.fn === "model_debit")!.input;
+    expect(modelDebit.modelId).toBe("fixture/model");
+    expect(searchDebits(active.calls)[0]!.input).toMatchObject({
+      usage: { kind: "tool", modelId: "fixture/model" },
+    });
   });
 
   test("externally billed, billing-off and search-free responses are never charged", async () => {

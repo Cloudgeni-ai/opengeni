@@ -332,6 +332,8 @@ export async function processModelResponseTerminalEvent(input: {
       sourceKey: string;
       authoritative: boolean;
       usageReported: boolean;
+      /** Hosted searches of a response without usage, for the aggregate fallback. */
+      webSearchRequestsWithoutUsage: number;
     }
 > {
   const terminal = modelTerminalResponseFromSdkEvent(input.event);
@@ -484,6 +486,7 @@ export async function processModelResponseTerminalEvent(input: {
     sourceKey,
     authoritative,
     usageReported: responseUsage !== null,
+    webSearchRequestsWithoutUsage: responseUsage === null ? (terminal.webSearchRequests ?? 0) : 0,
   };
 }
 

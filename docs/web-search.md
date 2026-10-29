@@ -326,6 +326,35 @@ Every call, billed or not, records a `web_search.search_requests` or
 If settlement fails after the provider answered, the model still gets its
 result and the worker logs `web search usage settlement failed`.
 
+### Hosted search on turns Opengeni pays for
+
+Paid tools always cost credit. On a turn whose model Opengeni pays for (cost
+class `credits`) while credit billing is active, hosted search would otherwise
+run free, so one check point, `paidHostedToolsChargeCredits` in
+`packages/config/src/index.ts`, switches such turns to billed tools:
+
+- **Provider tools replace hosted search** whenever the turn gets them, as
+  with `OPENGENI_WEB_SEARCH_PREFER=provider`.
+- **Without a provider tool, hosted search stays and is charged.** Each model
+  response's hosted searches (Claude's reported count, OpenAI's
+  `web_search_call` items) cost $10 per 1,000 plus the web-search margin, as a
+  separate idempotent `web_search_debit` (source `hosted:<turnId>:<response>`).
+  A cost the Gateway reported already includes search and is not charged
+  again.
+- **OpenAI hosted image generation on the deployment's own key is not
+  offered.** The turn uses the priced Gateway image tool instead, so it has no
+  image tool unless the managed Gateway image credential or the workspace's
+  own Gateway key is configured.
+
+Plan credit pays first, the Free plan's monthly credit included whatever
+models its scope lists, then grants that list the turn's model, then general
+credit. API work pays from credits only. Turns on the user's own keys or
+subscriptions, free models, billing-off deployments and legacy billing
+accounts (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`) keep free hosted search and
+images. `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false` (default `true`)
+restores that for every turn, for example while the Gateway image credential
+is not set.
+
 ## Evaluating providers
 
 `scripts/web-search-eval.ts` compares hosted search with provider search on six

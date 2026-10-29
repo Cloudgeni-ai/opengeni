@@ -324,6 +324,11 @@ export type ModelResponseUsage = {
 export type ModelTerminalResponse = {
   responseId?: string;
   usage: ModelResponseUsage | null;
+  /**
+   * Hosted searches the response ran, also when it reported no usage: the
+   * aggregate usage fallback charges them (with usage, `usage` carries them).
+   */
+  webSearchRequests?: number;
 };
 
 export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
@@ -706,8 +711,10 @@ export function modelTerminalResponseFromSdkEvent(
     return null;
   }
   const responseId = modelResponseIdFromResponse(response);
+  const webSearchRequests = webSearchRequestsFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
+    ...(webSearchRequests ? { webSearchRequests } : {}),
     usage: modelResponseUsageFromResponse(response),
   };
 }
@@ -770,6 +777,8 @@ function webSearchRequestsFromResponse(response: unknown): number | undefined {
     const searchCall =
       record.type === "web_search_call" ||
       (record.type === "hosted_tool_call" && record.name === "web_search_call");
+    // OpenAI prices web search per tool call and reports no count, so each
+    // call item counts once; a call the provider marked failed is not charged.
     if (searchCall && record.status !== "failed") count += 1;
   }
   return count > 0 ? Math.min(count, MAX_WEB_SEARCH_REQUESTS) : undefined;

@@ -1,4 +1,5 @@
 import {
+  canonicalizeConfiguredModelId,
   hostedWebSearchCharge,
   paidHostedToolsChargeCredits,
   webSearchCreditBillingActive,
@@ -13,6 +14,7 @@ import {
   creditDebitAttributionMetadata,
   getSpendableCreditBalance,
   recordUsageEvent,
+  toolCreditUsage,
   withRlsContext,
   type CreditDebitAttribution,
   type Database,
@@ -37,9 +39,10 @@ export type WebSearchCallScope = {
   attemptId: string;
   /**
    * The credit-billed turn's product model when its paid hosted tools bill
-   * credits ({@link paidHostedToolsChargeCredits}): the monthly plan and
-   * grants covering that model pay first, then general credit, exactly as
-   * for the turn's Gateway images and chat. Omitted: general credit only.
+   * credits ({@link paidHostedToolsChargeCredits}): plan credit (the Free
+   * plan's on any model) and grants covering that model pay first, then
+   * general credit, as for the turn's Gateway images. Omitted: general and
+   * plan credit, as before.
    */
   creditUsageModelId?: string;
 };
@@ -105,13 +108,13 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
         );
       }
       const attribution = await attributionFor(scope);
-      // General credit, plus the plan and grants covering the turn's model
-      // when the turn's paid hosted tools bill credits; API work credits only.
+      // General and plan credit, plus grants covering the turn's model when
+      // the turn's paid hosted tools bill credits; API work credits only.
       const origin = attribution.kind === "unknown" ? undefined : attribution.billingOrigin;
       const balance = await getSpendableCreditBalance(
         deps.db,
         scope.accountId,
-        scope.creditUsageModelId,
+        webSearchCreditUsage(deps.settings, scope),
         undefined,
         undefined,
         origin,
@@ -179,7 +182,9 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
             sourceType: WEB_SEARCH_SOURCE_TYPE,
             sourceId: shared.sourceResourceId,
             idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
-            ...(scope.creditUsageModelId ? { usage: scope.creditUsageModelId } : {}),
+            ...(scope.creditUsageModelId
+              ? { usage: webSearchCreditUsage(deps.settings, scope) }
+              : {}),
             // The turn's frozen origin: API work pays from credits only.
             ...(usageOrigin ? { usageOrigin } : {}),
             metadata: {
@@ -200,6 +205,13 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
 }
 
 export type WebSearchBilling = ReturnType<typeof createWebSearchBilling>;
+
+/** Tool usage of the turn's canonical model, or none (general and plan credit). */
+function webSearchCreditUsage(settings: Settings, scope: WebSearchCallScope) {
+  return scope.creditUsageModelId
+    ? toolCreditUsage(canonicalizeConfiguredModelId(settings, scope.creditUsageModelId))
+    : undefined;
+}
 
 /** Usage source prefix for hosted searches, distinct from provider tool calls. */
 export const HOSTED_WEB_SEARCH_SOURCE_PREFIX = "hosted";
@@ -285,8 +297,9 @@ export async function settleHostedWebSearchUsage(
         sourceType: WEB_SEARCH_SOURCE_TYPE,
         sourceId: shared.sourceResourceId,
         idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
-        // The plan and grants covering the response's model pay first.
-        usage: input.model,
+        // Plan credit (the Free plan's on any model) and grants covering the
+        // response's canonical model pay first, as for the model debit.
+        usage: toolCreditUsage(canonicalizeConfiguredModelId(settings, input.model)),
         // API work pays from credits only, like the response's model debit.
         ...(usageOrigin ? { usageOrigin } : {}),
         metadata: {

@@ -5,9 +5,12 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getBillingBalance,
+  grantPlanCreditPeriod,
   setMemberAllowance,
   setWorkspaceAllowance,
   submitHumanPromptInTransaction,
+  upsertOrganizationPlan,
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -41,7 +44,13 @@ const billed = testSettings({
 });
 
 async function fixture(
-  options: { credits?: number; modelScopedCredits?: number; billingOrigin?: "app" | "api" } = {},
+  options: {
+    credits?: number;
+    modelScopedCredits?: number;
+    billingOrigin?: "app" | "api";
+    /** A Free plan period whose monthly credit is scoped to another model. */
+    freePlan?: boolean;
+  } = {},
 ) {
   const human = `user:web-search:${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
@@ -123,6 +132,32 @@ async function fixture(
       sourceId: crypto.randomUUID(),
       idempotencyKey: `test:web-search-scoped-grant:${grant.workspaceId}`,
     });
+  }
+  if (options.freePlan) {
+    // The Free plan's monthly credit takes its model scope from the
+    // verified-signup trial: here a model other than the turn's.
+    await applyCreditLedgerEntry(client.db, {
+      accountId: grant.accountId,
+      type: "grant",
+      amountMicros: 1_000_000,
+      sourceType: "verified_signup_trial",
+      sourceId: human,
+      idempotencyKey: `verified-signup-trial:v1:${human}`,
+      eligibleModelIds: ["other-model"],
+    });
+    const period = {
+      accountId: grant.accountId,
+      planKey: "free",
+      periodStart: new Date(Date.now() - 1000),
+      periodEnd: new Date(Date.now() + 3_600_000),
+    };
+    await upsertOrganizationPlan(client.db, {
+      ...period,
+      status: "active",
+      currentPeriodStart: period.periodStart,
+      currentPeriodEnd: period.periodEnd,
+    });
+    await grantPlanCreditPeriod(client.db, period);
   }
   const scope: WebSearchCallScope = {
     accountId: grant.accountId,
@@ -367,7 +402,7 @@ describe("web search credit billing", () => {
     expect(offRows).toHaveLength(0);
   }, 180_000);
 
-  test("model-scoped credit (the Free plan's) pays web search on a turn whose hosted tools bill credits", async () => {
+  test("a grant scoped to the turn's model pays web search on a turn whose hosted tools bill credits", async () => {
     const { scope } = await fixture({ modelScopedCredits: 1_000_000 });
     const billing = createWebSearchBilling({ db: client.db, settings: billed });
     // Without the turn's model, only general credit counts, as before.
@@ -445,5 +480,56 @@ describe("web search credit billing", () => {
       [-10_500, "api", 0],
       [-1_050, "api", 0],
     ]);
+  }, 180_000);
+
+  test("Free plan credit pays web search on a model outside its scope; API work never uses it", async () => {
+    const { scope } = await fixture({ freePlan: true });
+    const balance = await getBillingBalance(client.db, scope.accountId);
+    const plan = balance.promotionalCredits?.find((grant) => grant.planCredit);
+    // Precondition: the Free plan's credit does not cover the turn's model.
+    expect(plan?.remainingMicros).toBeGreaterThan(0);
+    expect(plan?.eligibleModelIds).not.toContain("scripted-model");
+    const billing = createWebSearchBilling({ db: client.db, settings: billed });
+    const billedTurn = { ...scope, creditUsageModelId: "scripted-model" };
+    // Admitted although the account has no general credit.
+    await billing.admit(billedTurn, 5_000);
+    await billing.settle(billedTurn, {
+      operationId: crypto.randomUUID(),
+      operation: "search",
+      provider: "parallel",
+      providerMicros: 1_000,
+      creditMicros: 1_050,
+      marginBps: 500,
+      basis: "list_price",
+    });
+    await settleHostedWebSearchUsage(client.db, billed, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      turnAttemptId: scope.attemptId,
+      sourceId: `${scope.turnId}:resp_free`,
+      model: "scripted-model",
+      requests: 1,
+    });
+    const allocated = await shared.admin<{ amount: string; grant: string; total: string }[]>`
+        select e.amount_micros::text as amount, a.grant_entry_id::text as grant,
+               sum(a.amount_micros)::text as total
+          from credit_ledger_entries e
+          join credit_debit_allocations a on a.debit_entry_id = e.id
+         where e.account_id=${scope.accountId} and e.type=${WEB_SEARCH_DEBIT_TYPE}
+         group by e.id, e.amount_micros, a.grant_entry_id order by e.amount_micros`;
+    // Both charges were paid in full by the Free plan's monthly credit.
+    expect(allocated.map((row) => [Number(row.amount), row.grant, Number(row.total)])).toEqual([
+      [-10_500, plan!.grantId, 10_500],
+      [-1_050, plan!.grantId, 1_050],
+    ]);
+
+    // API work on the same plan pays from credits only.
+    const api = await fixture({ freePlan: true, billingOrigin: "api" });
+    const refusal = await billing
+      .admit({ ...api.scope, creditUsageModelId: "scripted-model" }, 5_000)
+      .catch((error: unknown) => error);
+    expect((refusal as WebSearchBillingRefusedError).code).toBe("insufficient_credits");
   }, 180_000);
 });
