@@ -299,6 +299,7 @@ import {
   sessionPolicyPickerIds,
 } from "../lib/session-tools";
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
+import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -1121,6 +1122,14 @@ export function SessionRoute({
             providerId: account.providerId,
             ownership: account.ownership,
             reconnectAccountId: account.id,
+            // A tool needed more access than the account was connected with:
+            // the reconnect asks the provider for exactly that (incremental consent).
+            // Other providers keep their fixed permission set.
+            ...(item.reason === "insufficient_scope" &&
+            item.scopes.length > 0 &&
+            connectProviderAcceptsRequestedScopes(account.providerId)
+              ? { requestedScopes: [...item.scopes] }
+              : {}),
             displayName: account.label,
             returnUrl: page.href(),
             idempotencyKey: crypto.randomUUID(),

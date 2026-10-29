@@ -3025,11 +3025,15 @@ export const englishMessages = {
   "meetings.transcript.valueMatch": "{value}% match",
   "meetings.transcript.whoIsDisplayname": "Who is {displayName}?",
   "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
+  "messageTimeline.accessDraftAndSendEmail": "draft and send email",
+  "messageTimeline.accessJoin": " and ",
+  "messageTimeline.accessOrganizeMailbox": "organize your mailbox",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
   "messageTimeline.agentDecided": "Agent decided",
   "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
+  "messageTimeline.allowAccess": "Allow",
   "messageTimeline.answered": "Answered",
   "messageTimeline.answeredSummary": "Answered: {summary}",
   "messageTimeline.asked": "Asked",
@@ -3059,6 +3063,7 @@ export const englishMessages = {
   "messageTimeline.expired": "Expired",
   "messageTimeline.fromSource": "from {source}",
   "messageTimeline.generatedVideo": "Generated video",
+  "messageTimeline.giveProviderMoreAccess": "Give {provider} more access",
   "messageTimeline.goalCleared": "Goal cleared",
   "messageTimeline.goalCompleted": "Goal completed",
   "messageTimeline.goalHeld": "Goal held",
@@ -3069,6 +3074,8 @@ export const englishMessages = {
   "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
+  "messageTimeline.itNeedsPermissionTo":
+    "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
   "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
   "messageTimeline.jumpingToStart": "Jumping to start…",
@@ -3125,6 +3132,8 @@ export const englishMessages = {
   "messageTimeline.timelineItemUnavailable": "Timeline item unavailable",
   "messageTimeline.timelineItemUnavailableDetail":
     "This item could not be displayed. The rest of the conversation is still available.",
+  "messageTimeline.toolCallNotReplayedAfterAllowing":
+    "This tool call wasn't replayed. After you allow it, send a new message to try again.",
   "messageTimeline.toolCallNotReplayedAfterConnecting":
     "This tool call wasn't replayed. After connecting, send a new message to try again.",
   "messageTimeline.toolCallNotReplayedAfterReconnecting":

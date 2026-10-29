@@ -6872,6 +6872,8 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
@@ -6887,6 +6889,7 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
       mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },

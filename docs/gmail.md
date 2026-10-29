@@ -6,8 +6,26 @@ identity selects this bridge; Google's hosted MCP preview is not contacted.
 Connections remain personal, scoped to the accepted initiating human and selected
 account, with live authority checks for every physical provider request.
 
-The existing OAuth bundle is unchanged: `gmail.readonly`, `gmail.compose` and
-`gmail.modify`. No additional Google consent is needed for these tools:
+The reviewed tools use three Google scopes, `gmail.readonly`, `gmail.compose` and
+`gmail.modify`, asked for one step at a time (incremental consent):
+
+- A first connection asks Google only for `gmail.readonly`, so the person sees
+  "View your email messages and settings" and nothing about sending.
+- Every tool stays in the model's tool list. When a tool needs access the
+  account does not have yet (`gmail.compose` to draft or send, `gmail.modify` to
+  organize, trash or import), the bridge stops before any provider request and
+  before any approval, publishes an `insufficient_scope` auth notice naming the
+  missing scope, and returns a not-run tool error. The chat shows "Give Gmail more
+  access" with an Allow button.
+- Allow reconnects the same account and asks Google for the base scope, the
+  account's current Gmail grants and the requested scope, bounded by the three
+  reviewed scopes. Broader access, such as `https://mail.google.com/`, is never
+  requested. A plain reconnect keeps exactly what the account already holds.
+- The callback requires `gmail.readonly`. If the person unticks the extra
+  permission on Google's screen, the account keeps what it had and the next
+  call asks again.
+
+Accounts connected before this change keep all three scopes. Tools by area:
 
 | Area | Tools |
 | --- | --- |
