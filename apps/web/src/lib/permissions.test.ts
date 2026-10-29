@@ -211,7 +211,7 @@ describe("Personal workspace settings", () => {
   });
 });
 
-describe("shared workspace content (instructions, name, custom models)", () => {
+describe("shared workspace content (instructions and their reviews)", () => {
   const workspace = {
     id: "44444444-4444-4444-8444-444444444444",
     accountId: "11111111-1111-4111-8111-111111111111",
@@ -269,6 +269,51 @@ describe("shared workspace content (instructions, name, custom models)", () => {
       ),
     ).toBe(false);
     expect(canContributeWorkspaceContent(context(member), null, null)).toBe(false);
+  });
+
+  test("a delegated credential or a service acting for the member does not show the controls", () => {
+    const withGrant = (grant: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      context(member, {
+        workspaceGrants: [
+          {
+            workspaceId: workspace.id,
+            accountId: workspace.accountId,
+            subjectId: "user:kari",
+            permissions: member,
+            principalKind: "human_session",
+            ...grant,
+          },
+        ],
+        ...extra,
+      });
+    expect(canContributeWorkspaceContent(withGrant({}), workspace, null)).toBe(true);
+    expect(
+      canContributeWorkspaceContent(withGrant({ metadata: { delegated: true } }), workspace, null),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        withGrant({ serviceInitiator: { kind: "service" } }),
+        workspace,
+        null,
+      ),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        withGrant(
+          { subjectId: "dev", metadata: { delegated: true } },
+          { mode: "local", subjectId: "dev" },
+        ),
+        workspace,
+        null,
+      ),
+    ).toBe(false);
+    expect(
+      canContributeWorkspaceContent(
+        withGrant({ subjectId: "dev" }, { mode: "local", subjectId: "dev" }),
+        workspace,
+        null,
+      ),
+    ).toBe(true);
   });
 });
 

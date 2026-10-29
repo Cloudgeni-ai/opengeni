@@ -415,11 +415,11 @@ export function canManageWorkspaceSettings(
 
 /**
  * Shared content of a workspace that everyone who works there may change for
- * everyone, like a shared Skill: its instructions, its name and its custom
- * model entries. Whoever manages the workspace's settings may; otherwise a
- * person of the organization who can start chats here (`sessions:create`),
- * signed in as themselves. Mirrors the API's `requireWorkspaceContributorGrant`.
- * UI affordance only.
+ * everyone, like a shared Skill: its instructions and the review of the
+ * agent's proposed changes to them. Whoever manages the workspace's settings
+ * may; otherwise a person of the organization who can start chats here
+ * (`sessions:create`), signed in as themselves (see {@link isSignedInPerson}).
+ * Mirrors the API's `requireWorkspaceContributorGrant`. UI affordance only.
  */
 export function canContributeWorkspaceContent(
   context: AccessContext | null,
@@ -432,10 +432,29 @@ export function canContributeWorkspaceContent(
   return Boolean(
     grant &&
     grant.accountId === workspace.accountId &&
-    (grant.principalKind ?? "human_session") === "human_session" &&
-    context.credential === undefined &&
-    (context.mode === "local" || context.subjectId.startsWith("user:")) &&
+    isSignedInPerson(context, workspace.id) &&
     hasWorkspacePermission(context, workspace.id, "sessions:create"),
+  );
+}
+
+/**
+ * The signed-in person themself, not a key, a delegated credential or an
+ * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
+ * Mirrors the API's rule for Only me machines and shared workspace content;
+ * the API still decides.
+ */
+export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
+  if (!context || context.credential) return false;
+  const person =
+    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  return Boolean(
+    person &&
+    grant &&
+    grant.subjectId === context.subjectId &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator,
   );
 }
 

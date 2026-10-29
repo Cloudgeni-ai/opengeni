@@ -230,9 +230,10 @@ The routes live below
 open to everyone who may start chats in the workspace (`sessions:create`), like
 shared Skills and Knowledge: workspace admins, the owner of a Personal workspace,
 and Members. A Member must act as themselves: signed in to the app, or through
-their own chat or connected agent within what they allowed. An agent's own
-token, API keys without settings access, services and people from another
-product are refused (`requireWorkspaceContributorGrant` in
+their own chat, connected agent or personal API key within what they allowed
+(those act as the Member). An agent's own token, organization and workspace
+API keys without settings access, services and people from another product
+are refused (`requireWorkspaceContributorGrant` in
 `packages/core/src/access/index.ts`); agents change instructions only through
 agent learning below. Reviewing the agent's proposed instruction changes
 (`/v1/workspaces/:workspaceId/agent-learning/instructions/*`) needs the same
@@ -442,7 +443,7 @@ Canonical implementation: `packages/contracts/src/workspace-instruction-policies
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
-`packages/sdk/src/workspace-instruction-policies.ts`, with the bounded admin
+`packages/sdk/src/workspace-instruction-policies.ts`, with the bounded
 composer in `apps/web/src/routes/workspace-state.tsx`, plus runtime composition in
 `packages/runtime/src/workspace-governance.ts` and
 `apps/worker/src/activities/agent-turn/governance-model.ts`.

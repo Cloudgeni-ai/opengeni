@@ -1045,19 +1045,20 @@ export async function workspaceSettingsAuthorized(
 
 /** The refusal of {@link requireWorkspaceContributorGrant}, a plain sentence. */
 export const WORKSPACE_CONTRIBUTOR_REFUSAL =
-  "Only people who can start chats in this workspace can change this.";
+  "Only people who can start chats here, acting as themselves, can change this.";
 
 /**
  * Ordinary shared content of a workspace that anyone who works there may
  * change for everyone, like a shared Skill or Knowledge entry: its
- * instructions, its name and its custom model entries. Whoever may change
- * the workspace's settings may (see {@link workspaceSettingsAuthorized});
+ * instructions and the review of the agent's proposed changes to them.
+ * Whoever may change the workspace's settings may (see
+ * {@link workspaceSettingsAuthorized});
  * otherwise a person of the organization who can start chats here
  * (`sessions:create`), acting as themselves: signed in, or their own chat or
- * connected agent acting for them within what they allowed. Agents' own
- * tokens, API keys, services and people from another product keep their own
- * ways in (agent learning for instructions), so `sessions:create` alone never
- * lets them change these.
+ * connected agent or personal API key acting for them within what they
+ * allowed. Agents' own tokens, organization and workspace API keys, services
+ * and people from another product keep their own ways in (agent learning for
+ * instructions), so `sessions:create` alone never lets them change these.
  */
 export async function workspaceContributionAuthorized(
   deps: Pick<AccessDeps, "db">,

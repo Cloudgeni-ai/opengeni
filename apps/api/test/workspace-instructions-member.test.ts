@@ -5,9 +5,13 @@ import {
   acceptOrganizationInvitation,
   createDb,
   createOrganizationInvitation,
+  createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  saveAgentInstruction,
   upsertWorkspaceMemberAsWorkspaceManager,
+  withSessionRlsActorContext,
   type DbClient,
+  type KnowledgeContext,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -137,6 +141,47 @@ async function rolePermissions(role: "member" | "viewer") {
 
 type Result = { status: number; body: any };
 
+/** A running agent attempt in a chat the person started in the workspace. */
+async function agentAttempt(accountId: string, workspaceId: string, subjectId: string) {
+  const session = await withSessionRlsActorContext({ subjectId }, () =>
+    createSession(client.db, {
+      accountId,
+      workspaceId,
+      initialMessage: "Tidy the instructions",
+      memoryScope: "workspace",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      createdByContext: {},
+    }),
+  );
+  const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`SELECT set_config('opengeni.session_inference_claim','1',true)`;
+    await tx`INSERT INTO session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
+      status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
+      initiator_kind,initiator_subject_id,initiator_context,initiating_human_subject_id)
+      VALUES(${turnId},${accountId},${workspaceId},${session.id},${crypto.randomUUID()},${`instructions-${turnId}`},
+        'running','user',1,'Tidy the instructions','test-model','medium','none',1,'subject',${subjectId},'{}',${subjectId})`;
+    await tx`UPDATE sessions SET active_turn_id=${turnId},status='running' WHERE id=${session.id}`;
+    await tx`UPDATE session_turns SET active_attempt_id=${attemptId} WHERE id=${turnId}`;
+    await tx`INSERT INTO session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
+      temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies)
+      VALUES(${attemptId},${accountId},${workspaceId},${session.id},${turnId},1,'running',${`instructions-${turnId}`},
+        ${`run-${attemptId}`},${`activity-${attemptId}`},0,'{}')`;
+  });
+  return {
+    accountId,
+    workspaceId,
+    actor: { kind: "agent", sessionId: session.id, turnId, attemptId, executionGeneration: 1 },
+  } satisfies KnowledgeContext;
+}
+
 test("a Member edits and reviews the workspace instructions; a Viewer and bare tokens can't", async () => {
   const app = buildApp();
   const call = async (
@@ -244,6 +289,51 @@ test("a Member edits and reviews the workspace instructions; a Viewer and bare t
     settings: { instructions: "automatic" },
   });
   expect(settings.status).toBe(403);
+
+  // With Review first, an agent's proposed change waits for review; the
+  // Member approves it and it becomes the active instructions.
+  const reviewFirst = await call(as(owner), "POST", `/v1/workspaces/${team}/agent-learning`, {
+    scope: "workspace",
+    operationId: crypto.randomUUID(),
+    expectedVersion: 0,
+    settings: { knowledge: "automatic", instructions: "review_first", skills: "automatic" },
+  });
+  expect(reviewFirst).toMatchObject({ status: 200 });
+  const agent = await agentAttempt(accountId, team, colleague.subjectId);
+  const proposed = await saveAgentInstruction(client.db, agent, {
+    operationId: crypto.randomUUID(),
+    target: { kind: "policy", scope: "global", roleKey: null },
+    editMode: "append",
+    content: "Run the tests before approving.",
+    expectedCurrentRevisionId: head.revisionId,
+    expectedActivationVersion: head.activationVersion,
+    reason: "Be careful",
+  });
+  expect(proposed.outcome).toBe("pending");
+  const pending = await call(
+    as(colleague),
+    "GET",
+    `/v1/workspaces/${team}/agent-learning/instructions/reviews`,
+  );
+  expect(pending.status).toBe(200);
+  expect(pending.body.entries.map((entry: { revisionId: string }) => entry.revisionId)).toEqual([
+    proposed.revisionId,
+  ]);
+  const approveAs = (person: Person) =>
+    call(as(person), "POST", `/v1/workspaces/${team}/agent-learning/instructions/review`, {
+      operationId: crypto.randomUUID(),
+      revisionId: proposed.revisionId,
+      decision: "approve",
+      reason: "Reviewed",
+    });
+  expect((await approveAs(reader)).status).toBe(403);
+  const approved = await approveAs(colleague);
+  expect(approved.status).toBe(200);
+  expect(approved.body.outcome).toBe("published");
+  const [activeHead] = await shared.admin<Array<{ revisionId: string }>>`
+    select revision_id as "revisionId" from workspace_instruction_policy_heads
+    where workspace_id = ${team}`;
+  expect(activeHead!.revisionId).toBe(proposed.revisionId);
 
   // A Viewer reads but can't change or review them.
   expect((await call(as(reader), "GET", policies)).status).toBe(200);
