@@ -1386,6 +1386,9 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     expect(page.segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
       [null, "Remember to send the numbers."],
     ]);
+    // Its prepared audio is never stored: the text doesn't wait on a write.
+    expect([...storage.objects.keys()].filter((key) => key.includes("/prepared/"))).toEqual([]);
+    expect(stored.tracks.every((track) => !track.playable)).toBe(true);
 
     // The day is up: the dictation and its audio go.
     expect(storage.objects.size).toBeGreaterThan(0);
