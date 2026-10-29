@@ -19,6 +19,7 @@ import {
   type InteractionPasskeyStore,
   type InteractionSecretsPort,
   resetPasskeySessionCacheForTests,
+  releaseBrowserPasskeys,
   resolveInteractionSecretValues,
   syncBrowserPasskeys,
 } from "../src/interaction-secrets";
@@ -424,7 +425,10 @@ describe("syncBrowserPasskeys", () => {
         refresh: true,
       };
       expect(await syncBrowserPasskeys(input)).toEqual({ saved: 0, asserted: 0 });
-      expect(client.requests.map((request) => request.credentials?.length ?? null)).toEqual([0, 3]);
+      expect(client.requests.map((request) => request.credentials?.length ?? null)).toEqual([
+        null,
+        3,
+      ]);
       const sent = client.requests[1]!.credentials!;
       expect(sent[1]).not.toHaveProperty("backupEligibility");
       expect(sent[1]).not.toHaveProperty("backupState");
@@ -435,9 +439,97 @@ describe("syncBrowserPasskeys", () => {
       });
       await syncBrowserPasskeys(input);
       expect(client.requests).toHaveLength(3); // cached negotiation survives lease refresh
+      await syncBrowserPasskeys({
+        ...input,
+        grant: {
+          ...agentGrant,
+          metadata: { ...agentGrant.metadata, attemptId: "77777777-7777-4777-8777-777777777778" },
+        },
+      });
+      expect(client.requests).toHaveLength(4); // and a new attempt, without sharing its lease
+      expect(client.requests[3]!.credentials).toEqual(sent);
+      await syncBrowserPasskeys({ ...input, controllerGeneration: "controller-2" });
+      expect(client.requests).toHaveLength(6);
+      expect(client.requests[4]!.credentials).toBeNull();
+      await releaseBrowserPasskeys(input.port, BROWSER);
+      await syncBrowserPasskeys(input);
+      expect(client.requests).toHaveLength(8);
+      expect(client.requests[6]!.credentials).toBeNull();
       expect(credentials[2]!.backupEligibility).toBe(true); // never alter vault material
     });
   }
+
+  test("a pending assertion crosses attempts without a destructive capability probe", async () => {
+    const { store, calls } = fakeStore();
+    store.lease = async () => [{ ...stored, backupEligibility: true, backupState: true }];
+    const pending: BrowserPasskeyEvent[] = [];
+    const client = fakeClient(pending);
+    const sync = client.passkeySync.bind(client);
+    client.passkeySync = async (request) => ({
+      ...(await sync(request)),
+      supportsBackupFlags: true,
+    });
+    const input = {
+      port: { ...port({}), passkeys: store },
+      grant: agentGrant,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      client,
+    };
+    await syncBrowserPasskeys(input);
+    pending.push({
+      type: "asserted",
+      eventId: "99999999-9999-4999-8999-999999999992",
+      occurredAt: "2026-10-29T08:00:00.000Z",
+      targetId: "target-1",
+      rpId: stored.rpId,
+      credentialId: stored.credentialId,
+      itemId: stored.itemId,
+      signCount: 9,
+    });
+    const next = {
+      ...agentGrant,
+      metadata: { ...agentGrant.metadata, attemptId: "77777777-7777-4777-8777-777777777779" },
+    };
+    expect(await syncBrowserPasskeys({ ...input, grant: next })).toEqual({ saved: 0, asserted: 1 });
+    expect(client.requests.map((request) => request.credentials?.length ?? null)).toEqual([
+      null,
+      1,
+      1,
+      null,
+    ]);
+    expect(client.requests[2]!.credentials![0]!.signCount).toBe(4); // stale vault is reconciled by browserd
+    expect(calls).toContain(`count:${stored.itemId}:9`);
+    expect(pending).toEqual([]);
+  });
+
+  test("a failed load after discovery has not cleared the browser's existing credentials", async () => {
+    const { store } = fakeStore();
+    store.lease = async () => [{ ...stored, backupEligibility: true, backupState: true }];
+    let loaded = [{ ...stored, signCount: 9 }];
+    let calls = 0;
+    const result = await syncBrowserPasskeys({
+      port: { ...port({}), passkeys: store },
+      grant: agentGrant,
+      browserSessionId: BROWSER,
+      controllerGeneration: "controller-1",
+      client: {
+        async passkeySync(request) {
+          if (++calls === 2) throw new Error("synthetic load failure before dispatch");
+          if (request.credentials !== null) loaded = request.credentials;
+          return {
+            browserSessionId: BROWSER,
+            controllerGeneration: "controller-1",
+            authenticators: 1,
+            events: [],
+            supportsBackupFlags: true,
+          };
+        },
+      },
+    });
+    expect(result).toBeNull();
+    expect(loaded).toEqual([{ ...stored, signCount: 9 }]);
+  });
 
   test("loads leased passkeys, saves registrations and writes sign counts back", async () => {
     const { store, calls } = fakeStore();

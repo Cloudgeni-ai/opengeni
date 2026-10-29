@@ -106,6 +106,25 @@ e2e.each(["device-bound", "backed-up", "bitwarden", "legacy-missing-flags"] as c
       page = await until(first.driver, page.target.id, (o) =>
         hasName(o, `Logged in as ${username}`),
       );
+      if (source === "backed-up") {
+        // A new API attempt can discover capabilities before it has written
+        // the previous assertion's higher counter back to the vault. A read-only
+        // probe must preserve that counter while the stale lease is replaced.
+        const pending = await first.sync(null);
+        const asserted = only(pending.events, "asserted");
+        expect(asserted.signCount).toBeGreaterThan(stored.signCount);
+        await first.sync(null); // capability probe: no credential replacement or ack
+        const reconciled = await first.sync([stored]);
+        expect(only(reconciled.events, "asserted").signCount).toBe(asserted.signCount);
+        await first.sync(null, [asserted.eventId]);
+        page = await act(page, { type: "navigate", url: `${site.url}/logout` });
+        page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
+        page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+        page = await until(first.driver, page.target.id, (o) =>
+          hasName(o, `Logged in as ${username}`),
+        );
+        expect(await serverSignCount(username)).toBeGreaterThan(asserted.signCount);
+      }
       signCounts.push(await assertedSignCount(first, itemId));
     } finally {
       await first.close();

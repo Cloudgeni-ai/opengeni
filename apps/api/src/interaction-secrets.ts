@@ -248,18 +248,20 @@ type PasskeySessionState = {
   leasedAtMs: number;
   credentials: BrowserPasskeyCredential[];
   unsupported: boolean;
-  supportsBackupFlags?: boolean;
 };
 
 /** Per-process lease cache: renew at most once a minute per browser session
  * (leases last ten minutes and renew on use, Q-32). */
 const passkeySessions = new Map<string, PasskeySessionState>();
+/** Controller capability is independent of the acting principal and attempt. */
+const passkeyBackupFlagCapabilities = new Map<string, boolean>();
 
 /** The latest pending sync per BrowserSession; later syncs chain after it. */
 const passkeySyncTails = new Map<string, Promise<void>>();
 
 export function resetPasskeySessionCacheForTests(): void {
   passkeySessions.clear();
+  passkeyBackupFlagCapabilities.clear();
   passkeySyncTails.clear();
 }
 
@@ -327,7 +329,17 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
   const holder = passkeyLeaseHolder(input.browserSessionId);
   // Per attempt: a later turn may act for another person, so it leases (and
   // replaces browserd's credential set with) its own passkeys first.
-  const cacheKey = `${input.browserSessionId}:${input.controllerGeneration}:${principal.attemptId}`;
+  const bindingKey = `${input.browserSessionId}:${input.controllerGeneration}`;
+  const cacheKey = `${bindingKey}:${principal.attemptId}`;
+  let supportsBackupFlags = passkeyBackupFlagCapabilities.get(bindingKey);
+  const rememberBackupFlags = (response: BrowserPasskeySyncResponse): void => {
+    supportsBackupFlags = response.supportsBackupFlags === true;
+    passkeyBackupFlagCapabilities.delete(bindingKey);
+    passkeyBackupFlagCapabilities.set(bindingKey, supportsBackupFlags);
+    while (passkeyBackupFlagCapabilities.size > PASSKEY_SESSION_CACHE_LIMIT) {
+      passkeyBackupFlagCapabilities.delete(passkeyBackupFlagCapabilities.keys().next().value!);
+    }
+  };
   let state = passkeySessions.get(cacheKey);
   if (state?.unsupported) return null;
   const lease = async (): Promise<BrowserPasskeyCredential[]> => {
@@ -336,9 +348,6 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       leasedAtMs: now(),
       credentials,
       unsupported: false,
-      ...(state?.supportsBackupFlags === undefined
-        ? {}
-        : { supportsBackupFlags: state.supportsBackupFlags }),
     };
     passkeySessions.delete(cacheKey);
     passkeySessions.set(cacheKey, state);
@@ -359,10 +368,8 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     credentials:
       credentials?.map(({ backupEligibility, backupState, ...credential }) => ({
         ...credential,
-        ...(state?.supportsBackupFlags && backupEligibility === true
-          ? { backupEligibility: true }
-          : {}),
-        ...(state?.supportsBackupFlags && backupState === true ? { backupState: true } : {}),
+        ...(supportsBackupFlags && backupEligibility === true ? { backupEligibility: true } : {}),
+        ...(supportsBackupFlags && backupState === true ? { backupState: true } : {}),
       })) ?? null,
     acknowledgeEventIds,
   });
@@ -373,18 +380,17 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     let response: BrowserPasskeySyncResponse;
     try {
       if (
-        state?.supportsBackupFlags === undefined &&
+        supportsBackupFlags === undefined &&
         credentials?.some((credential) => credential.backupEligibility || credential.backupState)
       ) {
-        // Negotiate with an empty set before loading true flags, so a pending
-        // assertion cannot use another principal's previous credentials during
-        // discovery. Events remain pending. Older controllers ignore the opt-in
-        // query and return their original shape. Cache per binding/attempt.
-        const probe = await input.client.passkeySync(request([], []));
-        state!.supportsBackupFlags = probe.supportsBackupFlags === true;
+        // Read-only discovery preserves pending events and the browser's higher
+        // counters until normal replacement and write-back reconcile the vault.
+        // Older controllers ignore the opt-in query and return their old shape.
+        const probe = await input.client.passkeySync(request(null, []));
+        rememberBackupFlags(probe);
       }
       response = await input.client.passkeySync(request(credentials, []));
-      if (state) state.supportsBackupFlags = response.supportsBackupFlags === true;
+      rememberBackupFlags(response);
     } catch (error) {
       if (isUnsupportedSync(error)) {
         passkeySessions.set(cacheKey, {
@@ -455,6 +461,9 @@ export async function releaseBrowserPasskeys(
 ): Promise<void> {
   for (const key of [...passkeySessions.keys()]) {
     if (key.startsWith(`${browserSessionId}:`)) passkeySessions.delete(key);
+  }
+  for (const key of [...passkeyBackupFlagCapabilities.keys()]) {
+    if (key.startsWith(`${browserSessionId}:`)) passkeyBackupFlagCapabilities.delete(key);
   }
   await port?.passkeys?.release(passkeyLeaseHolder(browserSessionId)).catch(() => undefined);
 }
