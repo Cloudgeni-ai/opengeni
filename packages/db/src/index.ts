@@ -826,6 +826,7 @@ import type {
   SessionListTotals,
   SiteConversationGroup,
   SessionListEntryResponse,
+  SessionListLatestTurn,
   SessionTenancyPublicProjection,
   SessionEvent,
   SessionEventPayloadMode,
@@ -33057,7 +33058,15 @@ export type SessionListFilterOptions = {
   mineOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
+  /**
+   * Only these sessions (at most {@link SESSION_LIST_MAX_SESSION_IDS}). It
+   * narrows the caller's ordinary authorized list and never widens it.
+   */
+  sessionIds?: readonly string[];
 };
+
+/** Upper bound for the session-list `sessionIds` filter. */
+export const SESSION_LIST_MAX_SESSION_IDS = 200;
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
   SessionListFilterOptions & {
@@ -33954,6 +33963,79 @@ export async function sessionRequiresActionSinceForSessions(
   return new Map(rows.map((row) => [row.sessionId, new Date(row.since).toISOString()]));
 }
 
+/**
+ * Each listed session's newest turn in execution order: the last queued turn,
+ * else the turn currently executing, else the most recently finished turn.
+ * Three bounded backward probes of existing partial indexes per session
+ * (prompt queue, one current inference, finished order), so a long session
+ * costs the same as a new one. Sessions without turns are absent.
+ */
+export async function sessionLatestTurnsForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, SessionListLatestTurn>> {
+  const uniqueIds = [...new Set(sessionIds)];
+  if (uniqueIds.length === 0) return new Map();
+  const rows = await rawRows<{
+    sessionId: string;
+    id: string;
+    status: SessionListLatestTurn["status"];
+    startedAt: Date | string | null;
+    finishedAt: Date | string | null;
+  }>(
+    db,
+    sql`
+      select listed.session_id as "sessionId", latest.id, latest.status,
+        latest.started_at as "startedAt", latest.finished_at as "finishedAt"
+      from unnest(${`{${uniqueIds.join(",")}}`}::uuid[]) as listed(session_id)
+      cross join lateral (
+        select candidate.id, candidate.status, candidate.started_at, candidate.finished_at
+        from (
+          (select queued.id, queued.status, queued.started_at, queued.finished_at, 0 as rank
+            from ${schema.sessionTurns} queued
+            where queued.workspace_id = ${workspaceId}::uuid
+              and queued.session_id = listed.session_id
+              and queued.status = 'queued'
+            order by queued.position desc
+            limit 1)
+          union all
+          (select current_turn.id, current_turn.status, current_turn.started_at,
+              current_turn.finished_at, 1 as rank
+            from ${schema.sessionTurns} current_turn
+            where current_turn.workspace_id = ${workspaceId}::uuid
+              and current_turn.session_id = listed.session_id
+              and current_turn.status in ('running', 'requires_action', 'recovering', 'waiting_capacity')
+            limit 1)
+          union all
+          (select finished.id, finished.status, finished.started_at, finished.finished_at, 2 as rank
+            from ${schema.sessionTurns} finished
+            where finished.workspace_id = ${workspaceId}::uuid
+              and finished.session_id = listed.session_id
+              and finished.finished_at is not null
+            order by finished.finished_at desc, finished.position desc, finished.created_at desc
+            limit 1)
+        ) candidate
+        order by candidate.rank
+        limit 1
+      ) latest
+    `,
+  );
+  const iso = (value: Date | string | null) =>
+    value === null ? null : new Date(value).toISOString();
+  return new Map(
+    rows.map((row) => [
+      row.sessionId,
+      {
+        id: row.id,
+        status: row.status,
+        startedAt: iso(row.startedAt),
+        finishedAt: iso(row.finishedAt),
+      },
+    ]),
+  );
+}
+
 function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requiresActionSince">>(
   session: T,
   since: ReadonlyMap<string, string>,
@@ -34071,6 +34153,7 @@ async function sessionListTotalsInScope(
     !options.updatedBefore &&
     !options.createdFrom &&
     !options.createdBefore &&
+    !options.sessionIds &&
     !options.authorizationScope?.agentAccessViewer;
   const rootFilters = and(
     eq(schema.sessions.workspaceId, workspaceId),
@@ -34495,6 +34578,7 @@ function sessionFilters(
     | "needsYouOnly"
     | "contentArchivedOnly"
     | "mineOnly"
+    | "sessionIds"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -34596,6 +34680,14 @@ function sessionFilters(
   if (options.createdBefore) filters.push(lt(schema.sessions.createdAt, options.createdBefore));
   if (options.scopeSubjectId) {
     filters.push(eq(schema.sessions.scopeSubjectId, options.scopeSubjectId));
+  }
+  if (options.sessionIds) {
+    if (options.sessionIds.length > SESSION_LIST_MAX_SESSION_IDS)
+      throw new SessionListCursorError(
+        `sessionIds accepts at most ${SESSION_LIST_MAX_SESSION_IDS} ids`,
+      );
+    // An empty selection matches nothing, never everything.
+    filters.push(anyOf(schema.sessions.id, [...new Set(options.sessionIds)]));
   }
   return filters;
 }
@@ -34787,7 +34879,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.scopeSubjectId &&
     !options.needsYouOnly &&
     !options.contentArchivedOnly &&
-    !options.mineOnly
+    !options.mineOnly &&
+    !options.sessionIds
   ) {
     return "all";
   }
@@ -34806,6 +34899,17 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
     ...(options.contentArchivedOnly ? [["contentArchivedOnly", true]] : []),
     ...(options.mineOnly ? [["mineOnly", true]] : []),
+    // A digest keeps continuation cursors short for a 200-id selection.
+    ...(options.sessionIds
+      ? [
+          [
+            "sessionIds",
+            createHash("sha256")
+              .update([...new Set(options.sessionIds)].sort().join(","))
+              .digest("hex"),
+          ],
+        ]
+      : []),
   ]);
 }
 
@@ -35673,6 +35777,9 @@ async function readSessionListForSubject(
             .map((row) => row.session.id),
         );
         const controls = await sessionControlProjections(tx, workspaceId, ids);
+        const latestTurns = summary
+          ? await sessionLatestTurnsForSessions(tx, workspaceId, ids)
+          : new Map<string, SessionListLatestTurn>();
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
@@ -35721,6 +35828,10 @@ async function readSessionListForSubject(
             rootRelatedIds.has(session.id) ? "root" : "target",
           );
         };
+        const listEntry = (row: (typeof pinnedRows)[number] | (typeof pageRows)[number]) => ({
+          ...sessionListEntry(mapListSession(row)),
+          latestTurn: latestTurns.get(row.session.id) ?? null,
+        });
         if (summary)
           return {
             projection: "summary",
@@ -35728,12 +35839,13 @@ async function readSessionListForSubject(
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
             ...(options.mineOnly ? { mineOnly: true as const } : {}),
+            ...(options.sessionIds ? { sessionIdsApplied: true as const } : {}),
             ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
             ...(siteGroups ? { siteGroups } : {}),
             ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
-            pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
+            pinned: pinnedRows.map(listEntry),
             pinnedTruncated,
-            sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
+            sessions: pageRows.map(listEntry),
             nextCursor,
             sortBy,
             archiveStatus: archiveMode,
@@ -35743,6 +35855,7 @@ async function readSessionListForSubject(
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
           ...(options.mineOnly ? { mineOnly: true as const } : {}),
+          ...(options.sessionIds ? { sessionIdsApplied: true as const } : {}),
           ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
           ...(siteGroups ? { siteGroups } : {}),
           ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),

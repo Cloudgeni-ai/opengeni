@@ -26238,6 +26238,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.activeTurnId": "string! null",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
         "$.archiveVersion": "integer!",
@@ -26261,6 +26262,7 @@
         "$.inputWait.deadlineAt": "string!",
         "$.inputWait.reason": "string!",
         "$.lastSequence": "integer!",
+        "$.latestTurn": "ref(SessionListLatestTurn)? null",
         "$.model": "string?",
         "$.parentSessionId": "string! null",
         "$.pinVersion": "integer!",
@@ -26315,6 +26317,7 @@
         "$.pinned[]": "ref(SessionListEntry)",
         "$.pinnedTruncated": "boolean?",
         "$.projection": "const!=[\"\\\"summary\\\"\"]",
+        "$.sessionIdsApplied": "const?=[\"true\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(SessionListEntry)",
         "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
@@ -26323,6 +26326,18 @@
         "$.siteGroupsTruncated": "const?=[\"true\"]",
         "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
         "$.totals": "ref(SessionListTotals)?"
+      }
+    },
+    "SessionListLatestTurn": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.finishedAt": "string! null",
+        "$.id": "string!",
+        "$.startedAt": "string! null",
+        "$.status": "ref(SessionTurnStatus)!"
       }
     },
     "SessionListResponse": {
@@ -26341,6 +26356,7 @@
         "$.pinned": "array!",
         "$.pinned[]": "ref(Session)",
         "$.pinnedTruncated": "boolean?",
+        "$.sessionIdsApplied": "const?=[\"true\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(Session)",
         "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
@@ -34163,6 +34179,7 @@
       "sessionListEntry": "value",
       "SessionListEntry": "type",
       "SessionListEntryResponse": "type",
+      "SessionListLatestTurn": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
       "SessionListTotals": "type",

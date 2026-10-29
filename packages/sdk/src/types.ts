@@ -2105,6 +2105,7 @@ export type SessionListEntry = Pick<
   | "workspaceId"
   | "accountId"
   | "status"
+  | "activeTurnId"
   | "backgroundCommandActivity"
   | "hasSchedules"
   | "hasUpcomingSchedules"
@@ -2151,6 +2152,19 @@ export type SessionListEntry = Pick<
    */
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
+  /**
+   * Newest turn in execution order: the last queued turn, else the executing
+   * turn, else the most recently finished one. Null when the session has no
+   * turn; absent from older servers and SDK-projected full pages.
+   */
+  latestTurn?: SessionListLatestTurn | null | undefined;
+};
+
+export type SessionListLatestTurn = {
+  id: string;
+  status: SessionTurnStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
 };
 export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
   projection: "summary";
@@ -2213,6 +2227,8 @@ export type SessionListResponse = {
   contentArchivedOnly?: true;
   /** Receipt for the started-or-messaged-by-you filter. */
   mineOnly?: true;
+  /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
+  sessionIdsApplied?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
