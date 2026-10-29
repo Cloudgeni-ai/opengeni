@@ -421,6 +421,23 @@ function protectedContent(rawById: ReadonlyMap<string, CdpAxNode>): {
     }
     return false;
   };
+  // Whether a subtree was read whole: a partial or budgeted read can leave
+  // out nodes, and a name taken from them cannot be shown to hold no
+  // protected text. The field itself is left out (a name never includes what
+  // it holds), and so are a text node's own parts.
+  const readWhole = (rootId: string, excludedId: string): boolean => {
+    const stack = [rootId];
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (id === excludedId || seen.has(id)) continue;
+      seen.add(id);
+      const node = rawById.get(id);
+      if (!node) return false;
+      if (roleValue(node) !== "StaticText") stack.push(...childIds(node));
+    }
+    return true;
+  };
   // A subtree's public text, in order.
   const publicText = (rootId: string, excludedId: string | null, parts: string[]): void => {
     if (rootId === excludedId || reasons.has(rootId)) return;
@@ -441,11 +458,22 @@ function protectedContent(rawById: ReadonlyMap<string, CdpAxNode>): {
       if (reasons.has(nodeId) && !PROTECTED_FIELD_ROLES.has(role)) return null;
       const source = nameSource(node.name?.sources);
       if (!source) return name;
-      const related = relatedBackendNodeIds(source).flatMap((backendNodeId) => {
+      const relatedBackendIds = relatedBackendNodeIds(source);
+      const related = relatedBackendIds.flatMap((backendNodeId) => {
         const relatedId = byBackendNode.get(`${String(node.frameId)}\0${backendNodeId}`);
         return relatedId === undefined ? [] : [relatedId];
       });
       const fromContents = source.type === "contents";
+      // A protected field keeps its label only when the label was read whole.
+      if (
+        reasons.has(nodeId) &&
+        (related.length !== relatedBackendIds.length ||
+          !(fromContents
+            ? readWhole(nodeId, "")
+            : related.every((relatedId) => readWhole(relatedId, nodeId))))
+      ) {
+        return null;
+      }
       const tainted = fromContents
         ? holdsProtected(nodeId, null)
         : related.some((relatedId) => holdsProtected(relatedId, nodeId));
@@ -493,6 +521,12 @@ function nameSource(sources: unknown): Record<string, unknown> | null {
       return source;
   }
   return null;
+}
+
+/** The DOM nodes a node's name was taken from (aria-labelledby, a label). */
+export function nameRelatedBackendNodeIds(node: CdpAxNode): number[] {
+  const source = nameSource(node.name?.sources);
+  return source ? relatedBackendNodeIds(source) : [];
 }
 
 /** The elements a name source took its text from (aria-labelledby, a label). */

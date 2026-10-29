@@ -28,10 +28,13 @@ const MIXED_PAGE = `<title>Mixed</title><body>
     <label>Email <input name="email" value="fixture-email-value"></label>
     <label>Password <input type="password" value="fixture-password-secret"></label>
     <textarea data-private>fixture-textarea-secret</textarea>
-    <select name="card-expiry"><option>fixture-select-secret</option></select>
+    <select id="expiry-field" name="card-expiry"><option>fixture-select-secret</option></select>
   </form>
   <p>Balance: <span data-private>fixture-balance-secret</span> NOK</p>
-  <div id="card-number">fixture-card-secret</div>
+  <h2 id="credit-card-offers">Credit card offers</h2><p id="expiration-notice">Your trial ends Friday</p>
+  <label>Link expiration <select id="link-expiration"><option>1 day</option><option>7 days</option></select></label>
+  <div id="card-number">Card ending 4242</div>
+  <div contenteditable id="card-number-editor">fixture-editor-secret</div>
   <div data-sensitive><p>fixture-nested-secret</p><span>fixture-nested-secret-two</span></div>
   <div style="display: contents">Contents <span style="display: none">fixture-hidden-text</span><span data-private>fixture-contents-secret</span></div>
   <ul><li>First</li><li>Second</li></ul>
@@ -102,6 +105,12 @@ e2e(
         "More",
         "Less",
         "Footer text",
+        // A payment-like id or name marks only a form field: page text keeps
+        // showing.
+        "Credit card offers",
+        "Your trial ends Friday",
+        "Link expiration",
+        "Card ending 4242",
       ]) {
         expect(mixedBody.text).toContain(shown);
       }
@@ -120,12 +129,22 @@ e2e(
       expect(paged).toBe(mixedBody.text!);
 
       // A protected element, and anything inside one, is still refused whole.
-      for (const selector of ["#inside", "#inside-child", "#card-number", "select"]) {
+      for (const selector of ["#inside", "#inside-child", "#card-number-editor", "#expiry-field"]) {
         const refused = await read(mixed.target.id, selector);
         expect(refused).toMatchObject({ text: null, value: null });
         expect(refused.redacted).not.toBeNull();
         expect(JSON.stringify(refused)).not.toMatch(/fixture-/u);
       }
+      // Ordinary elements with payment-like ids read in full.
+      for (const [selector, text] of [
+        ["#credit-card-offers", "Credit card offers"],
+        ["#expiration-notice", "Your trial ends Friday"],
+        ["#card-number", "Card ending 4242"],
+      ]) {
+        const shown = await read(mixed.target.id, selector!);
+        expect(shown).toMatchObject({ redacted: null, text });
+      }
+      expect(await read(mixed.target.id, "#link-expiration")).toMatchObject({ redacted: null });
     } finally {
       await driver.close();
       server.stop(true);
@@ -152,7 +171,10 @@ const OBSERVED_PAGE = `<title>Observed</title><body>
   <p id="password-length">Password length 0</p>
   <p id="notes-length">Notes length 0</p>
   <p>Balance: <span data-private>fixture-balance-secret</span> NOK</p>
-  <div id="card-number">fixture-card-secret</div>
+  <h2 id="credit-card-offers">Credit card offers</h2><p id="expiration-notice">Your trial ends Friday</p>
+  <label>Link expiration <select id="link-expiration"><option>1 day</option><option>7 days</option></select></label>
+  <div id="card-number">Card ending 4242</div>
+  <div contenteditable id="card-number-editor">fixture-editor-secret</div>
   <div data-sensitive><p>fixture-nested-secret</p><a href="/fixture-link-address">fixture-link-secret</a></div>
   <button>Pay <span data-private>fixture-button-secret</span> now</button>
   <span id="private-label" data-private>fixture-labelledby-secret</span>
@@ -221,6 +243,16 @@ e2e(
       const expiry = node(page, "combobox", "Expiry");
       expect(expiry).toMatchObject({ value: { redacted: true, reason: "payment" } });
       expect(expiry.children ?? []).toEqual([]);
+
+      // A payment-like id or name marks only a form field: a heading, a
+      // paragraph, a plain div and a select whose name merely mentions
+      // expiration keep showing what they hold.
+      expect(node(page, "heading", "Credit card offers")).toBeDefined();
+      expect(node(page, "text", "Your trial ends Friday")).toBeDefined();
+      expect(node(page, "text", "Card ending 4242")).toBeDefined();
+      const linkExpiration = node(page, "combobox", "Link expiration");
+      expect(JSON.stringify(linkExpiration.value ?? null)).not.toContain("redacted");
+      expect(JSON.stringify(linkExpiration)).toContain("7 days");
       const agree = node(page, "checkbox", "Agree");
       expect(agree.actions).toContain("check");
       expect(agree.states.some((state) => state.startsWith("checked"))).toBe(false);
@@ -254,6 +286,32 @@ e2e(
       });
       expect(JSON.stringify(page.semantic)).not.toContain("new-password");
       expect(node(page, "text", "Password length 12")).toBeDefined();
+
+      // An action on a protected field found by CSS names the field by its
+      // label, as an observation does, and never by what it holds.
+      for (const [selector, label] of [
+        ['input[type="password"]', "Password"],
+        ["textarea", "Notes"],
+      ] as const) {
+        const items: unknown[] = [];
+        page = await driver.dispatch(
+          {
+            protocolVersion: 1,
+            operationId: randomUUID(),
+            browserSessionId: page.browserSessionId,
+            controllerGeneration: page.target.controllerGeneration,
+            targetId: page.target.id,
+            expectedTargetGeneration: page.target.targetGeneration,
+            expectedDocumentGeneration: page.target.documentGeneration,
+            expectedFrameId: page.frameId!,
+            actor: { kind: "agent", subjectId: "observe-redaction-e2e" },
+            action: { type: "click", locator: { kind: "css", selector } },
+          },
+          { record: (item) => items.push(item) },
+        );
+        expect(items).toEqual([expect.objectContaining({ name: label })]);
+        expect(JSON.stringify(items)).not.toMatch(/fixture-|new-password|a new note/u);
+      }
 
       // Protected text cannot be found by searching for it either.
       for (const locator of [

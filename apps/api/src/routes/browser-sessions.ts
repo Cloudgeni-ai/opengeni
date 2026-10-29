@@ -806,7 +806,7 @@ export function registerBrowserSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw browserRouteError(error);
+      throw browserRouteError(error, "open");
     }
   });
 

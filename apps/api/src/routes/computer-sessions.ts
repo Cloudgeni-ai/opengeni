@@ -545,7 +545,7 @@ export function registerComputerSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw computerRouteError(error);
+      throw computerRouteError(error, "open");
     }
   });
 

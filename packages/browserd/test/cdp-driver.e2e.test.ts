@@ -1921,7 +1921,7 @@ function authFixture(): string {
     </form>
     <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">
     <section id="private-container">Public intro <span data-private>fixture-private-secret</span></section>
-    <section id="payment-container">Public intro <span id="card-number"><span id="card-child">fixture-card-text-secret</span></span></section>`;
+    <section id="payment-container">Public intro <span id="card-number" contenteditable><span id="card-child">fixture-card-text-secret</span></span></section>`;
 }
 
 function dataUrl(html: string): string {

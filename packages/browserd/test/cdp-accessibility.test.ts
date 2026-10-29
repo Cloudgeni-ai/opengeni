@@ -554,4 +554,54 @@ describe("protected page content", () => {
       expect(shown).toContain(expected);
     }
   });
+
+  test("a protected field keeps its label only when the label was read whole", () => {
+    const field = (rootChildIds: string[], labelChildIds: string[] | null): CdpAxNode[] => [
+      {
+        nodeId: "1",
+        ignored: false,
+        role: { value: "RootWebArea" },
+        childIds: rootChildIds,
+        backendDOMNodeId: 1,
+      },
+      ...(labelChildIds
+        ? [
+            {
+              nodeId: "9",
+              ignored: false,
+              role: { value: "LabelText" },
+              childIds: labelChildIds,
+              backendDOMNodeId: 9,
+            },
+          ]
+        : []),
+      {
+        nodeId: "10",
+        ignored: false,
+        role: { value: "textbox" },
+        name: {
+          value: "Password",
+          sources: [
+            {
+              type: "relatedElement",
+              nativeSource: "labelwrapped",
+              nativeSourceValue: { type: "nodeList", relatedNodes: [{ backendDOMNodeId: 9 }] },
+              value: { type: "computedString", value: "Password" },
+            },
+          ],
+        },
+        value: { value: "hunter2" },
+        backendDOMNodeId: 10,
+        protectedReason: "password",
+      },
+    ];
+    const fieldName = (nodes: CdpAxNode[]) =>
+      normalize(nodes).entries.find((entry) => entry.backendDOMNodeId === 10)?.name ?? null;
+    // The label and its text were read: the field shows its label.
+    expect(fieldName([...field(["9"], ["90", "10"]), text("90", 90, "Password")])).toBe("Password");
+    // A partial read left out the label's text, or the label itself: what
+    // was not read cannot be shown to be public, so the field is unnamed.
+    expect(fieldName(field(["9"], ["90", "10"]))).toBeNull();
+    expect(fieldName(field(["10"], null))).toBeNull();
+  });
 });

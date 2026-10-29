@@ -20,15 +20,18 @@ export type InteractionControlSurface = "browser" | "computer";
  * other request (opening, selecting or closing a tab, resuming or ending the
  * session, recordings, saving downloads). Failures are worded for it, since a
  * click that timed out has nothing to do with a live view, and a read that
- * timed out is safe to repeat where a request may already have run.
+ * timed out is safe to repeat where a request may already have run. Opening
+ * the browser or computer (`open`) gets its own next step, since the request
+ * that failed was the open itself.
  */
-export type InteractionControlRequest = "live_view" | "action" | "read" | "request";
+export type InteractionControlRequest = "live_view" | "action" | "read" | "open" | "request";
 
 /** The request kind of a browser or computer route's channel operation. */
 export function interactionControlRequestFor(operation: string): InteractionControlRequest {
   if (operation === "browser.action" || operation === "computer.action") return "action";
   if (operation === "browser.attach" || operation === "computer.attach") return "live_view";
   if (operation === "browser.read" || operation === "computer.read") return "read";
+  if (operation === "browser.create" || operation === "computer.create") return "open";
   return "request";
 }
 
@@ -266,7 +269,7 @@ function safeControlRequestId(value: string | null): value is string {
 function requestControlFailureRuling(
   error: SelfhostedControlError,
   surface: InteractionControlSurface,
-  request: "action" | "read" | "request",
+  request: "action" | "read" | "open" | "request",
   code: InteractionControlFailureCode,
 ): { status: number; code: ErrorCode; message: string } {
   const what = `this ${surface} ${request === "action" ? "action" : "request"}`;
@@ -281,16 +284,26 @@ function requestControlFailureRuling(
       return {
         status: 409,
         code: "conflict",
-        message: `This connected machine does not support ${what}.`,
+        // A browser request is unsupported when the machine's agent has no
+        // browser controller (it could not find one when it started) or one
+        // too old for the request.
+        message:
+          surface === "browser"
+            ? `This connected machine's Opengeni agent cannot run ${what}: its browser controller is missing or too old. Update or reinstall the agent on that machine; retrying will not help until then.`
+            : `This connected machine does not support ${what}.`,
       };
     case "not_found":
       return {
         status: 404,
         code: "not_found",
         message:
-          surface === "browser"
-            ? `The connected machine's browser controller is not running, so ${what} could not run. Open the browser again with browser_open, then look at the page before repeating it.`
-            : `The connected machine's screen controller is not running, so ${what} could not run. Open the computer again with computer_open, then look at the screen before repeating it.`,
+          request === "open"
+            ? surface === "browser"
+              ? "The connected machine's browser controller stopped while the browser was opening. Open it once more; if that fails too, restart the Opengeni agent on that machine."
+              : "The connected machine's screen controller stopped while the computer was opening. Open it once more; if that fails too, restart the Opengeni agent on that machine."
+            : surface === "browser"
+              ? `The connected machine's browser controller is not running, so ${what} could not run. Open the browser again with browser_open, then look at the page before repeating it.`
+              : `The connected machine's screen controller is not running, so ${what} could not run. Open the computer again with computer_open, then look at the screen before repeating it.`,
       };
     case "fenced":
       return {
@@ -319,7 +332,7 @@ function requestControlFailureRuling(
             ? `The connected machine did not answer ${what} in time. It only reads, so it is safe to retry.`
             : error.neverSent
               ? `The connected machine did not answer in time, so ${what} was not sent. It is safe to retry.`
-              : request === "request"
+              : request === "request" || request === "open"
                 ? `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "browser" : "screen"} before repeating it.`
                 : `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "page" : "window"} before doing anything again; do not repeat the action automatically.`,
       };

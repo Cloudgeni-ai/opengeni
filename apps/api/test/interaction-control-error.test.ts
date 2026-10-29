@@ -145,6 +145,8 @@ describe("connected-machine interaction control errors", () => {
     expect(interactionControlRequestFor("computer.read")).toBe("read");
     expect(interactionControlRequestFor("browser.control")).toBe("request");
     expect(interactionControlRequestFor("computer.end")).toBe("request");
+    expect(interactionControlRequestFor("browser.create")).toBe("open");
+    expect(interactionControlRequestFor("computer.create")).toBe("open");
 
     // A click that reached the machine and got no answer may have happened.
     const click = browserRouteError(timeout({ neverSent: false }), "action") as ApiHttpError;
@@ -189,7 +191,7 @@ describe("connected-machine interaction control errors", () => {
       AgentErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
       AgentErrorCode.ERROR_CODE_UNSPECIFIED,
     ]) {
-      for (const request of ["action", "read", "request"] as const) {
+      for (const request of ["action", "read", "open", "request"] as const) {
         const projected = interactionControlApiError(controlError(code), "browser", request)!;
         expect(projected.message).not.toContain("live view");
         expect(projected.message).not.toContain("PRIVATE");
@@ -235,6 +237,32 @@ describe("connected-machine interaction control errors", () => {
     );
     expect(interactionControlApiError(notFound, "computer", "read")!.message).toBe(
       "The connected machine's screen controller is not running, so this computer request could not run. Open the computer again with computer_open, then look at the screen before repeating it.",
+    );
+    // Opening is the request that failed, so its next step is not "open it
+    // again with browser_open": one more try, then the agent.
+    const failedOpen = browserRouteError(notFound, "open") as ApiHttpError;
+    expect(failedOpen.status).toBe(404);
+    expect(failedOpen.message).toBe(
+      "The connected machine's browser controller stopped while the browser was opening. Open it once more; if that fails too, restart the Opengeni agent on that machine.",
+    );
+    expect(interactionControlApiError(notFound, "computer", "open")!.message).toBe(
+      "The connected machine's screen controller stopped while the computer was opening. Open it once more; if that fails too, restart the Opengeni agent on that machine.",
+    );
+    expect(failedOpen.message).not.toContain("browser_open");
+    // An agent without a browser controller (none was installed beside it, or
+    // one too old) reports the request unsupported: the next step is the
+    // agent, never opening the browser again.
+    const unsupported = controlError(AgentErrorCode.ERROR_CODE_UNSUPPORTED);
+    for (const request of ["open", "action", "read", "request"] as const) {
+      const projected = interactionControlApiError(unsupported, "browser", request)!;
+      expect(projected.status).toBe(409);
+      expect(projected.message).not.toContain("browser_open");
+    }
+    expect(interactionControlApiError(unsupported, "browser", "open")!.message).toBe(
+      "This connected machine's Opengeni agent cannot run this browser request: its browser controller is missing or too old. Update or reinstall the agent on that machine; retrying will not help until then.",
+    );
+    expect(interactionControlApiError(unsupported, "computer", "action")!.message).toBe(
+      "This connected machine does not support this computer action.",
     );
     const consent = interactionControlApiError(
       controlError(AgentErrorCode.ERROR_CODE_CONSENT_REQUIRED),

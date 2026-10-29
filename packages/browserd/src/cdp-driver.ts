@@ -67,6 +67,7 @@ import {
   accessibilityContainer,
   CdpAccessibilityTreeTooLargeError,
   isProtectedReason,
+  nameRelatedBackendNodeIds,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAccessibilityEntry,
@@ -7462,10 +7463,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return unknown;
     }
     if (!Array.isArray(response.nodes)) return unknown;
+    // Marked with the frame's protected fields, as an observation's tree is,
+    // so a protected field keeps its label and never its value.
+    let marked: CdpAxNode[];
+    try {
+      const frameId = entry.frameId ?? state.frame.id;
+      const protectedNodes = await this.protectedFields(
+        this.commandSession(state, "Runtime.evaluate"),
+        frameId,
+      );
+      let nodes = response.nodes as CdpAxNode[];
+      if (protectedNodes.has(entry.backendDOMNodeId)) {
+        nodes = await this.withLabelSubtrees(state, frameId, nodes, entry.backendDOMNodeId);
+      }
+      marked = nodes.map((node) => {
+        const reason =
+          typeof node.backendDOMNodeId === "number"
+            ? protectedNodes.get(node.backendDOMNodeId)
+            : undefined;
+        return reason ? { ...node, protectedReason: reason } : node;
+      });
+    } catch {
+      return unknown;
+    }
     let snapshot: CdpAccessibilitySnapshot;
     try {
       snapshot = normalizeCdpAccessibilityTree({
-        nodes: response.nodes as CdpAxNode[],
+        nodes: marked,
         controllerGeneration: this.controllerGeneration,
         targetId: state.targetId,
         documentGeneration: state.documentGeneration,
@@ -7477,8 +7501,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (candidate) => candidate.backendDOMNodeId === entry.backendDOMNodeId,
     );
     if (!resolved) return unknown;
-    // An element that is, sits in or holds a protected field is named by its
-    // role alone, as an observation would not show its text either.
+    // An element that holds a protected field without being one is named by
+    // its role alone: this partial tree cannot show which of its text is
+    // public. A protected field itself keeps the name an observation shows
+    // (its label, never its value).
     let protectedReason: unknown;
     try {
       protectedReason = await this.callOnNode(
@@ -7495,11 +7521,71 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return {
       ...unknown,
       role: boundedTargetRole(resolved.role),
-      name: protectedReason ? null : boundedTargetText(resolved.name),
+      name: protectedReason && !resolved.protectedReason ? null : boundedTargetText(resolved.name),
       container: container
         ? { role: boundedTargetRole(container.role), name: boundedTargetText(container.name) }
         : null,
     };
+  }
+
+  /** A partial tree with the subtrees its target's name was taken from (a
+   * label, aria-labelledby) read in, so a protected field's label can be
+   * shown to hold no protected text. The read is bounded; what it leaves out
+   * keeps the label hidden. */
+  private async withLabelSubtrees(
+    state: TargetState,
+    frameId: string,
+    nodes: readonly CdpAxNode[],
+    backendDOMNodeId: number,
+  ): Promise<CdpAxNode[]> {
+    const byId = new Map<string, CdpAxNode>();
+    const byBackend = new Map<number, CdpAxNode>();
+    const add = (node: unknown): void => {
+      if (!isRecord(node) || typeof node.nodeId !== "string" || byId.has(node.nodeId)) return;
+      const axNode = node as CdpAxNode;
+      byId.set(node.nodeId, axNode);
+      if (typeof axNode.backendDOMNodeId === "number") {
+        byBackend.set(axNode.backendDOMNodeId, axNode);
+      }
+    };
+    for (const node of nodes) add(node);
+    const target = byBackend.get(backendDOMNodeId);
+    if (!target) return [...byId.values()];
+    let reads = 0;
+    const read = async (method: string, params: Record<string, unknown>): Promise<void> => {
+      if (reads >= LABEL_SUBTREE_READS || byId.size >= LABEL_SUBTREE_NODES) return;
+      reads += 1;
+      const response = await this.sendTarget<{ nodes?: unknown }>(state, method, params);
+      if (Array.isArray(response.nodes)) for (const node of response.nodes) add(node);
+    };
+    const pending: CdpAxNode[] = [];
+    for (const relatedId of nameRelatedBackendNodeIds(target)) {
+      if (!byBackend.has(relatedId)) {
+        await read("Accessibility.getPartialAXTree", {
+          backendNodeId: relatedId,
+          fetchRelatives: false,
+        });
+      }
+      const related = byBackend.get(relatedId);
+      if (related) pending.push(related);
+    }
+    const seen = new Set<string>();
+    while (pending.length > 0) {
+      const node = pending.pop()!;
+      const nodeId = String(node.nodeId);
+      if (node === target || seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      if (node.role?.value === "StaticText") continue;
+      const childIds = Array.isArray(node.childIds) ? node.childIds.map(String) : [];
+      if (childIds.some((childId) => !byId.has(childId))) {
+        await read("Accessibility.getChildAXNodes", { id: nodeId, frameId });
+      }
+      for (const childId of childIds) {
+        const child = byId.get(childId);
+        if (child) pending.push(child);
+      }
+    }
+    return [...byId.values()];
   }
 
   private async resolveLocator(
@@ -11229,17 +11315,30 @@ const HIT_TEST_FUNCTION = `function() {
 
 const PRIVATE_SELECTOR = "[data-private], [data-sensitive], [data-opengeni-private]";
 /** Every element SENSITIVE_REASON_FUNCTION can find a reason for. */
+/** Bounds on reading a protected field's label for an action's target. */
+const LABEL_SUBTREE_READS = 16;
+const LABEL_SUBTREE_NODES = 256;
 const SENSITIVE_CANDIDATE_SELECTOR = `[id], [name], [autocomplete], input, ${PRIVATE_SELECTOR}`;
 
 /** Why one element is a password, one-time code, payment, hidden or
- * explicitly private field, or null. */
+ * explicitly private field, or null. Password, one-time-code and cc-*
+ * autocomplete hints and data-private mark any element. A payment-like id or
+ * name marks only a form field (input, select, textarea, editable content),
+ * so a heading with id="credit-card-offers" or a select with
+ * id="link-expiration" stays readable; a bare "expiry"/"expiration" counts only
+ * as a whole name or beside card, cc or payment, or as an expiry date, month or
+ * year. */
 const SENSITIVE_REASON_FUNCTION = `function(node) {
   const nodeTag = String(node.tagName || "").toLowerCase();
   const type = nodeTag === "input" ? String(node.getAttribute("type") || "text").toLowerCase() : "";
   const autocomplete = String(node.getAttribute("autocomplete") || "").toLowerCase();
-  const fieldName = String(node.getAttribute("name") || "") + " " + String(node.getAttribute("id") || "");
+  const formField = nodeTag === "input" || nodeTag === "select" || nodeTag === "textarea" || node.isContentEditable === true;
+  const paymentName = (value) =>
+    /card.?(?:number|num\\b)|credit.?card|cvv|cvc|\\bcsc\\b|security.?code|(?:card|cc|payment).{0,12}?exp|exp(?:iry|iration)?.?(?:date|month|year|mm|yy)/i.test(value) ||
+    /^(?:expiry|expiration|exp)$/i.test(value);
+  const payment = formField && [node.getAttribute("name"), node.getAttribute("id")].some((value) => value && paymentName(String(value)));
   if (type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)) return "password";
-  if (/(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)) return "payment";
+  if (/(?:^|\\s)cc-/.test(autocomplete) || payment) return "payment";
   if (type === "hidden" || node.matches(${JSON.stringify(PRIVATE_SELECTOR)})) return "private";
   return null;
 }`;
