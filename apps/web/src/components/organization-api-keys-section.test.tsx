@@ -209,6 +209,132 @@ describe("organization API keys section", () => {
     container.remove();
   });
 
+  test("an organization admin who isn't the owner creates only member-level keys", async () => {
+    const createApiKey = mock(async () => ({ apiKey: key(), token: "og_member_level" }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <OrganizationApiKeysSection
+          organizationId="22222222-2222-4222-8222-222222222222"
+          canManage
+          memberLevelOnly
+          view="new-key"
+          onViewChange={() => undefined}
+          listApiKeys={async () => []}
+          createApiKey={createApiKey}
+          deleteApiKey={async () => key()}
+          listServiceAccounts={async () => [
+            { id: "44444444-4444-4444-8444-444444444444", name: "CI bot", role: "member" },
+            { id: "55555555-5555-4555-8555-555555555555", name: "Release bot", role: "admin" },
+          ]}
+        />,
+      );
+    });
+    await flush();
+    const pickers = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="combobox"]'));
+    const options = () =>
+      Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).map(
+        (each) => each.textContent ?? "",
+      );
+    // Only member service accounts can hold the key.
+    const holderPicker = pickers().find((each) =>
+      each.textContent?.includes("New service account"),
+    );
+    await act(async () => holderPicker!.click());
+    await flush();
+    expect(options().some((each) => each.startsWith("CI bot"))).toBe(true);
+    expect(options().some((each) => each.startsWith("Release bot"))).toBe(false);
+    await act(async () => holderPicker!.click());
+    await flush();
+    // Full access and Developer setup are the owner's; it starts at Read only.
+    const accessPicker = pickers().find((each) => each.textContent?.includes("Read only"));
+    if (!accessPicker) throw new Error("Missing access picker at Read only");
+    await act(async () => accessPicker.click());
+    await flush();
+    expect(options().some((each) => each.startsWith("Custom"))).toBe(true);
+    expect(options().some((each) => each.startsWith("Full access"))).toBe(false);
+    expect(options().some((each) => each.startsWith("Developer setup"))).toBe(false);
+    const custom = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+      (each) => each.textContent?.startsWith("Custom"),
+    );
+    await act(async () => custom!.click());
+    // People, key and billing administration can't be ticked.
+    // Each permission's own checkbox field, found by the permission it names.
+    const field = (permission: string) =>
+      Array.from(container.querySelectorAll<HTMLLabelElement>("label"))
+        .map((label) => label.parentElement?.parentElement ?? null)
+        .find((each) => each?.textContent?.includes(permission));
+    expect(field("api_keys:manage")?.hasAttribute("data-disabled")).toBe(true);
+    expect(field("billing:manage")?.hasAttribute("data-disabled")).toBe(true);
+    expect(field("sessions:read")?.hasAttribute("data-disabled")).toBe(false);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("an organization admin who isn't the owner revokes only member-level keys", async () => {
+    const memberKey = key({
+      id: "77777777-7777-4777-8777-777777777777",
+      name: "Member key",
+      permissionMode: "explicit",
+      permissions: ["sessions:read"],
+      serviceAccount: {
+        id: "44444444-4444-4444-8444-444444444444",
+        name: "CI bot",
+        role: "member",
+      },
+    });
+    const adminHeld = key({
+      id: "88888888-8888-4888-8888-888888888888",
+      name: "Admin held",
+      permissionMode: "explicit",
+      permissions: ["sessions:read"],
+      serviceAccount: {
+        id: "55555555-5555-4555-8555-555555555555",
+        name: "Release bot",
+        role: "admin",
+      },
+    });
+    const keyManager = key({
+      id: "99999999-9999-4999-8999-999999999999",
+      name: "Key manager",
+      permissionMode: "explicit",
+      permissions: ["api_keys:manage"],
+    });
+    const legacyAdmin = key({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "Legacy admin",
+      permissions: ["workspace:admin"],
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <OrganizationApiKeysSection
+          organizationId="22222222-2222-4222-8222-222222222222"
+          canManage
+          memberLevelOnly
+          listApiKeys={async () => [memberKey, adminHeld, keyManager, legacyAdmin]}
+          createApiKey={async () => ({ apiKey: memberKey, token: "unused" })}
+          deleteApiKey={async () => memberKey}
+        />,
+      );
+    });
+    await flush();
+    const revoke = (name: string) =>
+      container.querySelector(`button[aria-label="Revoke organization API key ${name}"]`);
+    expect(container.textContent).toContain("Legacy admin");
+    expect(revoke("Member key")).not.toBeNull();
+    expect(revoke("Admin held")).toBeNull();
+    expect(revoke("Key manager")).toBeNull();
+    expect(revoke("Legacy admin")).toBeNull();
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("explains the boundary and shows the one-time secret on the create page", async () => {
     const created = key({
       id: "33333333-3333-4333-8333-333333333333",

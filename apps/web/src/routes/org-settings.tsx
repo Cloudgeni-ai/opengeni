@@ -170,6 +170,7 @@ export function OrgSettingsRoute({
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOwnerLevelApiKeys,
     canManageOrganizationIntegrations,
     canMakeServiceAccountAdmin,
     administrator,
@@ -518,6 +519,7 @@ export function OrgSettingsRoute({
                 client={client}
                 organizationId={accountId}
                 canMakeAdmin={canMakeServiceAccountAdmin}
+                memberLevelOnly={!canManageOwnerLevelApiKeys}
                 location={serviceAccountsLocation}
                 onNavigate={navigateDeveloper}
                 onCreateKey={(serviceAccount) =>
@@ -561,6 +563,7 @@ export function OrgSettingsRoute({
                     client={client}
                     organizationId={accountId}
                     canMakeAdmin={canMakeServiceAccountAdmin}
+                    memberLevelOnly={!canManageOwnerLevelApiKeys}
                     location={{}}
                     onNavigate={navigateDeveloper}
                     onCreateKey={(serviceAccount) =>
@@ -578,6 +581,7 @@ export function OrgSettingsRoute({
                   key={`${identityKey}:organization-api-keys`}
                   organizationId={accountId}
                   canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+                  memberLevelOnly={!canManageOwnerLevelApiKeys}
                   view={organizationView === "new-key" ? "new-key" : undefined}
                   onViewChange={(view) =>
                     void navigate({

@@ -36,7 +36,13 @@ export type OrganizationSettingsAccess = {
   canManageBilling: boolean;
   canManageOrganizationKnowledge: boolean;
   canManageCompanyProfileAgentPolicy: boolean;
+  /**
+   * Organization API keys and service accounts: a literal `api_keys:manage`
+   * (the owner), or an organization admin who manages only member-level ones.
+   */
   canManageOrganizationApiKeys: boolean;
+  /** Keys and service accounts that manage people, keys or billing: the owner only. */
+  canManageOwnerLevelApiKeys: boolean;
   /**
    * Organization webhooks and the credential provider: the owner or an admin
    * signed in as themselves (or the single local user), as the server allows.
@@ -66,7 +72,7 @@ export function organizationSettingsAccess(input: {
   const canManageCompanyProfileAgentPolicy =
     canManageOrganizationKnowledge &&
     (accountGrant?.role === "owner" || accountGrant?.role === "admin");
-  const canManageOrganizationApiKeys = hasAccountPermission(
+  const canManageOwnerLevelApiKeys = hasAccountPermission(
     accessContext,
     accountId,
     "api_keys:manage",
@@ -82,6 +88,8 @@ export function organizationSettingsAccess(input: {
   const organizationAdministratorSession = managedHumanSession || singleUser;
   const canManageOrganizationIntegrations =
     organizationAdministratorSession && canAdministerOrganization(input);
+  const canManageOrganizationApiKeys =
+    canManageOwnerLevelApiKeys || canManageOrganizationIntegrations;
   const canMakeServiceAccountAdmin =
     organizationAdministratorSession &&
     hasAccountPermission(accessContext, accountId, "account:admin");
@@ -118,7 +126,7 @@ export function organizationSettingsAccess(input: {
     visible.add("insights");
     visible.add("billing");
   }
-  if (canManageOrganizationApiKeys || canManageOrganizationIntegrations) visible.add("developer");
+  if (canManageOrganizationApiKeys) visible.add("developer");
   // Connected agents belong to the people who connect them: every signed-in
   // member of a managed organization connects and manages their own.
   if (
@@ -145,6 +153,7 @@ export function organizationSettingsAccess(input: {
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOwnerLevelApiKeys,
     canManageOrganizationIntegrations,
     canMakeServiceAccountAdmin,
     visibleSections: visible,

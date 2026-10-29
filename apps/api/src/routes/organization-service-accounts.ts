@@ -18,13 +18,19 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { requireOrganizationApiKeyControlPermission, throwServiceAccountError } from "./api-keys";
+import {
+  requireMemberServiceAccount,
+  requireOrganizationApiKeyControlPermission,
+  throwServiceAccountError,
+  type OrganizationApiKeyControl,
+} from "./api-keys";
 
 /* ----------------------------------------------------------------------------
    Service accounts: organization identities with no person behind them. They
    hold organization API keys. Whoever may manage the organization's keys may
-   manage service accounts; only an organization administrator can make one an
-   admin. Deleting one revokes its keys at once.
+   manage service accounts; an organization admin manages only member service
+   accounts, and only the owner (a literal account:admin) makes one an admin or
+   changes an admin one. Deleting one revokes its keys at once.
    -------------------------------------------------------------------------- */
 
 const Id = z.string().uuid();
@@ -67,9 +73,10 @@ export function registerOrganizationServiceAccountRoutes(app: Hono, deps: ApiRou
     `${path}/:serviceAccountId`,
     zValidator("json", UpdateOrganizationServiceAccountRequest),
     async (c) => {
-      const { organizationId, context } = await requireControl(c, deps);
+      const { organizationId, context, control } = await requireControl(c, deps);
       const body = c.req.valid("json");
       if (body.role === "admin") requireOrganizationAdmin(context, organizationId);
+      await requireMemberServiceAccount(deps, control, organizationId, serviceAccountId(c));
       try {
         return c.json(
           OrganizationServiceAccount.parse(
@@ -89,7 +96,8 @@ export function registerOrganizationServiceAccountRoutes(app: Hono, deps: ApiRou
   );
 
   app.delete(`${path}/:serviceAccountId`, async (c) => {
-    const { organizationId } = await requireControl(c, deps);
+    const { organizationId, control } = await requireControl(c, deps);
+    await requireMemberServiceAccount(deps, control, organizationId, serviceAccountId(c));
     try {
       await deleteOrganizationServiceAccount(deps.db, organizationId, serviceAccountId(c));
     } catch (error) {
@@ -103,13 +111,17 @@ export function registerOrganizationServiceAccountRoutes(app: Hono, deps: ApiRou
 async function requireControl(
   c: Context,
   deps: ApiRouteDeps,
-): Promise<{ organizationId: string; context: AccessContext }> {
+): Promise<{
+  organizationId: string;
+  context: AccessContext;
+  control: OrganizationApiKeyControl;
+}> {
   const parsed = Id.safeParse(c.req.param("organizationId"));
   if (!parsed.success) throw new HTTPException(404, { message: "organization not found" });
   const organizationId = parsed.data.toLowerCase();
   const context = await requireAccessContext(c, deps);
-  requireOrganizationApiKeyControlPermission(context, organizationId);
-  return { organizationId, context };
+  const control = requireOrganizationApiKeyControlPermission(context, organizationId);
+  return { organizationId, context, control };
 }
 
 function serviceAccountId(c: Context): string {
@@ -118,11 +130,11 @@ function serviceAccountId(c: Context): string {
   return parsed.data.toLowerCase();
 }
 
-/** Only an organization administrator can make a service account an admin. */
+/** Only the owner (a literal account:admin) makes a service account an admin. */
 function requireOrganizationAdmin(context: AccessContext, organizationId: string): void {
   const grant = context.accountGrants.find((candidate) => candidate.accountId === organizationId);
   if (!grant?.permissions.includes("account:admin"))
     throw new HTTPException(403, {
-      message: "Only an organization administrator can make a service account an admin.",
+      message: "Only the organization owner can make a service account an admin.",
     });
 }

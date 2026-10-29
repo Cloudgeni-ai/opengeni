@@ -15,10 +15,12 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 /* End to end through the real app and PostgreSQL: an organization admin, like
-   the owner, manages the organization's webhooks and credential provider, and
-   sees and revokes everyone's personal API keys and connected agents; a member
-   does not, and being an admin in one organization grants nothing in another
-   where the same person is a member. */
+   the owner, manages the organization's webhooks and credential provider, sees
+   and revokes everyone's personal API keys and connected agents, and manages
+   member-level organization API keys and service accounts; keys and service
+   accounts that manage people, keys or billing stay the owner's. A member does
+   none of this, and being an admin in one organization grants nothing in
+   another where the same person is a member. */
 
 const origin = "http://opengeni.test";
 let shared: SharedTestDatabase;
@@ -231,5 +233,84 @@ describe("organization admins manage organization integrations", () => {
     expect(
       (await send(admin, org(acme.accountId, `/personal-api-keys/${memberKey}`), "DELETE")).status,
     ).toBe(204);
+
+    // Organization API keys and service accounts: an admin manages the
+    // member-level ones; owner-level keys and service accounts stay the owner's.
+    type CreatedKey = {
+      apiKey: { id: string; serviceAccount?: { id: string; role: string } | null };
+    };
+    const policy = (preset: "full" | "read_only") => ({
+      preset,
+      permissions: organizationAccessPresetPermissions(preset),
+      workspaceScope: { kind: "all" },
+    });
+    const orgKey = (person: Person, accountId: string, body: Record<string, unknown>) =>
+      send(person, org(accountId, "/api-keys"), "POST", {
+        name: `Automation ${crypto.randomUUID().slice(0, 8)}`,
+        ...body,
+      });
+    expect((await send(member, org(acme.accountId, "/api-keys"))).status).toBe(403);
+    expect((await send(admin, org(other.accountId, "/api-keys"))).status).toBe(403);
+    expect((await send(admin, org(acme.accountId, "/api-keys"))).status).toBe(200);
+    expect((await orgKey(member, acme.accountId, { policy: policy("read_only") })).status).toBe(
+      403,
+    );
+    expect((await orgKey(admin, other.accountId, { policy: policy("read_only") })).status).toBe(
+      403,
+    );
+    expect((await orgKey(admin, acme.accountId, { policy: policy("full") })).status).toBe(403);
+    expect((await orgKey(admin, acme.accountId, { access: "developer_setup" })).status).toBe(403);
+    expect((await orgKey(admin, acme.accountId, {})).status).toBe(403);
+    const readKeyResponse = await orgKey(admin, acme.accountId, { policy: policy("read_only") });
+    expect(readKeyResponse.status).toBe(201);
+    const readKey = ((await readKeyResponse.json()) as CreatedKey).apiKey;
+    expect(readKey.serviceAccount?.role).toBe("member");
+    const fullKeyResponse = await orgKey(owner, acme.accountId, { policy: policy("full") });
+    expect(fullKeyResponse.status).toBe(201);
+    const fullKey = ((await fullKeyResponse.json()) as CreatedKey).apiKey;
+    expect(fullKey.serviceAccount?.role).toBe("admin");
+    expect(
+      (
+        await orgKey(admin, acme.accountId, {
+          policy: policy("read_only"),
+          serviceAccountId: fullKey.serviceAccount!.id,
+        })
+      ).status,
+    ).toBe(403);
+    const keyPath = (id: string) => org(acme.accountId, `/api-keys/${id}`);
+    expect((await send(admin, keyPath(fullKey.id), "PATCH", { name: "Renamed" })).status).toBe(403);
+    expect((await send(admin, keyPath(fullKey.id), "DELETE")).status).toBe(403);
+    expect(
+      (await send(admin, keyPath(readKey.id), "PATCH", { policy: policy("full") })).status,
+    ).toBe(403);
+    expect((await send(admin, keyPath(readKey.id), "PATCH", { name: "Renamed" })).status).toBe(200);
+    expect((await send(member, keyPath(readKey.id), "DELETE")).status).toBe(403);
+    expect((await send(admin, keyPath(readKey.id), "DELETE")).status).toBe(200);
+
+    const accounts = org(acme.accountId, "/service-accounts");
+    expect((await send(member, accounts)).status).toBe(403);
+    expect((await send(admin, org(other.accountId, "/service-accounts"))).status).toBe(403);
+    expect((await send(admin, accounts)).status).toBe(200);
+    expect(
+      (await send(admin, accounts, "POST", { name: "Deploy bot", role: "admin" })).status,
+    ).toBe(403);
+    const created = await send(admin, accounts, "POST", { name: "Deploy bot", role: "member" });
+    expect(created.status).toBe(201);
+    const memberAccount = ((await created.json()) as { id: string }).id;
+    const ownerAccount = fullKey.serviceAccount!.id;
+    expect(
+      (await send(admin, `${accounts}/${ownerAccount}`, "PATCH", { name: "Renamed" })).status,
+    ).toBe(403);
+    expect((await send(admin, `${accounts}/${ownerAccount}`, "DELETE")).status).toBe(403);
+    expect(
+      (await send(admin, `${accounts}/${memberAccount}`, "PATCH", { role: "admin" })).status,
+    ).toBe(403);
+    expect(
+      (await send(admin, `${accounts}/${memberAccount}`, "PATCH", { name: "Release bot" })).status,
+    ).toBe(200);
+    expect((await send(admin, `${accounts}/${memberAccount}`, "DELETE")).status).toBe(204);
+    // The owner still manages everything.
+    expect((await send(owner, keyPath(fullKey.id), "DELETE")).status).toBe(200);
+    expect((await send(owner, `${accounts}/${ownerAccount}`, "DELETE")).status).toBe(204);
   });
 });
