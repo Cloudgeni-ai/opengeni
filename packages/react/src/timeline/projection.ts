@@ -35,9 +35,11 @@ import {
 } from "@opengeni/sdk/session-usage-limits";
 import {
   creditExhaustionText,
+  creditRefusalKindFromText,
   presentFailure,
   isCreditExhaustion,
   tryParseJson,
+  type CreditRefusalKind,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
@@ -2402,6 +2404,26 @@ function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
  * settles any other way (someone topped up and kept working) clears it.
  */
 export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
+  const payload = lastTurnEndPayload(events);
+  return payload ? isCreditExhaustionPayload(payload) : false;
+}
+
+/**
+ * The one-fix refusal (own-key fee or API use) the session's most recent turn
+ * ended on, or null. Read from the same LAST turn-end as
+ * `creditExhaustedFromEvents`, so a stop between model calls (a completed,
+ * budget-exhausted turn) names its fix too, and an older failure never does.
+ */
+export function creditRefusalFromEvents(events: SessionEvent[]): CreditRefusalKind | null {
+  const payload = lastTurnEndPayload(events);
+  if (!payload || !isCreditExhaustionPayload(payload)) return null;
+  return creditRefusalKindFromText(
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
+
+function lastTurnEndPayload(events: SessionEvent[]): Record<string, unknown> | null {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const event = ordered[index];
@@ -2412,9 +2434,9 @@ export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
     ) {
       continue;
     }
-    return isCreditExhaustionPayload(asRecord(event.payload));
+    return asRecord(event.payload);
   }
-  return false;
+  return null;
 }
 
 /** The latest session status carried in the event log, if any. */

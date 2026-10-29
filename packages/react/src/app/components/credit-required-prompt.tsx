@@ -194,7 +194,11 @@ export function CreditRequiredPromptView({
             {purpose === "topup"
               ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
               : refusalCode
-                ? "Choose an amount and pay in Stripe Checkout."
+                ? canBuyCredits && stripeEnabled
+                  ? "Choose an amount and pay in Stripe Checkout."
+                  : canBuyCredits
+                    ? "Add credits on Billing."
+                    : "Ask an organization owner to add credits."
                 : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
