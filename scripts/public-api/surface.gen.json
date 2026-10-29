@@ -10718,7 +10718,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"unattended\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
@@ -15398,6 +15398,7 @@
         "$.timeZone": "string?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)",
+        "$.unattended": "boolean?",
         "$.usageLimitMicros": "integer? null",
         "$.vaultPolicy": "ref(VaultPolicy)?",
         "$.visibility": "enum?=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",

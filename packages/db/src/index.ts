@@ -155,6 +155,8 @@ import {
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
+  sessionMetadataUnattended,
+  withSessionUnattendedMetadata,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -30239,6 +30241,11 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
+  /**
+   * No person will see or answer a question until the task ends. Recorded only
+   * under the reserved metadata key, which a caller-supplied value never sets.
+   */
+  unattended?: boolean;
   /** Vault narrowing for this session (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
@@ -30586,6 +30593,8 @@ type SessionCreateReplayIdentity = {
   memoryScope?: SessionMemoryScope;
   /** Resolved creation-time configuration; omitted and null are equivalent. */
   agentConfig?: ResolvedAgentConfig | null;
+  /** Unattended create; omitted means interactive. */
+  unattended?: boolean;
 };
 
 // Session metadata is immutable after creation and already participates in
@@ -30673,6 +30682,10 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  // A keyed retry must not silently flip whether anyone answers the agent.
+  if (sessionMetadataUnattended(existing.metadata) !== (input.unattended === true)) {
     throw new SessionCreateIdempotencyConflictError();
   }
   // A keyed retry that asks for a different agent-access, end-user, or memory
@@ -30897,15 +30910,18 @@ async function createSessionInTransaction(
   // A session an agent starts never stores a secret value its attempt knows.
   input = { ...input, initialMessage: maskSecretValuesForStorage(input.initialMessage, "message") };
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
-  const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    withBundledSkillSelectionMetadata(
-      metadataWithAgentConfigCreateIdentity(
-        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
-        input.agentConfig,
+  const sessionMetadata = withSessionUnattendedMetadata(
+    metadataWithSelectedInstalledSkillCreateIdentity(
+      withBundledSkillSelectionMetadata(
+        metadataWithAgentConfigCreateIdentity(
+          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+          input.agentConfig,
+        ),
+        input.bundledSkillIds,
       ),
-      input.bundledSkillIds,
+      selectedInstalledSkillIds,
     ),
-    selectedInstalledSkillIds,
+    input.unattended === true,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
@@ -30966,6 +30982,7 @@ async function createSessionInTransaction(
         ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
         ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        ...(input.unattended ? { unattended: true } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
@@ -31353,6 +31370,7 @@ async function createSessionInTransaction(
           ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+          ...(input.unattended ? { unattended: true } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -91830,7 +91848,11 @@ function mapSession(
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
-    metadata: row.metadata,
+    // A person makes a fork to continue the work, so a fork reads as attended
+    // even though the fork routine copies the source row's metadata.
+    metadata: row.forkedFromSessionId
+      ? withSessionUnattendedMetadata(row.metadata, false)
+      : row.metadata,
     ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,

@@ -19320,6 +19320,34 @@ export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
+/**
+ * Reserved session-metadata key recording that the session is unattended: no
+ * person will see or answer a question until its task ends. Session metadata
+ * is immutable after creation, so this is frozen with the create. Create
+ * admission sets it only from `CreateSessionRequest.unattended` and drops any
+ * caller-supplied value.
+ */
+export const SESSION_UNATTENDED_METADATA_KEY = "_opengeniUnattended";
+
+/** True only when session metadata records an unattended create. */
+export function sessionMetadataUnattended(metadata: unknown): boolean {
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>)[SESSION_UNATTENDED_METADATA_KEY] === true
+  );
+}
+
+/** `metadata` with the reserved unattended key set from `unattended` alone. */
+export function withSessionUnattendedMetadata(
+  metadata: Record<string, unknown>,
+  unattended: boolean,
+): Record<string, unknown> {
+  const { [SESSION_UNATTENDED_METADATA_KEY]: _ignored, ...rest } = metadata;
+  return unattended ? { ...rest, [SESSION_UNATTENDED_METADATA_KEY]: true } : rest;
+}
+
 export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
   rejectingRemovedFields(
     ["turnInstructions", "selectedHostMcpDelegations"],
@@ -19365,6 +19393,15 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         initialMessage: z.string().min(1).optional(),
         /** Exempt the new session from the idle-session archive (for persistent agents). */
         keepLive: primitives.optionalBoolean,
+        /**
+         * No person will see or answer questions until this session's task ends
+         * (an API automation or other headless run). The agent is told so, and
+         * resolves open choices itself instead of asking; tools that wait for a
+         * person are not offered. Frozen at create for every later turn;
+         * omitted or false keeps the ordinary interactive behavior. Not
+         * inherited by child sessions; a fork reads as attended.
+         */
+        unattended: primitives.optionalBoolean,
         /** The new chat's name, description and avatar, as if a person set them
          * (a bot started from a template, for example). Display metadata only;
          * never sent to the model. */

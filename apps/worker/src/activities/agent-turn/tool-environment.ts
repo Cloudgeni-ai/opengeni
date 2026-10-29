@@ -1,6 +1,7 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
+import { firstPartyToolsForAttendance, sessionIsUnattended } from "./unattended";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -501,13 +502,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   if (sharedSkillsResult.status === "rejected") throw sharedSkillsResult.reason;
   const skillConfiguration = skillConfigurationResult.value;
   const sharedSkillDescriptors = sharedSkillsResult.value;
-  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    scheduledTurnMcpServerIds(turn) !== null
-      ? allowedFirstPartyMcpToolsForSession(
-          runSettings,
-          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
-        )
-      : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
+  // An unattended session has no tool that waits for a person to act.
+  const selectedFirstPartyMcpTools = firstPartyToolsForAttendance(
+    toolFamilies.firstPartyTools(
+      scheduledTurnMcpServerIds(turn) !== null
+        ? allowedFirstPartyMcpToolsForSession(
+            runSettings,
+            scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+          )
+        : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
+    ),
+    sessionIsUnattended(session),
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
