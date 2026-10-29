@@ -293,6 +293,16 @@ impl Chunked {
         }
     }
 
+    /// The same store reading the time, which names the day of what it
+    /// stores, from `clock`: in a fleet, the fleet's.
+    #[must_use]
+    pub fn with_clock(self, clock: compute_storage::fresh::Clock) -> Self {
+        Self {
+            chunks: self.chunks.with_clock(clock),
+            ..self
+        }
+    }
+
     /// Checks once, before anything is stored, that the store can keep its
     /// pointers safely: a host on its own keeps them in its object store,
     /// which must then refuse a second create of the same object and a
@@ -367,7 +377,7 @@ impl Chunked {
         let Some(digest) = manifest else {
             return HashMap::new();
         };
-        match self.chunks.get_manifest(digest).await {
+        match self.chunks.get_optional_manifest(digest).await {
             Ok(manifest) => whole_chunks(manifest),
             Err(error) => {
                 tracing::debug!(%error, "earlier copy unreadable; archiving everything");
@@ -447,7 +457,7 @@ impl Chunked {
         }
         *held = None;
         let manifest = match parse_head(OP, &pointer) {
-            Ok(stored) => self.chunks.get_manifest(&stored.disk).await.ok(),
+            Ok(stored) => self.chunks.get_optional_manifest(&stored.disk).await.ok(),
             Err(_) => None,
         };
         let Some(manifest) = manifest else {
@@ -849,7 +859,7 @@ impl Store for Chunked {
         let profile = async {
             if let Some(reference) = &head.profile {
                 // A missing or damaged profile only makes the wake slower.
-                match self.chunks.get_chunk(reference).await {
+                match self.chunks.get_optional_chunk(reference).await {
                     Ok(bytes) => {
                         let _ = tokio::fs::write(&into.profile, bytes).await;
                     }

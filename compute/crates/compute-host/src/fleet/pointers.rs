@@ -3,8 +3,16 @@
 //! registration it holds. Until it holds one, and while the service cannot
 //! answer yet, every read and write fails as a transfer does, and is tried
 //! again.
+//!
+//! Every answer tells the fleet's clock, and the host names the day of
+//! what it stores by that clock ([`ControlPointers::clock`]), not by its
+//! own: an archive begins with a pointer request, so the clock is fresh
+//! when it names anything, and a host whose own clock is a day out cannot
+//! name an object a sweep takes as old.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use compute_fleet::Stamp;
@@ -12,6 +20,7 @@ use compute_protocol::fleet::{
     POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite, PointerWritten,
 };
 use compute_storage::Error;
+use compute_storage::fresh::{Clock, offset_ms};
 use compute_storage::pointer_store::{Kept, PointerStore, Version};
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -22,6 +31,10 @@ use super::gate::LeaseGate;
 /// How long one pointer request may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How far this host's clock may be from the fleet's before it warns, in
+/// milliseconds.
+const CLOCK_WARN_MS: i64 = 60_000;
+
 /// The service's pointers, as this host reaches them.
 #[derive(Clone)]
 pub struct ControlPointers {
@@ -30,6 +43,12 @@ pub struct ControlPointers {
     control: String,
     /// Holds the registration the host's requests are made under.
     gate: LeaseGate,
+    /// How far the fleet's clock was ahead of this host's at the last
+    /// answer, in milliseconds.
+    offset_ms: Arc<AtomicI64>,
+    /// The offset last warned about, so a host far off warns once, not
+    /// at every answer.
+    warned_ms: Arc<AtomicI64>,
 }
 
 impl std::fmt::Debug for ControlPointers {
@@ -49,6 +68,32 @@ impl ControlPointers {
             http,
             control: control.trim_end_matches('/').to_owned(),
             gate,
+            offset_ms: Arc::new(AtomicI64::new(0)),
+            warned_ms: Arc::new(AtomicI64::new(0)),
+        }
+    }
+
+    /// The fleet's clock, as the service last told it: this host's moved by
+    /// how far the fleet's was ahead at the last answer. A chunk store in a
+    /// fleet names the day of what it stores by it.
+    #[must_use]
+    pub fn clock(&self) -> Clock {
+        Clock::following(Arc::clone(&self.offset_ms))
+    }
+
+    /// Notes the fleet's clock, `now_ms`, as an answer just told it.
+    fn heard(&self, now_ms: u64) {
+        let offset = offset_ms(now_ms, SystemTime::now());
+        self.offset_ms.store(offset, Ordering::Relaxed);
+        let warned = self.warned_ms.load(Ordering::Relaxed);
+        if offset.saturating_abs() > CLOCK_WARN_MS
+            && offset.saturating_sub(warned).saturating_abs() > CLOCK_WARN_MS
+        {
+            self.warned_ms.store(offset, Ordering::Relaxed);
+            tracing::warn!(
+                offset_ms = offset,
+                "this host's clock is far from the fleet's; it names what it stores by the fleet's"
+            );
         }
     }
 
@@ -100,6 +145,7 @@ impl PointerStore for ControlPointers {
                 name: name.to_owned(),
             };
             let found: PointerFound = self.post(POINTER_READ_PATH, &read).await?;
+            self.heard(found.now_ms);
             Ok(found.kept.map(|kept| Kept {
                 owner: Stamp {
                     epoch: compute_fleet::OwnerEpoch(kept.owner_epoch),
@@ -137,6 +183,7 @@ impl PointerStore for ControlPointers {
                 on,
             };
             let written: PointerWritten = self.post(POINTER_WRITE_PATH, &write).await?;
+            self.heard(written.now_ms);
             Ok(written.version.map(Version::Row))
         })
     }

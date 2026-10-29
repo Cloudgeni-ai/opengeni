@@ -65,7 +65,14 @@ order, which write lands.
   - nothing writes a name of an earlier day, so a late delete never takes
     a newer write.
 
-  Clocks may disagree by up to an hour, well within the day of margin.
+- **A fleet goes by one clock**, its database's. The control service tells
+  it in every answer to a host's pointer request, and a host names the day
+  of what it stores by it, not by its own clock: an archive begins with a
+  pointer request, so the clock is fresh whenever it names anything. A
+  sweep reads it before it starts. So a host whose clock is a day out
+  cannot write a name a sweep takes as old, and the hour of disagreement
+  the rule allows is left to the time a request takes. A host on its own
+  goes by its own clock, which its sweep reads too.
   Objects in the old layout (`chunks/v1`, `manifests/v1`) are never
   written again; one no pointer names is deleted once it was last stored
   more than a week before the sweep, as before.
@@ -80,8 +87,12 @@ order, which write lands.
   store itself: a host says in its registration that it keeps them in the
   service. It copies every `pointers/v3` object into the table (a row
   already there wins) and records the store as imported; a store with no
-  pointers is recorded at once. The record is made in one transaction that
-  checks again that no such host is live, and that none changed since the
+  pointers is recorded at once. Nothing removes a pointer from an object
+  store, so one listed that reads as not there is on a store catching up:
+  it is read again for five minutes, and if still not there the import
+  fails and is tried again, never leaving it out. The record is made in
+  one transaction that checks again that no such host is live, and that
+  none changed since the
   leader read the hosts before reading the object store, so a host of an
   earlier release that registered, renewed or wrote meanwhile is waited for
   once more. From then on a host that does not keep its pointers in the
@@ -93,6 +104,11 @@ order, which write lands.
   service's pointers name, so `compute-host sweep`, and a host on its own,
   refuse a marked store. A service whose import has not happened refuses
   to sweep.
+- **A sweep adopts what an import missed.** Before it fences, a sweep that
+  deletes copies into the table every `pointers/v3` object the table has
+  no row of, as the import would have (rows are never removed, so such a
+  name was never moved in). A store that listed a pointer late during the
+  import then cannot leave the copy it names to the sweep.
 - **Stored copies get format 4**, whose manifest names carry their day; a
   host reads formats 3 and 4 and writes 4.
 - **A read waits for a store that is catching up.** Something names every
@@ -104,6 +120,9 @@ order, which write lands.
   chunk or manifest the store says is not there is tried again for five
   minutes, and only then taken as gone. A check whether an object is
   stored still answers at once: at worst the bytes are stored again.
+  A read of what only saves time (a wake's profile, a working-set pack,
+  the earlier copy and image an archive reuses chunks of) does not wait:
+  the reader goes on without it at once.
 
 ## Consequences
 
@@ -118,8 +137,20 @@ order, which write lands.
   renew its lease, and stops archiving with it.
 - The table holds one row per sandbox, image and template ever stored,
   tombstones included: a few hundred bytes each.
-- A fleet whose hosts are mid-upgrade archives nothing until the last old
-  host is gone, normally seconds after it stops.
+- A fleet whose hosts are mid-upgrade archives and restores nothing on its
+  upgraded hosts until the last old host is gone, normally seconds after
+  it stops: upgrade all hosts promptly after the service.
+  `compute_control_pointers_waiting_hosts` counts the hosts the move waits
+  for.
+- A control replica of an earlier release still serving after the move
+  (only when no host was live during the service's own rollout) deletes or
+  forgets a pointer only in the object store: what it named stays stored
+  until removed by hand, never lost.
+- An archive store must acknowledge a write only once it keeps it
+  durably, as GCS, Azure and S3 do: a host drops its own copy once the
+  store holds the chunks. Garage in its `dangerous` consistency mode
+  acknowledges once one node has a write, so a node lost before it copied
+  a write to another loses it, and with it the copies that name it.
 - Copying a fleet's store elsewhere is a copy of its chunks and manifests:
   the pointers are already in the service.
 - A chunk or manifest that is really gone takes five minutes to fail,

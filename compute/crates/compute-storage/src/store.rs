@@ -507,13 +507,26 @@ impl ChunkStore {
     /// have happened in transit; a chunk that is bad twice is copied to
     /// quarantine, and a later upload of the same content repairs it.
     pub async fn get_chunk(&self, reference: &ChunkRef) -> Result<Vec<u8>> {
+        self.get_chunk_within(reference, self.settle).await
+    }
+
+    /// Reads a chunk whose absence only costs time, such as a wake's
+    /// profile or a working-set pack, as [`Self::get_chunk`] does but
+    /// taking a store that says it is not there at its word at once: the
+    /// reader goes on without it rather than wait for a store that may be
+    /// catching up.
+    pub async fn get_optional_chunk(&self, reference: &ChunkRef) -> Result<Vec<u8>> {
+        self.get_chunk_within(reference, Duration::ZERO).await
+    }
+
+    async fn get_chunk_within(&self, reference: &ChunkRef, settle: Duration) -> Result<Vec<u8>> {
         reference.validate()?;
         let path = self.path(&reference.key());
         let mut attempt = 0;
         loop {
             attempt += 1;
             match self
-                .settled(&path, || self.read_chunk(&path, reference))
+                .settled(&path, settle, || self.read_chunk(&path, reference))
                 .await
             {
                 Err(Error::Integrity | Error::Truncated { .. }) if attempt == 1 => {}
@@ -572,13 +585,24 @@ impl ChunkStore {
     /// once more, since the damage may have happened in transit; one bad
     /// twice is copied to quarantine.
     pub async fn get_manifest(&self, name: &str) -> Result<DiskManifest> {
+        self.get_manifest_within(name, self.settle).await
+    }
+
+    /// Reads a manifest whose absence only costs time, such as the one of
+    /// the image an archive reuses chunks of, taking a store that says it
+    /// is not there at its word at once (see [`Self::get_optional_chunk`]).
+    pub async fn get_optional_manifest(&self, name: &str) -> Result<DiskManifest> {
+        self.get_manifest_within(name, Duration::ZERO).await
+    }
+
+    async fn get_manifest_within(&self, name: &str, settle: Duration) -> Result<DiskManifest> {
         let (_, digest) = manifest_name(name)?;
         let path = self.path(&Self::manifest_key(name)?);
         let mut attempt = 0;
         loop {
             attempt += 1;
             match self
-                .settled(&path, || self.read_manifest(&path, digest))
+                .settled(&path, settle, || self.read_manifest(&path, digest))
                 .await
             {
                 Err(Error::Integrity) if attempt == 1 => {}
@@ -605,10 +629,11 @@ impl ChunkStore {
     }
 
     /// Runs `read` of `path`, again while the store answers that nothing is
-    /// there, for up to [`Self::with_settle`]'s time ([`SETTLE`]).
+    /// there, for up to `settle` ([`Self::with_settle`]'s time, [`SETTLE`]).
     async fn settled<T, F: Future<Output = Result<T>>>(
         &self,
         path: &Path,
+        settle: Duration,
         mut read: impl FnMut() -> F,
     ) -> Result<T> {
         let started = tokio::time::Instant::now();
@@ -616,18 +641,17 @@ impl ChunkStore {
         loop {
             match read().await {
                 Err(Error::Object(object_store::Error::NotFound { .. }))
-                    if started.elapsed() < self.settle =>
+                    if started.elapsed() < settle =>
                 {
                     if delay == Duration::from_millis(100) {
                         tracing::warn!(
                             %path,
-                            settle_s = self.settle.as_secs(),
+                            settle_s = settle.as_secs(),
                             "the store does not have an object a stored copy names; reading it \
                              again while the store may still be catching up"
                         );
                     }
-                    tokio::time::sleep(delay.min(self.settle.saturating_sub(started.elapsed())))
-                        .await;
+                    tokio::time::sleep(delay.min(settle.saturating_sub(started.elapsed()))).await;
                     delay = (delay * 2).min(SETTLE_DELAY_MAX);
                 }
                 result => return result,

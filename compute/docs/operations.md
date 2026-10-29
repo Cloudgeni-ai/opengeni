@@ -796,9 +796,24 @@ before users move to compute from Modal:
   `compute-host sweep`. When a fleet first runs a release that keeps them
   in the service, the service moves them in by itself once no host of an
   earlier release is live, and marks the object store so that nothing
-  sweeps by the pointers left there; until then hosts archive nothing and
-  the sweep refuses to start. Copying a fleet's archive to another store
-  is then a copy of its `chunks/` and `manifests/`.
+  sweeps by the pointers left there; until then hosts of the new release
+  neither archive nor restore and the sweep refuses to start, so upgrade
+  every host soon after the service. `compute_control_pointers_imported`
+  says whether the move happened and
+  `compute_control_pointers_waiting_hosts` how many hosts of an earlier
+  release it waits for. Each sweep first adopts any pointer the object
+  store still holds that the service has none of (one an import missed
+  on a store that listed it late), and says so. Copying a fleet's archive
+  to another store is then a copy of its `chunks/` and `manifests/`.
+- **One clock.** Hosts in a fleet name the day of what they store by the
+  fleet's clock, the database's, which the service tells with every
+  pointer answer; the sweep starts by it too. A host or replica whose own
+  clock is more than a minute from it logs a warning, but stores safely.
+- **The archive store must keep what it acknowledges.** A host drops its
+  local copy once the store holds the chunks, so a store that acknowledges
+  a write before it is durable (Garage in its `dangerous` consistency
+  mode, which acknowledges once one node has it) can lose a stored copy if
+  a node fails in the moment before it passed a write on.
 - **Forgotten memory images** (30 days after last use by default) lose
   their pointer entry together with their working-set pack, and their
   chunks go at a following sweep under the same rule.

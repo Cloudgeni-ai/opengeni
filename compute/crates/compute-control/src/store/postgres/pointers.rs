@@ -8,7 +8,7 @@
 //! admitted before.
 
 use compute_fleet::{OwnerEpoch, Stamp};
-use deadpool_postgres::Transaction;
+use deadpool_postgres::{GenericClient, Transaction};
 use tokio_postgres::Row;
 
 use super::{PostgresStore, big, corrupt, database, small};
@@ -139,6 +139,25 @@ impl PostgresStore {
             .transpose()
     }
 
+    pub(super) async fn adopt_pointers_now(&self, found: &[Found]) -> Result<usize> {
+        let client = self.client().await?;
+        let kept = insert_absent(&client, found).await?;
+        Ok(usize::try_from(kept).unwrap_or(usize::MAX))
+    }
+
+    pub(super) async fn clock_ms_now(&self) -> Result<u64> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "select (extract(epoch from clock_timestamp()) * 1000)::bigint",
+                &[],
+            )
+            .await
+            .map_err(database)?;
+        small(row.get(0))
+    }
+
     pub(super) async fn import_pointers_now(
         &self,
         found: &[Found],
@@ -177,26 +196,7 @@ impl PostgresStore {
         if !waiting.is_empty() {
             return Ok(Import::Waiting(waiting));
         }
-        let mut names = Vec::with_capacity(found.len());
-        let mut epochs = Vec::with_capacity(found.len());
-        let mut saves = Vec::with_capacity(found.len());
-        let mut pointers = Vec::with_capacity(found.len());
-        for found in found {
-            names.push(found.name.as_str());
-            epochs.push(big(found.owner.epoch.0)?);
-            saves.push(big(found.owner.save)?);
-            pointers.push(found.pointer.as_slice());
-        }
-        tx.execute(
-            "insert into compute_pointers (name, owner_epoch, owner_save, pointer, version) \
-             select name, owner_epoch, owner_save, pointer, nextval('compute_pointer_versions') \
-             from unnest($1::text[], $2::bigint[], $3::bigint[], $4::bytea[]) \
-             as found (name, owner_epoch, owner_save, pointer) \
-             on conflict (name) do nothing",
-            &[&names, &epochs, &saves, &pointers],
-        )
-        .await
-        .map_err(database)?;
+        insert_absent(&tx, found).await?;
         tx.execute(
             "insert into compute_pointers_imported (imported_ms, from_store) values ($1, $2)",
             &[&big(at_ms)?, &from],
@@ -209,6 +209,32 @@ impl PostgresStore {
             from: from.to_owned(),
         }))
     }
+}
+
+/// Keeps each of `found` the store has no pointer of, a pointer kept
+/// winning: how many it kept.
+async fn insert_absent(client: &impl GenericClient, found: &[Found]) -> Result<u64> {
+    let mut names = Vec::with_capacity(found.len());
+    let mut epochs = Vec::with_capacity(found.len());
+    let mut saves = Vec::with_capacity(found.len());
+    let mut pointers = Vec::with_capacity(found.len());
+    for found in found {
+        names.push(found.name.as_str());
+        epochs.push(big(found.owner.epoch.0)?);
+        saves.push(big(found.owner.save)?);
+        pointers.push(found.pointer.as_slice());
+    }
+    client
+        .execute(
+            "insert into compute_pointers (name, owner_epoch, owner_save, pointer, version) \
+             select name, owner_epoch, owner_save, pointer, nextval('compute_pointer_versions') \
+             from unnest($1::text[], $2::bigint[], $3::bigint[], $4::bytea[]) \
+             as found (name, owner_epoch, owner_save, pointer) \
+             on conflict (name) do nothing",
+            &[&names, &epochs, &saves, &pointers],
+        )
+        .await
+        .map_err(database)
 }
 
 fn imported(row: &Row) -> Result<Imported> {

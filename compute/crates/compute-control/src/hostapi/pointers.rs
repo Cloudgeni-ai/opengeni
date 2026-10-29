@@ -57,6 +57,7 @@ pub(super) async fn read<S: Store>(
 ) -> Result<Json<PointerFound>, Refused> {
     let pointers = pointers_for(&api, &peer, read.epoch, &read.name).await?;
     let kept = pointers.read(&read.name).await.map_err(unanswered)?;
+    let now_ms = pointers.now_ms().await.map_err(unanswered)?;
     Ok(Json(PointerFound {
         kept: kept.map(|row| KeptPointer {
             owner_epoch: row.owner.epoch.0,
@@ -64,6 +65,7 @@ pub(super) async fn read<S: Store>(
             pointer: row.pointer,
             version: row.version,
         }),
+        now_ms,
     }))
 }
 
@@ -80,9 +82,11 @@ pub(super) async fn write<S: Store>(
         epoch: OwnerEpoch(write.owner_epoch),
         save: write.owner_save,
     };
+    // Read first, so a write that lands is never answered as failed.
+    let now_ms = pointers.now_ms().await.map_err(unanswered)?;
     let version = pointers
         .write(&write.name, owner, &write.pointer, write.on)
         .await
         .map_err(unanswered)?;
-    Ok(Json(PointerWritten { version }))
+    Ok(Json(PointerWritten { version, now_ms }))
 }

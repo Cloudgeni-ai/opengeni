@@ -928,10 +928,12 @@ async fn run_with_store(
             .with_compress_threads(threads.compress)
             .with_watch(Arc::new(StoreAlarms(config.observer.clone())));
         if let Some((fleet, prepared)) = fleet {
-            // The control service keeps a fleet's pointers (ADR 25).
+            // The control service keeps a fleet's pointers (ADR 25), and
+            // what the host stores is named by the fleet's clock it tells.
             let pointers = fleet.pointers(&prepared.gate)?;
+            let clock = pointers.clock();
             let leased = Leased::new(
-                chunked.with_pointers(Arc::new(pointers)),
+                chunked.with_pointers(Arc::new(pointers)).with_clock(clock),
                 prepared.gate.clone(),
             );
             return run_agent(

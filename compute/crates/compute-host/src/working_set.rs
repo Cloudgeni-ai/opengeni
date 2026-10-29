@@ -412,7 +412,7 @@ pub(crate) async fn fetch(
     zero_chunks: &Arc<[bool]>,
 ) -> Vec<Range<u64>> {
     let index =
-        match chunks.get_chunk(index).await.map(|bytes| {
+        match chunks.get_optional_chunk(index).await.map(|bytes| {
             serde_json::from_slice::<PackIndex>(&bytes).map_err(|error| error.to_string())
         }) {
             Ok(Ok(index)) => index,
@@ -433,7 +433,7 @@ pub(crate) async fn fetch(
     let fetched: Vec<Option<Vec<u64>>> = stream::iter(index.parts)
         .map(|part| async move {
             let _permit = transfers.acquire().await.ok()?;
-            let plain = match chunks.get_chunk(&part.chunk).await {
+            let plain = match chunks.get_optional_chunk(&part.chunk).await {
                 Ok(plain) => plain,
                 Err(error) => {
                     tracing::warn!(%error, "working-set pack part unavailable; its pages come through chunks");

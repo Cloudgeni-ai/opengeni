@@ -1815,6 +1815,60 @@ async fn pointers_are_replaced_only_on_the_version_their_writer_read() {
     each(pointer_writes, pointer_writes).await;
 }
 
+async fn pointer_adoptions<S: Store>(store: S) {
+    let kept = format!("s-{:016x}", random());
+    let missed = format!("s-{:016x}", random());
+    let version = store
+        .write_pointer(&kept, stamp(5, 1), b"newer", None)
+        .await
+        .unwrap()
+        .expect("created");
+    let found = |name: &str, pointer: &[u8]| Found {
+        name: name.to_owned(),
+        owner: stamp(1, 1),
+        pointer: pointer.to_vec(),
+    };
+    // Pointers an object store still holds from before the import: one the
+    // store keeps a newer copy of, and one an import missed.
+    let adopted = store
+        .adopt_pointers(&[found(&kept, b"older"), found(&missed, b"missed")])
+        .await
+        .unwrap();
+    assert_eq!(adopted, 1, "only the one the store had none of");
+    assert_eq!(
+        store.pointer(&kept).await.unwrap(),
+        Some(PointerRow {
+            owner: stamp(5, 1),
+            pointer: b"newer".to_vec(),
+            version,
+        }),
+        "a pointer the store keeps wins"
+    );
+    let row = store.pointer(&missed).await.unwrap().expect("adopted");
+    assert_eq!(
+        (row.owner, row.pointer.as_slice()),
+        (stamp(1, 1), &b"missed"[..])
+    );
+    assert!(row.version > version, "a version no write had");
+    assert_eq!(
+        store
+            .adopt_pointers(&[found(&missed, b"again")])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(store.adopt_pointers(&[]).await.unwrap(), 0);
+
+    // The fleet's clock is the store's.
+    let clock = store.clock_ms().await.unwrap();
+    assert!(clock.abs_diff(now_ms()) < 60_000, "{clock}");
+}
+
+#[tokio::test]
+async fn pointers_an_import_missed_are_adopted_and_a_kept_one_wins() {
+    each(pointer_adoptions, pointer_adoptions).await;
+}
+
 /// A registration of a host of a release that keeps its pointers in the
 /// object store itself.
 fn earlier(name: &str) -> Register {

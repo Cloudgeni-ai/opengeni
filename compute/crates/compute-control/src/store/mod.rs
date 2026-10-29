@@ -582,6 +582,16 @@ pub trait Store: Send + Sync + 'static {
     /// When the fleet's pointers were moved into the store, if they were.
     fn pointers_imported(&self) -> impl Future<Output = Result<Option<Imported>>> + Send;
 
+    /// Keeps each of `found`, pointers the object store still holds from
+    /// before the import, that the store has none of: answers how many it
+    /// kept. A pointer the store keeps always wins, as in the import.
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send;
+
+    /// The fleet's clock: the time, in milliseconds since 1970, as the
+    /// store reads it (its database's clock), which every host names the
+    /// day of what it stores by and every sweep starts by.
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send;
+
     /// Moves `found`, the pointers read from the object store `from`, into
     /// the store and records them imported at `at_ms`, in one transaction,
     /// a pointer already kept winning over one found: only while no live

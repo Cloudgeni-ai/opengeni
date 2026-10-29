@@ -68,6 +68,26 @@ impl Inner {
         self.pointers.imported.clone()
     }
 
+    pub(super) fn adopt_pointers(&mut self, found: &[Found]) -> usize {
+        let mut kept = 0;
+        for found in found {
+            if self.pointers.rows.contains_key(&found.name) {
+                continue;
+            }
+            let version = self.pointers.next();
+            self.pointers.rows.insert(
+                found.name.clone(),
+                PointerRow {
+                    owner: found.owner,
+                    pointer: found.pointer.clone(),
+                    version,
+                },
+            );
+            kept += 1;
+        }
+        kept
+    }
+
     pub(super) fn import_pointers(
         &mut self,
         found: &[Found],
@@ -90,20 +110,7 @@ impl Inner {
         if !waiting.is_empty() {
             return Import::Waiting(waiting);
         }
-        for found in found {
-            if self.pointers.rows.contains_key(&found.name) {
-                continue;
-            }
-            let version = self.pointers.next();
-            self.pointers.rows.insert(
-                found.name.clone(),
-                PointerRow {
-                    owner: found.owner,
-                    pointer: found.pointer.clone(),
-                    version,
-                },
-            );
-        }
+        self.adopt_pointers(found);
         let imported = Imported {
             at_ms,
             from: from.to_owned(),

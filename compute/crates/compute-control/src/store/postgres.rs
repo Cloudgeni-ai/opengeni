@@ -1092,6 +1092,14 @@ impl Store for PostgresStore {
         self.pointers_imported_now().await
     }
 
+    async fn adopt_pointers(&self, found: &[Found]) -> Result<usize> {
+        self.adopt_pointers_now(found).await
+    }
+
+    async fn clock_ms(&self) -> Result<u64> {
+        self.clock_ms_now().await
+    }
+
     async fn import_pointers(
         &self,
         found: &[Found],

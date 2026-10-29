@@ -827,6 +827,19 @@ impl Store for MemoryStore {
         ready(Ok(self.lock().pointers_imported()))
     }
 
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send {
+        ready(Ok(self.lock().adopt_pointers(found)))
+    }
+
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        ready(Ok(now))
+    }
+
     fn import_pointers(
         &self,
         found: &[Found],

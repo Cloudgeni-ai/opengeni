@@ -28,7 +28,9 @@
 //! old. Nothing writes a name of an earlier day either, so a delete held
 //! up in flight, however long, never takes a later write: no delete needs
 //! a condition. Only rule 2 rests on clocks, which may disagree by up to
-//! [`CLOCK_SKEW`], well within its day of margin.
+//! [`CLOCK_SKEW`], well within its day of margin. In a fleet every writer
+//! and sweep reads one clock, the database's ([`Clock::following`]), so a
+//! host whose own clock runs wrong cannot break it.
 //!
 //! Objects in the old layout, named by content alone, are never written
 //! again. One no pointer names is deleted once it was last stored more
@@ -36,6 +38,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
 const DAY: Duration = Duration::from_secs(86_400);
@@ -80,10 +83,43 @@ impl Clock {
         Self(Arc::new(now))
     }
 
+    /// The system clock moved by `offset_ms` (which may be negative), read
+    /// again on every call: another clock, as last compared with this one.
+    #[must_use]
+    pub fn following(offset_ms: Arc<AtomicI64>) -> Self {
+        Self::from_fn(move || shifted(SystemTime::now(), offset_ms.load(Ordering::Relaxed)))
+    }
+
     #[must_use]
     pub fn now(&self) -> SystemTime {
         (self.0)()
     }
+}
+
+/// `at` moved by `offset_ms`, which may be negative; never before 1970.
+#[must_use]
+pub fn shifted(at: SystemTime, offset_ms: i64) -> SystemTime {
+    let by = Duration::from_millis(offset_ms.unsigned_abs());
+    if offset_ms >= 0 {
+        at.checked_add(by).unwrap_or(at)
+    } else {
+        at.checked_sub(by)
+            .filter(|moved| *moved >= SystemTime::UNIX_EPOCH)
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+}
+
+/// How far `other`, in milliseconds since 1970, is ahead of `at` (behind
+/// when negative).
+#[must_use]
+pub fn offset_ms(other: u64, at: SystemTime) -> i64 {
+    let at = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i128::try_from(since.as_millis()).unwrap_or(i128::MAX)
+        });
+    let offset = i128::from(other) - at;
+    i64::try_from(offset).unwrap_or(if offset < 0 { i64::MIN } else { i64::MAX })
 }
 
 impl Default for Clock {
@@ -109,6 +145,37 @@ mod tests {
         assert_eq!(day_of(at + DAY - Duration::from_secs(1)), 20_390);
         assert_eq!(day_of(at + DAY), 20_391);
         assert_eq!(day_of(SystemTime::UNIX_EPOCH - DAY), 0);
+    }
+
+    #[test]
+    fn a_clock_follows_another_by_its_offset() {
+        let at = SystemTime::UNIX_EPOCH + 20_390 * DAY;
+        let ahead = at + DAY;
+        let offset = offset_ms(
+            u64::try_from(
+                ahead
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap(),
+            at,
+        );
+        assert_eq!(offset, 86_400_000);
+        assert_eq!(shifted(at, offset), ahead);
+        assert_eq!(shifted(ahead, -offset), at);
+        assert_eq!(shifted(at, i64::MIN), SystemTime::UNIX_EPOCH);
+        let followed = Arc::new(AtomicI64::new(-86_400_000));
+        let clock = Clock::following(Arc::clone(&followed));
+        let near = |a: SystemTime, b: SystemTime| {
+            a.duration_since(b)
+                .or_else(|_| b.duration_since(a))
+                .unwrap()
+                < Duration::from_secs(60)
+        };
+        assert!(near(clock.now() + DAY, SystemTime::now()));
+        followed.store(0, Ordering::Relaxed);
+        assert!(near(clock.now(), SystemTime::now()));
     }
 
     #[test]

@@ -9,6 +9,10 @@
 //! The service answers a host whose registration it does not know (given
 //! up on, or of an earlier registration) with 404, and with 503 while it
 //! cannot answer yet, as before the fleet's pointers were moved into it.
+//!
+//! Every answer carries the time on the fleet's clock, which a host names
+//! the day of what it stores by, so a host's own clock running wrong
+//! cannot name an object a sweep takes as days old.
 
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +56,9 @@ pub struct PointerFound {
     /// The pointer, or `None` when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept: Option<KeptPointer>,
+    /// The fleet's clock when the service answered, in milliseconds since
+    /// 1970.
+    pub now_ms: u64,
 }
 
 /// A host keeps `pointer` under the owner stamp it gives as `name`, only if
@@ -79,6 +86,8 @@ pub struct PointerWritten {
     /// since the version the write named, and nothing was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<i64>,
+    /// As [`PointerFound::now_ms`].
+    pub now_ms: u64,
 }
 
 mod base64_bytes {
@@ -117,22 +126,31 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<PointerWrite>(&text).unwrap(), write);
         let found: PointerFound = serde_json::from_str(
-            r#"{"kept":{"owner_epoch":3,"owner_save":4,"pointer":"","version":9}}"#,
+            r#"{"kept":{"owner_epoch":3,"owner_save":4,"pointer":"","version":9},"now_ms":5}"#,
         )
         .unwrap();
+        assert_eq!(found.now_ms, 5);
         assert_eq!(found.kept.unwrap().pointer, Vec::<u8>::new());
         assert_eq!(
-            serde_json::to_string(&PointerFound { kept: None }).unwrap(),
-            "{}"
+            serde_json::to_string(&PointerFound {
+                kept: None,
+                now_ms: 7
+            })
+            .unwrap(),
+            r#"{"now_ms":7}"#
         );
         assert_eq!(
-            serde_json::to_string(&PointerWritten { version: None }).unwrap(),
-            "{}",
+            serde_json::to_string(&PointerWritten {
+                version: None,
+                now_ms: 7
+            })
+            .unwrap(),
+            r#"{"now_ms":7}"#,
             "a write that did not land"
         );
         assert!(
             serde_json::from_str::<PointerFound>(
-                r#"{"kept":{"owner_epoch":3,"owner_save":4,"pointer":"*","version":9}}"#
+                r#"{"kept":{"owner_epoch":3,"owner_save":4,"pointer":"*","version":9},"now_ms":5}"#
             )
             .is_err(),
             "contents are base64"

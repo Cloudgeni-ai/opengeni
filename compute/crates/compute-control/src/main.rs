@@ -730,7 +730,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Sweeps the archive store `url` with the pointers the service keeps in
-/// `database`, printing the report.
+/// `database`, printing the report. It goes by the fleet's clock (the
+/// database's), as hosts name what they store by it, and first adopts any
+/// pointer the store still holds that the import missed, so nothing such a
+/// pointer names is deleted.
 async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<()> {
     anyhow::ensure!(
         database.database != "memory",
@@ -744,8 +747,35 @@ async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<
     );
     let chunks = ChunkStore::from_url(url)
         .with_context(|| format!("the archive store {url}"))?
-        .with_context(|| format!("{url} names no object store"))?
-        .with_pointers(Arc::new(compute_control::pointers::Pointers::new(store)));
+        .with_context(|| format!("{url} names no object store"))?;
+    let from = chunks.object_pointers();
+    if delete {
+        let adopted = compute_control::pointers::adopt(&*store, &from).await?;
+        if !adopted.is_empty() {
+            eprintln!(
+                "adopted {} pointers the store held that the import missed: {adopted:?}",
+                adopted.len()
+            );
+        }
+    } else {
+        let missed = compute_control::pointers::missed(&*store, &from).await?;
+        if !missed.is_empty() {
+            eprintln!(
+                "{} pointers the store holds were missed by the import and would be adopted \
+                 before a sweep that deletes; what they name counts as unnamed here: {missed:?}",
+                missed.len()
+            );
+        }
+    }
+    let pointers = Arc::new(compute_control::pointers::Pointers::new(store));
+    let fleet_ms = pointers.now_ms().await?;
+    let offset = compute_storage::fresh::offset_ms(fleet_ms, std::time::SystemTime::now());
+    let chunks =
+        chunks
+            .with_pointers(pointers)
+            .with_clock(compute_storage::fresh::Clock::following(Arc::new(
+                std::sync::atomic::AtomicI64::new(offset),
+            )));
     let chunks = &chunks;
     let report = compute_storage::sweep::sweep(
         chunks,

@@ -223,6 +223,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             from,
             url,
             IMPORT_EVERY,
+            Arc::clone(&metrics),
         )));
     }
     let metrics = serve_metrics(config.metrics, metrics, &view, &mut tasks).await?;

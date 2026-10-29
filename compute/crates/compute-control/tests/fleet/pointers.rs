@@ -84,10 +84,18 @@ async fn pointers_an_earlier_release_kept_move_into_the_service_once_none_of_its
         },
     )
     .await;
-    let kept = serde_json::from_str::<PointerFound>(&found)
-        .unwrap()
-        .kept
-        .expect("the earlier pointer");
+    let found = serde_json::from_str::<PointerFound>(&found).unwrap();
+    // The answer tells the fleet's clock, which hosts name what they store
+    // by: here the store's, this machine's own.
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    assert!(found.now_ms.abs_diff(now_ms) < 60_000, "{}", found.now_ms);
+    let kept = found.kept.expect("the earlier pointer");
     assert_eq!(kept.pointer, b"an earlier copy");
     assert_eq!((kept.owner_epoch, kept.owner_save), (4, 2));
 

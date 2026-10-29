@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use compute_core::HostPolicy;
@@ -38,6 +38,20 @@ use super::{Delays, Fake, Lab, NEVER, World, id};
 /// The registration the fake service gives.
 const HOST: u64 = 1;
 const EPOCH: u64 = 5;
+/// How far the fake service's clock, the fleet's, runs ahead of the
+/// host's.
+const FLEET_AHEAD: Duration = Duration::from_secs(2 * 86_400);
+
+/// The fleet's clock, as the fake service tells it.
+fn fleet_now_ms() -> u64 {
+    let now = SystemTime::now() + FLEET_AHEAD;
+    u64::try_from(
+        now.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
 
 /// A two-second term, renewed every 200 ms, with the margin the rules
 /// need in whole milliseconds, as the service sends terms.
@@ -221,12 +235,14 @@ impl Service {
                             pointer: b"a copy".to_vec(),
                             version: 7,
                         }),
+                        now_ms: fleet_now_ms(),
                     };
                     json(serde_json::to_vec(&found).unwrap())
                 } else {
                     let write: PointerWrite = serde_json::from_slice(&body).unwrap();
                     let written = PointerWritten {
                         version: (write.on == Some(7)).then_some(8),
+                        now_ms: fleet_now_ms(),
                     };
                     json(serde_json::to_vec(&written).unwrap())
                 }
@@ -700,6 +716,7 @@ async fn a_host_keeps_its_pointers_in_the_service_under_its_registration() {
     let _guard = hold_lock(&ready_lock(&fleet.guard_lock)).unwrap();
     let prepared = fleet.clone().prepare().unwrap();
     let pointers = fleet.pointers(&prepared.gate).unwrap();
+    let clock = pointers.clock();
 
     // Not registered yet: nothing is asked, and the read is tried again.
     let early = pointers.read("s-1").await;
@@ -746,6 +763,16 @@ async fn a_host_keeps_its_pointers_in_the_service_under_its_registration() {
     );
     assert_eq!(kept.version, Version::Row(7));
     assert!(pointers.read("s-2").await.unwrap().is_none());
+    // The host now goes by the fleet's clock, two days ahead of its own,
+    // to name what it stores.
+    let ahead = clock
+        .now()
+        .duration_since(SystemTime::now())
+        .expect("the fleet's clock is ahead");
+    assert!(
+        ahead.abs_diff(FLEET_AHEAD) < Duration::from_secs(60),
+        "{ahead:?}"
+    );
 
     // A write lands on the version it read, and not on another.
     let stamp = Stamp {
