@@ -12,8 +12,8 @@
 -- Both trigger functions are the 1067 versions plus the server question;
 -- approvals without one project exactly as before. Same signatures, so
 -- triggers and grants are kept. The new column is nullable without default
--- (catalog-only); the previous release reads list_inbox_items_v3, which keeps
--- working.
+-- (catalog-only). list_inbox_items_v3 keeps its signature and also returns the
+-- server question (see below), so no new owner-run routine is added.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
@@ -438,19 +438,30 @@ BEGIN
 END
 $pin$;
 
--- As v3, with each approval item's server question.
-CREATE FUNCTION opengeni_private.list_inbox_items_v4(p_account_id uuid, p_subject_id text)
+-- The inbox list keeps its shipped signature, so no new owner-run routine is
+-- needed and the previous release's readiness check still knows every
+-- routine. An approval item's server question rides in its choices as one
+-- {"serverQuestion": {...}} element; approval items have no choices of their
+-- own, and readers keep only {id, label} entries, so a previous release ignores
+-- it. Same return type and owner: grants are kept; the search path is pinned
+-- again below.
+CREATE OR REPLACE FUNCTION opengeni_private.list_inbox_items_v3(p_account_id uuid, p_subject_id text)
 RETURNS TABLE (
   id uuid, workspace_id uuid, session_id uuid, kind text,
   source_key text, title text, subtitle text, body text, facts jsonb, link jsonb,
-  event_sequence integer, choices jsonb, server_question jsonb, urgency text, status text,
+  event_sequence integer, choices jsonb, urgency text, status text,
   unread boolean, snoozed_until timestamptz, created_at timestamptz, updated_at timestamptz,
   resolved_at timestamptz, sender_subject_id text, sender_label text
 )
 LANGUAGE sql SECURITY DEFINER SET search_path FROM CURRENT AS $list$
   SELECT item.id, item.workspace_id, item.session_id, item.kind,
     item.source_key, item.title, item.subtitle, item.body, item.facts, item.link,
-    item.event_sequence, item.choices, item.server_question, item.urgency, item.status,
+    item.event_sequence,
+    CASE WHEN item.server_question IS NULL THEN item.choices
+      ELSE coalesce(item.choices, '[]'::jsonb)
+        || jsonb_build_array(jsonb_build_object('serverQuestion', item.server_question))
+    END,
+    item.urgency, item.status,
     item.seen_version < item.content_version, item.snoozed_until, item.created_at,
     item.updated_at, item.resolved_at, item.sender_subject_id, item.sender_label
   FROM opengeni_private.inbox_items item
@@ -462,15 +473,9 @@ LANGUAGE sql SECURITY DEFINER SET search_path FROM CURRENT AS $list$
 $list$;
 
 DO $inbox_server_questions$
-DECLARE
-  target_schema text := current_schema();
 BEGIN
-  REVOKE ALL ON FUNCTION opengeni_private.list_inbox_items_v4(uuid,text) FROM PUBLIC;
   EXECUTE format(
-    'ALTER FUNCTION opengeni_private.list_inbox_items_v4(uuid,text) SET search_path = pg_catalog, %I, pg_temp',
-    target_schema
+    'ALTER FUNCTION opengeni_private.list_inbox_items_v3(uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    current_schema()
   );
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION opengeni_private.list_inbox_items_v4(uuid,text) TO opengeni_app;
-  END IF;
 END $inbox_server_questions$;

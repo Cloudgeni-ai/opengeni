@@ -46,7 +46,6 @@ type InboxItemRecord = {
   link: unknown;
   event_sequence: number | null;
   choices: unknown;
-  server_question: unknown;
   urgency: InboxItemRow["urgency"];
   status: InboxItemRow["status"];
   unread: boolean;
@@ -76,13 +75,28 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
   });
 }
 
-function serverQuestionOf(value: unknown): InboxItemRow["serverQuestion"] {
-  const parsed = jsonValue(value);
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const { server, kind, round } = parsed as { server?: unknown; kind?: unknown; round?: unknown };
-  if (typeof server !== "string" || !server) return null;
-  if (typeof round !== "number" || !Number.isInteger(round) || round < 1) return null;
-  return { server, kind: kind === "confirm" ? "confirm" : "form", round };
+/**
+ * The server question an approval item carries as one `{serverQuestion}`
+ * element of its choices (1101), so the list keeps its shipped signature.
+ * choicesOf keeps only `{id, label}` entries and drops it.
+ */
+function serverQuestionOf(choices: unknown): InboxItemRow["serverQuestion"] {
+  const parsed = jsonValue(choices);
+  if (!Array.isArray(parsed)) return null;
+  for (const choice of parsed as unknown[]) {
+    if (typeof choice !== "object" || choice === null) continue;
+    const question = (choice as { serverQuestion?: unknown }).serverQuestion;
+    if (typeof question !== "object" || question === null) continue;
+    const { server, kind, round } = question as {
+      server?: unknown;
+      kind?: unknown;
+      round?: unknown;
+    };
+    if (typeof server !== "string" || !server) return null;
+    if (typeof round !== "number" || !Number.isInteger(round) || round < 1) return null;
+    return { server, kind: kind === "confirm" ? "confirm" : "form", round };
+  }
+  return null;
 }
 
 function jsonValue(value: unknown): unknown {
@@ -117,7 +131,7 @@ export async function listInboxItems(
 ): Promise<InboxItemRow[]> {
   const rows = await rawRows<InboxItemRecord>(
     db,
-    sql`select * from opengeni_private.list_inbox_items_v4(
+    sql`select * from opengeni_private.list_inbox_items_v3(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -134,7 +148,7 @@ export async function listInboxItems(
     link: linkOf(row.link),
     eventSequence: row.event_sequence ?? null,
     choices: choicesOf(row.choices),
-    serverQuestion: serverQuestionOf(row.server_question),
+    serverQuestion: serverQuestionOf(row.choices),
     urgency: row.urgency,
     status: row.status,
     unread: row.unread,

@@ -180,6 +180,24 @@ describe("1101 MCP server questions in the inbox and phone alerts", () => {
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\bDROP\s+(TABLE|COLUMN|FUNCTION)\b/i);
+    // The previous release's readiness check rejects any SECURITY DEFINER
+    // routine it does not know, so the list keeps its shipped name.
+    expect(source).not.toMatch(/CREATE\s+FUNCTION/i);
+  });
+
+  test("the previous release reads the list unchanged: no choices on approval items", async () => {
+    if (!client) return;
+    const owner = await person("previous");
+    await ask(owner, [approval("call_previous", confirm)]);
+    const [item] = await items(owner);
+    // The server question rides as a {serverQuestion} element of choices,
+    // which every release's choices reader drops.
+    expect(item?.choices).toEqual([]);
+    expect(item?.serverQuestion).toEqual({ server: "Messages", kind: "confirm", round: 1 });
+    const [raw] = await owned!.admin<Array<{ choices: unknown }>>`
+      select item.choices from opengeni_private.inbox_items item
+      where item.source_key = 'call_previous'`;
+    expect(raw?.choices).toEqual([]);
   });
 
   test("a server's confirmation reads as its question and is answered in one tap", async () => {
