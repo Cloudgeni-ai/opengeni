@@ -1320,8 +1320,26 @@ export function createInteractionAttemptToolDefinitions(
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
   });
   // Whether a computer_open result already named the person's own online
-  // computers in this attempt: once is enough to choose.
+  // computers in this attempt (or one is about to): once is enough to choose.
   let personalComputersNamed = false;
+  // One read of those computers per attempt, shared by parallel opens. A read
+  // that failed or ran out of time is dropped, so a later open reads again.
+  let personalComputersLookup: Promise<PersonalComputer[] | null> | undefined;
+  const lookUpPersonalComputers = (): Promise<PersonalComputer[] | null> => {
+    if (!personalComputersLookup) {
+      const lookup: Promise<PersonalComputer[] | null> = onlinePersonalComputers(
+        input.transport,
+        input.workspaceId,
+        input.sessionId,
+      ).then((computers) => {
+        if (computers === null && personalComputersLookup === lookup)
+          personalComputersLookup = undefined;
+        return computers;
+      });
+      personalComputersLookup = lookup;
+    }
+    return personalComputersLookup;
+  };
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
       newestRelevant(
@@ -2785,11 +2803,11 @@ export function createInteractionAttemptToolDefinitions(
       // An open that names no computer and no machine lands on the chat's
       // current one, which may be its own cloud computer while the person
       // asked about theirs. Their online computers are read alongside, so
-      // the result can name them; a failed read names none.
+      // the result can name them; a failed or slow read names none.
       const personalComputers =
         !value.computerSessionId && !value.placement && !personalComputersNamed
-          ? onlinePersonalComputers(input.transport, input.workspaceId, input.sessionId)
-          : Promise.resolve([]);
+          ? lookUpPersonalComputers()
+          : undefined;
       const { unavailable, ...opened } = await reportingChatMove(
         chatMove,
         async () =>
@@ -2816,10 +2834,19 @@ export function createInteractionAttemptToolDefinitions(
       const notes: Array<{ type: "text"; text: string }> = chatMove.moved
         ? [{ type: "text", text: CHAT_MOVED_NOTE }]
         : [];
-      const computers = await personalComputers;
-      if (computers.length > 0 && opened.session.placement.kind === "sandbox_group") {
+      // Only an open on the chat's own computer waits for them, and only
+      // briefly: naming them must never hold up or fail the open. The claim
+      // comes before the wait, so parallel opens name them once.
+      if (
+        personalComputers &&
+        !personalComputersNamed &&
+        opened.session.placement?.kind === "sandbox_group"
+      ) {
         personalComputersNamed = true;
-        notes.push({ type: "text", text: personalComputersNote(computers) });
+        const computers = await settledWithin(personalComputers, PERSONAL_COMPUTERS_WAIT_MS);
+        if (computers && computers.length > 0)
+          notes.push({ type: "text", text: personalComputersNote(computers) });
+        else personalComputersNamed = false;
       }
       // Its screen is locked or shows another user's session: nothing on it
       // can be read, launched, captured or clicked, so say why and do nothing.
@@ -3490,22 +3517,41 @@ const DISCOVERY_MODEL_LIST_LIMIT = 50;
 /** The most of the person's computers one computer_open result names. */
 const PERSONAL_COMPUTERS_NAMED_LIMIT = 3;
 
+/** The longest an open on the chat's own computer waits to name them. */
+const PERSONAL_COMPUTERS_WAIT_MS = 250;
+
+/** The longest one read of the person's computers may run before it is dropped. */
+const PERSONAL_COMPUTERS_LOOKUP_TIMEOUT_MS = 5_000;
+
 type PersonalComputer = { name: string; os: string; sandboxId: string };
 
 /**
  * The person's own Connected Machines (connected for themselves, not shared
  * with the workspace) that are online with a screen, as the person who
- * started the turn sees them. Empty when there are none or they cannot be
- * listed: naming them only helps, so a failed read must not fail an open.
+ * started the turn sees them. Empty when there are none; null when they
+ * cannot be listed in time: naming them only helps, so a failed or slow read
+ * must never fail an open.
  */
 async function onlinePersonalComputers(
   transport: InteractionPlacementTransport,
   workspaceId: string,
   sessionId: string,
-): Promise<PersonalComputer[]> {
+): Promise<PersonalComputer[] | null> {
   if (!transport.listMachines) return [];
+  const abort = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const listed = await transport.listMachines(workspaceId, { sessionId });
+    const listed = await Promise.race([
+      transport.listMachines(workspaceId, { sessionId, signal: abort.signal }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          resolve(null);
+        }, PERSONAL_COMPUTERS_LOOKUP_TIMEOUT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (!listed) return null;
     return listed.machines
       .filter(
         (machine) =>
@@ -3518,7 +3564,26 @@ async function onlinePersonalComputers(
       .sort((left, right) => left.name.localeCompare(right.name))
       .map((machine) => ({ name: machine.name, os: machine.os, sandboxId: machine.sandboxId }));
   } catch {
-    return [];
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The value once settled within `ms`, or undefined: the wait never rejects. */
+async function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -3531,7 +3596,12 @@ function personalComputersNote(computers: readonly PersonalComputer[]): string {
     .slice(0, PERSONAL_COMPUTERS_NAMED_LIMIT)
     .map(
       (computer) =>
-        `${JSON.stringify(computer.name)} (${computer.os}), placement {"kind":"connected_machine","sandboxId":"${computer.sandboxId}"}`,
+        `${JSON.stringify(computer.name)
+          .replace(/\u2028/gu, "\\u2028")
+          .replace(
+            /\u2029/gu,
+            "\\u2029",
+          )} (${computer.os}), placement {"kind":"connected_machine","sandboxId":"${computer.sandboxId}"}`,
     )
     .join("; ");
   return `This is this chat's own cloud computer, not the person's. Their online computer${one ? "" : "s"}: ${named}. To use ${one ? "it" : "one"}, call computer_open with ${one ? "that" : "its"} placement; this chat then runs there.`;
