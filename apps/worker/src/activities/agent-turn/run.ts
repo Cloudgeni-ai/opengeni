@@ -14,6 +14,7 @@ import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   freezeAgentLearningPolicy,
+  learningPrivateFileOwner,
   recoverLegacyKnowledgeConfirmations,
   withSessionRlsActorContext,
 } from "@opengeni/db";
@@ -663,8 +664,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // same root-scoped audience as native attempt-authorized tool reads.
           agentRootSessionId: attachmentAuthority.rootSessionId,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
-          privateFileOwnerSubjectId:
-            learning.defaultScope === "personal" ? learning.subjectId : null,
+          privateFileOwnerSubjectId: learningPrivateFileOwner(learning),
         },
         async () => {
           if (!leases.codex.holderId) {

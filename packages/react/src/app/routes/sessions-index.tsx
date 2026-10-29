@@ -438,7 +438,7 @@ function SessionsIndexRouteContent({
     : null;
   const attachments = useDraftAttachments(
     workspaceId,
-    personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
+    draft.visibility === "private" ? "personal" : "workspace",
   );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");

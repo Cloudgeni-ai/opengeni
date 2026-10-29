@@ -161,6 +161,9 @@ export async function freezeAgentLearningPolicy(db: Database, context: Knowledge
       .object({
         defaultScope: z.enum(["workspace", "personal"]),
         subjectId: z.string().nullable(),
+        // The owner of a Personal workspace whose own work there reads their
+        // Personal layer while it learns to the workspace (migration 1095).
+        personalReadSubjectId: z.string().nullable().optional(),
         effective: AgentLearningDefaults,
       })
       .passthrough()
@@ -170,6 +173,20 @@ export async function freezeAgentLearningPolicy(db: Database, context: Knowledge
       throw new KnowledgeLearningScopeChangedError(error);
     throw error;
   });
+}
+
+/**
+ * The person whose Only me files an accepted turn reads: its Personal owner,
+ * or the Personal-workspace owner whose own workspace chat it is.
+ */
+export function learningPrivateFileOwner(policy: {
+  defaultScope: "workspace" | "personal";
+  subjectId: string | null;
+  personalReadSubjectId?: string | null | undefined;
+}): string | null {
+  return policy.defaultScope === "personal"
+    ? policy.subjectId
+    : (policy.personalReadSubjectId ?? null);
 }
 
 export async function saveKnowledgeEntry(

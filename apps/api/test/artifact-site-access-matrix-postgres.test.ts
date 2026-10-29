@@ -60,6 +60,7 @@ const noop = async () => undefined;
 function memoryObjectStorage(): ObjectStorageDependency {
   const objects = new Map<string, Uint8Array>();
   return {
+    bucket: "matrix",
     maxSinglePutSizeBytes: 5_000_000_000,
     headObject: async (key: string) => {
       const bytes = objects.get(key);
@@ -675,42 +676,40 @@ test("personal workspace: the owner and their agent create, share, publish and u
     await m.editable(ws, f.people.member, "read"),
   );
 
-  // Publishing an Only me Site from a personal workspace.
-  const privatePublish = await m.publish(owner, ws, String(privateSite.json.artifact.id), {
+  // An Only me Site in a personal workspace is shared before it is published,
+  // as in a shared workspace (1093): publishing never widens its audience.
+  const privateSiteId = String(privateSite.json.artifact.id);
+  const privatePublish = await m.publish(owner, ws, privateSiteId, {
     access: "public",
     agent: { enabled: true },
   });
-  m.record(ws, "owner", "publish Only me Site (console)", "201", brief(privatePublish));
+  m.record(ws, "owner", "publish Only me Site (console)", "409", brief(privatePublish));
   m.record(
     ws,
     "owner",
-    "Only me Site audience after publishing",
-    "workspace",
-    await m.siteVisibility(owner, ws, String(privateSite.json.artifact.id)),
+    "Only me Site audience after a refused publish",
+    "private",
+    await m.siteVisibility(owner, ws, privateSiteId),
   );
-  // A publish that fails (a hostname already in use) leaves the Site Only me.
-  const unlucky = await m.createSite(owner, ws, "Unlucky Only me Site", "private");
-  const unluckyId = String(unlucky.json?.artifact?.id);
   m.record(
     ws,
     "owner",
-    "publish Only me Site on a taken hostname",
-    "409",
-    String(
-      (
-        await m.publish(owner, ws, unluckyId, {
-          access: "public",
-          label: String(privatePublish.json?.label),
-        })
-      ).status,
+    "share own Only me Site",
+    "200",
+    brief(
+      await f.api(owner, "PUT", `${m.sites(ws)}/${privateSiteId}/visibility`, {
+        visibility: "workspace",
+      }),
     ),
   );
   m.record(
     ws,
     "owner",
-    "Only me Site audience after a failed publish",
-    "private",
-    await m.siteVisibility(owner, ws, unluckyId),
+    "publish shared Site (console)",
+    "201",
+    brief(
+      await m.publish(owner, ws, privateSiteId, { access: "public", agent: { enabled: true } }),
+    ),
   );
 
   // The agent in an Only me chat (the default in a personal workspace).
@@ -728,7 +727,13 @@ test("personal workspace: the owner and their agent create, share, publish and u
       access: "public",
       agent: { enabled: true },
     });
-    m.record(ws, "owner's agent (Only me chat)", "publish its Site", "ok", toolBrief(agentPublish));
+    m.record(
+      ws,
+      "owner's agent (Only me chat)",
+      "publish its Only me Site",
+      "error site_not_shared",
+      toolBrief(agentPublish),
+    );
   } finally {
     await agent.close();
   }
@@ -899,6 +904,138 @@ test("personal workspace: the owner and their agent create, share, publish and u
     "Site AI uses the chosen model",
     "chosen model",
     await modelOf({ visitor: visitorId() }),
+  );
+
+  const mismatches = printMatrix(m.cells);
+  expect(mismatches).toEqual([]);
+}, 180_000);
+
+test("personal workspace: its Workspace Knowledge and files reach only its owner", async () => {
+  const f = await matrixFixture();
+  const m = matrix(f);
+  const ws = "personal" as const;
+  const entries = (workspace: Cell["workspace"]) =>
+    `/v1/workspaces/${f.workspaces[workspace]}/knowledge/entries`;
+  const files = (workspace: Cell["workspace"]) => `/v1/workspaces/${f.workspaces[workspace]}/files`;
+  const outside = [
+    ["org admin (not in workspace)", f.people.admin],
+    ["org member (not in workspace)", f.people.member],
+    ["org viewer (not in workspace)", f.people.viewer],
+    ["outsider (other organization)", f.outsider],
+  ] as const;
+
+  // Knowledge saved to the personal workspace's own Workspace scope (1093).
+  const entryId = crypto.randomUUID();
+  const saved = await f.api(f.owner, "POST", entries(ws), {
+    operationId: crypto.randomUUID(),
+    entryId,
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: {
+      kind: "note",
+      title: "Personal workspace note",
+      content: "Only the owner's own workspace.",
+      source: { kind: "manual" },
+    },
+  });
+  m.record(ws, "owner", "save Workspace Knowledge", "201", brief(saved));
+  const found = (result: Result) =>
+    result.status === 200
+      ? (result.json?.entries ?? []).some((entry: any) => entry.id === entryId)
+        ? "found"
+        : "absent"
+      : brief(result);
+  m.record(
+    ws,
+    "owner",
+    "search Workspace Knowledge",
+    "found",
+    found(await f.api(f.owner, "POST", `${entries(ws)}/search`, { limit: 50 })),
+  );
+  for (const [actor, who] of outside) {
+    m.record(
+      ws,
+      actor,
+      "search Workspace Knowledge",
+      "403",
+      brief(await f.api(who, "POST", `${entries(ws)}/search`, { limit: 50 })),
+    );
+    m.record(
+      ws,
+      actor,
+      "open Workspace Knowledge entry",
+      "403",
+      brief(await f.api(who, "GET", `${entries(ws)}/${entryId}`)),
+    );
+  }
+  // Another workspace of the same organization never sees it, the owner included.
+  for (const [actor, who] of [
+    ["owner (shared workspace)", f.owner],
+    ["admin (shared workspace)", f.people.admin],
+  ] as const) {
+    m.record(
+      "shared",
+      actor,
+      "search the personal workspace's Knowledge",
+      "absent",
+      found(await f.api(who, "POST", `${entries("shared")}/search`, { limit: 50 })),
+    );
+    m.record(
+      "shared",
+      actor,
+      "open the personal workspace's entry",
+      "404",
+      brief(await f.api(who, "GET", `${entries("shared")}/${entryId}`)),
+    );
+  }
+
+  // A person's upload there is a Workspace file by default, as in a shared workspace.
+  const upload = await f.api(f.owner, "POST", `${files(ws)}/uploads`, {
+    filename: "plan.txt",
+    contentType: "text/plain",
+    sizeBytes: 5,
+  });
+  m.record(ws, "owner", "upload a file", "201", brief(upload));
+  m.record(ws, "owner", "new file audience", "workspace", String(upload.json?.access?.visibility));
+  // A ready file the owner made there: its audience is theirs to change.
+  const fileId = crypto.randomUUID();
+  await shared.admin`insert into files(id,account_id,workspace_id,status,filename,safe_filename,content_type,
+      size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+    values(${fileId},${f.accountId},${f.workspaces.personal},'ready','plan.txt','plan.txt','text/plain',5,
+      ${"a".repeat(64)},'matrix',${`workspaces/${f.workspaces.personal}/files/${fileId}/plan.txt`},
+      null,${f.owner.subjectId})`;
+  m.record(
+    ws,
+    "owner",
+    "limit own file to Only me",
+    "200",
+    brief(
+      await f.api(f.owner, "PUT", `${files(ws)}/${fileId}/visibility`, { visibility: "private" }),
+    ),
+  );
+  m.record(
+    ws,
+    "owner",
+    "share own file with the workspace",
+    "200",
+    brief(
+      await f.api(f.owner, "PUT", `${files(ws)}/${fileId}/visibility`, { visibility: "workspace" }),
+    ),
+  );
+  for (const [actor, who] of outside)
+    m.record(
+      ws,
+      actor,
+      "open the file",
+      "403",
+      brief(await f.api(who, "GET", `${files(ws)}/${fileId}`)),
+    );
+  m.record(
+    "shared",
+    "admin (shared workspace)",
+    "open the personal workspace's file",
+    "404",
+    brief(await f.api(f.people.admin, "GET", `${files("shared")}/${fileId}`)),
   );
 
   const mismatches = printMatrix(m.cells);

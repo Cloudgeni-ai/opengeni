@@ -83,7 +83,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   const fileRequestAuthority = new WeakMap<
     Request,
-    { owner: string | null; agent: boolean; person: string | null }
+    { owner: string | null; agent: boolean; person: string | null; chatOwner: string | null }
   >();
   /** Who can open a file, for the person or agent that uploaded or shared it. */
   const withFileAccess = async (workspaceId: string, file: FileAsset): Promise<FileAsset> => ({
@@ -111,6 +111,8 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       fileRequestAuthority.set(c.req.raw, {
         owner: actor.privateFileOwnerSubjectId ?? null,
         agent,
+        // The person an agent's own chat is Only me for, if any.
+        chatOwner: agent ? (actor.chatOwnerSubjectId ?? null) : null,
         // The human this request acts for: the caller, or an agent's turn initiator.
         person: agent
           ? (actor.initiatingHumanSubjectId ?? null)
@@ -198,11 +200,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspace = await requireWorkspace(db, workspaceId);
     // A person's upload is shared unless they choose Only me. An agent's
     // follows its chat (Only me in an Only me chat) unless it chooses, on its
-    // owner's behalf; a personal workspace keeps an agent's uploads private.
-    const personal =
-      payload.scope && !(authority?.agent && workspace.kind === "personal")
-        ? payload.scope === "personal"
-        : Boolean(authority?.agent && privateOwner !== null);
+    // owner's behalf. A personal workspace follows the same rule.
+    const personal = payload.scope
+      ? payload.scope === "personal"
+      : Boolean(authority?.agent && authority.chatOwner !== null);
     if (personal && !privateOwner)
       throw new HTTPException(403, {
         message: authority?.agent

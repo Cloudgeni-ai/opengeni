@@ -33,11 +33,9 @@ Open the Site and choose **Publish**. The **Publish to web** page sets:
 
 Only the Site's owner and workspace admins with `artifacts:publish` see the
 button. A Site must be shared with its workspace first; an **Only me** Site
-can't be published. In a **Personal workspace**, where every chat is Only me
-and nobody else is in the workspace, publishing an Only me Site shares it
-with that one-person workspace as it publishes: only its owner, or their own
-agent, can do this. **Unpublish** takes the Site offline at once and keeps
-its address reserved; publishing again brings it back on the same address.
+can't be published, in a **Personal workspace** too. **Unpublish** takes the
+Site offline at once and keeps its address reserved; publishing again brings
+it back on the same address.
 
 Agents can do the same with the first-party tools `site_publication_get`,
 `site_publication_update` and `site_hostname_check`, within the same
