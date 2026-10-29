@@ -1462,7 +1462,17 @@ identity with no person behind it (`/v1/organizations/:id/service-accounts`,
 SDK `listOrganizationServiceAccounts`, `createOrganizationServiceAccount`,
 `updateOrganizationServiceAccount`, `deleteOrganizationServiceAccount`).
 Whoever may manage the organization's keys (`api_keys:manage`) manages service
-accounts; only an organization administrator can make one an admin.
+accounts; only the organization owner (a literal `account:admin`) can make one
+an admin.
+
+An organization admin signed in as themselves (managed cookie session) also
+manages the organization's keys and service accounts, at member level only: they
+list every key and service account, but create, change or revoke only keys whose
+effective permissions hold none of the administration permissions below and that
+no admin service account holds, and change or delete only member service
+accounts. A legacy `workspace:admin` key counts as owner-level. Admin rights in
+one organization grant nothing in another; API keys and agents never qualify
+through the admin role.
 
 - Role is `admin` or `member`, never owner. A member's keys never hold
   `account:admin`, `members:manage`, `billing:manage`, `api_keys:manage` or

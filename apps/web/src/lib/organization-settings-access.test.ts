@@ -168,7 +168,7 @@ describe("organization settings access", () => {
     expect(owner).toMatchObject({ administrator: true, modelsAdministrator: true });
   });
 
-  test("owners and admins manage organization integrations; only the owner makes a service account an admin", () => {
+  test("owners and admins manage organization integrations and keys; only the owner makes a service account an admin", () => {
     const access = (
       role: "owner" | "admin" | "member",
       permissions: string[],
@@ -182,13 +182,19 @@ describe("organization settings access", () => {
     const admin = access("admin", ["account:read", "members:manage", "billing:read"]);
     expect(admin.canManageOrganizationIntegrations).toBe(true);
     expect(admin.canMakeServiceAccountAdmin).toBe(false);
+    // Admins manage member-level keys and service accounts; owner-level ones stay the owner's.
+    expect(admin.canManageOrganizationApiKeys).toBe(true);
+    expect(admin.canManageOwnerLevelApiKeys).toBe(false);
     expect(admin.visibleSections.has("developer")).toBe(true);
     const owner = access("owner", ["account:read", "account:admin", "api_keys:manage"]);
     expect(owner.canManageOrganizationIntegrations).toBe(true);
     expect(owner.canMakeServiceAccountAdmin).toBe(true);
+    expect(owner.canManageOrganizationApiKeys).toBe(true);
+    expect(owner.canManageOwnerLevelApiKeys).toBe(true);
     expect(access("owner", ["account:admin"], local).canManageOrganizationIntegrations).toBe(true);
     const member = access("member", ["account:read"]);
     expect(member.canManageOrganizationIntegrations).toBe(false);
+    expect(member.canManageOrganizationApiKeys).toBe(false);
     expect(member.visibleSections.has("developer")).toBe(false);
     // Without a signed-in session the admin role counts for nothing, as on the server.
     const signedOut = access("admin", ["account:read"], {
@@ -196,6 +202,7 @@ describe("organization settings access", () => {
       auth: { mode: "none" },
     } as never);
     expect(signedOut.canManageOrganizationIntegrations).toBe(false);
+    expect(signedOut.canManageOrganizationApiKeys).toBe(false);
     expect(signedOut.visibleSections.has("developer")).toBe(false);
   });
 
