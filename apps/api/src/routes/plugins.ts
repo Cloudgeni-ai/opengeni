@@ -32,8 +32,10 @@ import {
 import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
+  hasIntegrationAdminPermission,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
+  requireIntegrationSetupAuthorization,
+  requireMemberIntegrationSetupAllowed,
   resolveSkillImport,
   type ApiRouteDeps,
   type GitHubSkillSourceClient,
@@ -205,14 +207,14 @@ export function registerPluginRoutes(
 
   app.post("/v1/workspaces/:workspaceId/plugins/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const { grant } = access;
     const payload = await parseRequestJson(c, InstallPluginRequest);
+    if (!hasIntegrationAdminPermission(grant))
+      await requireMemberIntegrationSetupAllowed(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      });
     const resolved = await resolvePluginPackage({
       skillActor: () => skillInstallerActor(access),
       deps,
@@ -364,12 +366,7 @@ export function registerPluginRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/plugins/:pluginKey", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const { grant } = access;
     const skillActor = skillRemovalActor(access);
     const pluginKey = decodeURIComponent(c.req.param("pluginKey"));

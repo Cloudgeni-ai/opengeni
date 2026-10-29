@@ -216,7 +216,11 @@ import type {
 } from "../components/session/editable-artifacts-workspace";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
-import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
+import {
+  canConnectWorkspaceMcpFromChat,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "../lib/permissions";
 import { secretSaveTargets } from "../lib/secrets-ui";
 import { chatLearningScope } from "../lib/chat-learning-scope";
 import { currentModelRecovery } from "../lib/model-recovery";
@@ -1156,9 +1160,7 @@ export function SessionRoute({
         const catalogItem = context.workspaceCapabilityCatalog.find(
           (candidate) => candidate.id === item.capability?.id,
         );
-        const canInstall =
-          hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") &&
-          hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
+        const canInstall = canConnectWorkspaceMcpFromChat(context.accessContext, workspaceId);
         const mcpUrl = catalogItem?.mcpUrl ?? catalogItem?.endpointUrl ?? null;
         if (
           canInstall &&

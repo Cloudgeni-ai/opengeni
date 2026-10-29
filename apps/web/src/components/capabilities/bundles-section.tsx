@@ -169,13 +169,13 @@ export function BundlesSection({
     canManagePlugins,
   ]);
 
-  // Skills are team content (documents:manage); plugins stay administrative.
+  // Skills are team content (documents:manage); plugins are added by members too.
   const lacksPlugins = section !== "skills" && !canManagePlugins;
   const restrictionNote =
     !canManage && (lacksPlugins || section === "skills")
-      ? "Workspace administrators can install, update, and remove these items."
+      ? "Members can install, update, and remove these items."
       : lacksPlugins
-        ? "Workspace administrators can install, update, and remove plugins."
+        ? "Members can install, update, and remove plugins."
         : null;
 
   const visible = useMemo(

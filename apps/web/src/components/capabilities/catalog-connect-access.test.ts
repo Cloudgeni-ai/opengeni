@@ -28,8 +28,20 @@ const member = { permissions: ["connections:read", "connections:write"] };
 const admin = { permissions: ["workspace:admin"] };
 
 describe("who may connect from a connection's page", () => {
-  test("a member can't start sign-in for a custom server that isn't on yet; it says to ask an admin", () => {
+  test("a member turns on a custom server that isn't on yet and chooses who can use it", () => {
     expect(catalogConnectAccess(custom, member, "shared")).toEqual({
+      personalOnly: false,
+      blocked: null,
+    });
+    expect(catalogConnectAccess(custom, { permissions: [] }, "shared").blocked?.title).toBe(
+      "You can't connect accounts here",
+    );
+  });
+
+  test("with only the narrow permission, a custom server that isn't on yet waits for someone who can add it", () => {
+    expect(
+      catalogConnectAccess(custom, { permissions: ["connections:personal"] }, "shared"),
+    ).toEqual({
       personalOnly: false,
       blocked: {
         title: "Ask an admin to turn on Team tools",
@@ -37,9 +49,6 @@ describe("who may connect from a connection's page", () => {
           "Only an admin can turn it on in this workspace. Once it's on, you can connect your own account here.",
       },
     });
-    expect(catalogConnectAccess(custom, { permissions: [] }, "shared").blocked?.title).toBe(
-      "You can't connect accounts here",
-    );
   });
 
   test("once an admin turns it on for each person, a member connects only their own account", () => {
@@ -54,11 +63,14 @@ describe("who may connect from a connection's page", () => {
     });
   });
 
-  test("a reviewed sign-in integration lets a member turn it on for their own account", () => {
+  test("a reviewed sign-in integration lets a member turn it on for the workspace or just themselves", () => {
     expect(catalogConnectAccess(reviewed, member, "shared")).toEqual({
-      personalOnly: true,
+      personalOnly: false,
       blocked: null,
     });
+    expect(
+      catalogConnectAccess(reviewed, { permissions: ["connections:personal"] }, "shared"),
+    ).toEqual({ personalOnly: true, blocked: null });
   });
 
   test("an admin chooses who can use it in a shared workspace", () => {
@@ -85,6 +97,6 @@ test("adding a server without permission explains who can, never the raw permiss
     status: 403,
     message: "API 403: missing permission: capabilities:manage",
   });
-  expect(copy.title).toBe("Only an admin can add connections");
+  expect(copy.title).toBe("You can't add connections here");
   expect(`${copy.title} ${copy.description}`).not.toContain("capabilities:manage");
 });

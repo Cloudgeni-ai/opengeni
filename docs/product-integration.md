@@ -1077,10 +1077,12 @@ Integration lifecycle:
    stable instance key, Connection, and selected operations. Operations the
    preview marks `approvalMode: "ask"` pause for human approval on every call;
    for unattended or scheduled work, list the ones policy permits in
-   `autoApprovedTools` (`capabilities:manage`; curated definitions may keep specific operations human-approved;
-   re-checked against organization integration policy; declarative, so an
-   update that omits it restores approval). Connector Block, session approval
-   policy, and action policies still apply.
+   `autoApprovedTools` (`capabilities:manage`; members, who hold
+   `connections:write`, install without it; curated definitions may keep
+   specific operations human-approved; re-checked against organization
+   integration policy; an update that omits it keeps an earlier choice only for
+   the same account and unchanged operations, otherwise approval is restored).
+   Connector Block, session approval policy, and action policies still apply.
 6. Persist the returned non-secret instance/server identifiers and select that
    server in sessions.
 

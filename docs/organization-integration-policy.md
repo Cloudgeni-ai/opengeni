@@ -19,19 +19,23 @@ header-only credential rotation, and accepted host-delegation use are unchanged.
 Do not present this setting as a universal outbound-network or tool-execution
 allowlist.
 
-## Members turning integrations on for their own accounts
+## Members turning integrations on
 
-`personalIntegrationSetup` decides who may turn on a reviewed catalog OAuth
-integration for personal accounts (each person signs in to their own account):
+`personalIntegrationSetup` decides whether members may turn integrations on:
 
 - `members` (the default): anyone holding `connections:personal`, which every
   workspace Member has through `connections:write` and which embedded per-user
-  workspaces get by default. It covers only a reviewed catalog integration
-  (built in, deployment configured, or a verified registry entry) that signs
-  each person in with OAuth, only when it is not on yet, and only within the
-  rest of this policy. It never covers custom MCP servers, shared or workspace
-  connections, or removing or reconfiguring an integration.
-- `admins`: only people who manage integrations (`capabilities:manage`).
+  workspaces get by default, may turn on a reviewed catalog integration (built
+  in, deployment configured, or a verified registry entry) that signs each
+  person in with OAuth for personal accounts. Members holding
+  `connections:write` may also add anything else: custom MCP servers, API
+  integrations and plugins, with personal or shared connections. Both are
+  create-only, only within the rest of this policy, and never set tool approval
+  or change, reconfigure or turn off an integration that is already on.
+- `admins`: only people who manage integrations (`capabilities:manage`) turn
+  integrations on, add MCP servers or API integrations, or install plugins.
+  Members can still connect their own accounts to integrations that are on,
+  configure their sources, and remove them.
 
 Once on, the integration is visible to the workspace's other members as an
 optional integration that each of them must connect with their own account.

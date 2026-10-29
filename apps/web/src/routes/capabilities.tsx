@@ -167,7 +167,10 @@ import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canAddWorkspaceIntegrations,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { request } from "@/api";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -258,7 +261,7 @@ export function canManageApiIntegrations(
   accessContext: AccessContext | null,
   workspaceId: string,
 ): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
+  return canAddWorkspaceIntegrations(accessContext, workspaceId);
 }
 
 type CapabilitiesRouteProps = {
@@ -515,8 +518,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     context.accessContext,
     workspaceId,
   );
-  // Skills are shared team procedures that Members may install and manage;
-  // plugins can add connections and MCP servers and stay administrative.
+  // Skills are shared team procedures that Members may install and manage.
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -1777,6 +1779,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
+        canTurnOff={hasWorkspacePermission(
+          context.accessContext,
+          workspaceId,
+          "capabilities:manage",
+        )}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
         onRetryAuthInspection={

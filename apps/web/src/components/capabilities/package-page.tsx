@@ -107,7 +107,7 @@ export function InstalledPackagePage({
         </p>
         {footer.kind === "locked" ? (
           <p className="mt-3 mb-0 text-xs leading-4.5 text-fg-muted">
-            Only workspace admins can update and remove imported skills and plugins.
+            Members can update and remove imported skills and plugins.
           </p>
         ) : null}
       </DetailSection>

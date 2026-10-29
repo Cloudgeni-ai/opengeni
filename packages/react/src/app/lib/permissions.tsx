@@ -363,6 +363,36 @@ export function hasWorkspacePermission(
 }
 
 /**
+ * Whether the viewer may add integrations here: install and remove plugins and
+ * API integrations, add MCP servers, turn on an integration that is not on yet
+ * and configure an integration's sources. Members hold `connections:write`;
+ * integration admins hold `capabilities:manage`, which alone also covers tool
+ * approval rules, auto-approval and turning an integration off for everyone.
+ * The same rule as the API's (`INTEGRATION_SETUP_PERMISSION`).
+ */
+export function canAddWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return (
+    hasWorkspacePermission(context, workspaceId, "connections:write") ||
+    hasWorkspacePermission(context, workspaceId, "capabilities:manage")
+  );
+}
+
+/**
+ * Whether the chat's connect card may sign in a workspace-owned account for an
+ * OAuth MCP server, turning the server on if it is not on yet. Members may
+ * (`connections:write`), as the API's MCP OAuth start decides.
+ */
+export function canConnectWorkspaceMcpFromChat(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return hasWorkspacePermission(context, workspaceId, "connections:write");
+}
+
+/**
  * True only when the viewer's loaded grant for this workspace provably lacks
  * `permission`. A missing grant (still loading, local mode, or no access at
  * all) is not evidence of a narrower role.

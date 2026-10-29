@@ -26,7 +26,10 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { ConnectionOwnershipDialog } from "@opengeni/react/app/components/capabilities/connection-ownership-selector";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canAddWorkspaceIntegrations,
+  hasAccountPermission,
+} from "@opengeni/react/app/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
@@ -547,11 +550,7 @@ export function useIntegrationDefinitionRow({
   refreshRevision?: number;
 }): IntegrationAdapter {
   const context = useAppContext();
-  const canManage = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "capabilities:manage",
-  );
+  const canManage = canAddWorkspaceIntegrations(context.accessContext, workspaceId);
   const controller = useApiIntegrationAccounts({
     workspaceId,
     definitionId,

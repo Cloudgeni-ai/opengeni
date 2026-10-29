@@ -9,6 +9,31 @@ import { integrationDefinitionIdFromCapabilityId } from "./integration-capabilit
 export const PERSONAL_INTEGRATION_SETUP_PERMISSION = "connections:personal" as const;
 
 /**
+ * Adding integrations to a workspace: installing and removing plugins and API
+ * integrations, adding custom MCP servers, turning on a catalog integration
+ * that is not on yet, and configuring an installed integration's sources.
+ * Members hold `connections:write`; integration admins hold
+ * `capabilities:manage`, which also keeps what stays admin work: tool approval
+ * rules (Allow/Ask/Block), auto-approval, changing an integration that is
+ * already on, and turning one off for everyone. The organization's integration
+ * policy still decides what may be added, and an organization can reserve
+ * turning integrations on for admins.
+ */
+export const INTEGRATION_SETUP_PERMISSION = "connections:write" as const;
+
+/** Whether this grant may add integrations ({@link INTEGRATION_SETUP_PERMISSION}). */
+export function canAddIntegrations(grant: {
+  permissions: readonly string[];
+  permissionMode?: "legacy" | "explicit" | undefined;
+}): boolean {
+  return (
+    grant.permissions.includes(INTEGRATION_SETUP_PERMISSION) ||
+    grant.permissions.includes("capabilities:manage") ||
+    (grant.permissionMode !== "explicit" && grant.permissions.includes("workspace:admin"))
+  );
+}
+
+/**
  * Literal permission-set coverage for ceilings (organization key policies,
  * delegation limits): the exact permission, or the personal setup permission
  * through `connections:write`. Grants and policies saved before the narrow
@@ -78,12 +103,8 @@ export function personalIntegrationSetupAccess(
       permission !== "secrets:read" &&
       grant.permissions.includes("workspace:admin"));
   if (!can(PERSONAL_INTEGRATION_SETUP_PERMISSION)) return null;
-  if (
-    can("connections:write") &&
-    can("connections:read") &&
-    (item.enabled || can("capabilities:manage"))
-  )
-    return "any";
+  // Members may turn on any integration that is not on yet (canAddIntegrations).
+  if (can("connections:write") && can("connections:read")) return "any";
   // Already on: connecting one's own account changes no installation, but
   // only an installation that signs each person in can take it.
   if (item.enabled) return item.connectionRef?.subjectScope === "subject" ? "personal" : null;
@@ -136,8 +157,9 @@ export function inChatCapabilitySetup(
       : { kind: "unavailable" };
   }
   if (capabilityId.startsWith("plugin:")) {
-    // Installing a plugin adds Skills and MCP servers for the whole workspace.
-    return can("sessions:control") && can("capabilities:manage")
+    // Installing a plugin adds Skills and MCP servers for the whole workspace,
+    // which members may do (canAddIntegrations).
+    return can("sessions:control") && canAddIntegrations(grant)
       ? { kind: "default" }
       : { kind: "unavailable" };
   }

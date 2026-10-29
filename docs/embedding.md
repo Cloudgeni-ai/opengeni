@@ -306,8 +306,8 @@ control (`sessions:control`) plus one of these:
   custom MCP servers, shared or workspace connections, other people's
   connections, or removing or reconfiguring an integration, and an
   organization can reserve turning integrations on for admins.
-- `connections:write` with `connections:read` and `capabilities:manage` (or an
-  integration that is already on): any account, shared or personal.
+- `connections:write` with `connections:read`: any account, shared or
+  personal, turning the integration on if it is not on yet.
 - `connections:read` alone, when the integration is already on and bound to a
   shared workspace account.
 

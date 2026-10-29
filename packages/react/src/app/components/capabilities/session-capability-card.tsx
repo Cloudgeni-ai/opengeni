@@ -511,7 +511,7 @@ function SessionCapabilitySetup({
           canManageSkills: hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           ),
           refresh: catalog.refresh,
           onRuntimeChanged: () => {
@@ -656,7 +656,7 @@ function SessionCapabilitySetup({
           canManageSkills={hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           )}
           onAction={(action) => void act(action)}
           onRetryAuthInspection={

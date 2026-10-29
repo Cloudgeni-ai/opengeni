@@ -5,6 +5,7 @@ import {
 } from "../src/organization-access";
 import {
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  canAddIntegrations,
   inChatCapabilitySetup,
   isPersonalIntegrationSetupCandidate,
   permissionSetCovers,
@@ -99,6 +100,37 @@ describe("personal integration setup", () => {
         reviewed,
       ),
     ).toBeNull();
+  });
+
+  test("members turn on any integration that is not on yet, custom servers included", () => {
+    const member = { permissions: ["connections:read", "connections:write"] };
+    expect(personalIntegrationSetupAccess(member, reviewed)).toBe("any");
+    expect(personalIntegrationSetupAccess(member, { ...reviewed, source: "manual" })).toBe("any");
+    expect(personalIntegrationSetupAccess(member, { ...reviewed, authKind: "api_key" })).toBe(
+      "any",
+    );
+    expect(canAddIntegrations(member)).toBe(true);
+    expect(canAddIntegrations({ permissions: ["capabilities:manage"] })).toBe(true);
+    expect(canAddIntegrations({ permissions: ["workspace:admin"] })).toBe(true);
+    expect(
+      canAddIntegrations({ permissions: ["workspace:admin"], permissionMode: "explicit" }),
+    ).toBe(false);
+    for (const permissions of [["connections:read"], ["connections:personal"], []])
+      expect(canAddIntegrations({ permissions })).toBe(false);
+  });
+
+  test("in-chat setup: a member's card can install a plugin", () => {
+    const chat = ["workspace:read", "sessions:read", "sessions:control"];
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, "connections:write"] },
+        "plugin:x/y",
+        undefined,
+      ),
+    ).toEqual({ kind: "default" });
+    expect(inChatCapabilitySetup({ permissions: chat }, "plugin:x/y", undefined)).toEqual({
+      kind: "unavailable",
+    });
   });
 
   test("organization policies holding connections:write keep their preset", () => {

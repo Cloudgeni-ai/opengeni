@@ -97,9 +97,9 @@ export function catalogConnectAccess(
 export function addConnectionErrorCopy(error: unknown): { title: string; description: string } {
   if (apiErrorFacts(error).status === 403)
     return {
-      title: "Only an admin can add connections",
+      title: "You can't add connections here",
       description:
-        "Ask a workspace admin to add this MCP server. Once it's on, you can connect your own account.",
+        "Ask a workspace admin to add this MCP server, or for access to add connections.",
     };
   return capabilityErrorToast(error, "Couldn't add the connection");
 }

@@ -221,6 +221,12 @@ describe("Slack integration authority", () => {
       true,
     );
     expect(canManageApiIntegrations(accessContext(["connections:write"]), "workspace-a")).toBe(
+      true,
+    );
+    expect(canManageApiIntegrations(accessContext(["connections:read"]), "workspace-a")).toBe(
+      false,
+    );
+    expect(canManageApiIntegrations(accessContext(["connections:personal"]), "workspace-a")).toBe(
       false,
     );
     expect(canManageApiIntegrations(accessContext(["capabilities:manage"]), "workspace-a")).toBe(

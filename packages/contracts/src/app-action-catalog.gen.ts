@@ -775,7 +775,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "IntegrationFacetMutationResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "configureOrganizationRecoveryPolicy",
@@ -981,7 +981,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CapabilityCatalogItem"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "createChannel",
@@ -4625,7 +4625,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "InstalledApiIntegration"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "installFikenConnection",
@@ -4665,7 +4665,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "InstalledPlugin"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "installSkill",
@@ -6651,7 +6651,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MutateIntegrationFacetRequest"
     ],
     "response": [],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume",
@@ -6661,7 +6661,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MutateIntegrationFacetRequest"
     ],
     "response": [],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
@@ -7795,7 +7795,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "IntegrationFacetRemovalResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "removeWorkspaceMember",
@@ -8327,7 +8327,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "IntegrationFacetMutationResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "saveKnowledgeEntry",
@@ -9057,7 +9057,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UninstallApiIntegrationResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "uninstallPlugin",
@@ -9069,7 +9069,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UninstallPluginResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "uninstallSkill",

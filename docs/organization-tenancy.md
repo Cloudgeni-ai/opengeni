@@ -1250,8 +1250,10 @@ App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
 workspace and organization machines; a signed-in Member connects and changes
 their own Only me machine with `enrollments:read`, see
 [Connected Machines](connected-machines.md#connect-a-machine)),
-`capabilities:manage` (integration and plugin install, workspace
-tool policy) and `secrets:read`. Routes where a newly granted permission would
+`capabilities:manage` (workspace tool policy, auto-approval, and changing or
+turning off an integration that is on; Members add integrations and plugins
+with `connections:write`, see [Capability Catalog](capabilities.md)) and
+`secrets:read`. Routes where a newly granted permission would
 otherwise reach workspace-wide configuration check the settings power
 explicitly: workspace-owned model-provider keys and the Slack bot need
 `capabilities:manage`, and the workspace default Sandbox Environment needs

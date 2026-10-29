@@ -46,6 +46,8 @@ import {
   externalActorContinuationForAuthorization,
   requireAccessGrantAuthorization,
   hasPermission,
+  hasIntegrationAdminPermission,
+  requireMemberIntegrationSetupAllowed,
   requireEnvironmentEncryption,
   isFikenConnection,
   isOpenGeniSlackBotConnection,
@@ -162,7 +164,7 @@ async function requireConnectAuthorization(
  * connections:write), like connecting Gmail. The instance resolves
  * credentials for that person alone. Anything else (a workspace account, a
  * custom source, or an instance not already bound to this same account)
- * stays integration management (capabilities:manage).
+ * is adding an integration (connections:write, which members hold).
  */
 async function isOwnAccountInstall(
   deps: ApiRouteDeps,
@@ -290,7 +292,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Install MCP capability",
         family: "mcp",
         readiness:
-          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
+          !external || !hasPermission(authorization.grant.permissions, "connections:write")
             ? "unsupported"
             : deps.settings.integrationsEnabled
               ? "available"
@@ -755,9 +757,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const input = await parseRequestJson(c, AdvanceConnectRequest);
     const action = input.action;
     const workspaceId = c.req.param("workspaceId");
+    // Adding an MCP server or an API integration is member work
+    // (INTEGRATION_SETUP_PERMISSION); auto-approval and changing what is
+    // already on stay with integration admins.
     const permission =
       action.type === "install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : action.type === "credentials"
           ? "connections:write"
           : "workspace:read";
@@ -777,7 +782,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertAgentPreparedConnect(actor, before);
     const advancePermission =
       before.providerId === "mcp-install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : action.type === "credentials"
           ? connectSetupPermission(before)
           : action.type === "install" && (await isOwnAccountInstall(deps, scope, before))
@@ -785,8 +790,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
       throw new MissingPermissionRefusal(advancePermission);
-    if (before.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
-      throw new MissingPermissionRefusal("capabilities:manage");
+    // A member adding an MCP server or a workspace integration needs their
+    // organization to let members turn on integrations.
+    const memberSetup = !hasIntegrationAdminPermission(authorization.grant);
+    if (
+      memberSetup &&
+      (before.providerId === "mcp-install" ||
+        (action.type === "install" && advancePermission !== "connections:personal"))
+    )
+      await requireMemberIntegrationSetupAllowed(deps.db, scope);
     if (before.providerId === "mcp-install") {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "Choose an MCP capability" });
@@ -803,7 +815,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           operationId: input.idempotencyKey,
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "capabilities:manage", origin),
+            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload MCP setup" });
@@ -814,6 +826,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: scope.accountId,
               workspaceId,
               capabilityId: values.capabilityId,
+              // Members turn a server on only if it is not on yet.
+              ...(memberSetup ? { memberSetup: true } : {}),
               payload: { config: {}, metadata: {}, headers: {} },
               mcpServerLogoStorage: deps.objectStorage,
             });
@@ -1094,9 +1108,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           inputDigest: createHmac("sha256", encryptionKey).update(stableJson(input)).digest("hex"),
           beforeOperation: actor.beforeOperation,
           authorize: async (tx, attempt, origin) => {
+            // Finishing an agent-prepared key setup is member work: it saves a
+            // credential and turns the server on only if it is not on yet.
             await requireConnectOwnerAuthority(tx, scope, "connections:write", origin);
-            if (attempt.mcpSetup)
-              await requireConnectOwnerAuthority(tx, scope, "capabilities:manage", origin);
           },
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
@@ -1446,7 +1460,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           assertAgentPreparedConnect(actor, attempt);
           const permission =
             attempt.providerId === "mcp-install"
-              ? "capabilities:manage"
+              ? "connections:write"
               : ["x", "reddit"].includes(attempt.providerId)
                 ? attempt.ownership === "workspace"
                   ? "workspace:admin"
@@ -1505,7 +1519,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         : requested;
     const setupPermission =
       input.providerId === "mcp-install"
-        ? "capabilities:manage"
+        ? "connections:write"
         : ["x", "reddit"].includes(input.providerId)
           ? input.ownership === "workspace"
             ? "workspace:admin"
@@ -1525,8 +1539,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
       });
-    if (input.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
-      throw new MissingPermissionRefusal("capabilities:manage");
     if (input.providerId === "atlassian")
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     if (
@@ -1570,8 +1582,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   null,
                   setupOwnerOptions,
                 );
-                if (input.mcpSetup)
-                  await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 const replay = await getConnectBeginReplay(actorTx, scope, {
                   idempotencyKey: input.idempotencyKey,
                   requestDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
@@ -1608,8 +1618,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   null,
                   setupOwnerOptions,
                 );
-                if (input.mcpSetup)
-                  await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 return persistConnectAttempt(actorTx, scope, {
                   ...attemptInput,
                   authorizeAcquisition: async () => {

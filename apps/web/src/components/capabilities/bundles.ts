@@ -184,8 +184,7 @@ export function importedSkillBundleRow(
             }
           : {
               kind: "locked",
-              message:
-                "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+              message: "Members can install, update, and remove imported Skills and Plugins.",
             },
       },
     },
@@ -259,8 +258,7 @@ export function pluginBundleRow(
             }
           : {
               kind: "locked",
-              message:
-                "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+              message: "Members can install, update, and remove imported Skills and Plugins.",
             },
         ...(active
           ? {}

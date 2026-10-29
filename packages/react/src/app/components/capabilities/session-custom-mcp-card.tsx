@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "../../../timeline";
 import { useAppContext } from "../../app-context";
 import { apiErrorFacts, userErrorText } from "../../../ui/api-error";
-import { hasWorkspacePermission } from "../../lib/permissions";
+import { canAddWorkspaceIntegrations, hasWorkspacePermission } from "../../lib/permissions";
 import { Button } from "../../../ui/button";
 import { Input } from "../../../ui/input";
 import { Label } from "../../../ui/label";
@@ -28,10 +28,11 @@ export function SessionCustomMcpCard(props: Props) {
         {...props}
         client={context.client}
         actorId={context.accessContext?.subjectId ?? ""}
-        canConfigure={
-          hasWorkspacePermission(context.accessContext, props.workspaceId, "connections:write") &&
-          hasWorkspacePermission(context.accessContext, props.workspaceId, "capabilities:manage")
-        }
+        canConfigure={hasWorkspacePermission(
+          context.accessContext,
+          props.workspaceId,
+          "connections:write",
+        )}
       />
     );
   return <LegacyCustomMcpCard {...props} />;
@@ -52,7 +53,7 @@ function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
   useEffect(() => {
     let active = true;
     // Read-only lookup lets anyone return to the existing connection card after
-    // an admin adds the server; only a human with manage permission may create it.
+    // someone adds the server; only a human who may add integrations creates it.
     void context.client
       .listCapabilities(workspaceId)
       .then((catalog) => {
@@ -73,11 +74,7 @@ function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
       active = false;
     };
   }, [context.client, workspaceId, proposal.endpointUrl, onRegistered]);
-  const canManage = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "capabilities:manage",
-  );
+  const canManage = canAddWorkspaceIntegrations(context.accessContext, workspaceId);
   const validUrl = (() => {
     try {
       const parsed = new URL(url.trim());
@@ -203,7 +200,8 @@ function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
         </div>
         {!canManage ? (
           <p role="status" className="text-sm text-fg-muted">
-            A workspace admin needs to add this server. You can share its URL with them.
+            Someone who can add connections here needs to add this server. You can share its URL
+            with them.
           </p>
         ) : null}
         {error ? (
