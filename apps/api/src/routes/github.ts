@@ -69,6 +69,7 @@ import {
 import {
   githubBindingStatus,
   GitHubRepositoryBranchAuthorityError,
+  isTransientGitHubRepositoryListFailure,
   listWorkspaceGitHubInstallationBindings,
   listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
@@ -352,14 +353,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, {
-          message: JSON.stringify({ message: error.message, missing: error.missing }),
-        });
-      }
-      throw new HTTPException(502, {
-        message: errorMessage(error),
-      });
+      throw githubRepositoryListRouteError(error);
     }
   });
 
@@ -371,14 +365,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         repositories: await listWorkspaceGitHubRepositories(deps, workspaceId, { fresh: true }),
       });
     } catch (error) {
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, {
-          message: JSON.stringify({ message: error.message, missing: error.missing }),
-        });
-      }
-      throw new HTTPException(502, {
-        message: errorMessage(error),
-      });
+      throw githubRepositoryListRouteError(error);
     }
   });
 
@@ -1097,6 +1084,25 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
     return new HTTPException(502, { message: error.message });
   }
   return new HTTPException(502, { message: "GitHub authority verification failed" });
+}
+
+/**
+ * A GitHub outage (5xx, rate limit, timeout, network) stays a 502 that clients
+ * may retry. GitHub refusing the installation (401, 403, 404) is not an outage:
+ * it is a 409 that asks for a reconnect, so background reads stop retrying it.
+ */
+function githubRepositoryListRouteError(error: unknown): HTTPException {
+  if (error instanceof GitHubAppConfigurationError) {
+    return new HTTPException(409, {
+      message: JSON.stringify({ message: error.message, missing: error.missing }),
+    });
+  }
+  if (error instanceof GitHubAppApiError && !isTransientGitHubRepositoryListFailure(error)) {
+    return new HTTPException(409, {
+      message: "GitHub no longer grants access to this installation; reconnect GitHub",
+    });
+  }
+  return new HTTPException(502, { message: errorMessage(error) });
 }
 
 function githubRepositoryBranchesRouteError(error: unknown): Error {

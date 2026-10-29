@@ -1549,7 +1549,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           githubQuietRetry.current.schedule(() => {
             if (!ownsRefresh() || githubRefreshId.current !== refreshId) return;
             void refreshGitHubRef.current(workspaceId);
-          });
+          }, workspaceId);
         }
         // Load and focus refreshes run in the background: a failure there is
         // shown where GitHub is used (the repository picker, the GitHub card and
@@ -1610,7 +1610,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         if (signal?.aborted || !ownsRefresh()) return;
         const connection = status.connection;
         setPersonalGitHubStatus(status);
-        personalGitHubQuietRetry.current.reset();
         setPersonalGitHubAuthorityCache((current) =>
           connection &&
           reusablePersonalGitHubAuthority(current, {
@@ -1626,6 +1625,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setSelectedPersonalGitHubRepoIds(new Set());
           setSelectedPersonalGitHubRepoRefs({});
           setPersonalGitHubCatalogReady(true);
+          personalGitHubQuietRetry.current.reset();
           return;
         }
         const repositories: PersonalGitHubRepositoryCatalogItem[] = [];
@@ -1661,6 +1661,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             ),
         );
         setPersonalGitHubCatalogReady(true);
+        // Only a whole read counts: a status that answers while the repository
+        // listing keeps failing (a GitHub rate limit) must keep backing off.
+        personalGitHubQuietRetry.current.reset();
       } catch (error) {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
@@ -1670,7 +1673,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           personalGitHubQuietRetry.current.schedule(() => {
             if (!ownsRefresh()) return;
             void refreshPersonalGitHubRef.current(workspaceId);
-          });
+          }, workspaceId);
           if (!options?.userInitiated) return;
         }
         toast.error("Your GitHub account is unavailable", {

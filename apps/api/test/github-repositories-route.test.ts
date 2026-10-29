@@ -21,6 +21,7 @@ import {
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
+import { GitHubAppApiError } from "@opengeni/github";
 
 import { createApp } from "../src/app";
 
@@ -118,6 +119,7 @@ function repository(id: number, installationId: number): GitHubRepository {
 function testApp(installationId: number, repositoryIds: number[]) {
   const github = {
     failing: false,
+    failure: null as Error | null,
     listCalls: 0,
     repositoryIds,
   };
@@ -137,6 +139,7 @@ function testApp(installationId: number, repositoryIds: number[]) {
       }),
       listRepositories: async () => {
         github.listCalls += 1;
+        if (github.failure) throw github.failure;
         if (github.failing) throw new Error("GitHub answered 502 Bad Gateway");
         return github.repositoryIds.map((id) => repository(id, installationId));
       },
@@ -229,5 +232,30 @@ describe("workspace GitHub repositories", () => {
     // Later passive reads use the new list.
     await app.request(list, { headers: await headers(workspace) });
     expect(github.listCalls).toBe(2);
+  }, 60_000);
+
+  test("GitHub refusing the installation is a 409 to reconnect, not a retryable 502", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await bindRepositories(workspace, { installationId: 505, repositoryIds: [41] });
+    const { app, github } = testApp(505, [41]);
+    const list = `/v1/workspaces/${workspace.workspaceId}/github/repositories`;
+
+    github.failure = new GitHubAppApiError("Not Found", 404);
+    const passive = await app.request(list, { headers: await headers(workspace) });
+    expect(passive.status).toBe(409);
+    const sync = await app.request(`${list}/sync`, {
+      method: "POST",
+      headers: await headers(workspace),
+    });
+    expect(sync.status).toBe(409);
+
+    // A GitHub outage stays a 502 that clients may retry.
+    github.failure = new GitHubAppApiError("Bad Gateway", 502);
+    const outage = await app.request(`${list}/sync`, {
+      method: "POST",
+      headers: await headers(workspace),
+    });
+    expect(outage.status).toBe(502);
   }, 60_000);
 });

@@ -64,8 +64,11 @@ const BOUND_STATUS = {
 };
 
 /** An Opengeni API that answers like a gateway while `deploying` is set. */
-function redeployingHost() {
-  const api = { deploying: true, reads: { github: 0, personal: 0, mcp: 0 } };
+function redeployingHost({ personalRateLimited = false } = {}) {
+  const api = {
+    deploying: !personalRateLimited,
+    reads: { github: 0, personal: 0, personalRepositories: 0, mcp: 0 },
+  };
   const duringDeploy = <T,>(read: () => T) => {
     if (api.deploying) throw new OpenGeniApiError(502, "", { correlationId: crypto.randomUUID() });
     return read();
@@ -98,7 +101,20 @@ function redeployingHost() {
         })),
       personalGitHubStatus: async () => {
         api.reads.personal += 1;
-        return duringDeploy(() => ({ enabled: true, connection: null, reviewUrl: null }));
+        return duringDeploy(() => ({
+          enabled: true,
+          connection: personalRateLimited
+            ? { id: "personal-1", status: "active", version: 1, login: "bendik" }
+            : null,
+          reviewUrl: null,
+        }));
+      },
+      listPersonalGitHubRepositories: async () => {
+        api.reads.personalRepositories += 1;
+        // GitHub rate-limits the person: the API answers provider_rate_limited as a 503.
+        throw new OpenGeniApiError(503, "GitHub is temporarily rate limited", {
+          correlationId: crypto.randomUUID(),
+        });
       },
       listCapabilities: async () => {
         api.reads.mcp += 1;
@@ -196,6 +212,39 @@ describe("a chat open while Opengeni redeploys", () => {
       const settled = { ...api.reads };
       await flush(60_000);
       expect(api.reads).toEqual(settled);
+    } finally {
+      jest.useRealTimers();
+      await rendered.unmount();
+    }
+  });
+
+  test("keeps backing off while the person's GitHub status answers but their repositories are rate-limited", async () => {
+    const toastError = spyOn(Sonner.toast, "error");
+    const { host, api } = redeployingHost({ personalRateLimited: true });
+    const rendered = await renderHook(useOpenChat, { host, ready: false });
+    try {
+      for (let i = 0; i < 20 && !rendered.result.current; i++) await flush(10);
+      await actRun(() => rendered.result.current!.prepareWorkspaceTransition(WORKSPACE_ID));
+      jest.useFakeTimers();
+      await rendered.rerender({ host, ready: true });
+      await flush();
+      const first = api.reads.personalRepositories;
+      expect(first).toBeGreaterThanOrEqual(1);
+      // First quiet retry after 2 s.
+      await flush(2_000);
+      expect(api.reads.personalRepositories).toBe(first + 1);
+      // The status answered again, but the read as a whole failed: the next
+      // pause is longer (4 s), not back to 2 s.
+      await flush(2_000);
+      expect(api.reads.personalRepositories).toBe(first + 1);
+      await flush(2_000);
+      expect(api.reads.personalRepositories).toBe(first + 2);
+      // Then 8 s.
+      await flush(4_000);
+      expect(api.reads.personalRepositories).toBe(first + 2);
+      await flush(4_000);
+      expect(api.reads.personalRepositories).toBe(first + 3);
+      expect(toastError).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
       await rendered.unmount();

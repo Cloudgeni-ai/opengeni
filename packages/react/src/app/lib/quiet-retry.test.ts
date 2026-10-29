@@ -58,6 +58,24 @@ describe("quiet retry", () => {
     expect(runs).toEqual(["second"]);
   });
 
+  test("another key (a workspace switch) starts over at the first pause", () => {
+    jest.useFakeTimers();
+    const retry = createQuietRetry([10, 20, 40]);
+    let runs = 0;
+    const run = () => {
+      runs += 1;
+    };
+    retry.schedule(run, "workspace-a");
+    jest.advanceTimersByTime(10);
+    retry.schedule(run, "workspace-a");
+    jest.advanceTimersByTime(20);
+    expect(runs).toBe(2);
+    retry.cancel();
+    retry.schedule(run, "workspace-b");
+    jest.advanceTimersByTime(10);
+    expect(runs).toBe(3);
+  });
+
   test("a hidden page asks nothing until it is back in view", () => {
     jest.useFakeTimers();
     const retry = createQuietRetry([10]);
