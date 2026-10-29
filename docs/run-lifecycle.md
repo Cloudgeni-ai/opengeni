@@ -390,12 +390,17 @@ scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
 
 One narrow Send exception prevents a conversational answer from getting stuck
-behind the question it is answering. When the active, unpaused branch is in
-`requires_action`, a normal human Send is promoted inside that same transaction
-to Steer-equivalent replacement: pending human-input or approval state is
-cancelled, the new prompt is inserted at the head, and its routing is
-`accepted_for_steering`. Running, recovering, and capacity-waiting turns retain
-ordinary Send queue semantics. An explicitly paused branch also remains inert;
+behind a wait that has no live attempt. When the active, unpaused branch is in
+`requires_action` or `waiting_capacity` (a turn parked on a used-up
+subscription or an account to reconnect) and no admission block holds it, a
+normal human or operator Send is promoted inside that same transaction to
+Steer-equivalent replacement: pending human-input or approval state, or the
+capacity waiter with its parked turn, is cancelled, the new prompt is inserted
+at the head, and its routing is `accepted_for_steering`. This applies to any
+caller holding `session.append`, so a follow-up sent during even a short
+capacity wait replaces the parked turn instead of waiting behind it. Running
+and recovering turns, and agent or machine input, retain ordinary Send queue
+semantics. An explicitly paused branch also remains inert;
 only Resume or an explicit Steer activates it. Resubmitting a checked-out queue
 Edit also keeps ordinary queue placement: it is a revision of already accepted
 work, not a new conversational answer to the active wait.
@@ -1875,7 +1880,7 @@ semantics, exactly like a Send during `requires_action`
 the parked turn is superseded with its waiter and the new prompt runs next on
 its own accepted model, so a person who switched model or provider after a
 usage limit is never held until the reset. A queue-edit resubmission, agent
-or machine input, and a Send to a paused branch keep ordinary queue semantics
+or machine input, and a Send to a paused or admission-blocked branch keep ordinary queue semantics
 and remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Session and workspace Resume, and a

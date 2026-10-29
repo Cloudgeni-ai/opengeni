@@ -109,21 +109,6 @@ export function codexUsageContinuesAtReset(input: {
 }
 
 /**
- * Whether picking another model in the composer continues the blocked chat
- * with it: a Codex chat its usage limit stopped or holds, and any chat whose
- * turn is parked on provider capacity (a used-up Claude, Codex or SuperGrok
- * plan, an account to reconnect), which would otherwise wait for its reset.
- * Only a person who may control the chat continues it.
- */
-export function pickedModelContinuesBlockedChat(input: {
-  status: Session["status"];
-  codexUsageBlocked: boolean;
-  canControl: boolean;
-}): boolean {
-  return input.canControl && (input.codexUsageBlocked || input.status === "waiting_capacity");
-}
-
-/**
  * Whether the usage-limit line describes this chat. A Codex usage wait with
  * a known reset is a usage limit. A wait with no reset in sight (for example
  * no ChatGPT plan connected any more) or one that needs a person to act keeps

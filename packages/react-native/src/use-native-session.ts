@@ -174,6 +174,7 @@ export function useOpenGeniNativeSession(input: {
         status: session.session?.status,
         activeTurnId: session.session?.activeTurnId,
         queuedPrompts: queue.queue.length,
+        admissionBlock: session.session?.admissionBlock,
       }),
     busySend: input.busySend,
     offerQueue: input.offerQueue,

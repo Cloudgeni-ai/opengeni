@@ -77,6 +77,7 @@ import {
   promptSendDestination,
   sessionAdmissionBlocked,
   sessionDisplayStatus,
+  sessionTurnKeepsRunControl,
 } from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
@@ -270,7 +271,6 @@ import {
   latestCheckpointIsCompaction,
   modelSwitchHeadsUpText,
   needsModelSwitchHeadsUp,
-  pickedModelContinuesBlockedChat,
 } from "../lib/codex-model-switch";
 import {
   consumeSessionComposerFocusIntent,
@@ -2825,6 +2825,7 @@ function SessionChatPane(props: {
         status: props.session.status,
         activeTurnId: props.session.activeTurnId,
         queuedPrompts: props.queue.queue.length,
+        admissionBlock: props.session.admissionBlock,
       }),
     busySend: resolveWorkspaceBusySend(workspace?.settings),
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
@@ -3470,11 +3471,7 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     sessionModel: props.session.model,
     composerModel: model,
-    enabled: pickedModelContinuesBlockedChat({
-      status: props.session.status,
-      codexUsageBlocked,
-      canControl: workspacePermissions.includes("sessions:control"),
-    }),
+    enabled: codexUsageChoices,
     closePicker: () => setModelPickerSession(null),
     onContinue: (picked) =>
       void continueAfterUsageLimit(
@@ -4273,7 +4270,11 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
-                running={usageLimitTreeActive || props.pendingWake}
+                running={
+                  usageLimitTreeActive ||
+                  sessionTurnKeepsRunControl(props.session.status) ||
+                  props.pendingWake
+                }
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,
