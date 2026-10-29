@@ -28,6 +28,7 @@ export async function getBillingBalance(
       plan: BillingPlanBalance | null;
       decision: NonNullable<BillingBalance["promotionDecision"]>;
       enforcement: boolean;
+      apiSpent: string;
     }>(
       tx,
       sql`
@@ -43,6 +44,10 @@ export async function getBillingBalance(
         read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
         (select coalesce(sum(amount_micros), 0)::text
           from ${schema.creditLedgerEntries} where account_id = ${accountId}) as balance,
+        -- What API work has spent: negative credits up to this are API debt.
+        (select greatest(0, coalesce(sum(-amount_micros), 0))::text
+          from ${schema.creditLedgerEntries}
+          where account_id = ${accountId} and usage_origin = 'api') as "apiSpent",
         coalesce((select jsonb_agg(jsonb_build_object(
           'grantId', g.id,
           'label', coalesce(g.metadata->>'creditOfferLabel', 'Promotional credits'),
@@ -98,6 +103,10 @@ export async function getBillingBalance(
       balanceMicros,
       generalBalanceMicros,
       creditsMicros: creditsOutsidePlan(generalBalanceMicros, row?.plan ?? null),
+      ...apiDebt(
+        creditsOutsidePlan(generalBalanceMicros, row?.plan ?? null),
+        Number(row?.apiSpent ?? 0),
+      ),
       heldGeneralCreditMicros,
       heldCreditMicros:
         heldGeneralCreditMicros +
@@ -124,12 +133,25 @@ function creditsOutsidePlan(generalBalanceMicros: number, plan: BillingPlanBalan
   return generalBalanceMicros - (plan && !plan.creditScoped ? plan.creditRemainingMicros : 0);
 }
 
+/**
+ * Credit debt that API work ran up: negative credits, up to what API work has
+ * spent. Plan credit never repays it (the database's plan_app_general_balance
+ * applies the same rule at period expiry and to a new period's opening debt).
+ */
+function apiDebt(creditsMicros: number, apiSpentMicros: number) {
+  const debt = Math.min(Math.max(0, -creditsMicros), Math.max(0, apiSpentMicros));
+  return debt > 0 ? { apiDebtMicros: debt } : {};
+}
+
+/** General credit app work may use: API debt never shrinks the plan allowance. */
+function appGeneralMicros(balance: BillingBalance): number {
+  return (balance.generalBalanceMicros ?? balance.balanceMicros) + (balance.apiDebtMicros ?? 0);
+}
+
 /** Credits only: what API-origin work may spend (never plan or promotional credit). */
 export function apiSpendableCreditMicros(balance: BillingBalance): number {
-  return Math.max(
-    0,
-    balance.creditsMicros ?? balance.generalBalanceMicros ?? balance.balanceMicros,
-  );
+  // Without a credits figure, nothing is known to be credits: fail closed.
+  return Math.max(0, balance.creditsMicros ?? 0);
 }
 
 /**
@@ -165,11 +187,7 @@ export function spendableCreditMicros(
 ): number {
   if (origin === "api") return apiSpendableCreditMicros(balance);
   return (
-    Math.max(
-      0,
-      (balance.generalBalanceMicros ?? balance.balanceMicros) -
-        (balance.heldGeneralCreditMicros ?? 0),
-    ) +
+    Math.max(0, appGeneralMicros(balance) - (balance.heldGeneralCreditMicros ?? 0)) +
     (balance.promotionalCredits ?? []).reduce(
       (sum, grant) => sum + (grantCovers(grant, usage) ? grant.remainingMicros : 0),
       0,
@@ -238,7 +256,7 @@ export function planCreditDebit(
   // by repeatedly preserving promotional grants while overdrawing general.
   const planBudget = Math.min(
     balance.plan?.creditScoped ? 0 : (balance.plan?.creditRemainingMicros ?? 0),
-    Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
+    Math.max(0, appGeneralMicros(balance)),
   );
   return {
     debitedMicros,
@@ -267,7 +285,7 @@ export function planPostUseCreditAllocations(
   // allowance that is no longer backed by a positive general balance.
   const planBudget = Math.min(
     balance.plan?.creditScoped ? 0 : (balance.plan?.creditRemainingMicros ?? 0),
-    Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
+    Math.max(0, appGeneralMicros(balance)),
   );
   return allocateToCoveringGrants(balance, amountMicros, usage, planBudget);
 }

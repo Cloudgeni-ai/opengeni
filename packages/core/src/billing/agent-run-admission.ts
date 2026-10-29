@@ -6,6 +6,7 @@ import {
 import type { BillingOrigin, EntitlementsPort } from "@opengeni/contracts";
 import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
+  chargeBillingOrigin,
   checkWorkspaceAllowance,
   getSpendableCreditBalance,
   isCodexBilledTurn,
@@ -15,6 +16,8 @@ import {
 
 export type AgentRunAdmissionDenial =
   | "insufficient_credits"
+  /** API work found no credits: plan credit never pays for it. */
+  | "api_credits_required"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit";
@@ -30,8 +33,11 @@ export async function agentRunAdmissionDenial(
     /** The accepted work's causal human, not the scheduler/service caller. */
     initiatingHumanSubjectId?: string | null;
     acceptedTurn?: { sessionId: string; turnId: string };
-    /** Who pays: API work needs credits; plan credit never pays for it. */
-    billingOrigin?: BillingOrigin | null;
+    /**
+     * Who pays: API work needs credits; plan credit never pays for it. A
+     * resolver is read only when credits decide admission.
+     */
+    billingOrigin?: BillingOrigin | null | (() => Promise<BillingOrigin | null>);
   },
 ): Promise<AgentRunAdmissionDenial | null> {
   const codexBilled = await isCodexBilledTurn({
@@ -68,15 +74,23 @@ export async function agentRunAdmissionDenial(
       });
       if (!decision.allowed) return "insufficient_credits";
     } else {
+      const billingOrigin =
+        typeof input.billingOrigin === "function"
+          ? await input.billingOrigin()
+          : input.billingOrigin;
       const balance = await getSpendableCreditBalance(
         services.db,
         input.accountId,
         canonicalizeConfiguredModelId(services.settings, input.model),
         undefined,
         undefined,
-        input.billingOrigin,
+        billingOrigin,
       );
-      if (balance.balanceMicros <= 0) return "insufficient_credits";
+      if (balance.balanceMicros <= 0) {
+        return chargeBillingOrigin(billingOrigin) === "api"
+          ? "api_credits_required"
+          : "insufficient_credits";
+      }
     }
   }
   const refusal = await checkWorkspaceAllowance(services.db, {

@@ -68,6 +68,37 @@ test("Resume uses scoped models and the original causal human for admission", as
   );
 });
 
+test("Resume funds the turn like its chat: an API chat's origin reaches admission", async () => {
+  const settings = testSettings();
+  const value = fixture(settings.openaiModel, settings);
+  const sessionId = "33333333-3333-4333-8333-333333333333";
+  const limit = spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
+    allowed: true,
+    state: null,
+  } as never);
+  const origin = spyOn(db, "readSessionBillingOrigin").mockResolvedValue("api");
+  restores.push(
+    () => limit.mockRestore(),
+    () => origin.mockRestore(),
+  );
+  await assertGoalResumeAllowed(
+    { db: database, settings },
+    {
+      accountId,
+      workspaceId,
+      id: sessionId,
+      model: settings.openaiModel,
+      codexCompactionMode: "portable",
+    },
+    null,
+  );
+  const resolver = value.admission.mock.calls.at(-1)?.[1].billingOrigin;
+  expect(typeof resolver).toBe("function");
+  expect(origin).not.toHaveBeenCalled();
+  expect(await (resolver as () => Promise<string>)()).toBe("api");
+  expect(origin).toHaveBeenCalledWith(database, { accountId, workspaceId, sessionId });
+});
+
 test("Resume uses only promotional credits eligible for the chosen model", async () => {
   const settings = testSettings({
     billingMode: "stripe",
@@ -194,6 +225,7 @@ test("a host funding denial is neutral about the host's private balance and poli
 
 for (const [denial, pausedReason, message] of [
   ["insufficient_credits", "credits", "Insufficient workspace credits"],
+  ["api_credits_required", "credits", "API usage uses credits, not your plan credit."],
   ["allowance_exhausted", "allowance", "Usage allowance exhausted"],
   ["monthly_model_cost_limit", "budget", "spending limit reached"],
   ["monthly_agent_run_limit", "usage_limit", "agent run limit reached"],

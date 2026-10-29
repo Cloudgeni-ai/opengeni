@@ -11,6 +11,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  expirePlanCreditPeriod,
   ensureManagedAccessForUser,
   getBillingBalance,
   getSpendableCreditBalance,
@@ -96,11 +97,8 @@ test("API usage spends credits only and never the plan allowance; runtime postur
   ).toBe(230 * M);
   // An ambient override (an API request scope) decides when the caller does not.
   expect(
-    (
-      await withBillingOriginOverride("api", () =>
-        getSpendableCreditBalance(client!.db, accountId),
-      )
-    ).balanceMicros,
+    (await withBillingOriginOverride("api", () => getSpendableCreditBalance(client!.db, accountId)))
+      .balanceMicros,
   ).toBe(30 * M);
 
   // Up-to-balance: capped at credits, plan untouched.
@@ -238,8 +236,8 @@ async function startedSession(
   return { session, turn: started.turn! };
 }
 async function turnOrigin(workspaceId: string, turnId: string) {
-  const [row] =
-    await shared!.admin`select billing_origin from session_turns where workspace_id = ${workspaceId}::uuid and id = ${turnId}::uuid`;
+  const [row] = await shared!
+    .admin`select billing_origin from session_turns where workspace_id = ${workspaceId}::uuid and id = ${turnId}::uuid`;
   return row?.billing_origin ?? null;
 }
 
@@ -295,4 +293,140 @@ test("turns freeze their origin; undecided turns inherit the chat's, then the pa
     "session_turns_billing_origin_valid",
   ]);
   for (const row of checks) expect(row.def).toContain("'app'::text, 'api'::text");
+}, 180_000);
+
+async function proPeriod() {
+  const accountId = await proAccount();
+  const [row] = await shared!.admin`
+    select id from plan_credit_periods where account_id = ${accountId}::uuid and expired_at is null`;
+  return { accountId, periodId: row!.id as string };
+}
+async function nextProPeriod(accountId: string) {
+  const input: PlanCreditPeriodInput = {
+    accountId,
+    planKey: "pro",
+    periodStart: new Date(Date.now() - 500),
+    periodEnd: new Date(Date.now() + 3_600_000),
+    stripeSubscriptionId: `sub_${crypto.randomUUID()}`,
+  };
+  await upsertOrganizationPlan(client!.db, {
+    ...input,
+    status: "active",
+    currentPeriodStart: input.periodStart,
+    currentPeriodEnd: input.periodEnd,
+  });
+  return await grantPlanCreditPeriod(client!.db, input);
+}
+const apiOverrun = (accountId: string, amountMicros: number) =>
+  applyCreditDebitAfterUse(client!.db, {
+    accountId,
+    type: "model_usage_debit",
+    amountMicros,
+    sourceType: "test",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+    usageOrigin: "api",
+  });
+
+test("plan credit never repays API debt: not mid-period, not at expiry, not in the next period", async () => {
+  if (!client || !shared) return;
+  const { accountId, periodId } = await proPeriod();
+  await topup(accountId, 1 * M);
+  await apiOverrun(accountId, 6 * M);
+  const owing = await getBillingBalance(client.db, accountId);
+  expect(owing.creditsMicros).toBe(-5 * M);
+  expect(owing.apiDebtMicros).toBe(5 * M);
+  expect(owing.plan?.creditRemainingMicros).toBe(200 * M);
+  // App work still has the whole plan allowance while credits owe API debt.
+  expect(
+    (await getSpendableCreditBalance(client.db, accountId, undefined, undefined, undefined, "app"))
+      .balanceMicros,
+  ).toBe(200 * M);
+  expect(
+    (await getSpendableCreditBalance(client.db, accountId, undefined, undefined, undefined, "api"))
+      .balanceMicros,
+  ).toBe(0);
+
+  // Expiry removes the unused allowance; the API debt stays credit debt.
+  await expirePlanCreditPeriod(client.db, { accountId, periodId, force: true });
+  const expired = await getBillingBalance(client.db, accountId);
+  expect(expired.balanceMicros).toBe(-5 * M);
+  expect(expired.creditsMicros).toBe(-5 * M);
+
+  // The next period opens in full: API debt is not netted from plan credit.
+  const next = await nextProPeriod(accountId);
+  expect(next.opening_debt_micros).toBe(0);
+  const renewed = await getBillingBalance(client.db, accountId);
+  expect(renewed.plan?.creditRemainingMicros).toBe(200 * M);
+  expect(renewed.creditsMicros).toBe(-5 * M);
+
+  // The next top-up repays the API debt first.
+  await topup(accountId, 8 * M);
+  expect((await getBillingBalance(client.db, accountId)).creditsMicros).toBe(3 * M);
+}, 180_000);
+
+test("app overruns still carry into the next period's opening debt", async () => {
+  if (!client || !shared) return;
+  const { accountId, periodId } = await proPeriod();
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "model_usage_debit",
+    amountMicros: 205 * M,
+    sourceType: "test",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  await expirePlanCreditPeriod(client.db, { accountId, periodId, force: true });
+  const next = await nextProPeriod(accountId);
+  expect(next.opening_debt_micros).toBe(5 * M);
+  const renewed = await getBillingBalance(client.db, accountId);
+  expect(renewed.plan?.creditRemainingMicros).toBe(195 * M);
+  expect(renewed.creditsMicros).toBe(0);
+}, 180_000);
+
+test("documents uploaded with an API key record their origin", async () => {
+  if (!client || !shared) return;
+  const grant = await workspace();
+  const [base] = await shared.admin`
+    insert into document_bases (account_id, workspace_id, name)
+    values (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${`base-${crypto.randomUUID()}`})
+    returning id`;
+  // The application role writes the row, as an upload does.
+  const insert = async (attribution: Record<string, unknown>) => {
+    const [file] = await shared!.admin`
+      insert into files (account_id, workspace_id, status, filename, safe_filename, content_type,
+        size_bytes, bucket, object_key)
+      values (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'ready', 'api.txt', 'api.txt',
+        'text/plain', 1, 'test', ${`documents/${crypto.randomUUID()}`})
+      returning id`;
+    return await withRlsContext(
+      client!.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      (tx) =>
+        tx.execute(sql`
+          insert into documents (account_id, workspace_id, base_id, file_id, status, title, created_by,
+            authority_kind, authority_workspace_id, visibility, billing_attribution)
+          values (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${base!.id}::uuid,
+            ${file!.id}::uuid, 'queued', 'api', 'api-key:test', 'workspace', ${grant.workspaceId}::uuid,
+            'workspace', ${JSON.stringify(attribution)}::jsonb)`),
+    );
+  };
+  const codeOf = async (attribution: Record<string, unknown>) => {
+    try {
+      await insert(attribution);
+      return null;
+    } catch (error) {
+      return nestedPostgresSqlState(error) ?? "unknown";
+    }
+  };
+  expect(await codeOf({ kind: "service", billingOrigin: "api" })).toBeNull();
+  expect(await codeOf({ kind: "service", billingOrigin: "app" })).toBeNull();
+  expect(await codeOf({ kind: "service" })).toBeNull();
+  expect(await codeOf({ kind: "service", billingOrigin: "free" })).toBe("23514");
+  expect(await codeOf({ kind: "service", billingOrigin: "api", extra: 1 })).toBe("23514");
+  const [jobs] = await shared.admin`
+    select pg_get_constraintdef(oid) as def from pg_constraint
+    where conname = 'knowledge_index_billing_attribution_check'
+      and connamespace = ${shared.schema}::regnamespace`;
+  expect(jobs?.def).toContain("billingOrigin");
 }, 180_000);

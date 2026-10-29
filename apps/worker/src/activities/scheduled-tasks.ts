@@ -1251,17 +1251,23 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
           initiatingHumanSubjectId: causalHumanSubjectId,
           // Runs are billed as whoever set the task up.
-          billingOrigin: await readScheduledTaskBillingOrigin(db, {
-            accountId: task.accountId,
-            workspaceId: task.workspaceId,
-            taskId: task.id,
-          }),
+          billingOrigin: () =>
+            readScheduledTaskBillingOrigin(db, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              taskId: task.id,
+            }),
         },
       );
       if (admissionDenial) {
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
-        return await refuseAdmission(admissionDenial, true, "agent run admission denied");
+        // A run receipt records API work without credits as out of credits.
+        return await refuseAdmission(
+          admissionDenial === "api_credits_required" ? "insufficient_credits" : admissionDenial,
+          true,
+          "agent run admission denied",
+        );
       }
       if (acceptedTargetSessionId && targetSessionExecutionBase) {
         // An occurrence that targets an existing task tree counts against

@@ -6582,6 +6582,12 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
      * May be negative after use.
      */
     creditsMicros: z.number().int().optional(),
+    /**
+     * Credit debt that API work ran up (negative credits, up to the account's
+     * API spending). Plan credit never repays it, so app use still sees the
+     * whole plan credit. Absent means none.
+     */
+    apiDebtMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),

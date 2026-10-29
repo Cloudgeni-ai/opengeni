@@ -27,7 +27,10 @@ export function ambientBillingOrigin(): BillingOrigin | null {
   );
 }
 
-/** Who pays for a schedule's runs; a task from before origins is app. */
+/**
+ * Who pays for a schedule's runs; a task from before origins is app. A task
+ * this caller cannot see is never billed to plan credit.
+ */
 export async function readScheduledTaskBillingOrigin(
   db: Database,
   input: { accountId: string; workspaceId: string; taskId: string },
@@ -39,7 +42,34 @@ export async function readScheduledTaskBillingOrigin(
         WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
           AND id=${input.taskId}::uuid`,
     );
-    return storedBillingOrigin(task?.billingOrigin);
+    return task ? storedBillingOrigin(task.billingOrigin) : "api";
+  });
+}
+
+/**
+ * The origin a chat's next machine turn (a goal continuation, a resume)
+ * inherits: its latest decided turn's, else its parent chat's, else app.
+ * Mirrors the session_turns insert trigger, so admission and charge agree.
+ */
+export async function readSessionBillingOrigin(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<BillingOrigin> {
+  return await withRlsContext(db, input, async (tx) => {
+    const [row] = await rawRows<{ billingOrigin: string | null }>(
+      tx,
+      sql`SELECT coalesce(
+          (SELECT turn.billing_origin FROM session_turns turn
+            WHERE turn.workspace_id=${input.workspaceId}::uuid AND turn.session_id=${input.sessionId}::uuid
+              AND turn.billing_origin IS NOT NULL
+            ORDER BY turn.created_at DESC, turn.id DESC LIMIT 1),
+          (SELECT turn.billing_origin FROM sessions child JOIN session_turns turn
+              ON turn.workspace_id = child.workspace_id AND turn.session_id = child.parent_session_id
+            WHERE child.workspace_id=${input.workspaceId}::uuid AND child.id=${input.sessionId}::uuid
+              AND turn.billing_origin IS NOT NULL
+            ORDER BY turn.created_at DESC, turn.id DESC LIMIT 1)) AS "billingOrigin"`,
+    );
+    return storedBillingOrigin(row?.billingOrigin);
   });
 }
 

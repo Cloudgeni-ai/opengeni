@@ -220,15 +220,24 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       eligibleModelIds: ["gpt-chat-only"],
       idempotencyKey: `promo:${value.accountId}`,
     });
-    const refused = await begin(app, value, AZURE_MODEL);
+    // A person in the app (the app's own sign-in fixes this scope in production).
+    const refused = await withBillingOriginOverride("app", () => begin(app, value, AZURE_MODEL));
     expect(refused.response.status).toBe(402);
     expect(await refused.response.json()).toMatchObject({
       code: "insufficient_credits",
       message: "Promotional credits don't cover live voice. Add credits to use it.",
     });
-    const catalog = await app.request(
-      `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
-      { headers: value.headers },
+    // The fixture's own delegated token is API use: it is told credits pay.
+    const api = await begin(app, value, AZURE_MODEL);
+    expect(api.response.status).toBe(402);
+    expect(await api.response.json()).toMatchObject({
+      code: "insufficient_credits",
+      message: "API usage uses credits, not your plan credit.",
+    });
+    const catalog = await withBillingOriginOverride("app", () =>
+      app.request(`http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`, {
+        headers: value.headers,
+      }),
     );
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
     expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({

@@ -6704,6 +6704,43 @@ const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
  * trusted outer scope fixed; else app (today's behaviour, and legacy null).
  * API debits never count against the monthly plan allowance.
  */
+/**
+ * The origin a frozen billing record is charged under, resolved like the
+ * debit itself (see resolveUsageOrigin), so admission and charge agree.
+ */
+async function attributionBillingOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  const attribution = input.attribution;
+  if (!attribution || attribution.kind === "unknown") return ambientBillingOrigin() ?? "app";
+  return await resolveUsageOrigin(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    metadata: creditDebitAttributionMetadata(attribution),
+  });
+}
+
+/** {@link attributionBillingOrigin} for a caller outside an account scope. */
+export async function billingOriginForAttribution(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await attributionBillingOrigin(scopedDb, input),
+  );
+}
+
 async function resolveUsageOrigin(
   scopedDb: Database,
   input: {
@@ -47777,7 +47814,15 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getSpendableCreditBalance(tx, accountId);
+            // The box is funded like the work it runs: an API chat's box spends credits.
+            const balance = await getSpendableCreditBalance(
+              tx,
+              accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, { accountId, workspaceId, attribution }),
+            );
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
             }
@@ -54916,7 +54961,20 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot.attribution,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -57127,7 +57185,20 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot?.attribution ?? null,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }

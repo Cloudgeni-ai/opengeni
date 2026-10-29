@@ -13,6 +13,7 @@ export {
   withCreditDebitAttribution,
   ambientBillingOrigin,
   readScheduledTaskBillingOrigin,
+  readSessionBillingOrigin,
   readTurnBillingOrigin,
   withBillingOriginOverride,
 } from "./credit-debit-attribution";

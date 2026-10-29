@@ -4,8 +4,9 @@
 -- turn freezes its funding origin, schedules freeze their creator's origin,
 -- and each usage debit records the origin it was charged under. The monthly
 -- plan allowance stops counting API debits, so plan credit never pays for API
--- work, and stops counting the bring-your-own-key platform fee on Free
--- periods (the fee is payable only from paid credit). See docs/billing-origin.md.
+-- work, and plan credit never repays debt that API work ran up (period
+-- expiry, the next period's opening debt). Document and index-job billing
+-- records may carry the origin. See docs/billing-origin.md.
 --
 -- Rolling: three nullable columns (catalog-only; their checks are NOT VALID
 -- and only constrain new writes) and two same-signature function bodies. The
@@ -65,11 +66,14 @@ BEGIN
     RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, %1$I, pg_temp AS $body$
     BEGIN
       IF NEW.scheduled_task_run_id IS NOT NULL THEN
+        -- A task from before origins is app; a task this writer cannot see
+        -- is never billed to plan credit.
         SELECT coalesce(task.billing_origin, 'app') INTO NEW.billing_origin
           FROM scheduled_task_runs run JOIN scheduled_tasks task
             ON task.workspace_id = run.workspace_id AND task.id = run.task_id
           WHERE run.workspace_id = NEW.workspace_id AND run.id = NEW.scheduled_task_run_id;
-        IF NEW.billing_origin IS NOT NULL THEN RETURN NEW; END IF;
+        NEW.billing_origin := coalesce(NEW.billing_origin, 'api');
+        RETURN NEW;
       END IF;
       SELECT turn.billing_origin INTO NEW.billing_origin FROM session_turns turn
         WHERE turn.workspace_id = NEW.workspace_id AND turn.session_id = NEW.session_id
@@ -122,8 +126,6 @@ BEGIN
             'credit_refund','credit_dispute_hold','credit_dispute_release')
           -- Plan credit never pays for API work.
           AND entry.usage_origin IS DISTINCT FROM 'api'
-          -- The own-key platform fee is payable only from paid credit, never Free.
-          AND NOT (entry.type = 'byok_platform_fee' AND p_period.plan_key = 'free')
           AND (entry.type <> 'video_generation_refund' OR EXISTS (
             SELECT 1 FROM credit_ledger_entries debit
             WHERE debit.account_id = entry.account_id AND debit.type = 'video_generation_debit'
@@ -192,3 +194,222 @@ BEGIN
     END $$;
   $create$, data_schema);
 END $install$;
+
+-- Plan credit never repays API debt. Credits can go negative when API work
+-- settles past them; that debt stays credit debt for the next top-up. Debt up
+-- to the account's API spending counts as API debt, so period expiry removes
+-- the whole unused allowance, a new period's opening debt only nets older app
+-- debt, and the pending-expiry read agrees. Accounts with no API use keep
+-- today's behaviour exactly (funding reversals still cap the allowance).
+DO $install$
+DECLARE
+  data_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_private.plan_app_general_balance(p_account_id uuid, p_plan_remaining bigint) RETURNS bigint
+        LANGUAGE sql STABLE
+        SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
+        AS $$
+      SELECT general + least(greatest(0, p_plan_remaining - general), api_spent)
+      FROM (SELECT opengeni_private.plan_general_balance(p_account_id) AS general,
+        greatest(0, coalesce((SELECT sum(-amount_micros) FROM credit_ledger_entries
+          WHERE account_id = p_account_id AND usage_origin = 'api'), 0)) AS api_spent) balances
+    $$;
+  $create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION expire_plan_credit_period(p_account_id uuid, p_period_id uuid, p_force boolean DEFAULT false) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
+    AS $$
+DECLARE period plan_credit_periods%%ROWTYPE; usage bigint; remaining bigint; balance bigint;
+  expiry uuid; expiry_time timestamptz; scoped boolean;
+BEGIN
+  IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
+    RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext(p_account_id::text));
+  SELECT * INTO period FROM plan_credit_periods WHERE account_id = p_account_id AND id = p_period_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Plan credit period not found' USING ERRCODE = 'P0002'; END IF;
+  IF period.expired_at IS NOT NULL THEN RETURN to_jsonb(period); END IF;
+  expiry_time := clock_timestamp();
+  IF NOT p_force AND period.period_end > expiry_time THEN
+    RAISE EXCEPTION 'Plan credit period has not ended' USING ERRCODE = '55000';
+  END IF;
+  SELECT eligible_model_ids IS NOT NULL INTO scoped FROM credit_ledger_entries WHERE id = period.grant_entry_id;
+  usage := opengeni_private.plan_period_usage(period, expiry_time);
+  remaining := greatest(0, period.granted_micros - period.opening_debt_micros - usage);
+  -- Scoped funding never repays general debt. Consume its exact remainder via
+  -- allocation so neither signup promotions nor purchased funds are removed.
+  -- API debt is never repaid from plan credit: it stays as credit debt.
+  balance := CASE WHEN scoped THEN remaining ELSE greatest(0, opengeni_private.plan_app_general_balance(p_account_id, remaining)) END;
+  INSERT INTO credit_ledger_entries(account_id, workspace_id, type, amount_micros, source_type, source_id,
+    idempotency_key, metadata, occurred_at, created_at)
+  VALUES (p_account_id, NULL, 'plan_credit_expiry', -least(remaining, balance), 'plan_credit_period', period.id::text,
+    'plan-credit-expiry:' || period.id::text, jsonb_build_object('planKey',period.plan_key,'usageMicros',usage), expiry_time, expiry_time)
+  RETURNING id INTO expiry;
+  IF scoped AND remaining > 0 THEN
+    INSERT INTO credit_debit_allocations(account_id, debit_entry_id, grant_entry_id, amount_micros)
+      VALUES (p_account_id, expiry, period.grant_entry_id, remaining);
+  END IF;
+  UPDATE plan_credit_periods SET expired_at = expiry_time, expiry_entry_id = expiry, usage_at_expiry_micros = usage
+    WHERE id = period.id RETURNING * INTO period;
+  RETURN to_jsonb(period);
+END $$;
+  $create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION grant_plan_credit_period(p_account_id uuid, p_plan_key text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_stripe_subscription_id text DEFAULT NULL::text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
+    AS $$
+DECLARE state organization_plans%%ROWTYPE; period plan_credit_periods%%ROWTYPE; previous plan_credit_periods%%ROWTYPE;
+  definition jsonb; catalog_version bigint; amount bigint; opening_debt bigint; grant_id uuid;
+  granted_time timestamptz; grant_key text; model_ids jsonb;
+BEGIN
+  IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
+    RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
+  END IF;
+  IF p_period_start IS NULL OR p_period_end IS NULL OR NOT isfinite(p_period_start) OR NOT isfinite(p_period_end)
+    OR p_period_end <= p_period_start OR p_period_start > clock_timestamp() THEN
+    RAISE EXCEPTION 'Invalid plan credit period' USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext(p_account_id::text));
+  grant_key := CASE WHEN p_stripe_subscription_id IS NOT NULL
+    THEN 'plan-credit:stripe:' || p_stripe_subscription_id || ':' || extract(epoch FROM p_period_start)::text || ':' || p_plan_key
+    ELSE 'plan-credit:free:' || p_account_id::text || ':' || to_char(p_period_start AT TIME ZONE 'UTC', 'YYYY-MM') END;
+  SELECT * INTO period FROM plan_credit_periods WHERE idempotency_key = grant_key;
+  IF FOUND THEN
+    IF period.account_id IS DISTINCT FROM p_account_id OR period.plan_key IS DISTINCT FROM p_plan_key
+      OR period.period_start IS DISTINCT FROM p_period_start OR period.period_end IS DISTINCT FROM p_period_end
+      OR period.stripe_subscription_id IS DISTINCT FROM p_stripe_subscription_id THEN
+      RAISE EXCEPTION 'Plan grant idempotency key conflicts with different terms' USING ERRCODE = '23505';
+    END IF;
+    RETURN to_jsonb(period);
+  END IF;
+  SELECT * INTO state FROM organization_plans WHERE account_id = p_account_id;
+  IF NOT FOUND OR state.plan_key IS DISTINCT FROM p_plan_key OR state.status NOT IN ('active','trialing')
+    OR state.stripe_subscription_id IS DISTINCT FROM p_stripe_subscription_id
+    OR state.current_period_start IS DISTINCT FROM p_period_start OR state.current_period_end IS DISTINCT FROM p_period_end THEN
+    RAISE EXCEPTION 'Grant requires matching active organization plan state' USING ERRCODE = '55000';
+  END IF;
+  SELECT revision, entry INTO catalog_version, definition
+  FROM (SELECT revision, catalog FROM opengeni_private.subscription_plan_catalog_revisions ORDER BY revision DESC LIMIT 1) revision,
+    jsonb_array_elements(revision.catalog) entry WHERE entry->>'key' = p_plan_key;
+  IF definition IS NULL THEN RAISE EXCEPTION 'Unknown subscription plan' USING ERRCODE = '22023'; END IF;
+  IF (definition->>'freeCredit')::boolean THEN
+    IF p_stripe_subscription_id IS NOT NULL OR NOT free_plan_credit_eligible(p_account_id) THEN
+      RAISE EXCEPTION 'Organization is not eligible for Free monthly credit' USING ERRCODE = '42501';
+    END IF;
+  ELSIF p_stripe_subscription_id IS NULL THEN
+    RAISE EXCEPTION 'Paid plan credit requires a subscription identity' USING ERRCODE = '22023';
+  END IF;
+  FOR previous IN SELECT * FROM plan_credit_periods WHERE account_id = p_account_id AND expired_at IS NULL LOOP
+    IF previous.period_end > p_period_start THEN
+      RAISE EXCEPTION 'Active plan period overlaps; use replace_plan_credit_period for an upgrade' USING ERRCODE = '55000';
+    END IF;
+    PERFORM expire_plan_credit_period(p_account_id, previous.id, false);
+  END LOOP;
+  amount := (definition->>'monthlyCreditMicros')::bigint;
+  IF p_plan_key = 'free' AND amount > 0 THEN
+    SELECT coalesce(policy->'signupModelIds', policy->'defaultModelIds') INTO model_ids
+      FROM opengeni_private.credit_promotion_policy_revisions ORDER BY revision DESC LIMIT 1;
+    -- Bootstrap deployments may have issued the signup receipt from the env
+    -- policy before a runtime revision exists. Preserve that receipt's scope.
+    IF model_ids IS NULL THEN
+      SELECT to_jsonb(eligible_model_ids) INTO model_ids FROM credit_ledger_entries
+        WHERE account_id = p_account_id AND source_type = 'verified_signup_trial'
+          AND eligible_model_ids IS NOT NULL ORDER BY created_at, id LIMIT 1;
+    END IF;
+    IF model_ids IS NULL THEN
+      RAISE EXCEPTION 'Free monthly credit requires a configured free-credit model policy' USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  opening_debt := CASE WHEN model_ids IS NOT NULL THEN 0
+    -- Only debt beyond what API work ran up is repaid from plan credit.
+    ELSE least(amount, greatest(0, -opengeni_private.plan_app_general_balance(p_account_id, 0))) END;
+  granted_time := clock_timestamp();
+  INSERT INTO credit_ledger_entries(account_id, workspace_id, type, amount_micros, source_type, source_id,
+    idempotency_key, metadata, eligible_model_ids, occurred_at, created_at)
+  VALUES (p_account_id, NULL, 'plan_credit_grant', amount, 'subscription_plan', p_stripe_subscription_id,
+    grant_key, jsonb_build_object('planKey',p_plan_key,'catalogRevision',catalog_version,
+      'creditOfferLabel','Monthly plan credit'),
+    CASE WHEN model_ids IS NULL THEN NULL ELSE ARRAY(SELECT jsonb_array_elements_text(model_ids)) END,
+    granted_time, granted_time)
+  RETURNING id INTO grant_id;
+  INSERT INTO plan_credit_periods(account_id, plan_key, catalog_revision, stripe_subscription_id, period_start, period_end,
+    granted_micros, opening_debt_micros, grant_entry_id, idempotency_key, granted_at)
+  VALUES (p_account_id, p_plan_key, catalog_version, p_stripe_subscription_id, p_period_start, p_period_end,
+    amount, opening_debt, grant_id, grant_key, granted_time) RETURNING * INTO period;
+  IF p_period_end <= clock_timestamp() THEN
+    RETURN expire_plan_credit_period(p_account_id, period.id, false);
+  END IF;
+  RETURN to_jsonb(period);
+END $$;
+  $create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION read_organization_plan_balance(p_account_id uuid, p_as_of timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
+    AS $$
+DECLARE state organization_plans%%ROWTYPE; definition jsonb; period plan_credit_periods%%ROWTYPE;
+  remaining bigint := 0; pending bigint := 0; as_of timestamptz := coalesce(p_as_of, clock_timestamp()); scoped boolean := false;
+BEGIN
+  IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
+    RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO state FROM organization_plans WHERE account_id = p_account_id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  definition := opengeni_private.subscription_plan_definition(state.plan_key);
+  SELECT * INTO period FROM plan_credit_periods WHERE account_id = p_account_id
+    AND (expired_at IS NULL OR (plan_key = state.plan_key AND period_start = state.current_period_start))
+    ORDER BY expired_at DESC NULLS FIRST, granted_at DESC LIMIT 1;
+  SELECT eligible_model_ids IS NOT NULL INTO scoped FROM credit_ledger_entries WHERE id = period.grant_entry_id;
+  IF period.id IS NOT NULL AND period.expired_at IS NULL AND period.period_end > as_of THEN
+    remaining := greatest(0, period.granted_micros - period.opening_debt_micros - opengeni_private.plan_period_usage(period, as_of));
+  END IF;
+  SELECT least(greatest(0, ended.granted_micros - ended.opening_debt_micros
+      - opengeni_private.plan_period_usage(ended, as_of)),
+    CASE WHEN grant_row.eligible_model_ids IS NOT NULL THEN ended.granted_micros
+      ELSE greatest(0, opengeni_private.plan_app_general_balance(p_account_id,
+        greatest(0, ended.granted_micros - ended.opening_debt_micros
+          - opengeni_private.plan_period_usage(ended, as_of)))) END) INTO pending
+    FROM plan_credit_periods ended JOIN credit_ledger_entries grant_row ON grant_row.id = ended.grant_entry_id
+    WHERE ended.account_id = p_account_id AND ended.expired_at IS NULL AND ended.period_end <= as_of;
+  RETURN jsonb_build_object('key',state.plan_key,'label',coalesce(definition->>'label',state.plan_key),'status',state.status,
+    'creditGrantedMicros',coalesce(period.granted_micros,0),'creditRemainingMicros',remaining,
+    'creditPendingExpiryMicros',coalesce(pending,0),'creditScoped',coalesce(scoped,false),
+    'periodResetAt',coalesce(period.period_end,state.current_period_end),'seatLimit',definition->'seatLimit','seatsUsed',organization_plan_seats_used(p_account_id),
+    'cancelAtPeriodEnd',state.cancel_at_period_end);
+END $$;
+  $create$, data_schema);
+END $install$;
+REVOKE ALL ON FUNCTION opengeni_private.plan_app_general_balance(uuid, bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.prevent_session_turn_billing_origin_change() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.inherit_session_turn_billing_origin() FROM PUBLIC;
+
+-- A key's or service's billing record may carry its origin (API keys are
+-- api; a trusted dispatcher such as a bot may fix app). The previous release
+-- writes the exact old record, which still passes; NOT VALID leaves existing
+-- rows unscanned.
+ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_billing_attribution_check,
+  ADD CONSTRAINT documents_billing_attribution_check CHECK (((jsonb_typeof(billing_attribution) = 'object'::text) AND COALESCE(
+CASE (billing_attribution ->> 'kind'::text)
+    WHEN 'unknown'::text THEN (billing_attribution = '{"kind": "unknown"}'::jsonb)
+    WHEN 'service'::text THEN ((billing_attribution - 'billingOrigin'::text) = '{"kind": "service"}'::jsonb
+      AND COALESCE(billing_attribution ->> 'billingOrigin'::text, 'app'::text) = ANY (ARRAY['app'::text, 'api'::text]))
+    WHEN 'human'::text THEN ((jsonb_typeof((billing_attribution -> 'initiatingHumanSubjectId'::text)) = 'string'::text) AND ((octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) >= 1) AND (octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) <= 1024)))
+    WHEN 'turn'::text THEN ((COALESCE((billing_attribution ->> 'turnId'::text), ''::text) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text) AND (((billing_attribution -> 'initiatingHumanSubjectId'::text) = 'null'::jsonb) OR ((jsonb_typeof((billing_attribution -> 'initiatingHumanSubjectId'::text)) = 'string'::text) AND ((octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) >= 1) AND (octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) <= 1024)))))
+    ELSE false
+END, false))) NOT VALID;
+ALTER TABLE knowledge_index_jobs DROP CONSTRAINT IF EXISTS knowledge_index_billing_attribution_check,
+  ADD CONSTRAINT knowledge_index_billing_attribution_check CHECK (((jsonb_typeof(billing_attribution) = 'object'::text) AND COALESCE(
+CASE (billing_attribution ->> 'kind'::text)
+    WHEN 'unknown'::text THEN (billing_attribution = '{"kind": "unknown"}'::jsonb)
+    WHEN 'service'::text THEN ((billing_attribution - 'billingOrigin'::text) = '{"kind": "service"}'::jsonb
+      AND COALESCE(billing_attribution ->> 'billingOrigin'::text, 'app'::text) = ANY (ARRAY['app'::text, 'api'::text]))
+    WHEN 'human'::text THEN ((jsonb_typeof((billing_attribution -> 'initiatingHumanSubjectId'::text)) = 'string'::text) AND ((octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) >= 1) AND (octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) <= 1024)))
+    WHEN 'turn'::text THEN ((COALESCE((billing_attribution ->> 'turnId'::text), ''::text) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text) AND (((billing_attribution -> 'initiatingHumanSubjectId'::text) = 'null'::jsonb) OR ((jsonb_typeof((billing_attribution -> 'initiatingHumanSubjectId'::text)) = 'string'::text) AND ((octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) >= 1) AND (octet_length((billing_attribution ->> 'initiatingHumanSubjectId'::text)) <= 1024)))))
+    ELSE false
+END, false))) NOT VALID;

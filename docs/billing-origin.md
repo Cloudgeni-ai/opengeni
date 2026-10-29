@@ -44,6 +44,16 @@ unrestricted plan allowance: what API use may spend. It goes negative when a
 running API call settles past it, exactly like general debt today; the next
 top-up repays it first.
 
+Plan credit never repays that API debt. `BillingBalance.apiDebtMicros` is the
+negative part of credits, up to what API work has spent; app admission and
+plan allocation add it back, so app use keeps the whole allowance. The
+database applies the same rule with
+`opengeni_private.plan_app_general_balance`: period expiry removes the whole
+unused allowance and leaves the API debt as credit debt, and a new period's
+opening debt nets only older app debt. Debt is attributed to API use up to the
+API's lifetime spend, which can count a later app overrun as API debt when the
+account once paid for API use; that errs towards keeping plan credit.
+
 `plan_period_usage` ignores `usage_origin = 'api'` debits (and refunds of
 them), so API use never consumes the monthly allowance, and
 `expire_refunded_plan_credit` never treats a refunded API debit as unspent
@@ -58,6 +68,25 @@ credits is refused with HTTP 402, code `api_credits_required`, the message
 "API usage uses credits, not your plan credit." and an Add credits action
 (`details.action = { type: "add_credits", href: "/billing" }`).
 
+Machine work outside a request takes the origin it is funded under:
+goal continuations and Resume read the chat's origin (its latest decided turn,
+else the parent chat's), schedule runs their task's, sandbox leases, their
+heartbeat fence and knowledge indexing their billing record's. A schedule
+that is not visible to its runner is treated as API. Paused goals say "API
+usage uses credits, not your plan credit. Add credits before resuming.";
+schedule run receipts record such a skip as `insufficient_credits`.
+
+Billing records (`documents.billing_attribution`,
+`knowledge_index_jobs.billing_attribution`) may carry `billingOrigin` on a
+service attribution, so documents uploaded with an API key are indexed on
+credits.
+
+## Limitations
+
+- Schedules created through the API before this change have no stored origin
+  and are billed as app; telling them apart afterwards is not reliable.
+- Opengeni calling Opengeni over MCP is an outside agent and is billed as API.
+
 ## CloudGeni
 
 CloudGeni embeds Opengeni through organization keys and delegated tokens, so
@@ -65,10 +94,12 @@ its turns are API origin and are funded by credits, which operators grant with
 `manual_credit_grant` as today. No exemption is needed: its accounts are
 funded by credits, not plan or promotional credit, so nothing changes for it.
 A product that needs different terms gets operator credit grants, not a code
-path. Promotional credit (signup and offers) is app-only from this change.
+path. Before billing is switched on for CloudGeni's accounts, they need a
+positive credits balance, or their API turns are refused. Promotional credit (signup and offers) is app-only from this change.
 
 ## Rollout
 
 Migration 1100 is rolling: three nullable columns with `NOT VALID` checks,
-two triggers and two same-signature function bodies. The previous release
+two triggers, same-signature function bodies, one new private helper and two
+widened `NOT VALID` billing-record checks. The previous release
 never writes the columns; null keeps today's behaviour.
