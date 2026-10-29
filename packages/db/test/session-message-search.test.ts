@@ -354,6 +354,20 @@ test("every non-overlapping occurrence survives pagination within one message", 
   expect(result.page.matchedMessageCount).toBe(2);
   expect(result.page.matchedOccurrenceCount).toBe(7);
   expect(result.page.scannedMessages).toBe(2);
+  // Newest first: the latest message comes first, each message's occurrences
+  // stay in text order, and a page cut inside a message resumes inside it.
+  const newest = await collect({ query: "aa", sessionId: session.id, limit: 1, order: "newest" });
+  expect(newest.matches.map((m) => [m.sequence, m.messageMatchOffset])).toEqual([
+    [2, 0],
+    [2, 3],
+    [1, 3],
+    [1, 6],
+    [1, 10],
+    [1, 13],
+    [1, 16],
+  ]);
+  expect(newest.page.matchedMessageCount).toBe(2);
+  expect(newest.page.scannedMessages).toBe(2);
 }, 180_000);
 
 test("all occurrences cross scalar windows without repeat or loss", async () => {
@@ -372,6 +386,43 @@ test("all occurrences cross scalar windows without repeat or loss", async () => 
   );
   expect(result.page.matchedMessageCount).toBe(1);
   expect(result.page.matchedOccurrenceCount).toBe(320);
+}, 180_000);
+
+test("newest-first order keeps a long message's occurrences across scalar windows", async () => {
+  const session = await makeSession();
+  const text = "\u0000🙂" + ("x".repeat(249) + "abAB").repeat(160);
+  await insert(session.id, 1, "agent.message.completed", toPostgresLosslessJson({ text }), {
+    codec: 1,
+  });
+  await insert(session.id, 2, "user.message", { text: "latest ab" });
+  await insert(session.id, 3, "user.message", { text: "no match" });
+  const result = await collect({
+    query: "ab",
+    sessionId: session.id,
+    limit: 7,
+    order: "newest",
+  });
+  expect(result.matches.map((m) => [m.sequence, m.messageMatchOffset])).toEqual([
+    [2, 7],
+    ...[...text.matchAll(/ab/giu)].map((m) => [1, m.index]),
+  ]);
+  expect(result.page.matchedMessageCount).toBe(2);
+  expect(result.page.matchedOccurrenceCount).toBe(321);
+  // A newest-first cursor is bound to its order.
+  const first = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { query: "ab", sessionId: session.id, limit: 1, order: "newest" },
+    { subjectId },
+  );
+  await expect(
+    searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      { query: "ab", sessionId: session.id, limit: 1, cursor: first.nextCursor! },
+      { subjectId },
+    ),
+  ).rejects.toThrow();
 }, 180_000);
 
 test("canonical completion copies, explicit duplicates, stale events and unclaimed prompts are excluded", async () => {
@@ -774,6 +825,30 @@ test("searches read bounded windows and resume exactly across window boundaries"
     authority,
   );
   expect(pagedGroups.matches.map((m) => m.sessionId)).toEqual([first!.id, third!.id]);
+  // Newest first walks the same windows backwards, visiting every candidate
+  // once, with or without a page cut after each hit.
+  const newest = await collect({ query: "window-needle", order: "newest" }, authority);
+  expect(newest.matches.map((m) => [m.sessionId, m.sequence])).toEqual([
+    [third!.id, SESSION_MESSAGE_SEARCH_WINDOW],
+    [first!.id, span + 1],
+    [first!.id, 1],
+  ]);
+  expect(newest.page.scannedMessages).toBe(total);
+  const pagedNewest = await collect(
+    { query: "window-needle", order: "newest", limit: 1 },
+    authority,
+  );
+  expect(pagedNewest.matches.map((m) => m.sequence)).toEqual([
+    SESSION_MESSAGE_SEARCH_WINDOW,
+    span + 1,
+    1,
+  ]);
+  expect(pagedNewest.page.scannedMessages).toBe(total);
+  const inSession = await collect(
+    { query: "window-needle", sessionId: first!.id, order: "newest", limit: 1 },
+    authority,
+  );
+  expect(inSession.matches.map((m) => m.sequence)).toEqual([span + 1, 1]);
 }, 180_000);
 
 test("workspace grouping skips prolific sessions in both buffered results and continuation", async () => {

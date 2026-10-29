@@ -26471,6 +26471,7 @@
         "$.cursor": "string?",
         "$.groupBy": "const?=[\"\\\"session\\\"\"]",
         "$.limit": "integer?",
+        "$.order": "enum?=[\"\\\"newest\\\"\",\"\\\"oldest\\\"\"]",
         "$.query": "string!",
         "$.sessionId": "string?"
       }
