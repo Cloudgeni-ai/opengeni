@@ -15,6 +15,18 @@ general Autonomy principle alone still saw headless runs end with a question,
 because nothing told the model that no one would answer. Interactive sessions
 keep their bytes; the legacy lock adds an `unattended` case.
 
+A voice handoff answers in the user's language. When a person ends a realtime
+voice session, the remaining transcript reaches the agent as a message whose
+`<input>` is a fixed English note about the handoff. That note gains one last
+sentence (about 85 bytes): "Reply in the language the user spoke in the
+transcript, not the language of this note." Before, when the handoff was the
+only person message in a chat, the agent sometimes answered in English a
+person who spoke another language, following the note instead of the
+transcript. No system
+prompt or tool text changes, and earlier messages are unaffected. The
+timeline also shows the handoff's stored notice, "Voice session ended…", in
+the reader's language instead of always in English.
+
 Tool search returns the right tool on every route. No system prompt or tool
 description text changes; what changes is what a `tool_search` result carries,
 always appended after that result, so nothing an earlier request sent changes.

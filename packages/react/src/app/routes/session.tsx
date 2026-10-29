@@ -73,7 +73,12 @@ import {
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
-import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  sessionTurnKeepsRunControl,
+} from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
@@ -2817,7 +2822,12 @@ function SessionChatPane(props: {
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
-      props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: props.session.status,
+        activeTurnId: props.session.activeTurnId,
+        queuedPrompts: props.queue.queue.length,
+        admissionBlock: props.session.admissionBlock,
+      }),
     busySend: resolveWorkspaceBusySend(workspace?.settings),
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
@@ -4261,7 +4271,11 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
-                running={usageLimitTreeActive || props.pendingWake}
+                running={
+                  usageLimitTreeActive ||
+                  sessionTurnKeepsRunControl(props.session.status) ||
+                  props.pendingWake
+                }
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

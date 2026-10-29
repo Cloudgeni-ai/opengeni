@@ -29,6 +29,7 @@ old one; old records stay as history.
 | 21 | [Opengeni runs natively: its machine agent in every sandbox, behind the host's link](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) | Accepted |
 | 22 | [Templates saved from sandboxes](0022-templates-saved-from-sandboxes.md) | Accepted |
 | 23 | [GitHub Actions runner pools: a fresh sandbox per job](0023-github-actions-runner-pools.md) | Accepted |
+| 24 | [Busy sandboxes are slowed, never frozen, and the host never runs out](0024-busy-sandboxes-are-slowed-never-frozen.md) | Accepted |
 
 ## Format
 

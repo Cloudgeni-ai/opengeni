@@ -270,6 +270,7 @@ export function DetailBody({
   canManageSkills = false,
   onAction,
   onRetryAuthInspection,
+  nobodyToShareWith = false,
 }: {
   workspaceId?: string | undefined;
   item: CapabilityCatalogItem;
@@ -288,9 +289,16 @@ export function DetailBody({
   canManageSkills?: boolean | undefined;
   onAction: (action: ConnectAction) => void;
   onRetryAuthInspection?: (() => void) | undefined;
+  /**
+   * The person is alone in this workspace: a new connection is their own, so
+   * there is no "who can use it" choice to ask about.
+   */
+  nobodyToShareWith?: boolean | undefined;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  const defaultOwnership = defaultCapabilityConnectionOwnership(item);
+  const defaultOwnership = nobodyToShareWith
+    ? "personal"
+    : defaultCapabilityConnectionOwnership(item);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
   useEffect(() => setReconnecting(false), [item.id]);
@@ -487,6 +495,7 @@ export function DetailBody({
               connections={socialConnections ?? []}
               ownership={connectionOwnership}
               onOwnershipChange={setConnectionOwnership}
+              askOwnership={!nobodyToShareWith}
               busy={busy}
               canManage={canManageSocial}
               setupOnly={setupOnly}
@@ -582,12 +591,14 @@ export function DetailBody({
               <p className="text-sm text-fg-muted">
                 You’ll use credentials for your own provider account or service account.
               </p>
-              <OwnershipSelector
-                compact={inline}
-                credentialBased
-                value={connectionOwnership}
-                onChange={setConnectionOwnership}
-              />
+              {nobodyToShareWith ? null : (
+                <OwnershipSelector
+                  compact={inline}
+                  credentialBased
+                  value={connectionOwnership}
+                  onChange={setConnectionOwnership}
+                />
+              )}
 
               <CredentialForm
                 compact={inline}
@@ -599,9 +610,11 @@ export function DetailBody({
                 submitLabel={
                   inline
                     ? "Verify & connect"
-                    : connectionOwnership === "workspace"
-                      ? "Connect for workspace"
-                      : "Connect only for me"
+                    : nobodyToShareWith
+                      ? "Connect"
+                      : connectionOwnership === "workspace"
+                        ? "Connect for workspace"
+                        : "Connect only for me"
                 }
                 submitIcon={<PlugIcon />}
                 busy={busy}
@@ -622,11 +635,13 @@ export function DetailBody({
                 requestedScopes={plan.requestedScopes}
               />
               <p className="text-sm text-fg-muted">You’ll sign in with your own account.</p>
-              <OwnershipSelector
-                compact={inline}
-                value={connectionOwnership}
-                onChange={setConnectionOwnership}
-              />
+              {nobodyToShareWith ? null : (
+                <OwnershipSelector
+                  compact={inline}
+                  value={connectionOwnership}
+                  onChange={setConnectionOwnership}
+                />
+              )}
 
               <ConnectionActions onCancel={onCancel} busy={busy}>
                 <Button
@@ -645,9 +660,11 @@ export function DetailBody({
                   {busy ? <Loader2Icon className="animate-spin" /> : !inline ? <PlugIcon /> : null}
                   {inline
                     ? "Continue authorization"
-                    : connectionOwnership === "workspace"
-                      ? "Connect for workspace"
-                      : "Connect only for me"}
+                    : nobodyToShareWith
+                      ? "Connect"
+                      : connectionOwnership === "workspace"
+                        ? "Connect for workspace"
+                        : "Connect only for me"}
                 </Button>
               </ConnectionActions>
             </div>
@@ -843,6 +860,7 @@ export function SocialConnectorControls({
   connections,
   ownership,
   onOwnershipChange,
+  askOwnership = true,
   busy,
   canManage,
   onAction,
@@ -853,6 +871,8 @@ export function SocialConnectorControls({
   connections: SocialConnection[];
   ownership: ConnectionOwnership;
   onOwnershipChange: (ownership: ConnectionOwnership) => void;
+  /** False when the person is alone in the workspace and the account is theirs. */
+  askOwnership?: boolean | undefined;
   busy: boolean;
   setupOnly?: boolean | undefined;
   canManage: boolean;
@@ -871,7 +891,9 @@ export function SocialConnectorControls({
   return (
     <div className="space-y-3">
       <p className="text-sm text-fg-muted">You’ll sign in with your own account.</p>
-      <OwnershipSelector compact={setupOnly} value={ownership} onChange={onOwnershipChange} />
+      {askOwnership ? (
+        <OwnershipSelector compact={setupOnly} value={ownership} onChange={onOwnershipChange} />
+      ) : null}
       {visibleConnections.length > 0 ? (
         <div className="divide-y divide-border rounded-lg border border-border" role="list">
           {visibleConnections.map((connection) => (
@@ -934,9 +956,11 @@ export function SocialConnectorControls({
           ? `Reconnect or add ${item.name} account`
           : hasUsableAccount
             ? `Add another ${item.name} account`
-            : ownership === "workspace"
-              ? `Connect ${item.name} for workspace`
-              : `Connect ${item.name} only for me`}
+            : !askOwnership
+              ? `Connect ${item.name}`
+              : ownership === "workspace"
+                ? `Connect ${item.name} for workspace`
+                : `Connect ${item.name} only for me`}
       </Button>
       {ownership === "workspace" && !canManage ? (
         <p className="text-center text-xs text-fg-subtle">
