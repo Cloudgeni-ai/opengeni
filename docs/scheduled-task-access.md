@@ -410,7 +410,9 @@ at all. The rest of this section applies to runs that are attended: tasks that
 set `agentConfig.unattended: false`, tasks that set
 `agentConfig.approvalTimeoutSeconds` without `unattended`, runs posted into an
 existing chat, chats whose **Work without me** switch is off, and turns after a
-person wrote into a chat that was unattended only by default.
+person wrote into a chat that was unattended only by default (those turns keep
+the instructions and tools the chat started with; only their approvals and
+questions now wait for a person).
 
 A dispatched run whose own turn stops for a tool approval or a structured
 question stays `dispatched` (its lifecycle settles only when the turn

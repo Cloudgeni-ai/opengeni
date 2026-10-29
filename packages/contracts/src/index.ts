@@ -19386,6 +19386,14 @@ export type UpdateSessionUnattendedRequest = z.infer<typeof UpdateSessionUnatten
 export const UNATTENDED_APPROVAL_REFUSAL_TEXT =
   "Not run: this call needs a person's approval, and no one can give it during this unattended session. Nothing was changed. Continue without it, and list it among the steps left for a person.";
 
+/**
+ * Model-facing result of a question or hand-off to a person refused because
+ * the chat was switched to work without a person after it started (its tools
+ * stay as they were, so the call is refused rather than withheld).
+ */
+export const UNATTENDED_PERSON_REFUSAL_TEXT =
+  "Not sent: this chat is now set to work without a person, so no one will answer until the task ends. Settle open choices with the most conventional option and continue, and list any step only a person can take among the steps left for a person.";
+
 /** Surfaces through which a person, not a program, sends a message. */
 export const PERSON_MESSAGE_SURFACES: readonly SessionTurnSurface[] = ["web", "slack", "voice"];
 

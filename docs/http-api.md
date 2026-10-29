@@ -77,9 +77,16 @@ Session reads include `unattended`, whether the next turns run unattended.
 `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` with
 `{ "unattended": true | false }` turns it on or off from the next turn (the
 chat's **Work without me** switch in the Agent tab uses the same call; SDK
-`updateSessionUnattended`). A turn already waiting for a person's answer
-resumes with the tools it waited in when that answer arrives. It needs
-`sessions:control`, returns the session, and returns 409
+`updateSessionUnattended`). The switch changes only whether a person is waited
+for: while it is on, a call that needs approval is refused as above, and a
+question or hand-off to a person returns at once with a result saying no one
+will answer. What the agent is told and which tools it has follow how the chat
+started and never change mid-chat, so earlier requests stay cacheable: a chat
+that started unattended (the create option, or a scheduled or event-triggered
+chat that started unattended) keeps the unattended instructions and has no tool
+that waits for a person, and a chat that started attended keeps both tools. A
+turn already waiting for a person's answer resumes attended when that answer
+arrives. It needs `sessions:control`, returns the session, and returns 409
 `SESSION_ARCHIVED_READ_ONLY` for an archived session. A fork keeps this switch.
 
 Chats that a scheduled task or event trigger starts are unattended by default,
@@ -92,7 +99,8 @@ Explicit choices win: the create option, the switch (or its API call) and a
 task's own `agentConfig.unattended` stay until someone changes them. Only the
 automatic default for scheduled and event-triggered chats ends by itself:
 when a person sends a message in the chat from the web app, Slack or a voice
-call, the chat runs attended from that message on. Messages sent with an API
+call, the chat runs attended from that message on (its approvals wait for that
+person; its instructions stay as the chat started). Messages sent with an API
 key, from an embedding product or by another agent do not change it.
 
 Session goals support `GET`, `PATCH`, and idempotent `DELETE` on

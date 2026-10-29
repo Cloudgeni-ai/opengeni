@@ -54,7 +54,7 @@ import {
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { type SessionEvent } from "@opengeni/contracts";
-import { sessionIsUnattended } from "./unattended";
+import { sessionStartedUnattended } from "./unattended";
 
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
@@ -204,14 +204,15 @@ export type PostAgentCompactionOutcome =
 export function standaloneCompactionInstructions(input: {
   settings: Settings;
   session: Pick<ClaimTurnOk["session"], "agent" | "instructions" | "resources"> &
-    Partial<Pick<ClaimTurnOk["session"], "unattended">>;
+    Partial<Pick<ClaimTurnOk["session"], "metadata">>;
   workspaceAgentInstructions: string | null | undefined;
   workspaceAgentIdentity: string | null;
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
   rig: { name: string; version: number } | undefined;
 }): string {
-  const unattended = sessionIsUnattended(input.session);
+  // The instructions the chat started with, as the turn composes them.
+  const unattended = sessionStartedUnattended({ metadata: input.session.metadata ?? {} });
   if (input.session.agent) {
     return inspectPersistentAgentInstructions(input.settings, {
       agentConfig: input.session.agent,

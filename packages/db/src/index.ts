@@ -30248,7 +30248,7 @@ export type SessionCreateInput = {
    */
   unattended?: boolean;
   /**
-   * Changeable unattended setting (migration 1094), set only by first-party
+   * Changeable unattended setting (migration 1105), set only by first-party
    * creators such as the scheduler; omitted leaves it to the create option.
    */
   unattendedSetting?: SessionUnattendedSetting;
@@ -31289,6 +31289,12 @@ async function createSessionInTransaction(
         codeSearchEnabled,
         agentConfig: input.agentConfig ?? null,
         ...(input.unattendedSetting ? { unattendedSetting: input.unattendedSetting } : {}),
+        // Frozen: the chat starts unattended through its setting. The
+        // instructions and tools follow this, never the setting's later value.
+        ...(input.unattendedSetting === "unattended" ||
+        input.unattendedSetting === "unattended_by_default"
+          ? { startedUnattended: true }
+          : {}),
         // Creation reserves identity, not runnable work. The atomic start
         // transaction installs queued status together with its turn/wake.
         status: "idle",
@@ -91752,9 +91758,14 @@ function mapSession(
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     // A person makes a fork to continue the work, so a fork reads as attended
     // even though the fork routine copies the source row's metadata.
+    // Otherwise a chat that started unattended through its setting carries the
+    // same frozen marker as the create option, so everything that follows how
+    // the chat started reads one place.
     metadata: row.forkedFromSessionId
       ? withSessionUnattendedMetadata(row.metadata, false)
-      : row.metadata,
+      : row.startedUnattended === true
+        ? withSessionUnattendedMetadata(row.metadata, true)
+        : row.metadata,
     ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { sessionMetadataUnattended } from "@opengeni/contracts";
 import {
   createDb,
   createScheduledTask,
@@ -97,8 +98,12 @@ describe("scheduled runs and attendance", () => {
       if (result.action !== "start") return;
       const session = await getSession(client.db, workspace!.id, result.sessionId);
       expect(session?.unattended).toBe(expected);
-      // The generated create stays the scheduler's own: no metadata marker.
-      expect(session?.metadata).not.toHaveProperty("_opengeniUnattended");
+      // The stored create stays the scheduler's own (no metadata marker); the
+      // read shows the frozen "started unattended" fact under the same marker.
+      const [stored] = await admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from sessions where id = ${result.sessionId}`;
+      expect(stored?.metadata).not.toHaveProperty("_opengeniUnattended");
+      expect(sessionMetadataUnattended(session?.metadata)).toBe(expected);
       // A person writes in the chat.
       await endSessionUnattendedDefault(client.db, {
         workspaceId: workspace!.id,
@@ -106,6 +111,8 @@ describe("scheduled runs and attendance", () => {
       });
       const later = await getSession(client.db, workspace!.id, result.sessionId);
       expect(later?.unattended).toBe(afterPerson);
+      // How the chat started never changes, so its instructions and tools stay.
+      expect(sessionMetadataUnattended(later?.metadata)).toBe(expected);
     },
     60_000,
   );

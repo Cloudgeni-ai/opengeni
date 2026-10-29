@@ -159,6 +159,10 @@ import type { Database } from "@opengeni/db";
 /**
  * The unattended setting for a chat this task starts: nobody answers during a
  * scheduled or event-triggered run unless the task says otherwise.
+ * Creating the chat with an unattended setting also freezes that it started
+ * unattended, so its instructions and tools say so from the first turn and
+ * never change; the setting alone can later change, and only call-time
+ * behaviour follows it.
  */
 function unattendedSettingFor(config: ScheduledTask["agentConfig"]) {
   const unattendedSetting = scheduledTaskRunUnattendedSetting(config);

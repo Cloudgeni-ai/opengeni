@@ -1,4 +1,8 @@
-import type { FirstPartyMcpToolName, Session } from "@opengeni/contracts";
+import {
+  sessionMetadataUnattended,
+  type FirstPartyMcpToolName,
+  type Session,
+} from "@opengeni/contracts";
 
 /**
  * First-party tools that pause the turn until a person acts. An unattended
@@ -10,17 +14,31 @@ export const PERSON_WAITING_FIRST_PARTY_TOOLS: readonly FirstPartyMcpToolName[] 
 ];
 
 /**
- * True when the session's turns run unattended: its own setting, the create
- * option or an automation default (resolved when the session is read).
+ * True when the session started unattended: the create option or an
+ * automation default, frozen in its metadata when it was created (a fork reads
+ * as attended). What the model is told and which tools it has follow only
+ * this, so the instructions and tool list a chat started with never change
+ * under its earlier requests.
  */
-export function sessionIsUnattended(session: Pick<Session, "unattended">): boolean {
+export function sessionStartedUnattended(session: Pick<Session, "metadata">): boolean {
+  return sessionMetadataUnattended(session.metadata);
+}
+
+/**
+ * True when no person answers during this attempt: the chat's current
+ * setting, which the "Work without me" switch or a person's message can
+ * change. Only call-time behaviour follows it (approvals and questions are
+ * refused with a tool result instead of waiting); the prompt and tools do not.
+ */
+export function sessionUnattendedNow(session: Pick<Session, "unattended">): boolean {
   return session.unattended === true;
 }
 
 /**
  * The session an attempt runs with. A person's answer resumes the turn that
- * waited for it with the tools it waited in, even if the chat was switched to
- * unattended meanwhile; the switch applies to the turns after it.
+ * waited for it as attended, even if the chat was switched to unattended
+ * meanwhile, since that person is evidently there; the switch applies to the
+ * turns after it.
  */
 export function sessionForAttempt<T extends Pick<Session, "unattended">>(
   session: T,
