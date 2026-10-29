@@ -101,7 +101,6 @@ describe("withPageAccessibilityFacts", () => {
         null,
         fact(21, "menuitem", "Roles", 0),
       ],
-      decorations: new Set(),
     });
     const result = snapshot(nodes);
     const users = result.entries.find(
@@ -127,31 +126,9 @@ describe("withPageAccessibilityFacts", () => {
   test("leaves nodes Chromium exposes unchanged and drops roots it cannot place", () => {
     const nodes = withPageAccessibilityFacts(RAW, FRAME, {
       revealed: [fact(14, "generic", "", -1, [11]), fact(40, "link", "Lost", -1, [99])],
-      decorations: new Set(),
     });
     const result = snapshot(nodes);
     expect(result.entries.find((entry) => entry.backendDOMNodeId === 14)?.role).toBe("button");
     expect(result.entries.some((entry) => entry.name === "Lost")).toBe(false);
-  });
-
-  test("a decoration stays resolvable but is left out of the outline", () => {
-    const result = snapshot(
-      withPageAccessibilityFacts(RAW, FRAME, { revealed: [], decorations: new Set([30]) }),
-    );
-    expect(result.entries.find((entry) => entry.name === "browse options")?.actions).toEqual([
-      "click",
-    ]);
-    const shown: string[] = [];
-    const walk = (node: {
-      name?: string | undefined;
-      children?: readonly unknown[] | undefined;
-    }) => {
-      if (node.name) shown.push(node.name);
-      for (const child of node.children ?? []) walk(child as typeof node);
-    };
-    for (const root of result.roots) walk(root);
-    expect(shown).toContain("Administration");
-    expect(shown).not.toContain("browse options");
-    expect(shown).not.toContain("v");
   });
 });

@@ -5082,32 +5082,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /**
    * The main frame's accessibility nodes with what a person sees put right
-   * (see pageFactsExpression): content the page hides with aria-hidden while
+   * (see PAGE_FACTS_EXPRESSION): content the page hides with aria-hidden while
    * a person can see and press it, such as an open menu whose markup was
    * never updated, joins the tree with the role and name the page gives it,
-   * so the outline lists it and locators find it; and, for an outline,
-   * decorations over a control that takes their clicks are marked to be left
-   * out of it. Every read looks at the page: Chromium can leave a hidden
-   * subtree out of its tree altogether (an aria-hidden container whose
-   * content arrived later), so the tree cannot tell when there is nothing to
-   * reveal. Best effort: a page that cannot be read this way keeps the tree
-   * Chromium gave.
+   * so the outline lists it and locators find it. Every read looks at the
+   * page: Chromium can leave a hidden subtree out of its tree altogether (an
+   * aria-hidden container whose content arrived later), so the tree cannot
+   * tell when there is nothing to reveal. Best effort: a page that cannot be
+   * read this way keeps the tree Chromium gave.
    */
-  private async withPageFacts(
-    state: TargetState,
-    nodes: CdpAxNode[],
-    outline: boolean,
-  ): Promise<CdpAxNode[]> {
+  private async withPageFacts(state: TargetState, nodes: CdpAxNode[]): Promise<CdpAxNode[]> {
     if (this.engine === "lightpanda") return nodes;
-    const facts = await this.pageFacts(state, outline);
+    const facts = await this.pageFacts(state);
     if (!facts) return nodes;
     return withPageAccessibilityFacts(nodes, state.frame.id, facts);
   }
 
-  private async pageFacts(
-    state: TargetState,
-    decorate: boolean,
-  ): Promise<PageAccessibilityFacts | null> {
+  private async pageFacts(state: TargetState): Promise<PageAccessibilityFacts | null> {
     const connection = await this.ensureConnection();
     const sessionId = state.sessionId;
     const objectGroup = `opengeni-page-facts-${this.createId()}`;
@@ -5122,7 +5113,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Runtime.evaluate",
         {
           contextId: world.executionContextId,
-          expression: pageFactsExpression(decorate),
+          expression: PAGE_FACTS_EXPRESSION,
           objectGroup,
           returnByValue: false,
         },
@@ -5149,12 +5140,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const encoded = byIndex.get(0)?.value;
       if (typeof encoded !== "string") return null;
       const parsed: unknown = JSON.parse(encoded);
-      if (
-        !isRecord(parsed) ||
-        !Array.isArray(parsed.revealed) ||
-        !Array.isArray(parsed.decorations)
-      )
-        return null;
+      if (!isRecord(parsed) || !Array.isArray(parsed.revealed)) return null;
       const backendIds = new Map<number, number>();
       await Promise.all(
         [...byIndex.keys()]
@@ -5211,12 +5197,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           ancestors: roots.get(factIndex) ?? [],
         };
       });
-      const decorations = new Set<number>();
-      for (const index of parsed.decorations) {
-        const backendNodeId = backendOf(index);
-        if (backendNodeId !== null) decorations.add(backendNodeId);
-      }
-      return { revealed, decorations };
+      return { revealed };
     } catch (error) {
       // The page navigated or went away while it was read; the tree stays.
       if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
@@ -5371,7 +5352,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
       }
-      nodes = await this.withPageFacts(state, nodes, read === "outline");
+      nodes = await this.withPageFacts(state, nodes);
       let accessibility: CdpAccessibilitySnapshot;
       try {
         accessibility = normalizeCdpAccessibilityTree({
@@ -7673,11 +7654,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         backendDOMNodeId;
     }
     // A decoration that takes no pointer input over a control that does (a
-    // chevron drawn on its combobox) is pressed where it shows, as a person
-    // presses it: the click reaches that control, which the hit guard then
-    // expects. Only a decoration already in view is pressed this way, so
-    // nothing scrolls before it is known to have such a control; without
-    // one the target keeps its refusal, made before any input.
+    // chevron icon drawn on its combobox) is pressed where it shows, as a
+    // person presses it: the click reaches that control, which the hit guard
+    // then expects. A control is never a decoration: one that takes no
+    // pointer input keeps its refusal. Only a decoration already in view is
+    // pressed this way, so nothing scrolls before it is known to have such a
+    // control.
     let point: { x: number; y: number } | null = null;
     if (
       backendDOMNodeId !== null &&
@@ -8007,22 +7989,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser node cannot receive pointer input",
       );
     }
-    // A target that shows but turns the pointer off for itself and all it
-    // holds can never take a press, whether or not it is in view: refuse
-    // before anything scrolls or the pointer moves, so nothing has happened.
-    // One that does not show may be revealed by hovering (below).
-    if (
-      requireHit &&
-      (await this.callOnNode(
-        state,
-        backendDOMNodeId,
-        TAKES_NO_POINTER_FUNCTION,
-        [],
-        frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
-      ).catch(() => false)) === true
-    ) {
-      throw new InteractionDefiniteDriverError("invalid_action", POINTER_EVENTS_NONE_REFUSAL, true);
-    }
     // Scrolling runs page scroll listeners, so it counts as a possible effect
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
@@ -8080,7 +8046,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       const revealed =
         visible ?? (await this.revealByHover(state, backendDOMNodeId, frameId, point));
-      if (!revealed) {
+      if (!revealed || "unreactedSince" in revealed) {
+        // A target that shows but, even after the hover, turns the pointer
+        // off for itself and all it holds (often a control disabled by a
+        // class) gets that refusal, not one naming what its click falls
+        // through to. It stays definite when the page did not react to the
+        // hover's move: then nothing reached anything that acts on input.
+        if (
+          (await this.callOnNode(
+            state,
+            backendDOMNodeId,
+            TAKES_NO_POINTER_FUNCTION,
+            [],
+            frameId === undefined || this.engine === "lightpanda"
+              ? {}
+              : { isolatedFrameId: frameId },
+          ).catch(() => false)) === true
+        ) {
+          if (revealed) state.actionEffectCount = revealed.unreactedSince;
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            POINTER_EVENTS_NONE_REFUSAL,
+            true,
+          );
+        }
         const cover = await this.coveringElement(state, backendDOMNodeId);
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -8324,15 +8313,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * until the pointer is over their row or card (CSS :hover). The hit test
    * then lands on the target's own ancestor. A person moves the pointer onto
    * the spot first, so do the same and test again. The move is real input, so
-   * a refusal after it is an unknown outcome. Returns the action point, or
-   * null when the target is not hover-revealed or stays unreachable.
+   * a refusal after it is an unknown outcome. Returns the action point; null
+   * when the target is not hover-revealed; or, when it stays unreachable,
+   * null, or `unreactedSince`, the effect count from before the move, when
+   * the page provably did not react to it (see watchPageReaction).
    */
   private async revealByHover(
     state: TargetState,
     backendDOMNodeId: number,
     frameId: string | undefined,
     point: { x: number; y: number },
-  ): Promise<{ x: number; y: number } | null> {
+  ): Promise<{ x: number; y: number } | { unreactedSince: number } | null> {
     if (frameId === undefined) return null;
     const transparent = await this.callOnNode(
       state,
@@ -8342,13 +8333,79 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       { isolatedFrameId: frameId },
     ).catch(() => false);
     if (transparent !== true) return null;
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: point.x,
-      y: point.y,
-    });
-    if (!(await this.hitsAtCenter(state, backendDOMNodeId))) return null;
-    return await this.centerPoint(state, backendDOMNodeId);
+    const watch = await this.watchPageReaction(state, backendDOMNodeId, frameId);
+    const effectsBeforeMove = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+      });
+      if (await this.hitsAtCenter(state, backendDOMNodeId))
+        return await this.centerPoint(state, backendDOMNodeId);
+      return watch && (await watch.unchanged()) ? { unreactedSince: effectsBeforeMove } : null;
+    } finally {
+      watch?.release();
+    }
+  }
+
+  /**
+   * Watches the main frame's document from just before a pointer move: after
+   * it, `unchanged` waits two drawn frames (at most 100 ms) and tells whether
+   * nothing in the document changed (no element, attribute or text, no focus
+   * or address change), so the page did not act on the move. Hover styling
+   * alone changes none of these. Null where it cannot watch: a child frame,
+   * whose page the move also reaches, or a page that cannot be read this way.
+   */
+  private async watchPageReaction(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string,
+  ): Promise<{ unchanged: () => Promise<boolean>; release: () => void } | null> {
+    if (this.engine === "lightpanda" || state.nodeRoute || frameId !== state.frame.id) return null;
+    try {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId, worldName: "opengeni-dom-read" },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return null;
+      const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+        backendNodeId: backendDOMNodeId,
+        executionContextId: world.executionContextId,
+      });
+      if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") return null;
+      const objectId = resolved.object.objectId;
+      const call = (functionDeclaration: string) =>
+        this.sendTarget<{ result?: unknown }>(
+          state,
+          "Runtime.callFunctionOn",
+          { objectId, functionDeclaration, returnByValue: true, awaitPromise: true },
+          { timeoutMs: 2_000 },
+        );
+      const started = await call(PAGE_REACTION_WATCH_FUNCTION).catch(() => null);
+      const release = () =>
+        void call(PAGE_REACTION_STOP_FUNCTION)
+          .catch(() => undefined)
+          .finally(() =>
+            this.sendTarget(state, "Runtime.releaseObject", { objectId }).catch(() => undefined),
+          );
+      if (!isRecord(started?.result) || started.result.value !== true) {
+        release();
+        return null;
+      }
+      return {
+        unchanged: async () => {
+          const read = await call(PAGE_REACTION_READ_FUNCTION).catch(() => null);
+          return isRecord(read?.result) && read.result.value === true;
+        },
+        release,
+      };
+    } catch (error) {
+      if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
+        throw error;
+      return null;
+    }
   }
 
   /**
@@ -12008,16 +12065,17 @@ const POINTER_EVENTS_NONE_REFUSAL =
 const PRESSABLE_CONTROL_SELECTOR =
   'a[href], area[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [role=button], [role=link], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=tab], [role=option], [role=combobox], [role=textbox], [role=searchbox], [role=slider], [role=spinbutton], [role=treeitem]';
 
-// A decoration: an element that shows but sets pointer-events: none on
-// itself and on all it holds (a chevron or icon drawn over a field), so a
-// person's click there falls through to whatever is beneath. Set on itself,
-// not inherited from a container (a modal library turning the pointer off
-// behind its menu), which is not a decoration but shut out. pressedInstead:
-// what a click at its middle reaches, when that is an enabled control that
-// holds the decoration or sits beside it in the same small wrapper (its
-// parent or grandparent), or that wrapper itself when it frames exactly one
-// other enabled control (a field's frame around its input and chevron);
-// else null. Run with the element in view.
+// takesNoPointer: an element that shows but sets pointer-events: none on
+// itself and on all it holds, so a person's click there falls through to
+// whatever is beneath. Set on itself, not inherited from a container (a
+// modal library turning the pointer off behind its menu), which is shut out
+// instead. A decoration is such an element that is not itself a control (a
+// chevron icon drawn over a field): a control that takes no pointer input
+// is usually disabled by a class, and stays a control.
+// pressedInstead: for a decoration, what a click at its middle reaches, when
+// that is an enabled control that holds the decoration or sits beside it in
+// the same small wrapper (its parent or grandparent); else null. Run with
+// the element in view.
 const DECORATION_HELPER = `
   const pressableSelector = ${JSON.stringify(PRESSABLE_CONTROL_SELECTOR)};
   const flatParentOf = (node) => {
@@ -12066,9 +12124,10 @@ const DECORATION_HELPER = `
     return right - left >= 1 && bottom - top >= 1 ? [(left + right) / 2, (top + bottom) / 2] : null;
   };
   const pressedInstead = (element) => {
+    if (element.matches(pressableSelector)) return null;
     // Where it is, first: a box is cheaper to read than styles.
     const middle = middleInView(element);
-    if (!middle || !takesNoPointer(element) || disabledControl(element)) return null;
+    if (!middle || !takesNoPointer(element)) return null;
     const hit = hitAt(element.ownerDocument, middle[0], middle[1]);
     if (!hit || holdsNode(element, hit)) return null;
     let control = null;
@@ -12077,15 +12136,6 @@ const DECORATION_HELPER = `
         control = node;
         break;
       }
-    }
-    if (!control) {
-      const parent = flatParentOf(element);
-      const frame = hit === parent || (parent && hit === flatParentOf(parent));
-      if (!frame) return null;
-      const others = Array.from(hit.querySelectorAll(pressableSelector)).filter(
-        (node) => !holdsNode(element, node) && !disabledControl(node),
-      );
-      return others.length === 1 ? hit : null;
     }
     if (!control || holdsNode(element, control) || disabledControl(control)) return null;
     let related = holdsNode(control, element);
@@ -12112,10 +12162,44 @@ const DECORATION_PRESS_FUNCTION = `function() {
   return pressedInstead(element);
 }`;
 
+/** Starts watching the target's document for any change (see
+ * watchPageReaction). Runs in an isolated world; the watch is kept on that
+ * world's handle of the target, out of the page's reach. */
+const PAGE_REACTION_WATCH_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const document = element.ownerDocument;
+  let changed = false;
+  const observer = new MutationObserver(() => { changed = true; });
+  observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  const focus = document.activeElement;
+  const address = document.location.href;
+  this.__opengeniPageReaction = {
+    observer,
+    unchanged: () => !changed && observer.takeRecords().length === 0 && document.activeElement === focus && document.location.href === address,
+  };
+  return true;
+}`;
+
+/** Whether nothing changed since the watch started, read after two drawn
+ * frames (at most 100 ms), when the page has acted on the input. */
+const PAGE_REACTION_READ_FUNCTION = `async function() {
+  const watch = this.__opengeniPageReaction;
+  if (!watch) return false;
+  await new Promise((resolve) => {
+    setTimeout(resolve, 100);
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+  return watch.unchanged();
+}`;
+
+const PAGE_REACTION_STOP_FUNCTION = `function() {
+  this.__opengeniPageReaction?.observer.disconnect();
+  delete this.__opengeniPageReaction;
+}`;
+
 /** Most nodes of aria-hidden content one read adds to the tree. */
 const REVEALED_HIDDEN_MAX_NODES = 400;
-/** Most decorations one outline marks. */
-const DECORATIONS_MAX = 200;
 
 /**
  * What the main frame's accessibility tree leaves out or misstates about
@@ -12124,18 +12208,15 @@ const DECORATIONS_MAX = 200;
  * at its middle (an open menu whose markup still says hidden): its visible
  * elements and text come back with a role, name and states read from the
  * page, the way Chromium computes them without aria-hidden for common
- * elements. With `decorate`, also the controls that are decorations over a
- * control that takes their clicks (see DECORATION_HELPER). Returns [JSON
- * facts, ...nodes]: facts.revealed lists [node index, role, name, states,
- * parent's index in revealed or -1], facts.roots [index in revealed of a
- * hidden root, node indexes of its nearest ancestors], and
- * facts.decorations node indexes.
+ * elements. Returns [JSON facts, ...nodes]: facts.revealed lists [node
+ * index, role, name, states, parent's index in revealed or -1], and
+ * facts.roots [index in revealed of a hidden root, node indexes of its
+ * nearest ancestors].
  */
-const pageFactsExpression = (decorate: boolean): string => `(() => {
+const PAGE_FACTS_EXPRESSION = `(() => {
   ${DECORATION_HELPER}
-  const decorate = ${decorate};
   const nodes = [];
-  const facts = { revealed: [], decorations: [] };
+  const facts = { revealed: [] };
   const scopes = [document];
   let visited = 0;
   for (let index = 0; index < scopes.length; index += 1) {
@@ -12146,12 +12227,6 @@ const pageFactsExpression = (decorate: boolean): string => `(() => {
     }
   }
   const all = (selector) => scopes.flatMap((scope) => Array.from(scope.querySelectorAll(selector)));
-  if (decorate) {
-    for (const element of all(pressableSelector)) {
-      if (facts.decorations.length >= ${DECORATIONS_MAX}) break;
-      if (pressedInstead(element)) facts.decorations.push(nodes.push(element) - 1);
-    }
-  }
   const clean = (value) => String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, 1000);
   const hiddenByAria = (element) => String(element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true";
   const insideHidden = (element) => {

@@ -26,11 +26,6 @@ export type CdpAxNode = {
    * assistive technology with aria-hidden while a person can see and press
    * it (an open menu), with the role and name read from the page. */
   revealed?: boolean;
-  /** Set by the driver: a control drawn over another one that takes no
-   * pointer input itself (a field's chevron), so a click there reaches the
-   * control beneath. It stays resolvable by locators but is left out of the
-   * outline, which lists the control that takes the click. */
-  decoration?: boolean;
 };
 
 export type CdpAccessibilityEntry = {
@@ -109,11 +104,9 @@ export type PageRevealedNode = {
 };
 
 /** What the driver read from a frame's page about what a person sees: hidden
- * content to reveal (null where a node could not be identified) and the
- * backend nodes of decorations. */
+ * content to reveal (null where a node could not be identified). */
 export type PageAccessibilityFacts = {
   revealed: Array<PageRevealedNode | null>;
-  decorations: ReadonlySet<number>;
 };
 
 /**
@@ -122,14 +115,14 @@ export type PageAccessibilityFacts = {
  * out (it drops what an aria-hidden element holds) is added under its parent,
  * with the id Chromium gives a DOM-backed node, so its ref is the same as if
  * Chromium had listed it. A hidden root whose ancestors are all missing is
- * left out. Decorations are marked (see CdpAxNode.decoration).
+ * left out.
  */
 export function withPageAccessibilityFacts(
   nodes: readonly CdpAxNode[],
   frameId: string,
   facts: PageAccessibilityFacts,
 ): CdpAxNode[] {
-  if (facts.revealed.length === 0 && facts.decorations.size === 0) return [...nodes];
+  if (facts.revealed.length === 0) return [...nodes];
   const result = [...nodes];
   const byBackend = new Map<number, number>();
   const byId = new Map<string, number>();
@@ -142,11 +135,6 @@ export function withPageAccessibilityFacts(
     const suffix = `\0${node.backendDOMNodeId}`;
     if (prefix === null && typeof node.nodeId === "string" && node.nodeId.endsWith(suffix))
       prefix = node.nodeId.slice(0, -String(node.backendDOMNodeId).length);
-  }
-  for (const backendNodeId of facts.decorations) {
-    const index = byBackend.get(backendNodeId);
-    if (index !== undefined && result[index]!.ignored !== true)
-      result[index] = { ...result[index]!, decoration: true };
   }
   if (prefix === null) return result;
   const placed: Array<string | null> = [];
@@ -352,24 +340,11 @@ export function normalizeCdpAccessibilityTree(options: {
     }
     for (const childId of childIds(raw)) suppressSubtree(childId);
   }
-  // A decoration and what it draws stay out of the outline; unlike a
-  // suppressed subtree, they remain entries that locators resolve.
-  const outlineSkipped = new Set<string>();
-  const skipSubtree = (nodeId: string): void => {
-    if (outlineSkipped.has(nodeId)) return;
-    outlineSkipped.add(nodeId);
-    const raw = rawById.get(nodeId);
-    if (raw) for (const childId of childIds(raw)) skipSubtree(childId);
-  };
-  for (const [nodeId, node] of rawById) {
-    if (node.decoration === true && entriesByNodeId.has(nodeId)) skipSubtree(nodeId);
-  }
 
   const visit = (nodeId: string): InteractionSemanticNodeValue[] => {
     if (suppressed.has(nodeId) || visiting.has(nodeId) || emitted.has(nodeId)) return [];
     const raw = rawById.get(nodeId);
     if (!raw) return [];
-    if (outlineSkipped.has(nodeId)) return [];
     visiting.add(nodeId);
     const entry = entriesByNodeId.get(nodeId);
     const children = childIds(raw).flatMap(visit);
