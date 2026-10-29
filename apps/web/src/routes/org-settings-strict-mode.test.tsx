@@ -22,7 +22,7 @@ const toastError = mock((_message: string) => undefined);
 const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
 const navigate = mock(async (_options: unknown) => undefined);
 const captureAnalyticsEvent = mock((_name: string) => true);
-let accountRole: "owner" | "admin" = "owner";
+let accountRole: "owner" | "admin" | "member" = "owner";
 
 const getBilling = mock(async () => ({
   mode: "stripe" as const,
@@ -156,10 +156,17 @@ const context = {
       {
         accountId,
         subjectId: "user:strict-owner",
-        get role(): "owner" | "admin" {
+        get role(): "owner" | "admin" | "member" {
           return accountRole;
         },
-        permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
+        // An admin holds what the API grants admins; account:admin stays the owner's.
+        get permissions(): string[] {
+          return accountRole === "owner"
+            ? ["account:admin", "billing:read", "billing:manage", "api_keys:manage"]
+            : accountRole === "admin"
+              ? ["account:read", "members:manage", "workspace:create", "billing:read"]
+              : ["account:read"];
+        },
       },
     ],
     workspaceGrants: [],
@@ -602,32 +609,36 @@ describe("organization billing StrictMode ownership", () => {
     }
   });
 
-  test("does not load the owner-only agent identity policy for an account administrator", async () => {
-    getCompanyProfileAgentPolicy.mockClear();
-    accountRole = "admin";
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+  test("an organization admin loads the agent identity policy; a member does not", async () => {
+    for (const role of ["admin", "member"] as const) {
+      getCompanyProfileAgentPolicy.mockClear();
+      accountRole = role;
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
+            </StrictMode>,
+          );
+        });
+        await flush();
 
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
-          </StrictMode>,
-        );
-      });
-      await flush();
-
-      expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
-      expect(container.textContent).not.toContain("Agent learning");
-      expect(container.textContent).toContain(
-        "Only organization owners can change whether agents may update the identity",
-      );
-    } finally {
-      accountRole = "owner";
-      await act(async () => root.unmount());
-      container.remove();
+        if (role === "admin") {
+          expect(getCompanyProfileAgentPolicy).toHaveBeenCalled();
+          expect(container.textContent).toContain("Agent learning");
+        } else {
+          expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
+          expect(container.textContent).not.toContain("Agent learning");
+          expect(container.textContent).toContain("Organization identity is read-only for you.");
+        }
+      } finally {
+        accountRole = "owner";
+        await act(async () => root.unmount());
+        container.remove();
+      }
     }
   });
 
