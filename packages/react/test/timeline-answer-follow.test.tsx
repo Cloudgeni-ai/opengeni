@@ -178,6 +178,26 @@ test("a card that is already complete when it appears does not move the view", a
   }
 });
 
+test("a saved completion that loads after the card appears does not move the reader", async () => {
+  const events = conversation();
+  // The card appears before its saved state is known, then learns it was
+  // already finished. The person never touched it.
+  const view = await renderComponent(timeline(events, { expanded: false, complete: false }));
+  try {
+    await flush(50);
+    const elsewhere = view.container.querySelector<HTMLElement>("[data-og-group-key]");
+    elsewhere!.tabIndex = -1;
+    await act(async () => elsewhere!.focus());
+    await flush(20);
+    expect(following(view.container)).toBe("false");
+    await view.rerender(timeline(events, { expanded: false, complete: true }));
+    await flush(50);
+    expect(following(view.container)).toBe("false");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("the card's setup dialog is not reading the conversation", async () => {
   const events = conversation();
   const view = await renderComponent(timeline(events, { expanded: true, complete: false }));

@@ -103,12 +103,22 @@ export function SessionCapabilityFrame({
   const rootRef = useRef<HTMLDivElement>(null);
   const portalStyle = usePortalTokenStyle(sectionRef.current);
   // Finishing the card here is the person's answer and the agent continues
-  // from it: let the conversation follow that answer. A card that was already
-  // complete when it appeared (history) asks nothing.
+  // from it: let the conversation follow that answer. Only a completion the
+  // person brought about in this card counts. A card that was already complete
+  // when it appeared, or whose saved completion loads after it appears while
+  // the person reads elsewhere, asks nothing.
   const followAnswer = useTimelineAnswerFollow();
   const wasComplete = useRef(complete);
+  const engaged = useRef(false);
   useLayoutEffect(() => {
-    if (complete && !wasComplete.current && rootRef.current) followAnswer?.(rootRef.current);
+    if (expanded || busy) engaged.current = true;
+  }, [expanded, busy]);
+  const engage = () => {
+    engaged.current = true;
+  };
+  useLayoutEffect(() => {
+    if (complete && !wasComplete.current && engaged.current && rootRef.current)
+      followAnswer?.(rootRef.current);
     wasComplete.current = complete;
   }, [complete, followAnswer]);
   const identity = (
@@ -122,7 +132,14 @@ export function SessionCapabilityFrame({
     </>
   );
   return (
-    <div ref={rootRef} className="og-session-capability">
+    // React bubbles the setup dialog's portaled events here too.
+    <div
+      ref={rootRef}
+      className="og-session-capability"
+      onPointerDownCapture={engage}
+      onClickCapture={engage}
+      onKeyDownCapture={engage}
+    >
       <section
         hidden={dialogOnly}
         style={dialogOnly ? { display: "none" } : undefined}
