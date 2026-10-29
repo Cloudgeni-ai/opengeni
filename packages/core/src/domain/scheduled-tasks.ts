@@ -122,6 +122,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "../session-authorization";
+import { resolveTurnBillingOrigin } from "../billing-origin";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import {
@@ -671,10 +672,17 @@ export async function createValidatedScheduledTask(input: {
     agentConfig,
     audience: visibility,
   });
+  // Every run is billed as whoever set the task up: in the app, plan credit
+  // first; over the API, credits only.
+  const billingOrigin = await resolveTurnBillingOrigin(input.db, {
+    grant: input.grant,
+    authorization: input.authorization,
+  });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     input.db.transaction(async (transaction) => {
       const task = await createScheduledTask(transaction, {
         id,
+        billingOrigin,
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         name: trimmedScheduledTaskName(input.payload.name),

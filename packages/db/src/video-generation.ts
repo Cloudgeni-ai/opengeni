@@ -1356,12 +1356,15 @@ async function debitVideoGenerationCredits(
     subjectId: attribution.kind === "turn" ? attribution.initiatingHumanSubjectId : null,
   });
   if (refusal) throw Object.assign(new VideoGenerationCreditError(refusal.message), refusal);
+  // Billed like the chat it runs in: API work spends credits only.
+  const usageOrigin = attribution.kind === "turn" ? attribution.billingOrigin : undefined;
   const { balanceMicros } = await getSpendableCreditBalance(
     tx,
     operation.accountId,
     undefined,
     undefined,
     settledAt,
+    usageOrigin,
   );
   if (!Number.isSafeInteger(balanceMicros) || balanceMicros < operation.pricedCostMicros) {
     throw new VideoGenerationCreditError();
@@ -1376,6 +1379,7 @@ async function debitVideoGenerationCredits(
       amountMicros: -operation.pricedCostMicros,
       sourceType: "video_generation_operation",
       sourceId: operation.id,
+      usageOrigin: usageOrigin ?? "app",
       idempotencyKey: `credit:video_generation_debit:${operation.id}`,
       metadata: {
         turnId: operation.turnId,

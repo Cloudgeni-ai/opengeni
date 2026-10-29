@@ -280,7 +280,15 @@ export function createRealtimeVoiceBilling(deps: {
         WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE,
       );
     }
-    const balance = await getSpendableCreditBalance(deps.db, input.accountId, VOICE_CREDIT_USAGE);
+    // API callers spend credits only, as their debit will.
+    const balance = await getSpendableCreditBalance(
+      deps.db,
+      input.accountId,
+      VOICE_CREDIT_USAGE,
+      undefined,
+      undefined,
+      input.attribution.kind === "unknown" ? undefined : input.attribution.billingOrigin,
+    );
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
         code: "insufficient_credits",

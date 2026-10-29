@@ -114,7 +114,14 @@ test("Resume uses only promotional credits eligible for the chosen model", async
     );
     if (model === "gpt-6-luna") await expect(resume).resolves.toBeUndefined();
     else await expect(resume).rejects.toMatchObject({ pausedReason: "credits" });
-    expect(balance).toHaveBeenLastCalledWith(database, accountId, model);
+    expect(balance).toHaveBeenLastCalledWith(
+      database,
+      accountId,
+      model,
+      undefined,
+      undefined,
+      undefined,
+    );
   }
 });
 

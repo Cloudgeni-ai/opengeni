@@ -151,7 +151,15 @@ export function createVoiceInputBilling(deps: {
           },
         );
       }
-      const balance = await getSpendableCreditBalance(deps.db, accountId, VOICE_CREDIT_USAGE);
+      // API callers spend credits only, as their debit will.
+      const balance = await getSpendableCreditBalance(
+        deps.db,
+        accountId,
+        VOICE_CREDIT_USAGE,
+        undefined,
+        undefined,
+        attribution.billingOrigin,
+      );
       if (balance.balanceMicros <= 0) {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",

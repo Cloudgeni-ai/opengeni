@@ -1,10 +1,12 @@
 import type {
   BillingBalance,
+  BillingOrigin,
   BillingPlanBalance,
   PromotionalCreditBalance,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
+import { ambientBillingOrigin } from "./credit-debit-attribution";
 import { rawRows, withAccountRls } from "./database";
 import * as schema from "./schema";
 
@@ -95,6 +97,7 @@ export async function getBillingBalance(
       creditPolicyRevision: row?.revision ?? 0,
       balanceMicros,
       generalBalanceMicros,
+      creditsMicros: creditsOutsidePlan(generalBalanceMicros, row?.plan ?? null),
       heldGeneralCreditMicros,
       heldCreditMicros:
         heldGeneralCreditMicros +
@@ -109,6 +112,33 @@ export async function getBillingBalance(
       updatedAt: new Date().toISOString(),
     };
   });
+}
+
+/**
+ * Credits: general credit that is not this month's unrestricted plan
+ * allowance (top-ups, operator grants, unrestricted legacy grants). A scoped
+ * plan allowance is a promotional grant and never part of general credit.
+ * Negative after API use ran past it.
+ */
+function creditsOutsidePlan(generalBalanceMicros: number, plan: BillingPlanBalance | null) {
+  return generalBalanceMicros - (plan && !plan.creditScoped ? plan.creditRemainingMicros : 0);
+}
+
+/** Credits only: what API-origin work may spend (never plan or promotional credit). */
+export function apiSpendableCreditMicros(balance: BillingBalance): number {
+  return Math.max(
+    0,
+    balance.creditsMicros ?? balance.generalBalanceMicros ?? balance.balanceMicros,
+  );
+}
+
+/**
+ * The origin a charge is funded under: the caller's explicit origin, else
+ * the one a trusted outer scope fixed (an API request, an agent's turn),
+ * else app, today's behaviour.
+ */
+export function chargeBillingOrigin(origin?: BillingOrigin | null): BillingOrigin {
+  return origin ?? ambientBillingOrigin() ?? "app";
 }
 
 /**
@@ -128,7 +158,12 @@ function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boole
   return grant.coversVoice === true;
 }
 
-export function spendableCreditMicros(balance: BillingBalance, usage?: CreditUsage): number {
+export function spendableCreditMicros(
+  balance: BillingBalance,
+  usage?: CreditUsage,
+  origin: BillingOrigin = "app",
+): number {
+  if (origin === "api") return apiSpendableCreditMicros(balance);
   return (
     Math.max(
       0,
@@ -148,6 +183,8 @@ export async function getSpendableCreditBalance(
   usage?: CreditUsage,
   policyRevision?: number,
   settlementAt?: string,
+  /** Funding origin; omitted uses {@link chargeBillingOrigin}. */
+  origin?: BillingOrigin | null,
 ): Promise<CreditBalanceSnapshot> {
   // This existing definer also refreshes structured abuse evidence. Run it
   // only for admission, never for settlement of an already-dispatched call.
@@ -155,7 +192,10 @@ export async function getSpendableCreditBalance(
     await tx.execute(sql`select free_plan_credit_eligible(${accountId}::uuid)`);
   });
   const balance = await getBillingBalance(db, accountId, policyRevision, settlementAt);
-  return { ...balance, balanceMicros: spendableCreditMicros(balance, usage) };
+  return {
+    ...balance,
+    balanceMicros: spendableCreditMicros(balance, usage, chargeBillingOrigin(origin)),
+  };
 }
 
 /** Monthly plan credit pays first; then covering grants, oldest first. */
@@ -185,11 +225,14 @@ export function planCreditDebit(
   balance: BillingBalance,
   requestedMicros: number,
   usage?: CreditUsage,
+  origin: BillingOrigin = "app",
 ) {
   if (!Number.isSafeInteger(requestedMicros) || requestedMicros <= 0) {
     throw new Error("credit debit requires a positive, safe integer micro amount");
   }
-  const debitedMicros = Math.min(requestedMicros, spendableCreditMicros(balance, usage));
+  const debitedMicros = Math.min(requestedMicros, spendableCreditMicros(balance, usage, origin));
+  // API work spends credits only: no plan allowance and no promotional grant.
+  if (origin === "api") return { debitedMicros, allocations: [] };
   // Existing general-credit debt can leave less spendable general funding than
   // the derived allowance. Prepaid admission must never mint spendable credit
   // by repeatedly preserving promotional grants while overdrawing general.
@@ -212,10 +255,13 @@ export function planPostUseCreditAllocations(
   balance: BillingBalance,
   amountMicros: number,
   usage: CreditUsage,
+  origin: BillingOrigin = "app",
 ) {
   if (!Number.isSafeInteger(amountMicros) || amountMicros <= 0) {
     throw new Error("credit debit requires a positive, safe integer micro amount");
   }
+  // API work is charged to credits only, which may go negative after use.
+  if (origin === "api") return [];
   // Funding reversals/dispute holds can remove general funds without reducing
   // derived period usage. Do not preserve covering promotions by charging an
   // allowance that is no longer backed by a positive general balance.

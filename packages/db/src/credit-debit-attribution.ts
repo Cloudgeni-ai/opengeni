@@ -1,9 +1,63 @@
 import { z } from "zod";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "drizzle-orm";
+import { BILLING_ORIGINS, storedBillingOrigin, type BillingOrigin } from "@opengeni/contracts";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 const creditDebitAttributionContext = new AsyncLocalStorage<CreditDebitAttribution>();
+const billingOriginOverrideContext = new AsyncLocalStorage<BillingOrigin>();
+
+/**
+ * Trusted in-process dispatch only: everything inside `fn` is billed as
+ * `origin`, whatever credential the dispatched request carries. An agent's
+ * organization action runs as its person but keeps its chat's origin; an
+ * outside agent's runs stay API. Never call it with caller-supplied input.
+ */
+export function withBillingOriginOverride<T>(origin: BillingOrigin, fn: () => Promise<T>) {
+  return billingOriginOverrideContext.run(origin, fn);
+}
+
+/** The funding origin a trusted outer scope fixed for this work, if any. */
+export function ambientBillingOrigin(): BillingOrigin | null {
+  const attribution = creditDebitAttributionContext.getStore();
+  return (
+    billingOriginOverrideContext.getStore() ??
+    (attribution && attribution.kind !== "unknown" ? attribution.billingOrigin : undefined) ??
+    null
+  );
+}
+
+/** Who pays for a schedule's runs; a task from before origins is app. */
+export async function readScheduledTaskBillingOrigin(
+  db: Database,
+  input: { accountId: string; workspaceId: string; taskId: string },
+): Promise<BillingOrigin> {
+  return await withRlsContext(db, input, async (tx) => {
+    const [task] = await rawRows<{ billingOrigin: string | null }>(
+      tx,
+      sql`SELECT billing_origin AS "billingOrigin" FROM scheduled_tasks
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${input.taskId}::uuid`,
+    );
+    return storedBillingOrigin(task?.billingOrigin);
+  });
+}
+
+/** One accepted turn's frozen funding origin; null when it is not visible. */
+export async function readTurnBillingOrigin(
+  db: Database,
+  input: { accountId: string; workspaceId: string; turnId: string },
+): Promise<BillingOrigin | null> {
+  return await withRlsContext(db, input, async (tx) => {
+    const [turn] = await rawRows<{ billingOrigin: string | null }>(
+      tx,
+      sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${input.turnId}::uuid`,
+    );
+    return turn ? storedBillingOrigin(turn.billingOrigin) : null;
+  });
+}
 
 export function currentCreditDebitAttribution(): CreditDebitAttribution {
   return creditDebitAttributionContext.getStore() ?? { kind: "unknown" };
@@ -26,9 +80,13 @@ export async function creditDebitAttributionForTurn(
   input: { accountId: string; workspaceId: string; turnId: string },
 ): Promise<CreditDebitAttribution> {
   return withRlsContext(db, input, async (tx) => {
-    const [turn] = await rawRows<{ initiatingHumanSubjectId: string | null }>(
+    const [turn] = await rawRows<{
+      initiatingHumanSubjectId: string | null;
+      billingOrigin: string | null;
+    }>(
       tx,
-      sql`SELECT initiating_human_subject_id AS "initiatingHumanSubjectId"
+      sql`SELECT initiating_human_subject_id AS "initiatingHumanSubjectId",
+          billing_origin AS "billingOrigin"
         FROM session_turns WHERE account_id=${input.accountId}::uuid
           AND workspace_id=${input.workspaceId}::uuid AND id=${input.turnId}::uuid`,
     );
@@ -37,6 +95,7 @@ export async function creditDebitAttributionForTurn(
       kind: "turn",
       turnId: input.turnId,
       initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+      billingOrigin: storedBillingOrigin(turn.billingOrigin),
     });
   });
 }
@@ -45,17 +104,22 @@ export async function creditDebitAttributionForTurn(
  * Trusted admission facts, not an access grant. Unknown is deliberately
  * distinct from pure service: old jobs/leases cannot prove a human initiator.
  */
+/** Funding origin of the work (`BillingOrigin`); omitted when not yet known. */
+const attributionBillingOrigin = z.enum(BILLING_ORIGINS).optional();
+
 export const CreditDebitAttribution = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("turn"),
     turnId: z.uuid(),
     initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
+    billingOrigin: attributionBillingOrigin,
   }),
   z.object({
     kind: z.literal("human"),
     initiatingHumanSubjectId: z.string().min(1).max(1024),
+    billingOrigin: attributionBillingOrigin,
   }),
-  z.object({ kind: z.literal("service") }),
+  z.object({ kind: z.literal("service"), billingOrigin: attributionBillingOrigin }),
   z.object({ kind: z.literal("unknown") }),
 ]);
 export type CreditDebitAttribution = z.infer<typeof CreditDebitAttribution>;
@@ -70,11 +134,15 @@ export function creditDebitAttributionMetadata(
         ...(attribution.initiatingHumanSubjectId
           ? { initiatingHumanSubjectId: attribution.initiatingHumanSubjectId }
           : {}),
+        ...(attribution.billingOrigin ? { billingOrigin: attribution.billingOrigin } : {}),
       };
     case "human":
-      return { initiatingHumanSubjectId: attribution.initiatingHumanSubjectId };
+      return {
+        initiatingHumanSubjectId: attribution.initiatingHumanSubjectId,
+        ...(attribution.billingOrigin ? { billingOrigin: attribution.billingOrigin } : {}),
+      };
     case "service":
-      return {};
+      return attribution.billingOrigin ? { billingOrigin: attribution.billingOrigin } : {};
     case "unknown":
       throw new Error("Paid credit debit has no frozen initiating attribution");
   }

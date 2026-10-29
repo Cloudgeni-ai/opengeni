@@ -91,8 +91,15 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
         );
       }
       const attribution = await attributionFor(scope);
-      // Non-model resources spend general credits only.
-      const balance = await getSpendableCreditBalance(deps.db, scope.accountId);
+      // Non-model resources spend general credits only; API work credits only.
+      const balance = await getSpendableCreditBalance(
+        deps.db,
+        scope.accountId,
+        undefined,
+        undefined,
+        undefined,
+        attribution.kind === "unknown" ? undefined : attribution.billingOrigin,
+      );
       if (balance.balanceMicros <= 0) {
         throw new WebSearchBillingRefusedError(
           "insufficient_credits",

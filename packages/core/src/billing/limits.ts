@@ -4,6 +4,11 @@ import {
   resolveModelProviderForTurn,
   type Settings,
 } from "@opengeni/config";
+import {
+  API_CREDITS_REQUIRED_CODE,
+  API_CREDITS_REQUIRED_MESSAGE,
+  type BillingOrigin,
+} from "@opengeni/contracts";
 import type {
   LimitAction,
   LimitDecision,
@@ -17,6 +22,7 @@ import {
   countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
+  chargeBillingOrigin,
   getSpendableCreditBalance,
   isCodexBilledTurn,
   readSubscriptionCoreFunding,
@@ -61,7 +67,18 @@ export type LimitCheckInput = {
   // controls the token cap. Connected subscriptions still require live workspace
   // readiness. Non-model infra actions leave this undefined.
   model?: string | null;
+  /**
+   * Who pays for the work (`BillingOrigin`). API work spends credits only,
+   * never plan or promotional credit. Omitted uses the request's origin.
+   */
+  billingOrigin?: BillingOrigin | null;
 };
+
+/** Credit refusals: both are payment stops (402) with an Add credits action. */
+export const CREDIT_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "insufficient_credits",
+  API_CREDITS_REQUIRED_CODE,
+]);
 
 export function modelFundingForAdmission(
   settings: Settings,
@@ -139,7 +156,7 @@ export async function requireLimit(deps: LimitDependencies, input: LimitCheckInp
     return;
   }
   throw new HTTPException(
-    decision.code === "insufficient_credits" || decision.code === "allowance_exhausted" ? 402 : 429,
+    CREDIT_REFUSAL_CODES.has(decision.code) || decision.code === "allowance_exhausted" ? 402 : 429,
     {
       message: decision.message,
       cause: decision,
@@ -215,13 +232,20 @@ async function checkCreditBalance(
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
   }
+  const origin = chargeBillingOrigin(input.billingOrigin);
   const balance = await getSpendableCreditBalance(
     deps.db,
     input.accountId,
     input.model ? canonicalizeConfiguredModelId(deps.settings, input.model) : undefined,
+    undefined,
+    undefined,
+    origin,
   );
   if (balance.balanceMicros > 0) {
     return { allowed: true };
+  }
+  if (origin === "api") {
+    return { allowed: false, code: API_CREDITS_REQUIRED_CODE, message: API_CREDITS_REQUIRED_MESSAGE };
   }
   return {
     allowed: false,

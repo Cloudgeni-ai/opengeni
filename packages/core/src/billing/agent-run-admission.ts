@@ -3,7 +3,7 @@ import {
   configuredStaticUsageLimits,
   type Settings,
 } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
+import type { BillingOrigin, EntitlementsPort } from "@opengeni/contracts";
 import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
   checkWorkspaceAllowance,
@@ -30,6 +30,8 @@ export async function agentRunAdmissionDenial(
     /** The accepted work's causal human, not the scheduler/service caller. */
     initiatingHumanSubjectId?: string | null;
     acceptedTurn?: { sessionId: string; turnId: string };
+    /** Who pays: API work needs credits; plan credit never pays for it. */
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<AgentRunAdmissionDenial | null> {
   const codexBilled = await isCodexBilledTurn({
@@ -70,6 +72,9 @@ export async function agentRunAdmissionDenial(
         services.db,
         input.accountId,
         canonicalizeConfiguredModelId(services.settings, input.model),
+        undefined,
+        undefined,
+        input.billingOrigin,
       );
       if (balance.balanceMicros <= 0) return "insufficient_credits";
     }

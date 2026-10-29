@@ -1,11 +1,14 @@
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, BillingOrigin } from "@opengeni/contracts";
 import {
+  billingOriginForGrant,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  ambientBillingOrigin,
   freezeAgentLearningPolicy,
+  readTurnBillingOrigin,
   withSessionRlsActorContext,
   withCreditDebitAttribution,
   type CreditDebitAttribution,
@@ -42,11 +45,64 @@ function agentAttemptAuthorityError(
  */
 export function creditDebitAttributionForGrant(grant: AccessGrant): CreditDebitAttribution {
   if (grant.principalKind === "agent_attempt") return currentCreditDebitAttribution();
+  // Who pays: a trusted dispatcher's origin, else the credential's.
+  const billingOrigin = ambientBillingOrigin() ?? billingOriginForGrant(grant);
   return grant.principalKind === "human_session"
-    ? { kind: "human", initiatingHumanSubjectId: grant.subjectId }
+    ? { kind: "human", initiatingHumanSubjectId: grant.subjectId, billingOrigin }
     : ["service", "api_key", "configured_key", "mcp_gateway"].includes(grant.principalKind ?? "")
-      ? { kind: "service" }
+      ? { kind: "service", billingOrigin }
       : { kind: "unknown" };
+}
+
+/**
+ * A turn's funding origin never changes once accepted, so remember it per
+ * exact turn instead of reading it on every agent request.
+ */
+const TURN_ORIGIN_LIMIT = 4_096;
+const turnOriginsByDatabase = new WeakMap<object, Map<string, BillingOrigin>>();
+
+async function agentTurnBillingOrigin(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+  turnId: string,
+): Promise<BillingOrigin> {
+  let cache = turnOriginsByDatabase.get(deps.db);
+  if (!cache) {
+    cache = new Map();
+    turnOriginsByDatabase.set(deps.db, cache);
+  }
+  const key = `${grant.accountId}:${grant.workspaceId}:${turnId}`;
+  const remembered = cache.get(key);
+  if (remembered) return remembered;
+  // Plan credit never pays for work whose chat cannot be found.
+  const origin =
+    (await readTurnBillingOrigin(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      turnId,
+    })) ?? "api";
+  if (cache.size >= TURN_ORIGIN_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, origin);
+  return origin;
+}
+
+/**
+ * Who pays for work this grant starts outside a turn (a single model call,
+ * a tool): an agent attempt's chat, else a trusted dispatcher's origin, else
+ * the credential's (see `billingOriginForGrant`).
+ */
+export async function billingOriginForAccessGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<BillingOrigin> {
+  const turnId = grant.metadata?.turnId;
+  if (grant.principalKind === "agent_attempt") {
+    return typeof turnId === "string" ? await agentTurnBillingOrigin(deps, grant, turnId) : "api";
+  }
+  return ambientBillingOrigin() ?? billingOriginForGrant(grant);
 }
 
 /**
@@ -208,11 +264,14 @@ export async function withAccessGrantSessionRlsContext<T>(
         ? speculative
         : (rememberedLearning(deps.db, verifiedKey) ?? (await freezeLearning(verified)));
     rememberLearning(deps.db, verifiedKey, learning);
+    // Tools and sub-agents of a chat are billed like the chat.
+    const billingOrigin = await agentTurnBillingOrigin(deps, grant, actor.turnId);
     return await withCreditDebitAttribution(
       {
         kind: "turn",
         turnId: actor.turnId,
         initiatingHumanSubjectId: actor.initiatingHumanSubjectId ?? null,
+        billingOrigin,
       },
       () =>
         withSessionRlsActorContext(

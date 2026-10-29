@@ -2,7 +2,10 @@ import {
   GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
   isRetiredNativeGoogleDriveTask,
 } from "@opengeni/contracts/google-drive-native-retirement";
-import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
+import {
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
+  readScheduledTaskBillingOrigin,
+} from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -1247,6 +1250,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           model: targetSessionExecution?.model ?? model,
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
           initiatingHumanSubjectId: causalHumanSubjectId,
+          // Runs are billed as whoever set the task up.
+          billingOrigin: await readScheduledTaskBillingOrigin(db, {
+            accountId: task.accountId,
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+          }),
         },
       );
       if (admissionDenial) {

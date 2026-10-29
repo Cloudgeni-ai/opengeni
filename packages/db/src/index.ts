@@ -104,6 +104,8 @@ import {
   type CreditUsage,
 } from "./credit-balances";
 export {
+  apiSpendableCreditMicros,
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
@@ -300,6 +302,7 @@ export {
 } from "./accepted-subscription-authority";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import { storedBillingOrigin, type BillingOrigin } from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
@@ -342,6 +345,7 @@ import {
   currentSessionRlsActorInitiatingHumanSubjectId,
 } from "./database";
 import {
+  ambientBillingOrigin,
   CreditDebitAttribution,
   creditDebitAttributionMetadata,
   currentCreditDebitAttribution,
@@ -6691,6 +6695,46 @@ export async function applyCreditLedgerEntryOnce(
   );
 }
 
+const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The funding origin a usage debit is charged under, frozen on its ledger row
+ * (`usage_origin`): the caller's explicit origin; else the origin carried in
+ * its attribution metadata; else the turn it names; else the origin a
+ * trusted outer scope fixed; else app (today's behaviour, and legacy null).
+ * API debits never count against the monthly plan allowance.
+ */
+async function resolveUsageOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    usageOrigin?: BillingOrigin | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  },
+): Promise<BillingOrigin> {
+  if (input.usageOrigin) return input.usageOrigin;
+  const metadataOrigin = input.metadata?.billingOrigin;
+  if (metadataOrigin === "app" || metadataOrigin === "api") return metadataOrigin;
+  const attribution = currentCreditDebitAttribution();
+  const turnId =
+    typeof input.metadata?.turnId === "string"
+      ? input.metadata.turnId
+      : attribution.kind === "turn" && !attribution.billingOrigin
+        ? attribution.turnId
+        : null;
+  if (turnId && input.workspaceId && USAGE_ORIGIN_TURN_ID.test(turnId)) {
+    const [turn] = await rawRows<{ billingOrigin: string | null }>(
+      scopedDb,
+      sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${turnId}::uuid`,
+    );
+    if (turn) return storedBillingOrigin(turn.billingOrigin);
+  }
+  return ambientBillingOrigin() ?? "app";
+}
+
 export async function applyCreditDebitUpToBalance(
   db: Database,
   input: {
@@ -6706,6 +6750,8 @@ export async function applyCreditDebitUpToBalance(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{
   balance: BillingBalance;
@@ -6737,7 +6783,8 @@ export async function applyCreditDebitUpToBalance(
         settledAt,
         true,
       );
-      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId, usageOrigin);
       const candidateDebitMicros = plan.debitedMicros;
       // Keep a zero-cost receipt too: retrying after a top-up must not charge
       // a response that was already settled while the eligible balance was empty.
@@ -6750,6 +6797,7 @@ export async function applyCreditDebitUpToBalance(
           amountMicros: -candidateDebitMicros,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: {
             ...input.metadata,
@@ -6809,6 +6857,8 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
@@ -6822,8 +6872,9 @@ export async function applyCreditDebitAfterUse(
       // that cannot allocate promotional grants.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
-      if (input.usage) {
+      if (input.usage && usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
@@ -6839,6 +6890,7 @@ export async function applyCreditDebitAfterUse(
           amountMicros: -input.amountMicros,
           sourceType: input.sourceType,
           sourceId: input.sourceId,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
@@ -7116,6 +7168,8 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
+  /** Funding origin of whoever set the task up, inherited by every run. */
+  billingOrigin?: BillingOrigin | null;
   /** Vault narrowing for every run (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
@@ -7939,6 +7993,8 @@ export type EnqueueSessionTurnInput = {
   source: SessionTurnSource;
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the turn; null inherits the session's latest. */
+  billingOrigin?: BillingOrigin | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -7968,6 +8024,8 @@ export type SessionTurnForExecution = SessionTurn & {
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
+  /** Funding origin frozen at acceptance; legacy null is app. */
+  billingOrigin: BillingOrigin;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
@@ -19293,6 +19351,7 @@ export async function createScheduledTask(
           id: input.id,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          billingOrigin: input.billingOrigin ?? null,
           name: input.name,
           ownerSubjectId:
             (input.action?.kind ?? "agent_turn") === "agent_turn"
@@ -73351,6 +73410,8 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn; null inherits the parent's. */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Normalized IANA zone of the person sending the initial message, frozen in
    * the initial turn's metadata.
@@ -73976,6 +74037,7 @@ export async function initializeSessionStartAtomically(
                   status: "queued",
                   source: "user",
                   surface: input.surface ?? null,
+                  billingOrigin: input.billingOrigin ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -74322,6 +74384,7 @@ export async function enqueueSessionTurn(
                 status: "queued",
                 source: input.source,
                 surface: input.surface ?? null,
+                billingOrigin: input.billingOrigin ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -92624,6 +92687,7 @@ function mapSessionTurnForExecution(
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
+    billingOrigin: storedBillingOrigin(row.billingOrigin),
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,
