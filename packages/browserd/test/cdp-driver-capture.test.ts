@@ -450,9 +450,9 @@ test("a slow full-page screenshot does not end the live view of its tab", async 
   }
 }, 20_000);
 
-test("a frame capture the renderer never answers still ends the live view", async () => {
-  // Only a capture still within its own deadline holds frames back without
-  // counting; one past it is a renderer that stopped drawing.
+test("a frame capture past its sampling deadline does not end the live view", async () => {
+  // The renderer can resume after multiple sampling deadlines. Do not replace
+  // the subscription or issue overlapping captures while waiting for it.
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
   try {
@@ -462,26 +462,45 @@ test("a frame capture the renderer never answers still ends the live view", asyn
     expect((await iterator.next()).done).toBe(false);
     fixture.stallNext("Page.captureScreenshot");
     await fixture.waitUntilStalled();
-    const ended = (async () => {
-      try {
-        while (!(await iterator.next()).done);
-        return "closed";
-      } catch (error) {
-        return error;
-      }
-    })();
-    // Before the connection gives up on the stalled capture at 10 s.
-    const outcome = await Promise.race([
-      ended,
-      new Promise((resolve) => setTimeout(() => resolve("still streaming"), 9_000)),
-    ]);
-    expect(outcome).toBeInstanceOf(Error);
+    const captures = fixture.calls.filter(
+      (call) => call.method === "Page.captureScreenshot",
+    ).length;
+    const next = iterator.next().then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    // Longer than three sampling failures, but before the underlying 10 s
+    // capture deadline. Serialization must still hold until its answer.
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
+      captures,
+    );
+    fixture.replyToStalled();
+    expect(await next).toMatchObject({ done: false });
   } finally {
     fixture.replyToStalled();
     await frames?.close();
     await fixture.driver.close();
   }
 }, 20_000);
+
+test("a lost connection fails the live view instead of leaving a frozen subscription", async () => {
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    const failed = iterator.next().catch((error: unknown) => error);
+    fixture.disconnect();
+    expect(await failed).toBeInstanceOf(Error);
+    await expect(iterator.next()).rejects.toThrow();
+  } finally {
+    await frames?.close();
+    await fixture.driver.close();
+  }
+});
 
 test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
   // The wait for the frame comes out of the screenshot's own 3 s, not on top.

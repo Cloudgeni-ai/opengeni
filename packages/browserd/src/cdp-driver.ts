@@ -6078,7 +6078,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.captureFallbackFrame(targetId, expected);
           consecutiveFailures = 0;
         } catch (error) {
-          if (error instanceof CaptureBusyError) continue;
+          // A page busy with script can miss any number of sampling deadlines
+          // without losing its target or CDP connection. Keep the same stream
+          // alive so the next sample resumes it when the renderer responds.
+          // Capture serialization and action deadlines remain independent.
+          if (error instanceof CaptureBusyError || error instanceof CdpCommandTimeoutError)
+            continue;
           consecutiveFailures += 1;
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);
