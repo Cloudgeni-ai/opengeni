@@ -8,6 +8,7 @@ import {
   AgentBrowserDriver,
   DIALOG_NOT_CANCELLABLE_MESSAGE,
   PAGE_NOT_ANSWERING_MESSAGE,
+  PAGE_NOT_ANSWERING_HIDDEN_MESSAGE,
   PAGE_STILL_BUSY_MESSAGE,
 } from "../src/cdp-driver";
 import {
@@ -86,6 +87,14 @@ class UnansweredTabBridge implements AttachedBrowserBridgeTransport {
   }
 
   close(): void {}
+
+  /** Without a dialog, the page finishes its work this long from now. */
+  endWorkIn(ms: number): void {
+    setTimeout(() => {
+      this.blocked = false;
+      this.workEnded();
+    }, ms);
+  }
 
   show(tab: FixtureTab): void {
     const hidden = this.active.get(tab.windowId);
@@ -287,7 +296,10 @@ test("a busy page is not claimed to have had a dialog", async () => {
   try {
     await failure(driver.observe("7"));
     const error = await failure(driver.dispatch(dismiss(await driver.targetState("7"))));
-    expect(error).toMatchObject({ code: "tab_not_responding", message: PAGE_STILL_BUSY_MESSAGE });
+    expect(error).toMatchObject({
+      code: "tab_not_responding",
+      message: PAGE_NOT_ANSWERING_HIDDEN_MESSAGE,
+    });
     expect(bridge.active.get(1)).toBe("7");
     expect(bridge.tabs.map((tab) => tab.id)).toEqual(["7"]);
   } finally {
@@ -304,7 +316,69 @@ test("a busy page that answers only some time after its tab was hidden is not cl
   try {
     await failure(driver.observe("7"));
     const error = await failure(driver.dispatch(dismiss(await driver.targetState("7"))));
+    expect(error).toMatchObject({
+      code: "tab_not_responding",
+      message: PAGE_NOT_ANSWERING_HIDDEN_MESSAGE,
+    });
+  } finally {
+    await driver.close().catch(() => undefined);
+    connection.close();
+  }
+}, 15_000);
+
+test("a tab no longer in front is not switched, and its page is reported busy", async () => {
+  const bridge = new UnansweredTabBridge([
+    { id: "7", windowId: 1 },
+    { id: "8", windowId: 1 },
+  ]);
+  bridge.dialog = false;
+  const { connection, driver } = attachedDriver(bridge);
+  try {
+    await failure(driver.observe("7"));
+    const state = await driver.targetState("7");
+    // The person shows their other tab before the agent cancels.
+    bridge.active.set(1, "8");
+    const error = await failure(driver.dispatch(dismiss(state)));
     expect(error).toMatchObject({ code: "tab_not_responding", message: PAGE_STILL_BUSY_MESSAGE });
+    // Nothing was hidden, so it says nothing of hiding.
+    expect(error?.message).not.toContain("hidden");
+    expect(bridge.switches()).toEqual([]);
+    expect(bridge.active.get(1)).toBe("8");
+  } finally {
+    await driver.close().catch(() => undefined);
+    connection.close();
+  }
+});
+
+test("cancelling a dialog checks the page only briefly before and after hiding its tab", async () => {
+  const bridge = new UnansweredTabBridge([
+    { id: "7", windowId: 1 },
+    { id: "8", windowId: 1 },
+  ]);
+  const { connection, driver } = attachedDriver(bridge, 3_000);
+  try {
+    await failure(driver.observe("7"));
+    const started = Date.now();
+    const observation = await driver.dispatch(dismiss(await driver.targetState("7")));
+    expect(observation?.target.id).toBe("7");
+    expect(bridge.blocked).toBe(false);
+    // One brief check for the fences and one before hiding.
+    expect(Date.now() - started).toBeLessThan(2_600);
+  } finally {
+    await driver.close().catch(() => undefined);
+    connection.close();
+  }
+}, 15_000);
+
+test("a tab whose page did not answer once gets the full time to attach again", async () => {
+  const bridge = new UnansweredTabBridge([{ id: "7", windowId: 1 }]);
+  bridge.dialog = false;
+  const { connection, driver } = attachedDriver(bridge, 3_000);
+  try {
+    await failure(driver.observe("7"));
+    // A slow page that answers after 2.5 s is used, not reported again.
+    bridge.endWorkIn(2_500);
+    expect((await driver.observe("7")).target.id).toBe("7");
   } finally {
     await driver.close().catch(() => undefined);
     connection.close();
@@ -381,6 +455,8 @@ test("a window not in front with no other tab cannot be cancelled from here, and
       code: "tab_not_responding",
       message: DIALOG_NOT_CANCELLABLE_MESSAGE,
     });
+    // No dialog was seen, so none is asserted.
+    expect(error?.message).toContain("If a dialog holds it");
     expect(bridge.switches()).toEqual(["tabs.create about:blank", "tabs.close 101"]);
     expect(bridge.blocked).toBe(true);
   } finally {

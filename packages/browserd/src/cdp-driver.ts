@@ -1035,9 +1035,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** Tabs in front whose page did not answer, by the browser's own ID: a
    * dialog only the person sees may hold them. Cleared once one answers. */
   private readonly unansweredTabs = new Set<string>();
-  /** Tabs just hidden for a moment, whose page must answer right away to
-   * count as one a dialog held. */
-  private readonly justHiddenTabs = new Set<string>();
+  /** Shorter attach deadlines while checking whether such a tab's page
+   * answers, by the browser's own ID. */
+  private readonly probeDeadlines = new Map<string, number>();
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
@@ -1940,7 +1940,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   async targetState(tabId: string): Promise<BrowserTargetStateValue> {
     const targetId = this.browserTargetIdOf(tabId);
     try {
-      return await this.targetStateOf(targetId);
+      // A tab that did not answer before is only checked briefly: a page that
+      // answers at all does so well within that.
+      return this.unansweredTabs.has(targetId)
+        ? await this.probing(targetId, UNANSWERED_PROBE_TIMEOUT_MS, () =>
+            this.targetStateOf(targetId),
+          )
+        : await this.targetStateOf(targetId);
     } catch (error) {
       // A tab a dialog only the person sees may hold still has a state with no
       // readable document, so that dialog can be cancelled by handle_dialog.
@@ -3822,9 +3828,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     const connection = await this.ensureConnection();
     const info = await this.requireTargetInfo(connection, targetId);
-    const answers = async () => {
+    const answersWithin = async (timeoutMs: number) => {
       try {
-        await this.ensureTargetState(info);
+        await this.probing(targetId, timeoutMs, () => this.ensureTargetState(info));
         return true;
       } catch (error) {
         if (error instanceof InteractionControllerError && error.code === "tab_not_responding")
@@ -3833,7 +3839,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     };
     // The person may have answered it meanwhile.
-    if (await answers()) return false;
+    if (await answersWithin(UNANSWERED_PROBE_TIMEOUT_MS)) return false;
     const hidden = await personDialogs.hideForAMoment(targetId);
     if (hidden === "unavailable")
       throw new InteractionDefiniteDriverError(
@@ -3841,19 +3847,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         DIALOG_NOT_CANCELLABLE_MESSAGE,
       );
     // A tab not in front holds no such dialog: the browser closes them itself
-    // there. A page such a dialog held answers right away once it closed; one
-    // that does not is busy (one whose work happens to end just then cannot
-    // be told apart).
+    // there. Nothing was switched.
     if (hidden === "not_front")
       throw new InteractionDefiniteDriverError("tab_not_responding", PAGE_STILL_BUSY_MESSAGE);
-    this.justHiddenTabs.add(targetId);
-    try {
-      if (!(await answers()))
-        throw new InteractionDefiniteDriverError("tab_not_responding", PAGE_STILL_BUSY_MESSAGE);
-    } finally {
-      this.justHiddenTabs.delete(targetId);
-    }
+    // A page such a dialog held answers right away once it closed; one that
+    // does not is most likely busy (one whose work happens to end just then
+    // cannot be told apart, nor a dialog whose page answers only later).
+    if (!(await answersWithin(HIDDEN_TAB_ANSWER_TIMEOUT_MS)))
+      throw new InteractionDefiniteDriverError(
+        "tab_not_responding",
+        PAGE_NOT_ANSWERING_HIDDEN_MESSAGE,
+      );
     return true;
+  }
+
+  /** Run `work` with attaching to the tab bounded by `timeoutMs`. */
+  private async probing<T>(
+    targetId: string,
+    timeoutMs: number,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    this.probeDeadlines.set(targetId, timeoutMs);
+    try {
+      return await work();
+    } finally {
+      this.probeDeadlines.delete(targetId);
+    }
   }
 
   private async attachTarget(info: TargetInfo): Promise<TargetState> {
@@ -3904,17 +3923,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (viewport) await this.applyViewport(connection, sessionId, viewport);
         return await this.mainFrame(sessionId);
       })();
-      // A tab that did not answer before gets a shorter wait: the agent learns
-      // sooner that it still does not, and a page that a dialog only the
-      // person sees held answers within milliseconds once it closed.
+      // Checking whether a tab that did not answer before answers now waits
+      // briefly; using it waits the full time, as a slow page may need.
+      const probeDeadline = this.probeDeadlines.get(info.targetId);
       const attachTimeoutMs =
-        this.attachTimeoutMs !== undefined && this.unansweredTabs.has(info.targetId)
-          ? Math.min(
-              this.attachTimeoutMs,
-              this.justHiddenTabs.has(info.targetId)
-                ? HIDDEN_TAB_ANSWER_TIMEOUT_MS
-                : UNANSWERED_ATTACH_TIMEOUT_MS,
-            )
+        this.attachTimeoutMs !== undefined && probeDeadline !== undefined
+          ? Math.min(this.attachTimeoutMs, probeDeadline)
           : this.attachTimeoutMs;
       const outcome = await Promise.race([
         initialized,
@@ -10522,11 +10536,10 @@ const RESTORED_TAB_ATTACH_INTERVAL_MS = 100;
  * live page answers in well under a second. */
 const REBIND_TIMEOUT_MS = 5_000;
 
-/** How long attaching waits on a tab whose page did not answer before, while
- * a dialog only the person sees may hold it: a page that answers at all does
- * so in well under this, and one held by such a dialog answers within a few
- * milliseconds of the dialog closing. */
-const UNANSWERED_ATTACH_TIMEOUT_MS = 2_000;
+/** How long checking whether a tab whose page did not answer before answers
+ * now waits, while a dialog only the person sees may hold it: a page that
+ * answers at all does so in well under this. */
+const UNANSWERED_PROBE_TIMEOUT_MS = 1_000;
 
 /** How soon a page must answer once its tab was hidden for a moment to count
  * as one a dialog only the person sees held: such a page answers within tens
@@ -10539,14 +10552,19 @@ const HIDDEN_TAB_ANSWER_TIMEOUT_MS = 500;
 export const PAGE_NOT_ANSWERING_MESSAGE =
   'This tab\'s page is not answering: it is busy, or a dialog (alert, confirm or prompt) only the person can see is open. Ask them to answer it, or cancel it with browser_act action {type:"handle_dialog",response:"dismiss"}.';
 
-/** The answer to cancelling such a dialog when the page still did not answer
- * once its tab was hidden for a moment, which closes any such dialog. */
+/** The answer to cancelling such a dialog in a tab that is not in front,
+ * where the browser closes such dialogs itself, and nothing was switched. */
 export const PAGE_STILL_BUSY_MESSAGE =
-  "No dialog was found: the page still did not answer after its tab was hidden for a moment, so it is busy. Nothing else changed. Try again later, or ask the person to reload the tab.";
+  "No dialog was found: the page still does not answer, so it is busy. Nothing else changed. Try again later, or ask the person to reload the tab.";
+
+/** The answer to cancelling such a dialog when the page did not answer right
+ * after its tab was hidden for a moment, which closes any such dialog. */
+export const PAGE_NOT_ANSWERING_HIDDEN_MESSAGE =
+  "No dialog was confirmed cancelled: the page did not answer right after its tab was hidden for a moment, so it is most likely busy. Observe the tab before repeating a step.";
 
 /** The answer to cancelling such a dialog where its tab cannot be hidden. */
 export const DIALOG_NOT_CANCELLABLE_MESSAGE =
-  "This tab's page is still not answering, and a dialog in it cannot be cancelled from here. Ask the person to answer it in their browser.";
+  "This tab's page is still not answering. If a dialog holds it, it cannot be cancelled from here: ask the person to answer it in their browser.";
 
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";
