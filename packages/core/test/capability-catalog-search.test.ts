@@ -248,6 +248,28 @@ describe("agent capability catalog search", () => {
     expect(results[0]?.item.id).toBe("mcp:slack");
   });
 
+  test("a featured connector wins a close match over an entry that only shares its words", () => {
+    const mailbox = item({
+      id: "mcp:mailbox",
+      name: "Mailbox",
+      tags: ["email", "inbox"],
+      metadata: { curation: { curated: true, featured: true } },
+    });
+    const leads = item({
+      id: "plugin:leads",
+      name: "Leads",
+      kind: "plugin",
+      tags: ["email"],
+      description: "Check email addresses.",
+    });
+    const ranked = searchCapabilityCatalogItems([leads, mailbox], "check my email");
+    expect(ranked.map((result) => result.item.id)).toEqual(["mcp:mailbox", "plugin:leads"]);
+    const unfeatured = { ...mailbox, metadata: {} };
+    expect(searchCapabilityCatalogItems([leads, unfeatured], "check my email")[0]?.item.id).toBe(
+      "plugin:leads",
+    );
+  });
+
   test("is deterministic and honors the result bound", () => {
     const candidates = Array.from({ length: 25 }, (_, index) =>
       item({ id: `mcp:notify-${index}`, name: `Notify ${String(index).padStart(2, "0")}` }),

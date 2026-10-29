@@ -6,6 +6,7 @@ import {
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
+  connectorTakesOnlyPersonalAccounts,
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
   personalIntegrationSetupAccess,
 } from "@opengeni/contracts/personal-integration-setup";
@@ -16,12 +17,8 @@ import {
    the one sentence, the publisher and the trust line a person reads.
    -------------------------------------------------------------------------- */
 
-/** Hosts whose connections always belong to one person (Gmail, Google Calendar, Slack's hosted MCP). */
-const PERSONAL_ONLY_HOSTS = new Set([
-  "gmailmcp.googleapis.com",
-  "calendarmcp.googleapis.com",
-  "mcp.slack.com",
-]);
+/** Slack's hosted MCP signs in a Slack user; its page connects each member's own account. */
+const PERSONAL_ONLY_HOSTS = new Set(["mcp.slack.com"]);
 
 /**
  * True for providers that only ever connect someone's own account. The
@@ -30,6 +27,7 @@ const PERSONAL_ONLY_HOSTS = new Set([
 export function personalOnlyCapability(
   item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl">,
 ): boolean {
+  if (connectorTakesOnlyPersonalAccounts(item)) return true;
   const host = domainFromUrl(item.mcpUrl ?? item.endpointUrl ?? null);
   return host !== null && PERSONAL_ONLY_HOSTS.has(host.toLowerCase());
 }

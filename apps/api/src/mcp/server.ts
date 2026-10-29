@@ -414,6 +414,7 @@ import {
   marketplacePluginCapabilityItem,
   marketplacePluginCapabilityItems,
   pluginCapabilitySetup,
+  pluginsNotCoveredByConnectors,
 } from "../integrations/marketplace-plugin-catalog";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
@@ -7222,7 +7223,11 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
-      const candidates = [...current.items, ...recommendations(), ...pluginItems];
+      const candidates = [
+        ...current.items,
+        ...recommendations(),
+        ...pluginsNotCoveredByConnectors(pluginItems, current.items),
+      ];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({

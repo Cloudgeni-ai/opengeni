@@ -70,11 +70,13 @@ const CONNECT: Permission[] = [
 function ready(
   permissions: Permission[],
   items: CapabilityCatalogItem[] = [mail, keyed],
+  personalWorkspace?: boolean,
 ): InChatConnectSupport {
   return {
     status: "ready",
     permissions: new Set(permissions),
     catalog: new Map(items.map((item) => [item.id, item])),
+    ...(personalWorkspace === undefined ? {} : { personalWorkspace }),
   };
 }
 
@@ -111,6 +113,29 @@ describe("inChatConnectDecision", () => {
       kind: "card",
       item: mail,
       personalOnly: false,
+    });
+  });
+
+  test("a mailbox connector or a Personal workspace offers no 'Everyone in this workspace'", () => {
+    // Gmail connections always belong to one person; the API refuses a
+    // workspace-owned one, so the card must not offer it even to an admin.
+    const gmail = CapabilityCatalogItem.parse({
+      ...mail,
+      id: "mcp:gmail",
+      name: "Gmail",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+    });
+    const gmailRequest = request({ capability: { ...request().capability!, id: "mcp:gmail" } });
+    expect(inChatConnectDecision(gmailRequest, ready(CONNECT, [gmail]), true)).toEqual({
+      kind: "card",
+      item: gmail,
+      personalOnly: true,
+    });
+    // In a Personal workspace there is nobody to share an account with.
+    expect(inChatConnectDecision(request(), ready(CONNECT, [mail, keyed], true), true)).toEqual({
+      kind: "card",
+      item: mail,
+      personalOnly: true,
     });
   });
 

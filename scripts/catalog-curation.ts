@@ -23,6 +23,12 @@ export type CuratedCatalogEntry = {
   readonly description?: string;
   /** Catalog grouping shown in the connector browser. */
   readonly category?: string;
+  /**
+   * Words people use when they ask for this connector without naming it
+   * ("check my email" for Gmail). Added to the entry's catalog tags, which
+   * catalog search and the connector browser match. Never a security review.
+   */
+  readonly searchTags?: readonly string[];
   /** Promotes the entry to the featured strip. Not a security review. */
   readonly featured?: boolean;
   /** The provider publishes this server on its own domain. Not a security review. */
@@ -170,6 +176,7 @@ const BOOLEAN_FIELDS = [
 const STRING_ARRAY_FIELDS = [
   "scopesHint",
   "allowedTools",
+  "searchTags",
   "notes",
 ] as const satisfies readonly (keyof CuratedCatalogEntry)[];
 

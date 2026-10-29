@@ -111,6 +111,8 @@ export type CatalogIntegrationRow = {
   curated?: boolean;
   /** Curated grouping; absent means the registry-wide default. */
   category?: string;
+  /** Curated words people use for this connector; appended to its catalog tags. */
+  searchTags?: string[];
   /** Curated: promoted to the featured strip. Not a security review. */
   featured?: boolean;
   /** Curated: the provider publishes this server on its own domain. */
@@ -366,6 +368,7 @@ export function normalizeCatalogSnapshot(
       ...optionalString("description", official?.description ?? stringValue(candidate.description)),
       ...(official ? { curated: true } : {}),
       ...optionalString("category", official?.category),
+      ...(official?.searchTags?.length ? { searchTags: [...official.searchTags] } : {}),
       ...(official?.featured ? { featured: true } : {}),
       ...(official?.official ? { official: true } : {}),
       mcpUrl,
@@ -674,7 +677,7 @@ export function catalogRowToDbInput(
     homepageUrl: row.homepageUrl ?? `https://${row.domain}`,
     installUrl: row.installUrl ?? row.homepageUrl ?? `https://${row.domain}`,
     ...(row.category ? { category: row.category } : {}),
-    tags: ["mcp", "integration", row.tier, row.authKind],
+    tags: [...new Set(["mcp", "integration", row.tier, row.authKind, ...(row.searchTags ?? [])])],
     metadata: {
       logoSource: input.logoSource ?? (row.logoSourceUrl ? "integrations.sh" : "generic_monogram"),
       originalLogoUrl: row.logoSourceUrl,

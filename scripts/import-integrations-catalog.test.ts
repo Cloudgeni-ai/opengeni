@@ -360,6 +360,13 @@ describe("integrations.sh catalog import normalization", () => {
         importBatchId: "00000000-0000-4000-8000-000000000121",
       }).metadata,
     ).toMatchObject({ defaultConnectionOwnership: "personal" });
+    // People ask to "check my email", not for "Gmail": its catalog tags say so.
+    expect(normalized.rows[0]!.searchTags).toEqual(["email", "mail", "inbox"]);
+    expect(
+      catalogRowToDbInput(normalized.rows[0]!, {
+        importBatchId: "00000000-0000-4000-8000-000000000121",
+      }).tags,
+    ).toEqual(["mcp", "integration", "verified", "oauth2", "email", "mail", "inbox"]);
   });
 
   test("pins Mobbin to its reviewed official Registry and OAuth contract", () => {

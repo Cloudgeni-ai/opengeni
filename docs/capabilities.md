@@ -798,7 +798,11 @@ Ordinary new sessions include two first-party Opengeni tools:
   Capabilities page. It returns bounded, secret-free descriptors and a live
   setup state; it never returns credential instructions, tokens, or raw catalog
   metadata. Search is deterministic, excludes untrusted registry rows, and
-  prefers exact, enabled, verified, and built-in matches. It tolerates near
+  prefers exact, enabled, verified, built-in, and curated-featured matches. It
+  leaves out a marketplace plugin that is not installed, adds no Skills, and
+  only bundles MCP servers the catalog already lists as connectors: such a
+  plugin installs for the whole workspace yet offers nothing the connector
+  (which signs the person in with their own account) doesn't. It tolerates near
   spellings with a bounded edit-distance tier on names, provider domains, and
   tags (ranked below exact, prefix, and substring hits and flagged
   `approximate`), and matches workspace or operator entries without a provider
@@ -1130,7 +1134,11 @@ Two curated flags surface in the product. `featured` places a connector in
 the Featured strip above the Browse grid. `official` renders an "Official" marker meaning
 the provider publishes the MCP server on its own domain. Both are checkable
 claims recorded in the row's `metadata.curation`; neither is a security review,
-and the UI must never label a connector as reviewed or verified. Every entry
+and the UI must never label a connector as reviewed or verified. A featured
+connector also wins a close match in agent catalog search. `searchTags` lists
+the words people use when they ask for a connector without
+naming it (Gmail: email, mail, inbox); the import appends them to the row's
+catalog tags, which agent search and the connector browser match. Every entry
 must be backed by the provider's own current documentation, and its `notes`
 field records the reasoning for reviewers. Editing the overlay is the same PR
 workflow as the snapshot: change the file, re-run the import, review the diff.

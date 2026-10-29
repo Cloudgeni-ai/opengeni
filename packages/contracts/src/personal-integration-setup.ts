@@ -4,9 +4,35 @@
  * workspace. One shared definition for the API, the SDK and every client.
  */
 import { integrationDefinitionIdFromCapabilityId } from "./integration-capability-id";
+import { mcpEndpointIdentity } from "./mcp-endpoint";
 
 /** The narrow permission. `connections:write` includes it. */
 export const PERSONAL_INTEGRATION_SETUP_PERMISSION = "connections:personal" as const;
+
+/**
+ * Reviewed connectors whose connections always belong to one person: a
+ * mailbox, a calendar and a Drive are someone's own, and the API refuses a
+ * workspace-owned connection for them. Cards offer no "Everyone in this
+ * workspace" choice for these.
+ */
+export const PERSONAL_ACCOUNT_ONLY_MCP_URLS: readonly string[] = [
+  "https://gmailmcp.googleapis.com/mcp/v1",
+  "https://calendarmcp.googleapis.com/mcp/v1",
+  "https://drivemcp.googleapis.com/mcp/v1",
+];
+
+const PERSONAL_ACCOUNT_ONLY_ENDPOINTS = new Set(
+  PERSONAL_ACCOUNT_ONLY_MCP_URLS.map((url) => mcpEndpointIdentity(url)),
+);
+
+/** True when this connector only ever connects the person's own account. */
+export function connectorTakesOnlyPersonalAccounts(item: {
+  mcpUrl?: string | null | undefined;
+  endpointUrl?: string | null | undefined;
+}): boolean {
+  const endpoint = mcpEndpointIdentity(item.mcpUrl ?? item.endpointUrl);
+  return endpoint !== null && PERSONAL_ACCOUNT_ONLY_ENDPOINTS.has(endpoint);
+}
 
 /**
  * Literal permission-set coverage for ceilings (organization key policies,
@@ -57,6 +83,7 @@ export function isPersonalIntegrationSetupCandidate(item: {
  * from their workspace grant and the integration's catalog entry:
  *
  * - `"any"`: they may connect a shared or a personal account (and enable it).
+ *   A connector that only takes personal accounts never offers this.
  * - `"personal"`: only their own account; the card offers no ownership choice
  *   and enables the integration for personal accounts if it is not on yet.
  * - `null`: they cannot finish setup here.
@@ -70,6 +97,8 @@ export function personalIntegrationSetupAccess(
   item: Parameters<typeof isPersonalIntegrationSetupCandidate>[0] & {
     enabled?: boolean | undefined;
     connectionRef?: { subjectScope?: string | undefined } | null | undefined;
+    mcpUrl?: string | null | undefined;
+    endpointUrl?: string | null | undefined;
   },
 ): "any" | "personal" | null {
   const can = (permission: string) =>
@@ -83,7 +112,7 @@ export function personalIntegrationSetupAccess(
     can("connections:read") &&
     (item.enabled || can("capabilities:manage"))
   )
-    return "any";
+    return connectorTakesOnlyPersonalAccounts(item) ? "personal" : "any";
   // Already on: connecting one's own account changes no installation, but
   // only an installation that signs each person in can take it.
   if (item.enabled) return item.connectionRef?.subjectScope === "subject" ? "personal" : null;

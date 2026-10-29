@@ -3031,6 +3031,10 @@ export function searchCapabilityCatalogItems(
       if (item.enabled) score += 12;
       if (item.tier === "verified") score += 8;
       if (item.source === "built_in") score += 6;
+      // The reviewed overlay features the connectors most people mean
+      // ("check my email" means their own mailbox, not a lead-finding plugin
+      // that tags itself "email"), so a featured entry wins a close match.
+      if (capabilityCatalogItemIsFeatured(item)) score += 20;
       return [{ item, score, matchedOn: [...matchedOn], approximate }];
     })
     .sort(
@@ -3041,6 +3045,17 @@ export function searchCapabilityCatalogItems(
         left.item.id.localeCompare(right.item.id),
     )
     .slice(0, boundedLimit);
+}
+
+/** The reviewed curated overlay featured this catalog entry (set at catalog import). */
+function capabilityCatalogItemIsFeatured(item: CapabilityCatalogItem): boolean {
+  const curation = item.metadata.curation;
+  return (
+    typeof curation === "object" &&
+    curation !== null &&
+    !Array.isArray(curation) &&
+    (curation as Record<string, unknown>).featured === true
+  );
 }
 
 /**

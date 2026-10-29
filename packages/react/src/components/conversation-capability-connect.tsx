@@ -7,6 +7,8 @@ import type { AuthNeededItem } from "../timeline/types";
 export type InChatConnectSource = {
   getAccessContext: () => Promise<AccessContext>;
   listCapabilities: (workspaceId: string) => Promise<{ items: CapabilityCatalogItem[] }>;
+  /** Optional: a Personal workspace has one person, so its connections are theirs alone. */
+  getWorkspace?: (workspaceId: string) => Promise<{ kind?: "personal" | "shared" | undefined }>;
 };
 
 export type InChatConnectSupport =
@@ -18,6 +20,8 @@ export type InChatConnectSupport =
       permissions: ReadonlySet<Permission>;
       permissionMode?: "legacy" | "explicit" | undefined;
       catalog: ReadonlyMap<string, CapabilityCatalogItem>;
+      /** The chat's workspace is a Personal workspace: nobody else could use a shared account. */
+      personalWorkspace?: boolean | undefined;
     };
 
 export type InChatConnectDecision =
@@ -92,7 +96,11 @@ export function inChatConnectDecision(
   if (setup.kind === "integration")
     return { kind: "integration", capabilityId: requested.id, name: requested.name };
   if (setup.kind === "card" && capability)
-    return { kind: "card", item: capability, personalOnly: setup.personalOnly };
+    return {
+      kind: "card",
+      item: capability,
+      personalOnly: setup.personalOnly || support.personalWorkspace === true,
+    };
   return setup.kind === "unavailable" ? { kind: "unavailable" } : { kind: "default" };
 }
 
@@ -126,8 +134,14 @@ export function useInChatConnectSupport(
     const request = { client, workspaceId };
     requested.current = request;
     let live = true;
-    Promise.all([client.getAccessContext(), client.listCapabilities(workspaceId)]).then(
-      ([access, catalog]) => {
+    // The workspace kind only removes a meaningless ownership choice; if it
+    // can't be read the card still works and offers the choice as before.
+    const workspace =
+      typeof client.getWorkspace === "function"
+        ? client.getWorkspace(workspaceId).catch(() => null)
+        : Promise.resolve(null);
+    Promise.all([client.getAccessContext(), client.listCapabilities(workspaceId), workspace]).then(
+      ([access, catalog, details]) => {
         if (!live) return;
         const grant = access.workspaceGrants.find((entry) => entry.workspaceId === workspaceId);
         setLoaded({
@@ -138,6 +152,7 @@ export function useInChatConnectSupport(
             permissions: new Set(grant?.permissions ?? []),
             permissionMode: grant?.permissionMode,
             catalog: new Map(catalog.items.map((entry) => [entry.id, entry])),
+            personalWorkspace: details?.kind === "personal",
           },
         });
       },

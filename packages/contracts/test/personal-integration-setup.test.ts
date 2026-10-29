@@ -4,7 +4,9 @@ import {
   organizationAccessPresetPermissions,
 } from "../src/organization-access";
 import {
+  PERSONAL_ACCOUNT_ONLY_MCP_URLS,
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  connectorTakesOnlyPersonalAccounts,
   inChatCapabilitySetup,
   isPersonalIntegrationSetupCandidate,
   permissionSetCovers,
@@ -87,6 +89,34 @@ describe("personal integration setup", () => {
         custom,
       ),
     ).toBe("personal");
+  });
+
+  test("a mailbox, calendar or Drive connector is personal even for a connect admin", () => {
+    const admin = {
+      permissions: [
+        "sessions:control",
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ],
+    };
+    for (const mcpUrl of PERSONAL_ACCOUNT_ONLY_MCP_URLS) {
+      expect(connectorTakesOnlyPersonalAccounts({ mcpUrl })).toBe(true);
+      expect(personalIntegrationSetupAccess(admin, { ...reviewed, mcpUrl })).toBe("personal");
+      expect(inChatCapabilitySetup(admin, "mcp:x", { ...reviewed, mcpUrl })).toEqual({
+        kind: "card",
+        personalOnly: true,
+      });
+    }
+    // Matched as an endpoint identity, through the endpoint field too.
+    expect(
+      connectorTakesOnlyPersonalAccounts({ endpointUrl: "https://GMAILMCP.googleapis.com/mcp/v1" }),
+    ).toBe(true);
+    expect(connectorTakesOnlyPersonalAccounts({ mcpUrl: "https://mcp.slack.com/mcp" })).toBe(false);
+    expect(connectorTakesOnlyPersonalAccounts({ mcpUrl: null })).toBe(false);
+    expect(
+      personalIntegrationSetupAccess(admin, { ...reviewed, mcpUrl: "https://mcp.notion.com/mcp" }),
+    ).toBe("any");
   });
 
   test("legacy workspace:admin covers it; an explicit grant does not", () => {

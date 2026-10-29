@@ -18,6 +18,7 @@
       "name": "Gmail",
       "description": "Search and read Gmail, download original messages and attachments, manage drafts and labels, organize mail, import messages, and read mailbox changes and settings through the reviewed Gmail bridge.",
       "category": "communication",
+      "searchTags": ["email", "mail", "inbox"],
       "featured": true,
       "official": false,
       "tier": "verified",

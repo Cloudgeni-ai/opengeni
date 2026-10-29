@@ -1,5 +1,7 @@
 import {
   CapabilityCatalogItem,
+  capabilityCatalogItemIsTrustedForExposure,
+  mcpEndpointIdentity,
   pluginMcpUnavailableReason,
   type PluginDiscoveryItem,
 } from "@opengeni/contracts";
@@ -43,12 +45,18 @@ export function pluginCapabilityId(item: Pick<PluginDiscoveryItem, "provider" | 
 }
 
 /** What installing it adds, by the same rule the install flow uses. */
-function installableParts(item: PluginDiscoveryItem): { skills: string[]; servers: string[] } {
+function installableParts(item: PluginDiscoveryItem): {
+  skills: string[];
+  servers: string[];
+  serverUrls: string[];
+} {
+  const servers = (item.mcpServers ?? []).filter(
+    (server) => pluginMcpUnavailableReason(server) === null,
+  );
   return {
     skills: (item.skills ?? []).map((skill) => skill.name),
-    servers: (item.mcpServers ?? [])
-      .filter((server) => pluginMcpUnavailableReason(server) === null)
-      .map((server) => server.name),
+    servers: servers.map((server) => server.name),
+    serverUrls: servers.flatMap((server) => (server.endpoint ? [server.endpoint] : [])),
   };
 }
 
@@ -105,6 +113,7 @@ function catalogItem(
       provider: item.provider,
       skills: parts.skills,
       mcpServers: parts.servers,
+      mcpServerUrls: parts.serverUrls,
       recommendationOnly: true,
     },
   });
@@ -136,6 +145,37 @@ export function pluginCapabilityItems(installed: ReadonlySet<string>): Capabilit
       ? { ...item, enabled: true, lifecycle: { ...item.lifecycle, readiness: "ready" } }
       : item,
   );
+}
+
+/**
+ * The plugins worth offering next to these catalogue entries. A plugin that is
+ * not installed, adds no Skills and only bundles MCP servers the catalogue
+ * already lists as connectors offers nothing the connector doesn't, yet it
+ * installs for the whole workspace. Search leaves it out so the connector,
+ * which signs the person in with their own account, is what an agent offers.
+ */
+export function pluginsNotCoveredByConnectors(
+  plugins: readonly CapabilityCatalogItem[],
+  catalog: readonly CapabilityCatalogItem[],
+): CapabilityCatalogItem[] {
+  const connectorUrls = new Set(
+    catalog.flatMap((item) => {
+      if (item.kind !== "mcp" || !capabilityCatalogItemIsTrustedForExposure(item)) return [];
+      const url = mcpEndpointIdentity(item.mcpUrl ?? item.endpointUrl);
+      return url ? [url] : [];
+    }),
+  );
+  return plugins.filter((plugin) => {
+    if (plugin.enabled) return true;
+    const skills = plugin.metadata.skills;
+    const urls = plugin.metadata.mcpServerUrls;
+    if (!Array.isArray(skills) || skills.length > 0) return true;
+    if (!Array.isArray(urls) || urls.length === 0) return true;
+    return !urls.every((url) => {
+      const identity = typeof url === "string" ? mcpEndpointIdentity(url) : null;
+      return identity !== null && connectorUrls.has(identity);
+    });
+  });
 }
 
 /** One plugin's catalogue entry, or undefined when the id names none. */

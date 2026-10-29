@@ -10,6 +10,7 @@ import {
   type ConnectNavigation,
   type ConnectOwnership,
 } from "@opengeni/connect";
+import { connectorTakesOnlyPersonalAccounts } from "@opengeni/contracts/personal-integration-setup";
 import { OpenGeniApiError, type CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
@@ -101,7 +102,7 @@ export function useMcpCapabilityConnect({
   const view = useConnect(controller);
   const [item, setItem] = useState<CapabilityCatalogItem | null>(null);
   const personalOnly =
-    configuredPersonalOnly || (item?.mcpUrl ?? item?.endpointUrl) === GOOGLE_DRIVE_MCP_URL;
+    configuredPersonalOnly || (item !== null && connectorTakesOnlyPersonalAccounts(item));
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -166,7 +167,7 @@ export function useMcpCapabilityConnect({
     else if (
       !item &&
       (personalOnly ||
-        (resolved.mcpUrl ?? resolved.endpointUrl) === GOOGLE_DRIVE_MCP_URL ||
+        connectorTakesOnlyPersonalAccounts(resolved) ||
         resolved.metadata?.defaultConnectionOwnership === "personal")
     )
       setOwnership("personal");

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Permission, SessionEvent } from "@opengeni/sdk";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { flush, registerDom, renderComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 const { SessionConversation } = await import("../src/components/session-conversation");
@@ -79,6 +79,7 @@ function conversationClient(
   permissions: Permission[],
   chatConnections?: boolean,
   events: SessionEvent[] = history,
+  workspaceKind: "personal" | "shared" = "shared",
 ) {
   const effectiveControl = {
     state: "running",
@@ -118,6 +119,11 @@ function conversationClient(
         workspaceGrants: [{ workspaceId: WORKSPACE_ID, permissions }],
       }),
       listCapabilities: async () => ({ items: [mail] }),
+      getWorkspace: async () => ({
+        id: WORKSPACE_ID,
+        kind: workspaceKind,
+        inferenceControl: { revision: 0 },
+      }),
       listConnections: async () => [],
       listOwnConnectionAccounts: async () => [],
       // The Connect catalog offers each reviewed integration for personal accounts.
@@ -169,6 +175,30 @@ test("the stock conversation offers the shared connect card for an agent's reque
   } finally {
     await view.unmount();
   }
+});
+
+test("in a Personal workspace the connect card asks nobody who else can use the account", async () => {
+  const opened = async (workspaceKind: "personal" | "shared") => {
+    const view = await renderComponent(
+      <SessionConversation
+        client={conversationClient(CONNECT, undefined, history, workspaceKind)}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        modelPicker={false}
+      />,
+    );
+    await waitFor(() => connectButton() !== undefined, "The connect card did not render");
+    await actRun(() => connectButton()!.click());
+    await waitFor(
+      () => document.body.textContent?.includes("Continue to Mail") === true,
+      "The connect card did not open",
+    );
+    const asks = document.body.textContent?.includes("Who can use this connection?");
+    await view.unmount();
+    return asks;
+  };
+  expect(await opened("shared")).toBe(true);
+  expect(await opened("personal")).toBe(false);
 });
 
 test("without connect authority the card says setup is unavailable here", async () => {
