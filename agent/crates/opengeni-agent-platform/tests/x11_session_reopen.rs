@@ -498,27 +498,15 @@ mod linux {
         assert_eq!(typed("aB"), [(a, 0x10), (b, 0x11)]);
         // A second group gives `ф` and `Ф` on the `a` key. While it is
         // active, `ф` is pressed there, and `a` is not pressed on a key that
-        // would give `ф` (the batch is refused without input).
+        // would give `ф` (it goes to a spare keycode, bound for the session).
         conn.change_keyboard_mapping(1, a, 4, &[0x61, 0x41, 0x6c6, 0x6e6])
             .unwrap()
             .check()
             .unwrap();
         lock_keyboard(&conn, 0, xkb::Group::M2);
         assert_eq!(typed("ф"), [(a, 0x2000)]);
-        let refusal = runtime.block_on(desktop.inject(&opengeni_agent_proto::v1::DesktopInput {
-            event: Some(opengeni_agent_proto::v1::desktop_input::Event::Key(
-                opengeni_agent_proto::v1::KeyEvent {
-                    key: "a".into(),
-                    is_text: true,
-                    action: opengeni_agent_proto::v1::KeyAction::Press.into(),
-                },
-            )),
-            ..Default::default()
-        }));
-        assert!(matches!(
-            refusal,
-            Err(opengeni_agent_platform::PlatformError::Unsupported(_))
-        ));
-        assert!(conn.poll_for_event().unwrap().is_none());
+        let presses = typed("a");
+        assert_eq!(presses.len(), 1, "{presses:?}");
+        assert_ne!(presses[0].0, a, "{presses:?}");
     }
 }

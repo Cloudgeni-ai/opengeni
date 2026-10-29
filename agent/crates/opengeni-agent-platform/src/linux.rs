@@ -43,10 +43,14 @@ use crate::error::{PlatformError, PlatformResult};
 
 #[path = "linux_input_route.rs"]
 mod input_route;
+#[path = "linux_key_bindings.rs"]
+mod key_bindings;
 #[path = "linux_keysym_layout.rs"]
 mod keysym_layout;
 #[path = "linux_keysyms.rs"]
 mod keysyms;
+
+use key_bindings::{KeyBindingPlan, KeyBindings};
 
 pub use keysym_layout::{CompositorKey, CompositorLayout, KeymapNames};
 
@@ -88,6 +92,8 @@ pub struct LinuxDesktop {
     /// The display to connect to (e.g. `":0"`, `":99"`) and its authority.
     display: X11Display,
     composite: Option<Arc<Mutex<CompositeState>>>,
+    /// Spare keycodes this session bound, restored when the last handle drops.
+    key_bindings: Arc<KeyBindings>,
 }
 
 /// One unencoded X11 capture. Computer live-view encoding consumes this
@@ -349,8 +355,9 @@ impl LinuxDesktop {
     pub fn open_display(display: X11Display) -> Result<Self, String> {
         // Probe a real connection so a stale/dead $DISPLAY does not falsely report
         // a desktop. Drop it immediately; subsequent ops reconnect.
-        let (conn, _screen) = display.connect().map_err(|error| error.to_string())?;
+        let (conn, screen) = display.connect().map_err(|error| error.to_string())?;
         require_xtest(&conn)?;
+        key_bindings::prune_ended_sessions(&conn, conn.setup().roots[screen].root);
         let composite = conn
             .extension_information(x11rb::protocol::composite::X11_EXTENSION_NAME)
             .map_err(|error| format!("XComposite query failed: {error}"))?
@@ -360,7 +367,12 @@ impl LinuxDesktop {
                     redirected: BTreeSet::new(),
                 }))
             });
-        let desktop = Self { display, composite };
+        let key_bindings = Arc::new(KeyBindings::new(display.clone()));
+        let desktop = Self {
+            display,
+            composite,
+            key_bindings,
+        };
         // Establish backing storage for already-mapped windows before anything
         // can occlude them. Enumeration remains best-effort here; AT-SPI/screen
         // control still works when a hostile window races startup.
@@ -566,10 +578,9 @@ impl LinuxDesktop {
             // stops arriving; an async timeout alone cannot stop blocking I/O.
             let deadline = input_route::DeliveryDeadline::start(&conn)
                 .map_err(LinuxWindowActivationError::before)?;
-            // Declared before the server guard so an early return releases the
-            // guard first: the temporary keymap is restored only after clients
-            // can fetch it for the keys already delivered.
-            let remap;
+            if has_key_input(&inputs) {
+                this.key_bindings.prepare();
+            }
             let guard =
                 X11ServerGuard::acquire(&conn).map_err(LinuxWindowActivationError::before)?;
             let (prepared, plan) =
@@ -578,10 +589,11 @@ impl LinuxDesktop {
                 .map_err(LinuxWindowActivationError::before)?;
             verify_window_input_owners(&conn, screen.root, activation.window.id, &prepared)
                 .map_err(LinuxWindowActivationError::before)?;
-            remap = KeymapRemap::apply(&conn, &this.display, &plan)
+            this.key_bindings
+                .claim(&conn, screen.root, &plan, true)
                 .map_err(LinuxWindowActivationError::before)?;
-            // The route proof below binds the temporary bindings, so the
-            // remapped glyphs are verified like every other key.
+            // The route proof below follows the session's key bindings, so
+            // bound glyphs are verified like every other key.
             let routing =
                 input_route::preflight(&conn, screen.root, activation.window.id, &prepared)
                     .map_err(LinuxWindowActivationError::before)?;
@@ -605,11 +617,7 @@ impl LinuxDesktop {
                 .release(&conn)
                 .map_err(LinuxWindowActivationError::after)?;
             guard.release().map_err(LinuxWindowActivationError::after)?;
-            let delivered = deadline.finish().map_err(LinuxWindowActivationError::after);
-            if let Some(remap) = remap {
-                remap.restore();
-            }
-            delivered
+            deadline.finish().map_err(LinuxWindowActivationError::after)
         })
         .await
         .map_err(|error| {
@@ -832,7 +840,13 @@ impl LinuxDesktop {
     /// Synthesizes one input event via the `XTEST` `FakeInput` request.
     fn inject_blocking(&self, inputs: &[v1::DesktopInput]) -> PlatformResult<()> {
         let (conn, screen) = self.connect()?;
-        inject_inputs(&conn, screen.root, &self.display, inputs)
+        inject_inputs(
+            &conn,
+            screen.root,
+            &self.display,
+            &self.key_bindings,
+            inputs,
+        )
     }
 
     fn inject_window_blocking(
@@ -873,7 +887,13 @@ impl LinuxDesktop {
             .map_err(|error| {
                 PlatformError::os(format!("focus X11 window {window_id:#x}: {error}"))
             })?;
-        inject_inputs(&conn, screen.root, &self.display, inputs)
+        inject_inputs(
+            &conn,
+            screen.root,
+            &self.display,
+            &self.key_bindings,
+            inputs,
+        )
     }
 
     fn focus_window_blocking(
@@ -1483,16 +1503,16 @@ fn same_x11_client(
 
 // Resolve the entire batch on its delivery connection before any XTEST input.
 // A later unsupported glyph/chord must not turn an earlier emitted prefix into
-// a supposedly definite failure. Text never changes the keymap: a busy client
-// could translate its queued events only after a temporary binding was restored.
-// The returned plan is only for complete named function-key presses.
+// a supposedly definite failure. Characters the layout lacks only reserve spare
+// keycodes here; the returned plan binds them for the session after every check
+// passed.
 fn prepare_inputs(
     conn: &x11rb::rust_connection::RustConnection,
     inputs: &[v1::DesktopInput],
-) -> PlatformResult<(Vec<PreparedInput>, KeymapRemapPlan)> {
+) -> PlatformResult<(Vec<PreparedInput>, KeyBindingPlan)> {
     let mut mapping = None;
     let mut check = None;
-    let mut remap = KeymapRemapPlan::default();
+    let mut remap = KeyBindingPlan::default();
     let prepared = inputs
         .iter()
         .map(|input| match input.event.as_ref() {
@@ -1514,14 +1534,20 @@ fn prepare_inputs(
                 if key.is_text && check.is_none() {
                     check = Some(x11_text_check(conn, mapping)?);
                 }
+                let events = prepare_key(
+                    mapping,
+                    check.as_ref().and_then(Option::as_ref),
+                    key,
+                    &mut remap,
+                )?;
+                for (_, keycode) in &events {
+                    if let Some(row) = mapping.row(*keycode) {
+                        remap.note_used(*keycode, row);
+                    }
+                }
                 Ok(PreparedInput::Key {
                     request: key.clone(),
-                    events: prepare_key(
-                        mapping,
-                        check.as_ref().and_then(Option::as_ref),
-                        key,
-                        &mut remap,
-                    )?,
+                    events,
                 })
             }
             None => Err(PlatformError::os("DesktopInput carried no event")),
@@ -1539,19 +1565,25 @@ fn validate_x11_point(x: i32, y: i32) -> PlatformResult<()> {
     Ok(())
 }
 
+fn has_key_input(inputs: &[v1::DesktopInput]) -> bool {
+    inputs
+        .iter()
+        .any(|input| matches!(input.event, Some(v1::desktop_input::Event::Key(_))))
+}
+
 fn inject_inputs(
     conn: &x11rb::rust_connection::RustConnection,
     root: Window,
     display: &X11Display,
+    key_bindings: &KeyBindings,
     inputs: &[v1::DesktopInput],
 ) -> PlatformResult<()> {
-    let (prepared, plan) = prepare_inputs(conn, inputs)?;
-    let remap = KeymapRemap::apply(conn, display, &plan)?;
-    let delivered = inject_prepared_inputs(conn, root, display, &prepared);
-    if let Some(remap) = remap {
-        remap.restore();
+    if has_key_input(inputs) {
+        key_bindings.prepare();
     }
-    delivered
+    let (prepared, plan) = prepare_inputs(conn, inputs)?;
+    key_bindings.claim(conn, root, &plan, false)?;
+    inject_prepared_inputs(conn, root, display, &prepared)
 }
 
 /// Refuses once a desktop found through a login session is no longer the
@@ -1635,10 +1667,9 @@ fn inject_pointer(
 }
 
 /// Prepares key events from one complete immutable delivery keymap.
-/// Text must be typeable on the existing layout, otherwise the whole batch is
-/// refused before input so the caller can use clipboard paste. A function key
-/// the layout lacks (F13 to F24 on most layouts) may still use `remap` for a
-/// complete press; a held key must not outlive its temporary binding.
+/// Text the layout cannot type is bound to spare keycodes in `remap` for the
+/// rest of the session (complete presses only). So is a function key the
+/// layout lacks (F13 to F24 on most layouts).
 /// With another layout group active or a modifier such as Caps Lock locked
 /// (`check`), each character is sent on a key and with or without Shift so
 /// that it arrives as requested, or refused.
@@ -1646,14 +1677,18 @@ fn prepare_key(
     mapping: &X11KeyboardMapping,
     check: Option<&X11TextCheck>,
     key: &v1::KeyEvent,
-    remap: &mut KeymapRemapPlan,
+    remap: &mut KeyBindingPlan,
 ) -> PlatformResult<Vec<(u8, u8)>> {
     let mut events = Vec::new();
     if key.is_text {
+        let complete = matches!(
+            key.action(),
+            v1::KeyAction::Press | v1::KeyAction::Unspecified
+        );
         let strokes = key
             .key
             .chars()
-            .map(|character| text_stroke(mapping, check, character))
+            .map(|character| text_stroke(mapping, check, remap, complete, character))
             .collect::<PlatformResult<Vec<_>>>()?;
         let shift = if strokes.iter().any(|stroke| stroke.shift) {
             Some(
@@ -1699,7 +1734,7 @@ fn prepare_key(
                 .map(|stroke| stroke.keycode)
                 .or_else(|| {
                     (complete && is_function_keysym(keysym))
-                        .then(|| remap.bind_keysym(mapping, keysym))
+                        .then(|| bind_spare(remap, mapping, keysym))
                         .flatten()
                 })
                 .ok_or_else(|| {
@@ -1726,19 +1761,20 @@ fn prepare_key(
 }
 
 /// F1 to F24. These have no modifier or lock action, so a layout that lacks one
-/// can take it on a spare keycode for one complete press.
+/// can take it on a spare keycode bound for the session (complete presses only).
 fn is_function_keysym(keysym: u32) -> bool {
     (0xffbe..=0xffd5).contains(&keysym)
 }
 
 /// The stroke that types `character`: on the layout (in the active group and
-/// with Shift as locked modifiers require). Never temporarily rebind text:
-/// neither a server round trip nor a fixed delay acknowledges that a client
-/// has translated a queued key event. Refuse before input instead of reporting
-/// success for a character that a busy client can drop or translate differently.
+/// with Shift as locked modifiers require), or else (complete presses only)
+/// on a spare keycode bound for the rest of the session. Text is refused before
+/// input once no spare keycode is left.
 fn text_stroke(
     mapping: &X11KeyboardMapping,
     check: Option<&X11TextCheck>,
+    remap: &mut KeyBindingPlan,
+    complete: bool,
     character: char,
 ) -> PlatformResult<X11KeyStroke> {
     let resolved = mapping.resolve_character(character);
@@ -1746,6 +1782,15 @@ fn text_stroke(
         Some(check) => check.stroke(resolved, character),
         None => resolved,
     }
+    .or_else(|| {
+        (complete && check.is_none_or(|check| check.bound_types(character)))
+            .then(|| bind_character(remap, mapping, character))
+            .flatten()
+            .map(|keycode| X11KeyStroke {
+                keycode,
+                shift: false,
+            })
+    })
     .ok_or_else(|| {
         PlatformError::Unsupported(format!(
             "X11 keymap cannot type Unicode scalar U+{:04X}; use clipboard paste",
@@ -1989,6 +2034,16 @@ impl X11TextCheck {
             )
         })
     }
+
+    /// Whether a spare keycode bound to `character` (one group, the glyph on
+    /// both levels) types it under the locked modifiers.
+    fn bound_types(&self, character: char) -> bool {
+        keysym_layout::gives(
+            keysyms::text_keysym(character),
+            character,
+            self.locked & 0x02 != 0,
+        )
+    }
 }
 
 /// Whether text must be checked in active group `group` with `locked`
@@ -2057,158 +2112,26 @@ fn keyboard_layout_not_ready() -> PlatformError {
     )
 }
 
-/// Function keys bound to spare keycodes for one delivery
-/// batch. Planning has no X11 side effect; [`KeymapRemap::apply`] performs the
-/// bindings.
-#[derive(Debug, Default)]
-struct KeymapRemapPlan {
-    /// (keycode, keysym, original row) in binding order.
-    bindings: Vec<(u8, u32, Vec<u32>)>,
-    spares: Option<Vec<u8>>,
+/// Binds `character` to a spare keycode in `plan`, reusing a binding for a
+/// repeated character. `None` when it is not a glyph or no spare is left.
+fn bind_character(
+    plan: &mut KeyBindingPlan,
+    mapping: &X11KeyboardMapping,
+    character: char,
+) -> Option<u8> {
+    if !keysyms::remappable(character) {
+        return None;
+    }
+    bind_spare(plan, mapping, keysyms::text_keysym(character))
 }
 
-impl KeymapRemapPlan {
-    /// Returns the spare keycode bound to `keysym`, reusing a binding for a
-    /// repeated keysym. `None` when no spare is left.
-    fn bind_keysym(&mut self, mapping: &X11KeyboardMapping, keysym: u32) -> Option<u8> {
-        if let Some((keycode, ..)) = self.bindings.iter().find(|binding| binding.1 == keysym) {
-            return Some(*keycode);
-        }
-        let keycode = self
-            .spares
-            .get_or_insert_with(|| mapping.spare_keycodes())
-            .pop()?;
-        self.bindings
-            .push((keycode, keysym, mapping.row(keycode)?.to_vec()));
-        Some(keycode)
-    }
-}
-
-/// How long a temporary binding outlives the last key event. A client resolves
-/// keycodes with the keymap it refetches after the mapping notification, and a
-/// guarded delivery only lets it refetch once the server guard is released.
-/// Restoring sooner would let it translate an already delivered key through
-/// the restored (empty) binding; xdotool has the same constraint.
-const KEYMAP_REMAP_SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Temporary spare-keycode bindings. Restored by [`KeymapRemap::restore`], or
-/// on drop (also after a failure part-way through delivery). A keycode that
-/// another client changed in the meantime is left untouched.
-struct KeymapRemap<'a> {
-    conn: &'a x11rb::rust_connection::RustConnection,
-    display: X11Display,
-    /// (keycode, original row, row as read back after binding).
-    applied: Vec<(u8, Vec<u32>, Vec<u32>)>,
-}
-
-impl<'a> KeymapRemap<'a> {
-    /// Binds every planned keysym to its spare keycode (both core levels, so
-    /// XKB never derives a case pair that would turn `Æ` into `æ`) and waits
-    /// for the server to apply it. A failure restores what was bound.
-    fn apply(
-        conn: &'a x11rb::rust_connection::RustConnection,
-        display: &X11Display,
-        plan: &KeymapRemapPlan,
-    ) -> PlatformResult<Option<Self>> {
-        if plan.bindings.is_empty() {
-            return Ok(None);
-        }
-        let mut remap = Self {
-            conn,
-            display: display.clone(),
-            applied: Vec::with_capacity(plan.bindings.len()),
-        };
-        for (keycode, keysym, original) in &plan.bindings {
-            let bound = conn
-                .change_keyboard_mapping(1, *keycode, 2, &[*keysym, *keysym])
-                .map_err(|error| PlatformError::os(format!("X11 keymap binding: {error}")))
-                .and_then(|cookie| {
-                    cookie.check().map_err(|error| {
-                        PlatformError::os(format!("X11 keymap binding result: {error}"))
-                    })
-                })
-                .and_then(|()| read_keymap_row(conn, *keycode));
-            match bound {
-                Ok(row) => remap.applied.push((*keycode, original.clone(), row)),
-                Err(error) => {
-                    // Nothing was typed yet: restore at once, without settling.
-                    // The failed keycode has no read-back row and is restored
-                    // unconditionally.
-                    remap.applied.push((*keycode, original.clone(), Vec::new()));
-                    if let Err(restore) = remap.restore_on(conn) {
-                        tracing::warn!(error = %restore, "X11 keymap binding rollback failed");
-                    }
-                    remap.applied.clear();
-                    return Err(error);
-                }
-            }
-        }
-        Ok(Some(remap))
-    }
-
-    /// Waits for clients to translate the delivered keys, then restores.
-    fn restore(mut self) {
-        self.settle_and_restore();
-    }
-
-    fn settle_and_restore(&mut self) {
-        if self.applied.is_empty() {
-            return;
-        }
-        std::thread::sleep(KEYMAP_REMAP_SETTLE);
-        // The delivery connection may already be shut down (deadline or guard
-        // failure); its server-side cleanup releases the grab first.
-        let restored = self.restore_on(self.conn).or_else(|first| {
-            let (conn, _) = self.display.connect().map_err(|error| {
-                PlatformError::os(format!("X11 keymap restore reconnect: {error} ({first})"))
-            })?;
-            self.restore_on(&conn)
-        });
-        if let Err(error) = restored {
-            tracing::warn!(error = %error, "X11 temporary keymap binding was not restored");
-        }
-        self.applied.clear();
-    }
-
-    fn restore_on(&self, conn: &x11rb::rust_connection::RustConnection) -> PlatformResult<()> {
-        for (keycode, original) in
-            keymap_restorations(&self.applied, |keycode| read_keymap_row(conn, keycode))?
-        {
-            conn.change_keyboard_mapping(
-                1,
-                keycode,
-                u8::try_from(original.len())
-                    .map_err(|_| PlatformError::os("X11 keymap row is too wide"))?,
-                original,
-            )
-            .map_err(|error| PlatformError::os(format!("X11 keymap restore: {error}")))?
-            .check()
-            .map_err(|error| PlatformError::os(format!("X11 keymap restore result: {error}")))?;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for KeymapRemap<'_> {
-    fn drop(&mut self) {
-        self.settle_and_restore();
-    }
-}
-
-/// The original rows to write back: a binding still exactly as read back after
-/// applying it (or never read back) is ours; anything else was changed by
-/// another client (for example a layout switch) and is left alone.
-fn keymap_restorations(
-    applied: &[(u8, Vec<u32>, Vec<u32>)],
-    mut current: impl FnMut(u8) -> PlatformResult<Vec<u32>>,
-) -> PlatformResult<Vec<(u8, &[u32])>> {
-    let mut restorations = Vec::with_capacity(applied.len());
-    for (keycode, original, bound) in applied {
-        if bound.is_empty() || current(*keycode)? == *bound {
-            restorations.push((*keycode, original.as_slice()));
-        }
-    }
-    Ok(restorations)
+/// Binds `keysym` to a spare keycode in `plan`. `None` when no spare is left.
+fn bind_spare(plan: &mut KeyBindingPlan, mapping: &X11KeyboardMapping, keysym: u32) -> Option<u8> {
+    plan.bind_keysym(
+        || mapping.spare_keycodes(),
+        |keycode| mapping.row(keycode).map(<[u32]>::to_vec),
+        keysym,
+    )
 }
 
 fn read_keymap_row(
@@ -2854,7 +2777,7 @@ mod tests {
     #[test]
     fn key_preflight_rejects_unmappable_text_and_complete_chords() {
         let mapping = fixture_keymap();
-        let remap = &mut KeymapRemapPlan::default();
+        let remap = &mut KeyBindingPlan::default();
         let mut key = v1::KeyEvent {
             key: "a🙂".into(),
             is_text: true,
@@ -2959,7 +2882,7 @@ mod tests {
                 &mapping,
                 lock,
                 &text(text_, v1::KeyAction::Press),
-                &mut KeymapRemapPlan::default(),
+                &mut KeyBindingPlan::default(),
             )
             .map_err(|error| error.to_string())
         };
@@ -2979,17 +2902,21 @@ mod tests {
             Err("unsupported operation: X11 keymap cannot type Unicode scalar U+0061; use clipboard paste".into())
         );
 
-        // Unmapped text is refused even if spare keycodes are available:
-        // a busy client cannot safely consume temporary text bindings.
+        // A spare keycode gives its glyph on both levels, which applications
+        // capitalize under Caps Lock: a capital is bound, a small letter is
+        // refused before anything is bound.
         let spare = spare_keymap();
-        let mut remap = KeymapRemapPlan::default();
-        assert!(prepare_key(
-            &spare,
-            Some(&caps),
-            &text("Æ", v1::KeyAction::Press),
-            &mut remap
-        )
-        .is_err());
+        let mut remap = KeyBindingPlan::default();
+        assert_eq!(
+            prepare_key(
+                &spare,
+                Some(&caps),
+                &text("Æ", v1::KeyAction::Press),
+                &mut remap
+            )
+            .unwrap(),
+            plain(13)
+        );
         assert!(prepare_key(
             &spare,
             Some(&caps),
@@ -2997,7 +2924,7 @@ mod tests {
             &mut remap
         )
         .is_err());
-        assert!(remap.bindings.is_empty());
+        assert_eq!(remap.bindings.len(), 1);
     }
 
     #[test]
@@ -3018,7 +2945,7 @@ mod tests {
                 &mapping,
                 check,
                 &text(text_, v1::KeyAction::Press),
-                &mut KeymapRemapPlan::default(),
+                &mut KeyBindingPlan::default(),
             )
             .map_err(|error| error.to_string())
         };
@@ -3081,38 +3008,51 @@ mod tests {
     }
 
     #[test]
-    fn text_the_layout_lacks_is_refused_without_reserving_spare_keycodes() {
+    fn text_the_layout_lacks_is_bound_to_spare_keycodes_once_per_glyph() {
         let mapping = spare_keymap();
-        let mut remap = KeymapRemapPlan::default();
+        let mut remap = KeyBindingPlan::default();
         // π is on the layout through its legacy keysym; Æ and 密 are not.
         assert_eq!(
             prepare_key(
                 &mapping,
                 None,
-                &text("πa", v1::KeyAction::Press),
+                &text("πÆ密Æa", v1::KeyAction::Press),
                 &mut remap
             )
             .unwrap(),
             [
                 (KEY_PRESS, 12),
                 (KEY_RELEASE, 12),
+                (KEY_PRESS, 13),
+                (KEY_RELEASE, 13),
+                (KEY_PRESS, 10),
+                (KEY_RELEASE, 10),
+                (KEY_PRESS, 13),
+                (KEY_RELEASE, 13),
                 (KEY_PRESS, 8),
                 (KEY_RELEASE, 8),
             ]
         );
-        for value in ["πÆ密Æa", "密", "aÆ"] {
-            for action in [v1::KeyAction::Press, v1::KeyAction::Unspecified] {
-                assert!(matches!(
-                    prepare_key(&mapping, None, &text(value, action), &mut remap),
-                    Err(PlatformError::Unsupported(_))
-                ));
-            }
-        }
-        assert!(remap.bindings.is_empty());
+        assert_eq!(
+            remap.bindings,
+            [(13, 0xc6, vec![0, 0]), (10, 0x0100_5bc6, vec![0, 0])]
+        );
+        // Later keys of the same batch reuse the bindings; a third glyph has no
+        // spare left and fails the whole batch before any input.
+        assert_eq!(
+            prepare_key(
+                &mapping,
+                None,
+                &text("密", v1::KeyAction::Unspecified),
+                &mut remap
+            )
+            .unwrap(),
+            [(KEY_PRESS, 10), (KEY_RELEASE, 10)]
+        );
         let Err(PlatformError::Unsupported(message)) =
             prepare_key(&mapping, None, &text("Ø", v1::KeyAction::Press), &mut remap)
         else {
-            panic!("an unmapped glyph must be unsupported even with spare keycodes");
+            panic!("a glyph without a spare keycode must be unsupported");
         };
         assert_eq!(
             message,
@@ -3123,7 +3063,7 @@ mod tests {
     #[test]
     fn held_keys_and_control_characters_are_never_remapped() {
         let mapping = spare_keymap();
-        let mut remap = KeymapRemapPlan::default();
+        let mut remap = KeyBindingPlan::default();
         for action in [v1::KeyAction::Down, v1::KeyAction::Up] {
             assert!(matches!(
                 prepare_key(&mapping, None, &text("Æ", action), &mut remap),
@@ -3163,7 +3103,7 @@ mod tests {
     #[test]
     fn function_keys_the_layout_lacks_are_bound_for_one_complete_press() {
         let mapping = spare_keymap();
-        let mut remap = KeymapRemapPlan::default();
+        let mut remap = KeyBindingPlan::default();
         assert_eq!(
             prepare_key(
                 &mapping,
@@ -3223,7 +3163,7 @@ mod tests {
             );
         }
         assert_eq!(remap.bindings.len(), 2);
-        let mut fresh = KeymapRemapPlan::default();
+        let mut fresh = KeyBindingPlan::default();
         assert_eq!(
             prepare_key(
                 &mapping,
@@ -3235,26 +3175,6 @@ mod tests {
             [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
         );
         assert_eq!(fresh.bindings, [(13, 0xffd5, vec![0, 0])]);
-    }
-
-    #[test]
-    fn restore_writes_back_only_bindings_no_other_client_changed() {
-        let applied = vec![
-            (10, vec![0, 0], vec![0x0100_5bc6, 0x0100_5bc6]),
-            (13, vec![0, 0], vec![0xc6, 0xc6]),
-            (20, vec![0, 0], Vec::new()),
-        ];
-        let current = |keycode| {
-            Ok(match keycode {
-                10 => vec![0x0100_5bc6, 0x0100_5bc6],
-                // A layout switch rebound keycode 13 meanwhile.
-                13 => vec![0x61, 0x41],
-                _ => unreachable!("an unread binding is restored unconditionally"),
-            })
-        };
-        let restorations = keymap_restorations(&applied, current).unwrap();
-        assert_eq!(restorations, [(10, &[0, 0][..]), (20, &[0, 0][..])]);
-        assert!(keymap_restorations(&applied, |_| Err(PlatformError::os("gone"))).is_err());
     }
 
     #[test]
