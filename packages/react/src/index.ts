@@ -709,6 +709,12 @@ export type {
 } from "./model-policy";
 export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
 export {
+  REGION_RESTRICTED,
+  inferenceFeatureRestriction,
+  isRegionRestricted,
+  regionRestrictedText,
+} from "./inference-region";
+export {
   humanizeModelSlug,
   isRawModelLabel,
   modelDisplayName,
@@ -767,7 +773,11 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
-export { sessionAdmissionBlocked, sessionDisplayStatus } from "./session-status-model";
+export {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+} from "./session-status-model";
 export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,

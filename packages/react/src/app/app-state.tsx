@@ -9,10 +9,15 @@ import {
   createSessionEventFeedStore,
   useLatestCallback,
   type AppContextValue,
+  type GitHubRefreshOptions,
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
-import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
+import {
+  startWorkspaceClientConfigRefresh,
+  withWorkspaceClientConfig,
+  type WorkspaceClientConfig,
+} from "./lib/workspace-client-config";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
 import {
@@ -36,6 +41,8 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import { isTransientServiceFailure } from "../lib/transient-retry";
+import { createQuietRetry } from "./lib/quiet-retry";
 import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
@@ -220,6 +227,11 @@ export type AppState = ReturnType<typeof useAppState>;
 
 type StartSessionOptions = Parameters<AppContextValue["startSession"]>[2];
 
+/** The one "GitHub status unavailable" toast; a newer failure replaces it. */
+export const GITHUB_STATUS_TOAST_ID = "opengeni-github-status";
+/** The one "Your GitHub account is unavailable" toast. */
+export const PERSONAL_GITHUB_STATUS_TOAST_ID = "opengeni-personal-github-status";
+
 export type SlackLinkPrepareController<Request> = ReturnType<
   typeof createSlackLinkPrepareController<Request>
 >;
@@ -343,8 +355,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
-    useState<ClientConfig["voiceInput"]>(undefined);
+  const [workspaceConfig, setWorkspaceConfig] = useState<WorkspaceClientConfig | undefined>(
+    undefined,
+  );
+  const [workspaceConfigVersion, setWorkspaceConfigVersion] = useState(0);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -448,6 +462,19 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const seenCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const personalGitHubRefreshId = useRef(0);
+  // Background GitHub reads that fail while Opengeni is briefly unreachable
+  // (a deploy, a network drop) try again by themselves, quietly.
+  const githubQuietRetry = useRef(createQuietRetry());
+  const personalGitHubQuietRetry = useRef(createQuietRetry());
+  const refreshGitHubRef = useRef<AppContextValue["refreshGitHub"]>(async () => {});
+  const refreshPersonalGitHubRef = useRef<AppContextValue["refreshPersonalGitHub"]>(async () => {});
+  useEffect(
+    () => () => {
+      githubQuietRetry.current.reset();
+      personalGitHubQuietRetry.current.reset();
+    },
+    [],
+  );
   const mcpRefreshId = useRef(0);
   const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -615,7 +642,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
-      setWorkspaceVoiceInput(undefined);
+      setWorkspaceConfig(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -646,10 +673,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     const workspaceId = workspaceStateOwnerId;
     const accepted = captureWorkspaceInvocation(workspaceId);
     if (!accepted) return;
-    return startWorkspaceVoiceCapabilityRefresh({
+    return startWorkspaceClientConfigRefresh({
       read: (signal) => fetchClientConfig(signal, workspaceId),
       ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
-      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      apply: setWorkspaceConfig,
       subscribeFocus: (refresh) => {
         window.addEventListener("focus", refresh);
         return () => window.removeEventListener("focus", refresh);
@@ -660,11 +687,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clientConfigurationReady,
     authReady,
     workspaceStateOwnerId,
+    workspaceConfigVersion,
     accessContext?.subjectId,
     accessKeyVersion,
     captureWorkspaceInvocation,
     ownsWorkspaceInvocation,
   ]);
+  const refreshWorkspaceConfig = useCallback(
+    () => setWorkspaceConfigVersion((version) => version + 1),
+    [],
+  );
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -1444,7 +1476,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   const refreshGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean | undefined }) => {
+    async (workspaceId: string, signal?: AbortSignal, options?: GitHubRefreshOptions) => {
       const acceptedTransition = workspaceTransitionIdentity.current;
       if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) {
         return;
@@ -1457,8 +1489,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
+      // This read replaces any quiet retry still waiting.
+      githubQuietRetry.current.cancel();
       // A member whose loaded grant lacks GitHub has no GitHub state to read.
       if (lacksWorkspacePermission(accessContextRef.current, workspaceId, "github:use")) {
+        githubQuietRetry.current.reset();
         setGithubStatus(null);
         setGithubStatusFailed(false);
         setGithubAppOpen(false);
@@ -1478,8 +1513,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setGithubAppOpen(status.status !== "bound");
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
-          // so installations changed after connect show up; passive loads read
-          // Opengeni's cached rows.
+          // so installations changed after connect show up; passive loads may
+          // get the API's briefly cached GitHub list.
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);
@@ -1492,6 +1527,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setGithubRepos([]);
           setGithubCatalogReady(true);
         }
+        githubQuietRetry.current.reset();
       } catch (error) {
         if (
           isAbortError(error) ||
@@ -1507,9 +1543,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         // first-load failure must not look like an empty catalog, or draft
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
-        // Someone without GitHub access in this workspace has nothing to fix.
-        if (isWorkspacePermissionDenied(error)) return;
+        // Opengeni briefly unreachable (a deploy, a network drop): read again
+        // by itself, with a growing pause, until it answers.
+        if (isTransientServiceFailure(error)) {
+          githubQuietRetry.current.schedule(() => {
+            if (!ownsRefresh() || githubRefreshId.current !== refreshId) return;
+            void refreshGitHubRef.current(workspaceId);
+          }, workspaceId);
+        }
+        // Load and focus refreshes run in the background: a failure there is
+        // shown where GitHub is used (the repository picker, the GitHub card and
+        // the GitHub integration), not as a toast for something the person
+        // didn't do. Someone without GitHub access has nothing to fix.
+        if (!options?.userInitiated || isWorkspacePermissionDenied(error)) return;
+        // One toast for the GitHub status, replaced rather than stacked when
+        // refreshes fail again.
         toast.error("GitHub status unavailable", {
+          id: GITHUB_STATUS_TOAST_ID,
           description: userErrorText(error),
         });
       } finally {
@@ -1521,12 +1571,21 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     [client],
   );
 
+  useInsertionEffect(() => {
+    refreshGitHubRef.current = refreshGitHub;
+  }, [refreshGitHub]);
+
   const refreshPersonalGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal): Promise<void> => {
+    async (
+      workspaceId: string,
+      signal?: AbortSignal,
+      options?: Pick<GitHubRefreshOptions, "userInitiated">,
+    ): Promise<void> => {
       const acceptedTransition = workspaceTransitionIdentity.current;
       if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) return;
       const refreshId = personalGitHubRefreshId.current + 1;
       personalGitHubRefreshId.current = refreshId;
+      personalGitHubQuietRetry.current.cancel();
       const ownsRefresh = () =>
         ownsWorkspaceTransition(
           workspaceTransitionIdentity.current,
@@ -1542,6 +1601,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setSelectedPersonalGitHubRepoRefs({});
         setPersonalGitHubCatalogReady(true);
         setPersonalGitHubBusy(false);
+        personalGitHubQuietRetry.current.reset();
         return;
       }
       setPersonalGitHubBusy(true);
@@ -1565,6 +1625,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setSelectedPersonalGitHubRepoIds(new Set());
           setSelectedPersonalGitHubRepoRefs({});
           setPersonalGitHubCatalogReady(true);
+          personalGitHubQuietRetry.current.reset();
           return;
         }
         const repositories: PersonalGitHubRepositoryCatalogItem[] = [];
@@ -1600,10 +1661,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             ),
         );
         setPersonalGitHubCatalogReady(true);
+        // Only a whole read counts: a status that answers while the repository
+        // listing keeps failing (a GitHub rate limit) must keep backing off.
+        personalGitHubQuietRetry.current.reset();
       } catch (error) {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
+        if (isTransientServiceFailure(error)) {
+          // Opengeni is briefly unreachable: read again by itself, quietly,
+          // unless the person asked for this refresh.
+          personalGitHubQuietRetry.current.schedule(() => {
+            if (!ownsRefresh()) return;
+            void refreshPersonalGitHubRef.current(workspaceId);
+          }, workspaceId);
+          if (!options?.userInitiated) return;
+        }
         toast.error("Your GitHub account is unavailable", {
+          id: PERSONAL_GITHUB_STATUS_TOAST_ID,
           description: userErrorText(error),
         });
       } finally {
@@ -1612,6 +1686,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     },
     [client],
   );
+
+  useInsertionEffect(() => {
+    refreshPersonalGitHubRef.current = refreshPersonalGitHub;
+  }, [refreshPersonalGitHub]);
 
   async function beginPersonalGitHubOAuth(workspaceId: string, reconnect: boolean): Promise<void> {
     const connection = personalGitHubStatus?.connection;
@@ -1644,7 +1722,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         expectedVersion: connection.version,
         idempotencyKey: crypto.randomUUID(),
       });
-      await refreshPersonalGitHub(workspaceId);
+      await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("Your GitHub account was disconnected");
       return true;
     } catch (error) {
@@ -1672,7 +1750,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         idempotencyKey: crypto.randomUUID(),
         repositories,
       });
-      await refreshPersonalGitHub(workspaceId);
+      await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("GitHub repository access updated");
       return true;
     } catch (error) {
@@ -2080,7 +2158,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       ) {
         return false;
       }
-      await refreshGitHub(workspaceId, undefined, { sync: true });
+      await refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
       if (
         !ownsWorkspaceOperation(
           activeGitHubDisconnectOperation.current,
@@ -2527,14 +2605,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig: {
-            ...clientConfig,
-            voiceInput:
-              workspaceVoiceInput ??
-              (clientConfig.voiceInput
-                ? { ...clientConfig.voiceInput, available: false, providers: [] }
-                : undefined),
-          },
+          clientConfig: withWorkspaceClientConfig(clientConfig, workspaceConfig),
+          refreshWorkspaceConfig,
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2645,7 +2717,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clearSlackLinkContinuation,
     client,
     clientConfig,
-    workspaceVoiceInput,
+    workspaceConfig,
+    refreshWorkspaceConfig,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,

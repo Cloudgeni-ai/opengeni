@@ -59,6 +59,7 @@ export type BrowserTextObservation = {
     | undefined;
   dialog?: { type: string; message: string; defaultPrompt?: string | undefined } | null | undefined;
   screenshot?: unknown;
+  notice?: string | undefined;
   agentView: {
     sourceKind: string;
     nodes: readonly BrowserTextNode[];
@@ -235,6 +236,7 @@ export function browserObservationText(
 ): string {
   const allRefs = options.allRefs === true;
   const lines = [browserTargetLine({ ...observation.target, selected: false })];
+  if (observation.notice) lines.push(observation.notice);
   const viewport = observation.viewport;
   if (viewport) {
     const extras = [

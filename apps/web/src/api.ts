@@ -18,7 +18,10 @@ import {
   apiErrorFromResponseBody,
   isApiErrorStatus,
 } from "@opengeni/react/app/lib/app-api";
-import { securityReauthenticationPath } from "./lib/sign-in-feedback";
+import {
+  organizationSecurityReturnPath,
+  securityReauthenticationPath,
+} from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
@@ -1044,6 +1047,11 @@ function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
   const teamsReturn = teamsAuthReturnPath(window.location);
   if (teamsReturn) return teamsReturn;
+  const organizationSecurity = organizationSecurityReturnPath(
+    window.location.pathname,
+    window.location.search,
+  );
+  if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
     window.location.pathname === "/site-auth/authorize"

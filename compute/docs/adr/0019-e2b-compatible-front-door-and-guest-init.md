@@ -32,9 +32,14 @@ an init system of its own.
   proxy, `maskRequestHost`, and `autoPauseMemory: false`. A create asking
   for any of them gets a 400 naming them. `autoResume` needs `autoPause`.
 - **E2B's lifecycle words map onto our sleep, with explicit states.** A
-  sandbox E2B calls running sleeps whenever idle like any other, and any
-  request or port traffic wakes it; that is our own business and not
-  visible through the API. E2B's pause, and its timeout, are different:
+  sandbox E2B calls running that pauses at its timeout sleeps whenever
+  idle like any other, and any request or port traffic wakes it; that is
+  our own business and not visible through the API. One killed at its
+  timeout runs until then and never sleeps, as on E2B: only a request or
+  traffic from outside wakes a sleeping sandbox, never anything it does on
+  its own (a timer, a connection it opened), so sleeping would stop work it
+  drives itself, such as a CI runner's job, for good. Its timeout bounds
+  what it costs. E2B's pause, and its timeout, are different:
   the service records them as lifecycle states (`pausing`, `paused`,
   `killing`), which traffic does not cancel. Pausing ends every command and
   PTY stream, saves to at least Saved, and is complete only when the host

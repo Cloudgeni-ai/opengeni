@@ -30,7 +30,6 @@ import {
   retainedArtifactLoadErrorPresentation,
 } from "../lib/retained-artifact-load-error";
 import { FILE_AUDIENCE_COPY, useArtifactAudience } from "../components/artifacts/site-audience";
-import { isPersonalWorkspace } from "../lib/managed-self-context";
 import { hasWorkspacePermission } from "../lib/permissions";
 import { invalidateArtifactCatalog } from "../lib/use-artifact-catalog";
 
@@ -144,7 +143,6 @@ function RetainedArtifactDetail({
     artifact !== undefined &&
     retainedPreviewKind(artifact.contentType, loaded?.filename) !== null;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  // A Personal workspace has nobody to share with, so there is no audience.
   // Session screenshots and saved tool output stay with their chat.
   const file = loaded?.file;
   const showAudience =
@@ -152,8 +150,7 @@ function RetainedArtifactDetail({
     file.scope !== undefined &&
     artifact?.kind !== "computer_screenshot" &&
     artifact?.kind !== "browser_screenshot" &&
-    artifact?.kind !== "tool_result" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext);
+    artifact?.kind !== "tool_result";
   const audience = useArtifactAudience({
     client,
     workspaceId,

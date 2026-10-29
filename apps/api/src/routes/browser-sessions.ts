@@ -894,7 +894,9 @@ export function registerBrowserSessionRoutes(
         "session.control",
         "browser.control",
         async ({ sessionClient }) =>
-          BrowserObservation.parse(await sessionClient.selectTarget(targetId)),
+          BrowserObservation.parse(
+            await sessionClient.selectTarget(targetId, agentObservationNotices(grant)),
+          ),
       );
       return context.json(result);
     },
@@ -1599,7 +1601,7 @@ export function registerBrowserSessionRoutes(
         async ({ sessionClient }) => {
           stages.mark("placement");
           try {
-            return await sessionClient.observe(targetId);
+            return await sessionClient.observe(targetId, agentObservationNotices(grant));
           } finally {
             stages.mark("dispatch");
           }
@@ -1844,6 +1846,7 @@ export function registerBrowserSessionRoutes(
                     ...commandFields,
                     ...(secretValues === undefined ? {} : { secretValues }),
                   }),
+                  agentObservationNotices(grant),
                 );
               } finally {
                 stages.mark("dispatch");
@@ -6101,6 +6104,7 @@ export function withInitialView<
     }) {
   if (
     !launched?.targets ||
+    !launched.observation ||
     response.operation.state !== "completed" ||
     response.operation.replayed ||
     response.session.lifecycle !== "active" ||
@@ -6592,6 +6596,13 @@ function isUuid(value: unknown): value is string {
 
 function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
   return validateInteractionRequestOrigin(context.req.header("origin"), settings);
+}
+
+/** An agent's own browser tools receive a tab's notice (for example that a
+ * browser relaunch reloaded its page), which it is given once. A person's
+ * viewer and other API clients neither see it nor use it up. */
+function agentObservationNotices(grant: AccessGrant): { notices?: true } {
+  return grant.principalKind === "agent_attempt" ? { notices: true } : {};
 }
 
 export function interactionActorForGrant(

@@ -2260,6 +2260,73 @@ describe("interaction attempt tools", () => {
     expect(await run()).toBe("API 404: browser target does not exist");
   });
 
+  test.each(["attached_device", "sandbox_group"] as const)(
+    "a tab gone after the browser continued, with only another tab left (%s)",
+    async (placement) => {
+      // The agent was working in its own tab "10". The browser continued
+      // without it, leaving one tab ("20") that is not selected: in the
+      // person's own browser that tab is theirs, in a managed one it is the
+      // browser's only tab.
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      if (placement === "attached_device")
+        session.placement = { kind: "attached_device", deviceId: randomUUID() };
+      const own = { ...browserTarget(), id: "10" };
+      const other = { ...browserTarget(), id: "20", selected: false };
+      let targets = [own];
+      const observed: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: [session] }) as never,
+          getBrowserSession: async () => session,
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets,
+          }),
+          observeBrowserTarget: async (_workspace, _id, targetId) => {
+            observed.push(targetId ?? "default");
+            const target = targets.find((candidate) => candidate.id === targetId);
+            if (!target) {
+              throw new OpenGeniApiError(
+                404,
+                `browser target ${JSON.stringify(targetId)} does not exist; list the current targets and use one of their ids`,
+              );
+            }
+            return browserObservation(target);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_observe"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const observe = async () =>
+        (
+          await definitions[0]!.execute(
+            {},
+            { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+          )
+        ).structuredContent as { error?: { message: string } };
+      expect((await observe()).error).toBeUndefined();
+      targets = [other];
+      const gone = await observe();
+      const next = await observe();
+      if (placement === "attached_device") {
+        const noTab =
+          "This browser session has no tab of its own in the person's browser. Open one with browser_tabs operation=open, or pass targetId to use one of the person's tabs.";
+        expect(gone.error?.message).toBe(noTab);
+        expect(next.error?.message).toBe(noTab);
+        expect(observed).toEqual(["10", "10"]);
+      } else {
+        // Unchanged: the managed browser's only tab is used.
+        expect(gone.error?.message).toContain('browser target "10" does not exist');
+        expect(next.error).toBeUndefined();
+        expect(observed).toEqual(["10", "10", "20"]);
+      }
+    },
+  );
+
   test("computer tools with a mistyped ComputerSession id list this chat's open ComputerSessions", async () => {
     const open = discoveredComputerSession(randomUUID(), sessionId);
     open.lifecycle = "active";
@@ -3144,13 +3211,14 @@ describe("interaction attempt tools", () => {
       machines: {
         bridges?: Array<{ enrollmentId: string; sandboxId: string | null; machineName: string }>;
         activeSandboxId?: string | null;
+        sessions?: BrowserSession[];
       } = {},
     ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
         transport: {
           ...partialTransport({
-            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            listBrowserSessions: async () => ({ revision: 0, sessions: machines.sessions ?? [] }),
             listAttachedBrowsers: async () => ({
               revision: 1,
               bridges: (machines.bridges ?? []).map((bridge) => ({
@@ -3202,6 +3270,49 @@ describe("interaction attempt tools", () => {
         attachedProfile: { id: only.id, name: "Personal" },
       });
       expect(result.structuredContent).not.toHaveProperty("otherAttachedProfiles");
+    });
+
+    const liveSessionOn = (deviceId: string) => ({
+      ...discoveredBrowserSession(randomUUID(), sessionId),
+      placement: { kind: "attached_device" as const, deviceId },
+    });
+
+    test("does not reuse a session on a profile that has disconnected", async () => {
+      const connected = profile("Work", "2026-10-15T09:00:00.000Z");
+      const gone = profile("Personal", "2026-10-15T10:00:00.000Z", { state: "disconnected" });
+      const stale = liveSessionOn(gone.id);
+      const { result, createRequest } = await open([connected, gone], undefined, {
+        sessions: [stale],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: connected.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: connected.id, name: "Work" },
+      });
+      expect(JSON.stringify(result.structuredContent)).not.toContain(stale.id);
+    });
+
+    test("still reuses a session on a connected profile", async () => {
+      const connected = profile("Work", "2026-10-15T09:00:00.000Z");
+      const live = liveSessionOn(connected.id);
+      const { result, createRequest } = await open([connected], undefined, {
+        sessions: [live],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createRequest).toBeNull();
+      expect(JSON.stringify(result.structuredContent)).toContain(live.id);
+    });
+
+    test("says no profile is connected rather than reusing a session on a disconnected one", async () => {
+      const gone = profile("Personal", "2026-10-15T10:00:00.000Z", { state: "disconnected" });
+      const stale = liveSessionOn(gone.id);
+      const { result, createRequest } = await open([gone], undefined, { sessions: [stale] });
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
+      expect(JSON.stringify(result.structuredContent)).not.toContain(stale.id);
     });
 
     test("opens the most recently active profile and names the others", async () => {
@@ -3935,6 +4046,54 @@ describe("interaction attempt tools", () => {
     expect(observed.content.at(-1)).toEqual({ type: "text", text: note });
   });
 
+  test("a notice that a relaunch reloaded the tab reaches the model in every view", async () => {
+    const target = browserTarget();
+    const notice =
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+    const observation = { ...browserObservation(target), notice };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) =>
+          browserReceipt(value.operationId, observation),
+        observeBrowserTarget: async () => observation,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act", "browser_observe"],
+      permissions: ["sessions:control", "sessions:read"],
+    });
+    const tool = (name: string) =>
+      definitions.find((definition) => definition.modelName === `interaction__${name}`)!;
+    const text = (result: { content: readonly { type: string; text?: string }[] }) =>
+      result.content.flatMap((part) => (part.type === "text" && part.text ? [part.text] : []));
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    for (const view of ["compact", "full"] as const) {
+      const observed = await tool("browser_observe").execute(
+        { browserSessionId, targetId: target.id, view },
+        context(),
+      );
+      expect(observed.isError).toBeFalsy();
+      expect(observed.structuredContent).toMatchObject({ notice });
+      const lines = text(observed).join("\n").split("\n");
+      expect(lines[lines.findIndex((line) => line.startsWith(`Tab ${target.id}`)) + 1]).toBe(
+        notice,
+      );
+    }
+    const acted = await tool("browser_act").execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.com/next" },
+      },
+      context(),
+    );
+    expect(acted.isError).toBeFalsy();
+    expect(text(acted).join("\n")).toContain(notice);
+  });
+
   test("an upload by workspace path publishes each file once per operation and dispatches File IDs", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
@@ -4368,6 +4527,74 @@ describe("interaction attempt tools", () => {
     const unchanged = await act(invoke);
     expect(unchanged).toContain("No element changed since");
     expect(unchanged).not.toContain(line);
+  });
+
+  test("a Computer batch whose input the driver could not confirm and that changed no element says it may not have taken effect", async () => {
+    const target = computerTarget();
+    const reading = {
+      ...computerObservation(target),
+      semantic: {
+        kind: "snapshot" as const,
+        roots: Array.from({ length: 8 }, (_, index) => ({
+          ref: `e${index + 1}`,
+          role: "textbox",
+          name: `Field ${index}`,
+          states: [],
+          actions: ["set_value"],
+        })),
+        nodeCount: 8,
+      },
+    };
+    let unconfirmed = true;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
+        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => ({ ...reading, observationId: randomUUID() }),
+        // The computer runs the batch as one operation and reports its key
+        // press as sent with nothing confirming it, as CUA does.
+        actInComputer: async (_workspaceId, _computerSessionId, value) => ({
+          ...computerReceipt(value.operationId, { ...reading, observationId: randomUUID() }),
+          ...(unconfirmed ? { unconfirmedInput: true as const } : {}),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const act = async () => {
+      const result = await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "Meta+L" },
+              { type: "keyboard", action: "type", value: "example.com" },
+              { type: "keyboard", action: "press", value: "Enter" },
+            ],
+          },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return result;
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    // The first reading in this attempt is shown whole.
+    expect((await act()).structuredContent).toMatchObject({ unconfirmedInput: true });
+    const text = ((await act()).content[0] as { text: string }).text;
+    expect(text.split("\n").slice(0, 2)).toEqual([
+      `Batch completed on ${target.id}: 3 actions.`,
+      line,
+    ]);
+    unconfirmed = false;
+    const confirmed = await act();
+    expect(confirmed.structuredContent).not.toHaveProperty("unconfirmedInput");
+    expect((confirmed.content[0] as { text: string }).text).not.toContain(line);
   });
 
   test("a browser action's outline shows only what changed since the outline the model last saw", async () => {

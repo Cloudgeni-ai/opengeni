@@ -90,15 +90,16 @@ impl Process {
         *self.exit.borrow() == Exit::Running
     }
 
-    /// Makes this process one of the out-of-memory killer's last choices;
-    /// see [`OOM_SCORE_ADJ`]. The file is opened by number, then written
+    /// Lowers what the out-of-memory killer counts against this process by
+    /// `adj` thousandths of what it counts against (`oom_score_adj`), such
+    /// as [`OOM_SCORE_ADJ`]. The file is opened by number, then written
     /// only if the pinned process has not exited since: a procfs file
     /// names the process that had the number when it was opened, and the
     /// number cannot pass to another before the pinned process exits.
-    pub fn protect_from_oom(&self) -> io::Result<()> {
+    pub fn protect_from_oom(&self, adj: i32) -> io::Result<()> {
         let mut file = open_oom_score_adj(self.pid)?;
         self.still_running()?;
-        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+        file.write_all(adj.clamp(-999, 1000).to_string().as_bytes())
     }
 
     /// Names this process apart from every other the host has run or will
