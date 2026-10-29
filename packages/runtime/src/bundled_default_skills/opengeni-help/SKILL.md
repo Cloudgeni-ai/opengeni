@@ -25,10 +25,18 @@ them here: never send them to a settings page or ask for a screenshot of one.
   change shows them a short confirmation in the chat and runs only if they
   allow it, unless they gave the session full access. Ask in one step; if they
   decline, accept it.
-- Sharing with someone: the person must be in the workspace. Invite them to
-  the organization (with this workspace), or add an existing member to the
-  workspace, then share the chat with the workspace. Say what you did in plain
-  words.
+- Letting someone read this chat, such as family or a friend, also on their
+  phone: create a share link with the `createSessionShareLink` app action (one
+  confirmation) and give the person the link to send them. Anyone with the
+  link can read the conversation up to now without signing in; tool details
+  and files are left out, and the person can stop the link at any time. Only
+  the person who started the chat can share it. Explain it in one plain
+  sentence, without workspace or member words. If share links are turned off,
+  offer to email the conversation instead.
+- Working together in the same chats: invite them to the organization with a
+  shared workspace, or add an existing member to that workspace, then share
+  the chat with the workspace. A Personal workspace never has other members,
+  so use a share link there. Say what you did in plain words.
 - Some steps stay with the person in the app: signing in, sign-in methods,
   recovery, provider sign-in pages, giving an agent more access, and anything
   that creates, shows or rotates a key, password, token or other secret. In a
