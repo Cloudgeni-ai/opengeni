@@ -2918,7 +2918,7 @@ function SessionChatPane(props: {
       props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
     personalMachineIntent: personalMachineUseIntent(props.session.tenancy),
     extras: {
-      ...(composer.policy ?? {}),
+      ...(composer.sendPolicy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
         ? {
             controlEtag: (props.queue.effectiveControl ?? props.session.effectiveControl)!

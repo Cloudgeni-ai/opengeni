@@ -15,6 +15,7 @@ import {
   editQueuedTurnInTransaction,
   enqueueSessionTurn,
   evaluateSessionControl,
+  getComposerDraftInTransaction,
   getScheduledTargetSessionExecution,
   getSessionTurn,
   getSession,
@@ -35,6 +36,7 @@ import {
   settleSessionAttemptInterruptions,
   steerQueuedTurnInTransaction,
   submitHumanPromptInTransaction,
+  withEffectiveComposerDraftPolicy,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
@@ -349,6 +351,114 @@ describe("latest started session policy", () => {
       expect(await getSessionTurn(client.db, workspaceId, accepted.turnId)).toMatchObject(desired);
     });
   }
+
+  test("a draft without a pick follows the chat, so an agent's model switch survives the next Send", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const scope = {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+    };
+    const inScope = <T>(run: (db: Parameters<typeof saveComposerDraftInTransaction>[0]) => T) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, run);
+    const save = (expectedRevision: number, text: string, pick = {}) =>
+      inScope((db) =>
+        saveComposerDraftInTransaction(db, {
+          ...scope,
+          expectedRevision,
+          text,
+          resources: [],
+          ...pick,
+        }),
+      );
+    const submit = (expectedDraftRevision: number, text: string, pick = {}) =>
+      inScope((db) =>
+        submitHumanPromptInTransaction(db, {
+          ...scope,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          expectedDraftRevision,
+          text,
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          ...pick,
+        }),
+      );
+    const read = () =>
+      inScope(async (db) =>
+        withEffectiveComposerDraftPolicy(
+          db,
+          await getComposerDraftInTransaction(db, { workspaceId, ...scope }),
+        ),
+      );
+    const storedModel = async () =>
+      (await shared.admin`select model from sessions where id = ${value.session.id}`)[0]?.model;
+
+    const typed = await save(0, "first");
+    expect(typed).toMatchObject({ policyFollowsSession: true, model: "scripted-model" });
+    const first = await submit(typed.revision, "first");
+    expect(first.draft).toMatchObject({ policyFollowsSession: true, text: "" });
+    // A Send that made no choice leaves the chat's settings alone.
+    expect(
+      (await storedEvents(workspaceId, first.eventIds)).map((event) => event.type),
+    ).not.toContain("session.model_settings.updated");
+
+    // The agent switches the chat's model while the person's draft is open.
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "free-model",
+        reasoningEffort: "medium",
+      }),
+    );
+    expect(await read()).toMatchObject({ policyFollowsSession: true, model: "free-model" });
+    const next = await save(first.draft!.revision, "second");
+    expect(next).toMatchObject({ policyFollowsSession: true, model: "free-model" });
+    // A client still holding the old model is refused rather than undoing the switch.
+    await expect(submit(next.revision, "second", { model: "scripted-model" })).rejects.toThrow(
+      QueueCommandConflictError,
+    );
+    const second = await submit(next.revision, "second");
+    expect(await getSessionTurn(client.db, workspaceId, second.turnId)).toMatchObject({
+      model: "free-model",
+    });
+    expect(await storedModel()).toBe("free-model");
+
+    // A person's pick still wins: it is saved as a pick and becomes the chat's model.
+    const picked = await save(second.draft!.revision, "third", {
+      model: "picked-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(picked).toMatchObject({ policyFollowsSession: false, model: "picked-model" });
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "free-model-2",
+        reasoningEffort: "medium",
+      }),
+    );
+    expect(await read()).toMatchObject({ policyFollowsSession: false, model: "picked-model" });
+    const third = await submit(picked.revision, "third", {
+      model: "picked-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(await storedModel()).toBe("picked-model");
+    expect(third.draft).toMatchObject({ policyFollowsSession: true, model: "picked-model" });
+  });
 
   test("an explicit settings boundary survives older accepted turns starting later", async () => {
     const value = await fixture(0);

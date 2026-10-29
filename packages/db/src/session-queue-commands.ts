@@ -11,7 +11,10 @@ import {
 import { acceptSessionFileAttachments } from "./session-file-attachments";
 import { ArchivedSessionImportError } from "./archived-session-imports";
 import { SessionArchivedError } from "./session-archive-errors";
-import { withEffectiveSessionPolicy } from "./session-execution-policy";
+import {
+  effectiveSessionPolicyQuery,
+  withEffectiveSessionPolicy,
+} from "./session-execution-policy";
 import {
   parseAcceptedMcpAccountBindings,
   parseConnectionAccountIntent,
@@ -351,11 +354,14 @@ async function loadSubmittedHumanPromptReplay(
   const replayDraft =
     input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
       ? null
-      : await getComposerDraftInTransaction(db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          subjectId: input.subjectId,
-        });
+      : await withEffectiveComposerDraftPolicy(
+          db,
+          await getComposerDraftInTransaction(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            subjectId: input.subjectId,
+          }),
+        );
   return {
     receipt: input.receipt,
     routing:
@@ -1228,6 +1234,28 @@ export async function getComposerDraftInTransaction(
   return rows[0] ?? null;
 }
 
+/**
+ * A draft that follows the chat's settings reads as the chat's current
+ * effective model, reasoning effort and speed (the same projection a Send
+ * without a model uses), so a change made outside the composer is what the
+ * person sees and sends. A draft with the person's own pick is returned as
+ * stored. Call inside the caller's workspace/subject RLS boundary.
+ */
+export async function withEffectiveComposerDraftPolicy(
+  db: Database,
+  draft: ComposerDraftRow | null,
+): Promise<ComposerDraftRow | null> {
+  if (!draft?.policyFollowsSession) return draft;
+  const [policy] = await effectiveSessionPolicyQuery(db, draft.workspaceId, [draft.sessionId]);
+  if (!policy) return draft;
+  return {
+    ...draft,
+    model: policy.model,
+    reasoningEffort: policy.reasoningEffort,
+    latencyMode: policy.latencyMode,
+  };
+}
+
 export async function saveComposerDraftInTransaction(
   db: Database,
   input: {
@@ -1239,9 +1267,13 @@ export async function saveComposerDraftInTransaction(
     text: string;
     annotations?: DraftTimelineAnnotation[];
     resources: ResourceRef[];
-    model: string;
-    reasoningEffort: ReasoningEffort;
-    latencyMode: LatencyMode;
+    /**
+     * The person's pick in the composer. Omit all three to keep the draft on
+     * the chat's own settings, so it follows later changes to them.
+     */
+    model?: string | undefined;
+    reasoningEffort?: ReasoningEffort | undefined;
+    latencyMode?: LatencyMode | undefined;
     /**
      * Bound the workspace control prefix wait (request-scoped API callers pass
      * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
@@ -1271,6 +1303,14 @@ export async function saveComposerDraftInTransaction(
     });
   }
   const revision = currentRevision + 1;
+  const picked =
+    input.model !== undefined ||
+    input.reasoningEffort !== undefined ||
+    input.latencyMode !== undefined;
+  const [sessionPolicy] = await effectiveSessionPolicyQuery(db, input.workspaceId, [
+    input.sessionId,
+  ]);
+  if (!sessionPolicy) throw new Error(`Session not found: ${input.sessionId}`);
   const values = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -1282,9 +1322,10 @@ export async function saveComposerDraftInTransaction(
     resources: withCanonicalResourceMountPaths(input.resources),
     tools: [],
     toolsProvided: false,
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode,
+    model: input.model ?? sessionPolicy.model,
+    reasoningEffort: input.reasoningEffort ?? sessionPolicy.reasoningEffort,
+    latencyMode: input.latencyMode ?? sessionPolicy.latencyMode,
+    policyFollowsSession: !picked,
     // A queue edit is still the same accepted work item. Preserve its frozen
     // initiator through arbitrary draft saves; only a genuinely new compose or
     // Steer captures the submitting actor.
@@ -1709,6 +1750,8 @@ export async function editQueuedTurnInTransaction(
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
     latencyMode: turn.latencyMode,
+    // Editing a queued message keeps the settings it was sent with.
+    policyFollowsSession: false,
     sourceTurnId: turn.id,
     sourceTurnVersion: turn.version,
     updatedAt: new Date(),
@@ -2489,9 +2532,19 @@ export async function submitHumanPromptInTransaction(
         text: draft.text,
         annotations: DraftTimelineAnnotations.parse(draft.annotations),
         resources: withCanonicalResourceMountPaths(draft.resources),
-        model: draft.model,
-        reasoningEffort: draft.reasoningEffort,
-        latencyMode: draft.latencyMode,
+        // A draft that follows the chat's settings holds the chat's current
+        // effective policy, which is what a Send without a model runs with.
+        ...(draft.policyFollowsSession
+          ? {
+              model: session.model,
+              reasoningEffort: session.reasoningEffort,
+              latencyMode: session.latencyMode,
+            }
+          : {
+              model: draft.model,
+              reasoningEffort: draft.reasoningEffort,
+              latencyMode: draft.latencyMode,
+            }),
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
@@ -2913,8 +2966,12 @@ export async function submitHumanPromptInTransaction(
   // replay cannot change defaults. Non-composer API/automated inputs retain
   // their existing per-turn semantics. The boundary also prevents an older
   // accepted turn that starts later from restoring the previous policy.
+  // A draft that follows the chat's settings made no choice, so its Send
+  // leaves them as they are (for example as the agent last set them).
   const composerPolicy =
-    draft && (input.actor.type === "human" || input.actor.type === "operator")
+    draft &&
+    !draft.policyFollowsSession &&
+    (input.actor.type === "human" || input.actor.type === "operator")
       ? {
           model: turn.model,
           reasoningEffort: turn.reasoningEffort,
@@ -3172,6 +3229,12 @@ export async function submitHumanPromptInTransaction(
           resources: [],
           tools: [],
           toolsProvided: false,
+          // The next message follows the chat's settings again. Store the
+          // ones this Send ran with, which are now the chat's current ones.
+          model: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+          latencyMode: turn.latencyMode,
+          policyFollowsSession: true,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: now,
