@@ -5,11 +5,7 @@ import {
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
 } from "../../timeline";
-import {
-  creditRefusalHeadline,
-  isModelUnavailableSubmissionError,
-  type CreditRefusalKind,
-} from "../../lib/format";
+import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
@@ -41,7 +37,7 @@ import {
 } from "../lib/failed-session-retry";
 import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
-import { failedSessionCopy } from "../lib/failed-session-copy";
+import { chatComposerPlaceholder, failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
@@ -4579,23 +4575,15 @@ function SessionChatPane(props: {
                     </LazyPart>
                   ) : null
                 }
-                placeholder={
-                  props.session.status === "cancelled"
-                    ? "This session was cancelled."
-                    : props.creditExhausted &&
-                        (props.session.status === "failed" || props.session.status === "idle")
-                      ? // "Send a message to revive" is a dead end without credits —
-                        // the reply turn dies the same budget death. With free
-                        // credit left for other models, a covered model revives it.
-                        stopRefusal
-                        ? creditRefusalHeadline(t, stopRefusal)
-                        : creditGap
-                          ? creditGap.selectionUsable
-                            ? "Send a follow-up…"
-                            : "Your free credits don't cover this model — choose another model or add credits."
-                          : "Out of Opengeni credits — add credits to continue."
-                      : "Send a follow-up…"
-                }
+                placeholder={chatComposerPlaceholder({
+                  cancelled: props.session.status === "cancelled",
+                  creditStopped:
+                    Boolean(props.creditExhausted) &&
+                    (props.session.status === "failed" || props.session.status === "idle"),
+                  stopRefusal,
+                  creditGap,
+                  canBuyCredits,
+                })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                     <ModelPicker

@@ -34,8 +34,9 @@ describe("credit refusal wiring", () => {
     );
     expect(session).toContain("creditRefusal={stopRefusal}");
     expect(session).toMatch(/const creditGap =\s*props\.creditExhausted && !stopRefusal/);
+    // chatComposerPlaceholder's own tests cover what each state reads.
     expect(session).toMatch(
-      /stopRefusal\s*\?\s*creditRefusalHeadline\(t, stopRefusal\)\s*:\s*creditGap/,
+      /placeholder=\{chatComposerPlaceholder\(\{[^}]*stopRefusal,\s*creditGap,\s*canBuyCredits,\s*\}\)\}/,
     );
   });
 });

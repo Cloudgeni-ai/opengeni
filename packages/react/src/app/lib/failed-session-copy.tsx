@@ -382,3 +382,28 @@ export function failedSessionCopy(
           : "This session failed.";
   return { reason, unavailableModel };
 }
+
+/**
+ * The composer placeholder of a chat. "Send a message to revive" is a dead end
+ * without credits: the reply turn stops the same way. An own-key or API stop
+ * names its one fix; with free credit left for other models, a covered model
+ * revives it.
+ */
+export function chatComposerPlaceholder(input: {
+  cancelled: boolean;
+  /** Out of credits, and the chat has stopped (failed or idle). */
+  creditStopped: boolean;
+  stopRefusal: CreditRefusalKind | null;
+  creditGap: FreeCreditGap | null;
+  canBuyCredits: boolean;
+}): string {
+  if (input.cancelled) return "This session was cancelled.";
+  if (!input.creditStopped) return "Send a follow-up…";
+  if (input.stopRefusal) return creditRefusalHeadline(t, input.stopRefusal, input.canBuyCredits);
+  if (input.creditGap) {
+    return input.creditGap.selectionUsable
+      ? "Send a follow-up…"
+      : "Your free credits don't cover this model — choose another model or add credits.";
+  }
+  return "Out of Opengeni credits — add credits to continue.";
+}

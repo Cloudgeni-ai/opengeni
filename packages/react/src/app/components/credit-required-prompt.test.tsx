@@ -202,6 +202,45 @@ describe("credit required prompt", () => {
     expect(container.textContent).not.toContain("Stripe Checkout");
   });
 
+  test("an own-key refusal offers no coupon, and a member is told who can fix it once", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (
+      refusalCode: "byok_paid_credit_required" | "api_credits_required",
+      canBuyCredits = true,
+    ) => {
+      await act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={client as never}
+            open
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits={canBuyCredits}
+            refusalCode={refusalCode}
+            onOpenChange={() => undefined}
+          />,
+        ),
+      );
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    // A coupon's credit can't pay the own-key fee: checkout is the one fix.
+    await render("byok_paid_credit_required");
+    expect(container.textContent).toContain("Choose an amount and pay in Stripe Checkout.");
+    expect(container.textContent).not.toContain("Have a code?");
+    // A coupon's unscoped credit does pay for API use.
+    await render("api_credits_required");
+    expect(container.textContent).toContain("Have a code?");
+    await render("byok_paid_credit_required", false);
+    expect(container.textContent!.split("Ask an organization owner to add credits.").length).toBe(
+      2,
+    );
+    expect(container.querySelectorAll("a, button")).toHaveLength(0);
+  });
+
   test("the notice follows selected-model funding rather than the total credit balance", async () => {
     getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 100_000_000 } });
     const container = document.createElement("div");

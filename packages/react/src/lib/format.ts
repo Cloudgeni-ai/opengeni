@@ -180,9 +180,23 @@ const CREDIT_REFUSAL_HEADLINE_KEYS = {
   api_credits_required: "lib.format.apiCreditsRequiredHeadline",
 } as const;
 
-/** The short sentence that names a refusal of this kind, without what was kept. */
-export function creditRefusalHeadline(t: OpenGeniText, kind: CreditRefusalKind): string {
-  return t(CREDIT_REFUSAL_HEADLINE_KEYS[kind]);
+const CREDIT_REFUSAL_ASK_OWNER_KEYS = {
+  byok_upgrade_required: "lib.format.byokUpgradeRequiredAskOwner",
+  byok_paid_credit_required: "lib.format.byokPaidCreditRequiredAskOwner",
+  api_credits_required: "lib.format.apiCreditsRequiredAskOwner",
+} as const;
+
+/**
+ * The short sentence that names a refusal of this kind and its one fix,
+ * without what was kept. Someone who can't buy credits or upgrade is told to
+ * ask an organization owner instead.
+ */
+export function creditRefusalHeadline(
+  t: OpenGeniText,
+  kind: CreditRefusalKind,
+  canFix = true,
+): string {
+  return t(canFix ? CREDIT_REFUSAL_HEADLINE_KEYS[kind] : CREDIT_REFUSAL_ASK_OWNER_KEYS[kind]);
 }
 
 /** The credit-stop sentence for a refusal: own-key fee, API use, or no credit. */

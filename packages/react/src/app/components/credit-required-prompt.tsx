@@ -183,10 +183,11 @@ export function CreditRequiredPromptView({
                   ? "API usage uses credits, not your plan credit"
                   : "Add Opengeni credits to continue"}
           </DialogTitle>
-          {/* A refusal's title names its fix; the line below it says how. */}
+          {/* A refusal's title names its fix; the line below it says how. With
+              only the Billing link to show, the link says it. */}
           <DialogDescription
             className={
-              purpose === "required" && refusalCode && !(canBuyCredits && stripeEnabled)
+              purpose === "required" && refusalCode && canBuyCredits && !stripeEnabled
                 ? "sr-only"
                 : undefined
             }
@@ -218,7 +219,8 @@ export function CreditRequiredPromptView({
               )}
               {purpose === "topup" ? "Continue to Stripe" : "Add credits"}
             </Button>
-            {accountId ? (
+            {/* A coupon's credit can't pay the own-key fee, so it would not fix this refusal. */}
+            {accountId && refusalCode !== "byok_paid_credit_required" ? (
               <div className="border-t border-border pt-3">
                 <CouponRedeem
                   client={client}
@@ -231,11 +233,11 @@ export function CreditRequiredPromptView({
             ) : null}
           </div>
         ) : !canBuyCredits ? (
-          <p className="text-sm text-fg-muted">
-            {refusalCode
-              ? "Ask an organization owner to add credits."
-              : "Ask an organization owner to add credits, or an admin to connect a model."}
-          </p>
+          refusalCode ? null : (
+            <p className="text-sm text-fg-muted">
+              Ask an organization owner to add credits, or an admin to connect a model.
+            </p>
+          )
         ) : refusalCode && purpose === "required" ? (
           // Checkout isn't available here (yet): Billing still has the one fix.
           <DialogFooter>
