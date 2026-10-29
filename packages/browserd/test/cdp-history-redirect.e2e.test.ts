@@ -79,6 +79,31 @@ async function withFixture(scenario: (fixture: Fixture) => Promise<void>): Promi
           return new Response(`<!doctype html><title>Plain</title><h1>Plain</h1>`, {
             headers: { "content-type": "text/html" },
           });
+        // An app whose dashboard sends a signed-out visitor to its sign-in
+        // page, as many do when Back returns to it after signing out.
+        case "/app/page":
+          return page(`<title>App</title><h1>App page</h1>`);
+        case "/app/dashboard":
+          return page(
+            `<title>Dashboard</title><h1>Dashboard</h1><script>addEventListener('pageshow',()=>{if(sessionStorage.out)location.href='/app/signin?next=dashboard'})</script>`,
+          );
+        case "/app/logout":
+          return page(
+            `<title>Signed out</title><h1>Signed out</h1><script>sessionStorage.out=1</script>`,
+          );
+        case "/app/signin":
+          return page(`<title>App sign-in</title><h1>App sign-in</h1>`);
+        // A page whose image is slow to load, so its load event comes late.
+        case "/slow/page":
+          return page(`<title>Slow</title><h1>Slow</h1><img src="/slow/image" alt="">`);
+        case "/slow/image":
+          return Bun.sleep(1_500).then(
+            () => new Response("", { headers: { "content-type": "image/gif" } }),
+          );
+        // A single-page app that adds entries with pushState.
+        case "/spa":
+          return page(`<title>App</title><h1>App</h1>
+<button onclick="history.pushState({v:1},'','/spa/view')">Open view</button>`);
         // A page that loads itself again when it is shown again.
         case "/plain/reload":
           return page(`<title>Plain</title><h1>Plain</h1><script>
@@ -302,6 +327,66 @@ e2e(
       await Bun.sleep(500);
       expect(await url()).toBe(`${origin}/plain/reload`);
       expect(await heading()).toBe("Reloaded");
+    });
+  },
+  60_000,
+);
+
+e2e(
+  "Back to a page that sends the tab somewhere else than where Back started stays there, as a browser's Back does",
+  async () => {
+    await withFixture(async ({ origin, url, run }) => {
+      for (const path of ["/app/page", "/app/dashboard", "/app/logout"]) {
+        expect((await run({ type: "navigate", url: `${origin}${path}` })).state).toBe("completed");
+      }
+      // Shown again after signing out, the dashboard sends the tab to the
+      // sign-in page. That is where a person's Back lands too; it is not a
+      // step back to the page Back started from, so it is not passed over.
+      const result = await run(back);
+      expect(result.error ?? null).toBeNull();
+      expect(result.state).toBe("completed");
+      await Bun.sleep(500);
+      expect(await url()).toBe(`${origin}/app/signin?next=dashboard`);
+    });
+  },
+  60_000,
+);
+
+e2e(
+  "Back returns without a fixed wait from a same-document entry, a cached page and a page still loading its images",
+  async () => {
+    await withFixture(async ({ origin, run }) => {
+      const timedBack = async (expected: string) => {
+        const started = performance.now();
+        const result = await run(back);
+        const elapsed = performance.now() - started;
+        expect(result.error ?? null).toBeNull();
+        expect(result.observation?.target.url).toBe(expected);
+        return elapsed;
+      };
+      const limits: number[] = [];
+
+      expect((await run({ type: "navigate", url: `${origin}/spa` })).state).toBe("completed");
+      expect(
+        (await run({ type: "click", locator: { kind: "role", role: "button", name: "Open view" } }))
+          .state,
+      ).toBe("completed");
+      limits.push(await timedBack(`${origin}/spa`));
+
+      expect((await run({ type: "navigate", url: `${origin}/plain/a` })).state).toBe("completed");
+      expect((await run({ type: "navigate", url: `${origin}/plain/b` })).state).toBe("completed");
+      limits.push(await timedBack(`${origin}/plain/a`));
+
+      // The image keeps the page loading for 1.5 s; Back does not wait for it.
+      expect((await run({ type: "navigate", url: `${origin}/slow/page` })).state).toBe("completed");
+      expect((await run({ type: "navigate", url: `${origin}/plain/b` })).state).toBe("completed");
+      const slow = await timedBack(`${origin}/slow/page`);
+
+      // The whole action, observation included: about 10 to 20 ms here, as
+      // before Back passed over redirect steps, where a fixed watch of the
+      // page took 250 ms more, and the slow page over a second more.
+      for (const elapsed of limits) expect(elapsed).toBeLessThan(200);
+      expect(slow).toBeLessThan(600);
     });
   },
   60_000,
