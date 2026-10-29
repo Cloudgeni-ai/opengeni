@@ -671,6 +671,9 @@ type TargetState = {
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
+  /** The document already known to draw, so input sent to it while its tab
+   * is hidden reaches the page (see drawHiddenTabForInput). */
+  inputDrawnDocument?: string;
   /** When set, the current action's locator waits end here instead of
    * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
   locatorDeadline?: number | null;
@@ -4692,11 +4695,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Makes the tab draw itself at its current size. A background tab does not
    * lay out again when its emulation is cleared until it is shown; a capture
-   * of it has it draw without showing it or taking focus. */
-  private async redrawTab(state: TargetState): Promise<void> {
+   * of it has it draw without showing it or taking focus. Reports whether
+   * the capture was made. */
+  private async redrawTab(state: TargetState): Promise<boolean> {
     const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS).catch(() => null);
-    if (!metrics) return;
-    await this.sendCapture(
+    if (!metrics) return false;
+    return await this.sendCapture(
       state,
       {
         format: "jpeg",
@@ -4706,7 +4710,47 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         clip: { x: metrics.viewport.x, y: metrics.viewport.y, width: 1, height: 1, scale: 1 },
       },
       FRAME_CAPTURE_TIMEOUT_MS,
-    ).catch(() => undefined);
+    ).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  /** Has a hidden tab draw its document before input is sent to it. Chromium
+   * drops presses, releases and keys sent to a page that has never drawn, as
+   * a tab opened in the background has not, and still acknowledges them, so
+   * the action would look done while the page got nothing. A document that
+   * was ever shown has drawn and gets its input; one that never was is
+   * captured, which has it draw without showing it or taking focus. Runs
+   * before the action finds its element: a capture briefly changes the
+   * page's emulation. Focus emulation keeps hidden tabs drawing, so it needs
+   * none. */
+  private async drawHiddenTabForInput(state: TargetState): Promise<void> {
+    if (this.engine === "lightpanda" || this.focusEmulation || state.dialog) return;
+    const document = state.documentGeneration;
+    if (state.inputDrawnDocument === document) return;
+    const shown = await this.evaluateIsolated(
+      state,
+      DOCUMENT_SHOWN_EXPRESSION,
+      FRAME_CAPTURE_TIMEOUT_MS,
+    ).catch(() => null);
+    // A tab that cannot be read is left to the action itself to report.
+    if (shown !== false) {
+      if (shown === true) state.inputDrawnDocument = document;
+      return;
+    }
+    for (let attempt = 0; attempt < HIDDEN_TAB_DRAW_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await delay(HIDDEN_TAB_DRAW_RETRY_MS);
+      if (await this.redrawTab(state)) {
+        state.inputDrawnDocument = document;
+        return;
+      }
+    }
+    throw new InteractionDefiniteDriverError(
+      "resource_unavailable",
+      HIDDEN_TAB_NOT_DRAWN_MESSAGE,
+      true,
+    );
   }
 
   /** Sends a Page.captureScreenshot. Chromium serves a clipped capture, or
@@ -6207,6 +6251,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     state.nodeRoute = null;
     state.inputFence = null;
+    if (PAGE_INPUT_ACTIONS.has(action.type)) await this.drawHiddenTabForInput(state);
     switch (action.type) {
       case "navigate":
         await this.navigate(state, action.url);
@@ -10968,6 +11013,32 @@ const VIEWPORT_NOT_TAKEN_MESSAGE =
   "The viewport change was sent, but the tab did not take that size. Observe the tab to see its size now.";
 const VIEWPORT_RESET_NOT_TAKEN_MESSAGE =
   "The viewport reset was sent, but the tab did not return to its own size and scale. Observe the tab to see its size now.";
+
+/** Captures tried, and the pause between them, to have a hidden tab draw
+ * before input is sent to it (see drawHiddenTabForInput). */
+const HIDDEN_TAB_DRAW_ATTEMPTS = 3;
+const HIDDEN_TAB_DRAW_RETRY_MS = 100;
+/** Whether the document is shown now or ever was (Chromium records each
+ * visibility change of a document in its performance timeline). */
+const DOCUMENT_SHOWN_EXPRESSION =
+  'document.visibilityState === "visible" || performance.getEntriesByType("visibility-state").some((entry) => entry.name === "visible")';
+/** Actions that send mouse, touch or key input to the page. */
+const PAGE_INPUT_ACTIONS: ReadonlySet<BrowserAction["type"]> = new Set([
+  "click",
+  "double_click",
+  "hover",
+  "fill",
+  "type",
+  "press",
+  "select",
+  "check",
+  "scroll",
+  "drag",
+  "pointer",
+  "clipboard",
+]);
+const HIDDEN_TAB_NOT_DRAWN_MESSAGE =
+  "This tab is hidden behind another tab and has not drawn its page, so the page would not receive the input. No input was sent. Activate the tab, then try again.";
 
 function sameScale(
   measured: { deviceScaleFactor: number },
