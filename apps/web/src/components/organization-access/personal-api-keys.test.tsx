@@ -221,6 +221,33 @@ describe("personal API keys", () => {
       "Maja Berg will need to create a new key.",
     );
     await admin.unmount();
+
+    // An admin who isn't the owner sees the owner's keys but can't revoke them.
+    const ownersKey = { ...theirs, name: "Owner scripts", canRevoke: false };
+    const notOwner = render(
+      <PersonalApiKeys
+        organizationName="Acme"
+        api={{
+          list: async () => ({
+            apiKeys: [{ ...mine, canRevoke: true }, ownersKey],
+            canManageAll: true,
+          }),
+          create: async () => {
+            throw new Error("unused");
+          },
+          revoke,
+        }}
+        currentSubjectId={me}
+        workspaces={workspaces}
+        location={{}}
+        onNavigate={() => undefined}
+      />,
+    );
+    await notOwner.mount();
+    expect(notOwner.container.textContent).toContain("Owner scripts");
+    expect(menuButton(notOwner.container, "Owner scripts")).toBeNull();
+    expect(menuButton(notOwner.container, "Laptop scripts")).not.toBeNull();
+    await notOwner.unmount();
   });
 
   test("creating sends full access for 90 days by default and shows the key once", async () => {

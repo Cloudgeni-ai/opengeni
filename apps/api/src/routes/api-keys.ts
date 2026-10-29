@@ -256,7 +256,15 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
         if (!existing) throw new HTTPException(404, { message: "API key not found" });
         requireMemberLevelKey(control, existing);
-        if (body.policy && !isMemberLevel(body.policy.permissions))
+        if (
+          body.policy &&
+          !isMemberLevel(
+            effectiveKeyPermissions({
+              permissions: body.policy.permissions,
+              permissionMode: "explicit",
+            }),
+          )
+        )
           throw new HTTPException(403, { message: OWNER_LEVEL_KEY_MESSAGE });
       }
       try {
