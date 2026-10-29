@@ -40,11 +40,7 @@ import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
-import {
-  isPaymentRequiredError,
-  paymentRefusalCode,
-  type PaymentRefusalCode,
-} from "../lib/model-access";
+import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { waitingDescendants } from "../lib/descendant-requests";
@@ -2289,12 +2285,9 @@ function SessionChatPane(props: {
   );
   // The API's credit refusal of a Send: no remaining credit pays for that model.
   // It stays above the composer until a message is accepted or it is dismissed.
-  const [creditRefusal, setCreditRefusal] = useState<{
+  const [creditRefusal, setCreditRefusal] = useState<CreditRefusalRecord<{
     sessionId: string;
-    model: string;
-    message: string;
-    code: PaymentRefusalCode | null;
-  } | null>(null);
+  }> | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -2908,13 +2901,13 @@ function SessionChatPane(props: {
         setModelPickerSession(props.session.id);
       }
       // Re-read funding so the notice and picker name what the credit covers now.
-      if (isPaymentRequiredError(error)) {
-        setCreditRefusal({
-          sessionId: props.session.id,
-          model: refusedModelId(error, input) ?? props.session.model,
-          message: error.message,
-          code: paymentRefusalCode(error),
-        });
+      const refusal = creditRefusalRecord(
+        error,
+        { sessionId: props.session.id },
+        refusedModelId(error, input) ?? props.session.model,
+      );
+      if (refusal) {
+        setCreditRefusal(refusal);
         void modelCatalog.refresh();
       }
     },

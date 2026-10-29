@@ -1,5 +1,10 @@
 import { t } from "./console-text";
-import { isDiagnosticFailureCode } from "../../lib/format";
+import {
+  creditRefusalHeadline,
+  creditRefusalKindFromText,
+  isDiagnosticFailureCode,
+  type CreditRefusalKind,
+} from "../../lib/format";
 import { providerRecoverySubject } from "../../lib/provider-recovery";
 import type { SessionFailureSummary } from "./events";
 import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
@@ -213,6 +218,8 @@ export function failedSessionCopy(
   dailyLimit?: true | undefined;
   /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
   compaction?: true | undefined;
+  /** A credit stop one action fixes (own-key fee or API use); no model choice helps. */
+  creditRefusal?: CreditRefusalKind | undefined;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -335,6 +342,18 @@ export function failedSessionCopy(
       unavailableModel: false,
       compaction: true,
       ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
+  // An own-key or API stop names its one fix; free credit for another model
+  // can't pay for either.
+  const creditRefusal = creditExhausted
+    ? creditRefusalKindFromText(failure.recordedDetail, failure.reason)
+    : null;
+  if (creditRefusal) {
+    return {
+      reason: creditRefusalHeadline(t, creditRefusal),
+      unavailableModel: false,
+      creditRefusal,
     };
   }
   const reason = creditExhausted

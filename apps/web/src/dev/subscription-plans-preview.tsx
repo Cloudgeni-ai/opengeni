@@ -158,7 +158,13 @@ export function SubscriptionPlansPreview() {
             {view === "refusal" ? (
               <AppContext.Provider value={refusalPreviewContext}>
                 <div className="space-y-4">
-                  {(["byok_paid_credit_required", "api_credits_required"] as const).map((code) => (
+                  {(
+                    [
+                      "byok_upgrade_required",
+                      "byok_paid_credit_required",
+                      "api_credits_required",
+                    ] as const
+                  ).map((code) => (
                     <CreditRefusalNotice
                       key={code}
                       gap={{ modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: false }}

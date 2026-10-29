@@ -361,8 +361,75 @@ test("plan credit and credits are separate balances, and own-key fees have their
   expect(rows).toEqual([
     "Plan creditFor app use. Resets monthly.$100.00",
     "CreditsFuture purchases cover prior usage first.-$5.00",
-    "Platform fee on your own keysThis month.$1.25",
   ]);
+  // A charge, set apart from the balances.
+  expect(document.body.querySelector('[data-testid="byok-platform-fee"]')!.textContent).toBe(
+    "Platform fee on your own keysCharged this month$1.25",
+  );
+});
+
+test("without a plan or promotions, the fee line sits under the single total", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 20_000_000,
+          generalBalanceMicros: 20_000_000,
+          creditsMicros: 20_000_000,
+          byokPlatformFeeMonthMicros: 500_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: null,
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  expect(document.body.querySelectorAll("div.divide-y")).toHaveLength(0);
+  expect(document.body.textContent).toContain("Total balance");
+  expect(document.body.textContent).toContain("Charged this month$0.50");
+});
+
+test("with the plan row hidden, plan credit stays in Credits so the rows add up", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit={false}
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 130_000_000,
+          generalBalanceMicros: 120_000_000,
+          creditsMicros: 20_000_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: { ...previewPlan("pro"), creditRemainingMicros: 100_000_000 },
+          promotionalCredits: [
+            {
+              grantId: "g-1",
+              label: "Promotional credits",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  const rows = [...document.body.querySelectorAll("div.divide-y > div")].map(
+    (row) => row.textContent,
+  );
+  expect(rows.at(-1)).toContain("$120.00");
 });
 
 test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {

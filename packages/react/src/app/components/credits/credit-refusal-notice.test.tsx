@@ -223,3 +223,21 @@ test("an API refusal says credits pay for API use; a member is told to ask an ow
   );
   expect(container.querySelectorAll("a, button")).toHaveLength(0);
 });
+
+test("an own-key refusal on the Free plan offers one Upgrade to Pro action, even with a credits prompt", async () => {
+  const onAddCredits = mock(() => undefined);
+  const container = await render({
+    refusalCode: "byok_upgrade_required",
+    message: "Upgrade to Pro to use your own key.",
+    gap: { modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: false },
+    onChooseModel: () => undefined,
+    onAddCredits,
+  });
+  expect(container.textContent).toBe("Upgrade to Pro to use your own keyUpgrade to Pro");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+  const links = [...container.querySelectorAll("a")];
+  expect(links.map((link) => link.getAttribute("href"))).toEqual([
+    "/workspaces/ws/organization?section=billing",
+  ]);
+  expect(onAddCredits).not.toHaveBeenCalled();
+});

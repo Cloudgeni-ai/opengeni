@@ -234,6 +234,40 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(labels()).toEqual(["Retry"]);
 });
 
+test("own-key and API credit stops offer their one fix, never another model", async () => {
+  const banner = (reason: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason }}
+      creditExhausted
+      freeCreditGap={{
+        modelLabel: "Claude Opus 5.5",
+        covered: [{ id: "free-model", label: "Free model" }],
+        selectionUsable: false,
+      }}
+      onChooseModel={() => undefined}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canChooseModel
+    />
+  );
+  const container = await render(
+    banner("Activity task failed: Upgrade to Pro to use your own key."),
+  );
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+  await act(async () =>
+    root!.render(banner("Activity task failed: Add credits to use your own key.")),
+  );
+  expect(row().textContent).toContain("Add credits to use your own key.");
+  expect(row().textContent).not.toContain("out of Opengeni credits");
+  expect(labels()).toEqual(["Add credits"]);
+  await act(async () => root!.render(banner("API usage uses credits, not your plan credit.")));
+  expect(labels()).toEqual(["Add credits"]);
+});
+
 test("the free model keeps ordinary wording for failures other than its daily limit", async () => {
   const container = await render(
     <FailedSessionBanner

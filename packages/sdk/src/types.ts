@@ -10025,6 +10025,8 @@ export type BillingBalance = {
   paidCreditsMicros?: number | undefined;
   /** Own-key platform fees charged this calendar month (UTC). */
   byokPlatformFeeMonthMicros?: number | undefined;
+  /** Own-key fees that ran past paid credit; the next top-up repays it. */
+  byokFeeDebtMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
   heldCreditMicros?: number | undefined;
   heldGeneralCreditMicros?: number | undefined;

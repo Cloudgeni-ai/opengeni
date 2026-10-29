@@ -153,6 +153,35 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("Use your own provider account");
   });
 
+  test("own-key and API refusals offer their one fix, never another model or own key", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (refusalCode: "byok_upgrade_required" | "byok_paid_credit_required") =>
+      act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={client as never}
+            open
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            refusalCode={refusalCode}
+            onOpenChange={() => undefined}
+          />,
+        ),
+      );
+    await render("byok_upgrade_required");
+    expect(container.querySelector("h2")!.textContent).toBe("Upgrade to Pro to use your own key");
+    expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
+      "Upgrade to Pro",
+    ]);
+    await render("byok_paid_credit_required");
+    expect(container.textContent).toContain("Add credits to use your own key.");
+    expect(container.textContent).not.toContain("Use your own provider account");
+    expect(container.textContent).not.toContain("choose another model");
+  });
+
   test("the notice follows selected-model funding rather than the total credit balance", async () => {
     getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 100_000_000 } });
     const container = document.createElement("div");

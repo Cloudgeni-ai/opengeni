@@ -27,6 +27,7 @@ import { validTopupAmount } from "../lib/format";
 import { analyticsAction } from "../../ui/analytics-actions";
 import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
+import type { PaymentRefusalCode } from "../lib/model-access";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -36,6 +37,8 @@ type CreditRequiredPromptProps = {
   accountId: string | null;
   canBuyCredits: boolean;
   purpose?: "required" | "topup" | undefined;
+  /** A refusal one action fixes (own-key fee, API use): no model choice applies. */
+  refusalCode?: PaymentRefusalCode | null | undefined;
   onOpenChange: (open: boolean) => void;
   /**
    * Runs before this page leaves for checkout, such as saving the composer's
@@ -55,6 +58,7 @@ export function CreditRequiredPromptView({
   accountId,
   canBuyCredits,
   purpose = "required",
+  refusalCode = null,
   onOpenChange,
   beforeLeave,
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
@@ -134,6 +138,39 @@ export function CreditRequiredPromptView({
     return <CreditsCelebrationDialog status={granted} open={open} onOpenChange={onOpenChange} />;
   }
 
+  if (refusalCode === "byok_upgrade_required") {
+    // On the Free plan, own keys need a paid plan: one action.
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Upgrade to Pro to use your own key</DialogTitle>
+            <DialogDescription>
+              {canBuyCredits
+                ? "Own keys use paid credit, which Pro includes."
+                : "Ask an organization owner to upgrade to Pro."}
+            </DialogDescription>
+          </DialogHeader>
+          {canBuyCredits ? (
+            <DialogFooter>
+              <Button asChild type="button">
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "billing" }}
+                  onClick={() => onOpenChange(false)}
+                  {...analyticsAction("buy_credits")}
+                >
+                  Upgrade to Pro
+                </Link>
+              </Button>
+            </DialogFooter>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -144,7 +181,11 @@ export function CreditRequiredPromptView({
           <DialogDescription>
             {purpose === "topup"
               ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
-              : "Add credits to use this model, or choose another model."}
+              : refusalCode === "byok_paid_credit_required"
+                ? "Add credits to use your own key."
+                : refusalCode === "api_credits_required"
+                  ? "API usage uses credits, not your plan credit."
+                  : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
@@ -177,10 +218,13 @@ export function CreditRequiredPromptView({
           </div>
         ) : !canBuyCredits ? (
           <p className="text-sm text-fg-muted">
-            Ask an organization owner to add credits, or an admin to connect a model.
+            {refusalCode
+              ? "Ask an organization owner to add credits."
+              : "Ask an organization owner to add credits, or an admin to connect a model."}
           </p>
         ) : null}
-        {purpose === "required" ? (
+        {/* Own-key and API refusals have one fix: credits. */}
+        {purpose === "required" && !refusalCode ? (
           <DialogFooter>
             {/* Credits are the main action when they can be bought here. */}
             <Button

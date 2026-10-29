@@ -38,7 +38,7 @@ export function CreditRefusalNotice({
   gap: FreeCreditGap;
   /** The API's refusal text. */
   message?: string | null | undefined;
-  /** A refusal only credits fix (own-key fee, API use): no model choice applies. */
+  /** A refusal one action fixes (own-key fee, API use): no model choice applies. */
   refusalCode?: PaymentRefusalCode | null | undefined;
   workspaceId: string;
   /** The organization whose balance tells "no credit" from "credit this model can't use". */
@@ -73,29 +73,43 @@ export function CreditRefusalNotice({
   );
   // Wait for the balance rather than show words it would contradict.
   if (uncovered && !settled) return null;
-  const addCredits = canBuyCredits ? (
-    <AddCreditsButton
-      workspaceId={workspaceId}
-      outline={false}
-      {...(onAddCredits ? { onAddCredits } : {})}
-    />
-  ) : null;
   if (refusalCode) {
-    // Only credits fix this, whichever model is chosen.
-    const askOwner = canBuyCredits ? null : "Ask an organization owner to add credits.";
+    // One action fixes this, whichever model is chosen.
+    const upgrade = refusalCode === "byok_upgrade_required";
+    const askOwner = canBuyCredits
+      ? null
+      : upgrade
+        ? "Ask an organization owner to upgrade to Pro."
+        : "Ask an organization owner to add credits.";
     return (
       <Notice
         tone="waiting"
         live="assertive"
         title={
-          refusalCode === "byok_paid_credit_required"
-            ? "Add credits to use your own key"
-            : "API usage uses credits, not your plan credit"
+          upgrade
+            ? "Upgrade to Pro to use your own key"
+            : refusalCode === "byok_paid_credit_required"
+              ? "Add credits to use your own key"
+              : "API usage uses credits, not your plan credit"
         }
         {...(onDismiss ? { onDismiss } : {})}
       >
-        {askOwner ? <span data-testid="credit-refusal-notice">{askOwner}</span> : null}
-        {addCredits ? <div className="mt-2 flex flex-wrap gap-2">{addCredits}</div> : null}
+        <div data-testid="credit-refusal-notice">
+          {askOwner ? <span>{askOwner}</span> : null}
+          {canBuyCredits ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {upgrade ? (
+                <UpgradeButton workspaceId={workspaceId} />
+              ) : (
+                <AddCreditsButton
+                  workspaceId={workspaceId}
+                  outline={false}
+                  {...(onAddCredits ? { onAddCredits } : {})}
+                />
+              )}
+            </div>
+          ) : null}
+        </div>
       </Notice>
     );
   }
@@ -169,6 +183,22 @@ export function CreditRefusalNotice({
         </div>
       ) : null}
     </Notice>
+  );
+}
+
+/** Opens billing, where the plan picker offers Pro. */
+function UpgradeButton({ workspaceId }: { workspaceId: string }) {
+  return (
+    <Button asChild type="button" size="sm">
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+        {...analyticsAction("buy_credits")}
+      >
+        Upgrade to Pro
+      </Link>
+    </Button>
   );
 }
 
