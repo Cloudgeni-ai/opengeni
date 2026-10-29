@@ -30,6 +30,7 @@ export type {
   InsightsCallsScope,
 } from "./insights-usage";
 import type {
+  ClientModelResidencyV1,
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
@@ -4488,6 +4489,8 @@ export type ClientModel = {
    * is EU-only and this model's route is not EU by its residency record.
    */
   availability?: ModelAvailabilityV1 | undefined;
+  /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+  residency?: ClientModelResidencyV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -8118,6 +8121,11 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  /**
+   * Shown to people instead of the folder icon, like a chat's avatar. Absent
+   * from servers that predate project profiles.
+   */
+  avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
   createdBy: string | null;
@@ -8128,11 +8136,14 @@ export type Channel = {
 export type CreateChannelRequest = {
   name: string;
   description?: string;
+  avatar?: SessionAvatar | null;
 };
 
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  /** null clears it; omitted keeps it. */
+  avatar?: SessionAvatar | null;
   pinned?: boolean;
 };
 

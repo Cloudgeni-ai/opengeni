@@ -7,6 +7,7 @@ import {
   getSession,
   createChannel,
   type DbClient,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -151,6 +152,94 @@ describe("project MCP tools", () => {
     }
     await callMcpTool(server, "project_delete", { projectId: a.project.id });
     await callMcpTool(server, "project_delete", { projectId: b.project.id });
+  });
+
+  test("agents set a project's avatar and description like a chat's profile", async () => {
+    if (!available) return;
+    const server = buildOpenGeniMcpServer(
+      deps(new FakeWorkflowClient()),
+      grant(["sessions:read", "sessions:create"]),
+    );
+    type ProjectResult = {
+      project: { id: string; name: string; description: string | null; avatar: unknown };
+    };
+    const created = await callMcpTool<ProjectResult>(server, "project_create", {
+      name: "Research",
+      description: "Papers and benchmarks",
+      avatar: { kind: "emoji", emoji: "🔭", hue: 215 },
+    });
+    expect(created.project.avatar).toEqual({ kind: "emoji", emoji: "🔭", hue: 215 });
+    const id = created.project.id;
+
+    // Only the avatar changes; the name and description stay.
+    const iconed = await callMcpTool<ProjectResult>(server, "project_update", {
+      projectId: id,
+      avatar: { kind: "icon", icon: "telescope", hue: 245 },
+    });
+    expect(iconed.project).toMatchObject({
+      name: "Research",
+      description: "Papers and benchmarks",
+      avatar: { kind: "icon", icon: "telescope", hue: 245 },
+    });
+    // Omitting the avatar keeps it.
+    const renamed = await callMcpTool<ProjectResult>(server, "project_update", {
+      projectId: id,
+      name: "Research notes",
+    });
+    expect(renamed.project.avatar).toEqual({ kind: "icon", icon: "telescope", hue: 245 });
+    expect(
+      (await callMcpTool<ProjectResult>(server, "project_get", { projectId: id })).project.avatar,
+    ).toEqual({ kind: "icon", icon: "telescope", hue: 245 });
+
+    // An incomplete avatar or an image that isn't in the workspace is refused
+    // and leaves the project as it was.
+    await expect(
+      callMcpTool(server, "project_update", { projectId: id, avatar: { kind: "emoji", hue: 1 } }),
+    ).rejects.toThrow();
+    await expect(
+      callMcpTool(server, "project_update", {
+        projectId: id,
+        avatar: { kind: "image", artifactId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow();
+
+    // The whole workspace sees a project: an Only me image is refused even for
+    // its owner in a turn that can open it, and a workspace image is accepted.
+    const image = async (privateTo: string | null) => {
+      const fileId = crypto.randomUUID();
+      await shared!
+        .admin`insert into files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+        values(${fileId},${accountId},${workspaceId},'ready','logo.png','logo.png','image/png',4,${"a".repeat(64)},'fixture',
+          ${`workspaces/${workspaceId}/files/${fileId}/logo.png`},${privateTo ? [privateTo] : null},${privateTo})`;
+      return fileId;
+    };
+    const onlyMe = await image("user:mcp");
+    await expect(
+      withSessionRlsActorContext(
+        { subjectId: "user:mcp", privateFileOwnerSubjectId: "user:mcp" },
+        () =>
+          callMcpTool(server, "project_update", {
+            projectId: id,
+            avatar: { kind: "image", artifactId: onlyMe },
+          }),
+      ),
+    ).rejects.toThrow(/This image is Only me/);
+    const sharedImage = await image(null);
+    expect(
+      (
+        await callMcpTool<ProjectResult>(server, "project_update", {
+          projectId: id,
+          avatar: { kind: "image", artifactId: sharedImage },
+        })
+      ).project.avatar,
+    ).toEqual({ kind: "image", artifactId: sharedImage });
+
+    const cleared = await callMcpTool<ProjectResult>(server, "project_update", {
+      projectId: id,
+      avatar: null,
+    });
+    expect(cleared.project.avatar).toBeNull();
+    await callMcpTool(server, "project_delete", { projectId: id });
   });
 
   test("filing, paginated discovery and deletion preserve sessions", async () => {

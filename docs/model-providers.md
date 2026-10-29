@@ -1482,7 +1482,10 @@ Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
 Registry models may set `hostedWebSearchContextSize` to `low`, `medium`, or
-`high` for Responses routes that support `search_context_size`. The worker
+`high` for Responses routes that support `search_context_size` and have hosted
+web search enabled. Configuration rejects the setting for other APIs or a
+disabled hosted-search capability, rather than changing a route's execution
+digest for an option that its adapter cannot use. The worker
 passes this static route setting to the hosted search tool. Omission preserves
 the SDK's current `medium` default byte-for-byte; it does not add a new field
 to the executable definition. The option neither enables search nor changes

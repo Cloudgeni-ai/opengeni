@@ -558,6 +558,12 @@ export class LazyToolRuntime {
     private readonly connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
     /** Ranks tools by meaning alongside keywords; absent means keywords alone. */
     private readonly meaningRanker?: ToolMeaningRanker,
+    /**
+     * Each MCP tool's name as its server publishes it, by model tool name.
+     * A shortened model name (`mcp_<digest>__…`) can hide which of several
+     * siblings a tool is; the decision model reads the full name instead.
+     */
+    private readonly mcpToolNames: () => ReadonlyMap<string, string> = () => new Map(),
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -1496,10 +1502,16 @@ export class LazyToolRuntime {
       // A selection that has not answered by the deadline falls back to keywords
       // like any other selector failure; the turn's own cancellation still wins.
       const deadline = AbortSignal.timeout(TOOL_SELECTION_POLICY.deadlineMs);
+      const published = this.mcpToolNames();
       const judgments = await this.decisionModel({
         query,
         ...(units.length > 1 ? { requests: units.map((unit) => unit.text.trim()) } : {}),
-        candidates: candidates.map(decisionCandidate),
+        candidates: candidates.map((tool) =>
+          decisionCandidate(
+            tool,
+            isAliasedMcpToolName(String(tool.name)) ? published.get(String(tool.name)) : undefined,
+          ),
+        ),
         ...(this.loadedThisTurn.size ? { loadedEarlier: [...this.loadedThisTurn] } : {}),
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       });
@@ -1920,6 +1932,7 @@ export function installLazyToolRuntime(
   connectableLookup?: ConnectableIntegrationLookup,
   connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
   meaningRanker?: ToolMeaningRanker,
+  mcpToolNames?: () => ReadonlyMap<string, string>,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -1938,6 +1951,7 @@ export function installLazyToolRuntime(
     connectableLookup,
     connectedAccounts,
     meaningRanker,
+    mcpToolNames,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
