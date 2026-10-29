@@ -153,25 +153,18 @@ function ScopedCard({
         ) : null}
         {waiting ? (
           <div className="og-session-capability-waiting">
-            {/* Once the window is gone the card asks instead of spinning. */}
-            {flow.signInWindowGone ? null : (
-              <span aria-hidden className="og-session-capability-spinner" />
-            )}
+            <span aria-hidden className="og-session-capability-spinner" />
             <p role="status" tabIndex={-1}>
               {flow.signInWindowGone
-                ? t("sessionIntegrationCapabilityCard.signInWindowGone")
+                ? t("sessionIntegrationCapabilityCard.signInWindowGone", {
+                    name: presentation.name,
+                  })
                 : t("sessionIntegrationCapabilityCard.finishSigningIn", {
                     name: presentation.name,
                   })}
             </p>
             <span className="og-session-capability-waiting-actions">
-              <button
-                type="button"
-                className={
-                  flow.signInWindowGone ? "og-session-capability-reopen-primary" : undefined
-                }
-                onClick={flow.reopenSignIn}
-              >
+              <button type="button" onClick={flow.reopenSignIn}>
                 {flow.signInWindowGone
                   ? t("sessionIntegrationCapabilityCard.openSignInAgain")
                   : t("sessionIntegrationCapabilityCard.reopenSignIn")}

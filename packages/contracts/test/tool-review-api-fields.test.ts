@@ -284,15 +284,39 @@ test("a long message still shows every link target, even one past the preview's 
   expect(huge.preview.startsWith("Links: https://late.example\n\n")).toBe(true);
 });
 
-test("a very long list of link targets ends by pointing to Details", () => {
+test("a very long list of link targets points to Details, which lists every one", () => {
   const content = Array.from(
     { length: 400 },
     (_, index) => `<area href="https://link-${index}.example/some/longer/path">`,
   ).join("");
+  const args = { body: { body: { contentType: "HTML", content } } };
   const message = htmlMessage(content);
   expect(message.preview).toMatch(/^Links: https:\/\/link-0\.example\/some\/longer\/path, /);
-  expect(message.preview).toMatch(/, and \d+ more in Details\n\n$/);
+  expect(message.preview).toMatch(/, and \d+ more\. Details lists every link\.\n\n$/);
   expect(message.truncated).toBe(true);
+  // The message's Details lead with all 400 targets, page by page, then its fields.
+  const first = toolReviewDetails(args, undefined, message.path, 0);
+  expect(first.total).toBe(402);
+  expect(first.items[0]).toEqual({
+    label: "Link 1",
+    value: "https://link-0.example/some/longer/path",
+  });
+  const last = toolReviewDetails(args, undefined, message.path, 380);
+  expect(last.items.map((item) => item.label).slice(-3)).toEqual([
+    "Link 400",
+    "Content type",
+    "Content",
+  ]);
+  expect(last.items.at(-1)).toMatchObject({ path: `${message.path}/content`, truncated: true });
+  expect(last.nextOffset).toBeNull();
+  // A message without links keeps its plain fields.
+  const plain = toolReviewDetails(
+    { body: { body: { contentType: "HTML", content: "<p>Hi</p>" } } },
+    undefined,
+    message.path,
+    0,
+  );
+  expect(plain.items.map((item) => item.label)).toEqual(["Content type", "Content"]);
 });
 
 test("link targets decode exactly as a browser decodes them, and form destinations show", () => {

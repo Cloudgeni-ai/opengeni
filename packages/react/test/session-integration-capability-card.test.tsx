@@ -169,10 +169,16 @@ test("every line about the sign-in window stays true while it shows", async () =
     // The person closes the window (or the provider cuts the card off from it).
     windows[0]!.closed = true;
     await waitFor(
-      () => text().includes("Closed the sign-in window? Open it again to finish."),
+      () =>
+        text().includes(
+          "Finish signing in to Outlook Mail. If you closed the sign-in window, open it again.",
+        ),
       "The card kept saying to finish in a window it can't see",
     );
+    // It can't tell a closed window from one the provider cut off, so it
+    // never says the window closed, and it keeps waiting.
     expect(text()).not.toContain("in the window that opened");
+    expect(document.querySelector(".og-session-capability-spinner")).not.toBeNull();
     button("Open sign-in window")!.click();
     await waitFor(
       () => text().includes("Finish signing in to Outlook Mail"),

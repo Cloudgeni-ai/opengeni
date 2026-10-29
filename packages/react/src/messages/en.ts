@@ -4577,7 +4577,7 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
   "sessionIntegrationCapabilityCard.signInFailed": "Sign-in couldn't continue. Try again.",
   "sessionIntegrationCapabilityCard.signInWindowGone":
-    "Closed the sign-in window? Open it again to finish.",
+    "Finish signing in to {name}. If you closed the sign-in window, open it again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",

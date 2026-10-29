@@ -67,8 +67,9 @@ export type IntegrationCapabilityConnect = {
   waiting: boolean;
   /**
    * While {@link waiting}, the card can no longer see the sign-in window: the
-   * person closed it, or the provider's page cut the card off from it. Either
-   * way the card offers to open it again; it never claims which happened.
+   * person closed it, or the provider's page cut the card off from it (Google's
+   * sign-in pages do, while staying open). The card keeps waiting and says
+   * something true either way; it never claims the window closed.
    */
   signInWindowGone: boolean;
   /**
@@ -201,7 +202,7 @@ export function useIntegrationCapabilityConnect({
   // Every line must be true while it shows: the "close the sign-in window"
   // reminder goes once the window closes, and while waiting the card notices
   // when it can no longer see the window. A window the provider cut off reads
-  // as closed too, so the card only offers to open it again.
+  // as closed too, so the card keeps waiting and only offers to open it again.
   useEffect(() => {
     if (!waiting && !leftOpen) return;
     const timer = setInterval(() => {

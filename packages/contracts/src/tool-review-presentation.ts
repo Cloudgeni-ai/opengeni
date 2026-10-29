@@ -621,9 +621,14 @@ function plainText(content: string, contentType: unknown): ApiReading {
   }
   const more = unseen.length - count;
   const links = count
-    ? `Links: ${listed}${more ? `, and ${more.toLocaleString("en-US")} more in Details` : ""}\n\n`
+    ? `Links: ${listed}${more ? `, and ${more.toLocaleString("en-US")} more. Details lists every link.` : ""}\n\n`
     : "";
-  return { text: `${links}${preview}`, fitted: true, truncated: preview !== text || more > 0 };
+  return {
+    text: `${links}${preview}`,
+    fitted: true,
+    truncated: preview !== text || more > 0,
+    targets: [...targets],
+  };
 }
 
 /** Whether a preview shows a whole link target, not just the start of a longer address. */
@@ -707,15 +712,26 @@ function apiValueText(value: unknown): string | undefined {
  * A plain reading of a value. A message's text comes already fitted to its
  * preview (`fitted`), because its link list must survive the cut.
  */
-type ApiReading = { text: string; fitted?: boolean; truncated?: boolean };
+type ApiReading = {
+  text: string;
+  fitted?: boolean;
+  truncated?: boolean;
+  /** Every link target in an HTML message, in order. */
+  targets?: string[];
+};
 
-function apiValueReading(value: unknown): ApiReading | undefined {
-  if (
-    plainObject(value) &&
+/** A message body: its text and how it is written ({ content, contentType }). */
+function messageContent(value: unknown): { content: string; contentType: unknown } | undefined {
+  return plainObject(value) &&
     typeof value.content === "string" &&
     Object.keys(value).every((key) => ["content", "contentType"].includes(key))
-  )
-    return plainText(value.content, value.contentType);
+    ? { content: value.content, contentType: value.contentType }
+    : undefined;
+}
+
+function apiValueReading(value: unknown): ApiReading | undefined {
+  const message = messageContent(value);
+  if (message) return plainText(message.content, message.contentType);
   const text = apiValueText(value);
   return text === undefined ? undefined : { text };
 }
@@ -1064,16 +1080,28 @@ export function toolReviewDetails(
     items = [{ label: "Message", ...labelled(value)! }];
   } else if (value && typeof value === "object") {
     const entries = Object.entries(value);
-    total = entries.length;
-    items = entries.slice(offset, offset + limit).map(([key, entry], index) => ({
-      label: bound(
-        (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
-          ? context.fieldLabels[key]
-          : undefined) ?? toolReviewFieldLabel(key),
-        256,
-      ),
-      ...preview(entry, key, `${path}${fieldPointer(key, offset + index, path)}`),
+    // A message's Details lead with every link target it holds, so the card's
+    // "Details lists every link" is true however many there are.
+    const message = messageContent(value);
+    const links = message ? (plainText(message.content, message.contentType).targets ?? []) : [];
+    total = links.length + entries.length;
+    const linkItems = links.slice(offset, offset + limit).map((target, index) => ({
+      label: `Link ${offset + index + 1}`,
+      value: bound(target, 4000),
     }));
+    const start = Math.max(0, offset - links.length);
+    const fieldItems = entries
+      .slice(start, start + limit - linkItems.length)
+      .map(([key, entry], position) => ({
+        label: bound(
+          (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
+            ? context.fieldLabels[key]
+            : undefined) ?? toolReviewFieldLabel(key),
+          256,
+        ),
+        ...preview(entry, key, `${path}${fieldPointer(key, start + position, path)}`),
+      }));
+    items = [...linkItems, ...fieldItems];
   } else {
     const text = valueText(value);
     total = Math.max(1, Math.ceil(text.length / 4000));
