@@ -1358,9 +1358,11 @@ flowchart LR
 ```
 
 Send and Steer create durable turn intent. A normal human Send is promoted to
-Steer-equivalent replacement only when the active, unpaused branch is waiting in
-`requires_action`; checked-out queue edits, paused sessions, and other active
-lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
+Steer-equivalent replacement only when the active, unpaused, admissible branch
+is waiting with no live attempt: in `requires_action`, or in
+`waiting_capacity` on a parked subscription turn (`sendTakesOverActiveWait`);
+checked-out queue edits, paused sessions, and other active lifecycle states
+keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
