@@ -8735,7 +8735,7 @@ export const sessionAttemptCodemodeCalls = pgTable(
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
-    /** 1106: the machine the calling code ran on, when it was not the session's
+    /** 1108: the machine the calling code ran on, when it was not the session's
      *  active sandbox (a `run_on` exec). Paths in the call resolve there. */
     callerExecutionSandboxId: uuid("caller_execution_sandbox_id"),
     state: text("state", {
