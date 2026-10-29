@@ -64,6 +64,8 @@ export const DICTATION_CLIPBOARD_RESTORE_MS = 1_000;
 const NOTICE_MS = 2_500;
 const ERROR_NOTICE_MS = 8_000;
 const ESCAPE = "Escape";
+/** How long a cancelled dictation's page may take to send back its speech. */
+const CANCELLED_SPEECH_WAIT_MS = 60_000;
 
 /** A page that records for the shortcuts. */
 export interface DictationTarget {
@@ -170,6 +172,11 @@ export class Dictation {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   /** A shortcut pressed while no page could record: it starts once one listens. */
   private waiting: { profileId: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Dictations cancelled lately, whose page may still send back their speech to keep. */
+  private readonly cancelled = new Map<
+    string,
+    { target: DictationTarget; profile: DesktopDictationProfile; at: number }
+  >();
   private readonly listeners = new Set<() => void>();
 
   constructor(private readonly deps: DictationDeps) {
@@ -280,6 +287,14 @@ export class Dictation {
 
   /** How the page's dictation is going. */
   report(target: DictationTarget, report: DesktopDictationReport): void {
+    const asked = this.cancelled.get(report.dictationId);
+    if (asked?.target === target && report.phase === "cancelled") {
+      this.cancelled.delete(report.dictationId);
+      if (report.audio) {
+        this.keepCancelled(report.dictationId, asked.profile, asked.at, report.audio);
+      }
+      return;
+    }
     const active = this.active;
     if (!active || active.target !== target || report.dictationId !== active.id) return;
     switch (report.phase) {
@@ -306,6 +321,10 @@ export class Dictation {
         this.fail(report.message, report.retryable);
         return;
       case "cancelled":
+        // Cancelled on the page itself.
+        if (report.audio && !active.again) {
+          this.keepCancelled(active.id, active.profile, this.now(), report.audio);
+        }
         this.finish();
         this.show({ kind: "hidden" });
         return;
@@ -536,9 +555,45 @@ export class Dictation {
   private cancel(): void {
     const active = this.active;
     if (!active) return;
+    if (!active.again) {
+      // Its page sends back speech worth keeping, for the recent dictations.
+      const now = this.now();
+      for (const [id, earlier] of this.cancelled) {
+        if (now - earlier.at > CANCELLED_SPEECH_WAIT_MS) this.cancelled.delete(id);
+      }
+      this.cancelled.set(active.id, { target: active.target, profile: active.profile, at: now });
+    }
     this.send({ kind: "cancel", dictationId: active.id });
     this.finish();
     this.show({ kind: "hidden" });
+  }
+
+  /**
+   * A cancelled dictation's speech, kept with the recent dictations only, to
+   * play or transcribe again there; it is deleted everywhere else.
+   */
+  private keepCancelled(
+    id: string,
+    profile: DesktopDictationProfile,
+    at: number,
+    audio: DesktopDictationAudio,
+  ): void {
+    this.deps.store.remember(
+      {
+        id,
+        text: "",
+        at: new Date(at).toISOString(),
+        profileName: profile.name,
+        language: profile.language,
+        cancelled: true,
+      },
+      audio,
+    );
+    this.changed();
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
   }
 
   /** Let a failed dictation go; it stays saved, for the composer to offer. */
@@ -602,7 +657,7 @@ export class Dictation {
         {
           id: active.id,
           text,
-          at: new Date(this.deps.now?.() ?? Date.now()).toISOString(),
+          at: new Date(this.now()).toISOString(),
           profileName: active.profile.name,
           language: active.profile.language,
         },

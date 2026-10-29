@@ -651,6 +651,9 @@ export async function runTurnStreamAttempt(
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
+        ...(compactionModeOptions.isCodexSubscriptionTurn !== true
+          ? { omitRemoteCompactionItems: true }
+          : {}),
         ...(settings.subscriptionCrossProviderFailoverEnabled &&
         compactionModeOptions.codexCompactionMode === "portable" &&
         turnExecutionPolicy.credentialRestriction === undefined

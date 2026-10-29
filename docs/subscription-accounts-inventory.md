@@ -27,6 +27,13 @@
 > deleted after both providers migrate. Their
 > references are historical. See
 > [design X4](design/subscription-core-2026-10-07.md#x4-supergrok-legacy-deletion-and-the-provider-neutral-guard).
+>
+> The Codex remote_v2 model lock cited below (`assertSessionAllowsProductModel`,
+> `CodexCompactionV2ProviderLockedError`, the goal-admission Codex check and
+> the picker's `codexOnly` for sessions) is removed and historical. A
+> remote_v2 session switches to any model in place: its next turn on another
+> provider rebuilds a portable checkpoint from the stored transcript and the
+> session becomes portable ([context compaction](context-compaction.md)).
 
 > C3 provider-keyed candidate: Claude pin migration now preserves every
 > eligible effective-pool pin beside existing Codex and SuperGrok bindings,

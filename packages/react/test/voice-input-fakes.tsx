@@ -266,6 +266,8 @@ export function fakePlatform(
     store?: RecordingChunkStore;
     /** Chunks each recording saves as it starts, through its uploader. */
     chunks?: Uint8Array[];
+    /** How long each recording says it has been capturing once it starts. */
+    elapsedMilliseconds?: number;
   },
 ) {
   const recorders: Array<{ options: RecorderOptions; stopped: boolean; discarded: boolean }> = [];
@@ -318,7 +320,12 @@ export function fakePlatform(
               tracks: [{ trackNumber: 0, source: "microphone", label: "Microphone" }],
             } as never,
           );
-          snapshot = { ...snapshot, state: "recording", recordingId: created.id };
+          snapshot = {
+            ...snapshot,
+            state: "recording",
+            recordingId: created.id,
+            elapsedMilliseconds: options?.elapsedMilliseconds ?? 0,
+          };
           if (options?.chunks) {
             recorderOptions.onChange?.(snapshot);
             for (const [chunkNumber, bytes] of options.chunks.entries()) {

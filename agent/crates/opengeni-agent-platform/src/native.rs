@@ -1225,6 +1225,9 @@ impl Platform for NativePlatform {
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
+        if let Some(email) = crate::default_git_email(req.env.keys()) {
+            cmd.env("EMAIL", email);
+        }
 
         let requested_policy = requested_policy(policy)?;
         if requested_policy.has_limits()
@@ -2088,6 +2091,112 @@ mod tests {
         let out = String::from_utf8_lossy(&resp.stdout);
         assert!(out.contains("hello"), "stdout was {out:?}");
         assert!(!resp.timed_out);
+    }
+
+    /// A machine with no Git identity can still commit: with the default email
+    /// where Git cannot guess one (a fresh container), with Git's own guess
+    /// elsewhere. Any identity the repository or the request sets wins.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_commits_without_a_configured_git_identity() {
+        // Pin PATH in the request: a parallel test briefly points the process
+        // PATH at a missing directory, which would hide git from the shell.
+        let Some(git_dir) = ["/usr/bin", "/usr/local/bin", "/bin", "/opt/homebrew/bin"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|dir| dir.join("git").is_file())
+        else {
+            eprintln!("skipped: git is not installed");
+            return;
+        };
+        let path = format!("{}:/usr/bin:/bin", git_dir.display());
+        // A developer's exported identity would mask the fallback under test.
+        if [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!("skipped: a GIT_* identity is exported");
+            return;
+        }
+        // The probe resolves git through the process PATH; retry past that race
+        // once, after which its answer is remembered for the exec below.
+        let mut guesses = None;
+        for _ in 0..50 {
+            guesses = crate::git_guesses_email();
+            if guesses.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Some(guesses) = guesses else {
+            eprintln!("skipped: the git identity probe could not run");
+            return;
+        };
+        let (platform, dir) = rooted();
+        let home = tempfile::tempdir().expect("home tempdir");
+        // Only the agent's own environment decides the fallback; keep this
+        // test truthful on a developer machine that exports EMAIL.
+        let ambient = std::env::var("EMAIL").ok();
+        let isolated = |extra: &[(&str, &str)]| {
+            [
+                ("PATH", path.as_str()),
+                ("HOME", home.path().to_str().expect("utf-8 home")),
+                ("XDG_CONFIG_HOME", home.path().to_str().expect("utf-8 home")),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<std::collections::HashMap<String, String>>()
+        };
+        let run = |script: &str, env: std::collections::HashMap<String, String>| ExecRequest {
+            command: vec![script.to_string()],
+            shell: true,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            env,
+            ..Default::default()
+        };
+        let commit = "git init -q repo && cd repo && echo a > a && git add a && \
+                      git -c user.name=Agent commit -qm first && git log -1 --format=%ae";
+        let req = run(commit, isolated(&[]));
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        let stderr = String::from_utf8_lossy(&resp.stderr);
+        assert_eq!(resp.exit_code, 0, "stderr was {stderr:?}");
+        let email = String::from_utf8_lossy(&resp.stdout).trim().to_string();
+        match ambient {
+            Some(ambient) => assert_eq!(email, ambient),
+            None if !guesses => assert_eq!(email, crate::DEFAULT_GIT_EMAIL),
+            None => assert_ne!(email, crate::DEFAULT_GIT_EMAIL, "Git's own guess is kept"),
+        }
+
+        let repository = "cd repo && git config user.email repo@example.com && \
+                          echo b > b && git add b && git -c user.name=Agent commit -qm second && \
+                          git log -1 --format=%ae";
+        let req = run(repository, isolated(&[]));
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            "repo@example.com"
+        );
+
+        let req = run(
+            "printf %s \"$EMAIL\"",
+            isolated(&[("EMAIL", "me@example.com")]),
+        );
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(String::from_utf8_lossy(&resp.stdout), "me@example.com");
     }
 
     #[test]

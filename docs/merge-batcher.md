@@ -13,11 +13,20 @@ environment that only `main` can use.
 Add the `queue-ready` label or turn on auto-merge (`gh pr merge --auto --squash`).
 A queued PR is batched once its **PR CI** check has passed on its exact current
 head. Add `queue-priority` as well for an urgent fix: priority PRs are tested
-next, ahead of an ordinary batch that is still running.
+next, as soon as the batch that is already running finishes. A running batch is
+never cancelled for one.
 
 A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
 Pushing a new head while queued simply restarts its batch.
+
+Database migrations need unique numbers, and two PRs can add the same number
+without a Git conflict. A queued PR that adds a migration whose number `main`
+already uses for another migration leaves the queue right away, with the
+`scripts/renumber-migration.ts` command that fixes it, instead of failing a
+whole batch. Two queued PRs that add the same number never share a batch.
+The numbered directories are listed in `NUMBERED_FILES`
+(`scripts/batcher/model.ts`).
 
 ## How a batch lands
 
@@ -45,7 +54,7 @@ Pushing a new head while queued simply restarts its batch.
    turn until the failing PR is found and removed from the queue.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
-new head or leaves the queue, or a priority PR becomes ready.
+new head or leaves the queue.
 
 ## Main CI cadence
 
@@ -56,6 +65,10 @@ job, and `.github/workflows/main-approval-superseded.yml` re-runs the newest
 `main` SHA's run when no full run is in progress and the last one started at
 least 30 minutes ago (the repository variable `MAIN_CI_INTERVAL_MINUTES`
 changes that). Version merges always run in full on their own push.
+
+If that full run fails, the same workflow re-runs its failed jobs once, as the
+batcher does for a batch, so one flaky test does not cost `main` its images for
+a whole interval. A failure on the retry stays: `main` is broken and needs a fix.
 
 To get a fully tested SHA with images now, re-run that SHA's `CI` run on `main`
 (`gh run rerun <id>`). Canary and staging deploys use the newest fully green

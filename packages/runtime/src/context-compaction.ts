@@ -1680,6 +1680,34 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 }
 
 /**
+ * Compaction `implementation` of the portable rebuild that replaces a Codex
+ * remote compaction checkpoint when its chat switches to another model.
+ */
+export const PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION = "portable_model_switch" as const;
+
+/**
+ * Where the part of a stored transcript a model switch summarizes begins: the
+ * oldest user-message boundary after which the rest fits `budgetTokens`. When
+ * not even the newest work unit fits, it still starts at that unit, and the
+ * checkpoint request trims its tool output as usual.
+ */
+export function portableSwitchTranscriptStart(
+  items: readonly CompactionItem[],
+  budgetTokens: number,
+): number {
+  const prefixTokens = new Array<number>(items.length + 1).fill(0);
+  for (let index = 0; index < items.length; index += 1) {
+    prefixTokens[index + 1] = prefixTokens[index]! + estimateItemTokens(items[index]!);
+  }
+  const total = prefixTokens[items.length]!;
+  if (total <= budgetTokens) return 0;
+  const cuts = oldestLogicalUnitCuts(items);
+  const cut = cuts.find((candidate) => total - prefixTokens[candidate]! <= budgetTokens);
+  if (cut !== undefined && cut < items.length) return cut;
+  return cuts.length >= 2 ? cuts[cuts.length - 2]! : 0;
+}
+
+/**
  * Preparation for the retention rebuild shared by both compaction modes.
  *
  * - `source` has every "unchanged goal" stand-in restored to its full goal

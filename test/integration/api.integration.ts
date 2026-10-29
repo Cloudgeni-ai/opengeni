@@ -7329,7 +7329,9 @@ describe("API component integration", () => {
       },
     );
     expect(deniedRotate.status).toBe(403);
-    expect(await deniedRotate.text()).toContain("missing permission: mcp_servers:attach");
+    expect(await deniedRotate.json()).toMatchObject({
+      error: { details: { code: "missing_permission", permission: "mcp_servers:attach" } },
+    });
 
     const deniedCreate = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
@@ -7350,7 +7352,9 @@ describe("API component integration", () => {
       },
     });
     expect(deniedCreate.status).toBe(403);
-    expect(await deniedCreate.text()).toContain("missing permission: mcp_servers:attach");
+    expect(await deniedCreate.json()).toMatchObject({
+      error: { details: { code: "missing_permission", permission: "mcp_servers:attach" } },
+    });
 
     const collision = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",

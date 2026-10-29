@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { missingPermissionMessage } from "@opengeni/core";
 import {
   createDb,
   createWorkspace,
@@ -96,7 +97,7 @@ test("public GitHub verification accepts create or follow-up session authority",
   ).not.toThrow();
   expect(() =>
     requirePublicGitHubRepositoryVerificationPermission({ permissions: ["workspace:read"] }),
-  ).toThrow("sessions:create or sessions:control");
+  ).toThrow(missingPermissionMessage("sessions:create"));
 });
 
 function appWithProvider(

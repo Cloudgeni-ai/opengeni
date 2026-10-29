@@ -14,11 +14,13 @@ import {
 import {
   OAuthStartResponse,
   type ConnectionOwnership,
+  type ConnectionMetadata,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
 import {
   integrationKeyForConnectProvider,
   legacyMcpClientError,
+  listOwnConnectionMetadata,
   requireEnvironmentEncryption,
   withMcpStreamableHttpClient,
   type McpStreamableHttpClient,
@@ -1115,18 +1117,34 @@ async function completeMcpOAuthCallbackWithinDeadline(
       await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
       // Serialize the entire owner/resource bucket, including providers with no
       // identity proof. Locking only a known identity lets unknown callbacks race it.
+      // A personal account follows its owner across workspaces, so its bucket does too.
       const bucket = JSON.stringify([
         state.accountId,
-        state.workspaceId,
+        ownerSubjectId ? null : state.workspaceId,
         ownerSubjectId,
         state.mcpUrl,
       ]);
       await scopedDb.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-account:${bucket}`}, 0))`,
       );
-      const accounts = await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId);
+      const accounts = new Map<string, ConnectionMetadata>(
+        (await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId)).map(
+          (connection) => [connection.id, connection] as const,
+        ),
+      );
+      // Connecting a personal account again from another of the owner's
+      // workspaces reuses it instead of adding a duplicate without its settings.
+      if (ownerSubjectId) {
+        for (const connection of await listOwnConnectionMetadata(scopedDb, {
+          accountId: state.accountId,
+          workspaceId: state.workspaceId,
+          subjectId: ownerSubjectId,
+          includeInactive: true,
+        }))
+          accounts.set(connection.id, connection);
+      }
       const decision = decideOAuthAccountConnection({
-        accounts,
+        accounts: [...accounts.values()],
         ownerSubjectId,
         providerDomain: state.providerDomain,
         mcpUrl: state.mcpUrl,

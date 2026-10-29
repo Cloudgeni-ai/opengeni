@@ -530,7 +530,8 @@ with the workspace's voice input and kept like any dictation.
   transcribes it again, which uploads the kept speech as a new dictation and
   replaces the text. An optional retry shortcut does that for the last
   dictation and types the new text; an optional cancel shortcut works like
-  Escape.
+  Escape. Cancel deletes the dictation; its speech, after the first few
+  seconds, stays only here, marked cancelled, to play or transcribe again.
 - **Vocabulary.** Names and terms the person lists (up to 100) go with every
   dictation as the recording's `keyterms`, and reach the voice input model
   when it takes them.

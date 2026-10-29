@@ -70,7 +70,11 @@ const context = {
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#chat">{children}</a>,
 }));
-mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => context,
+  // The account picker reads the same context to name each account's origin.
+  useOptionalAppContext: () => context,
+}));
 mock.module("./schedule-parts", () => ({
   useScheduleAccess: () => ({
     canManage: true,

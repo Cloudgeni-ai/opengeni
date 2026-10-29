@@ -6,14 +6,20 @@ import type {
 import {
   getWorkspace,
   listCapabilityInstallations,
+  listInstalledApiIntegrations,
+  listEnabledMcpCapabilityServers,
   listOriginMcpCapabilityServersForPersonalExtension,
   rlsContextForWorkspace,
+  type ApiIntegrationRuntime,
   type Database,
   type EnabledMcpCapabilityServer,
   type OriginMcpCapabilityServer,
 } from "@opengeni/db";
 import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organization-integration-policy";
-import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
+import {
+  personalWorkspaceOwnerOriginConnections,
+  type PersonalWorkspaceOriginConnections,
+} from "./personal-connection-delegations";
 
 /**
  * Generic MCP enablement is classified as this key (see `prepareCapabilityEnable`
@@ -139,6 +145,8 @@ export async function personalWorkspaceExtensionMcpServers(
     ownServers:
       | readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[]
       | (() => Promise<readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[]>);
+    /** The owner's origin connections when the caller already read them. */
+    origins?: readonly PersonalWorkspaceOriginConnections[];
   },
 ): Promise<PersonalWorkspaceExtensionMcpServer[]> {
   const subjectId = input.subjectId;
@@ -147,13 +155,17 @@ export async function personalWorkspaceExtensionMcpServers(
   const accountId =
     input.accountId ?? (await rlsContextForWorkspace(db, input.workspaceId)).accountId;
   // One read at a time: `db` may be a single bounded transaction.
-  const origins = await personalWorkspaceOwnerOriginConnections(db, {
-    accountId,
-    workspaceId: input.workspaceId,
-    subjectId,
-  });
+  const origins =
+    input.origins ??
+    (await personalWorkspaceOwnerOriginConnections(db, {
+      accountId,
+      workspaceId: input.workspaceId,
+      subjectId,
+    }));
   if (origins.length === 0) return [];
-  const policy = await readOrganizationIntegrationPolicyForServing(db, { accountId });
+  const policy = await readOrganizationIntegrationPolicyForServing(db, {
+    accountId,
+  });
   const allowedByPolicy = (server: OriginMcpCapabilityServer) =>
     policy.mode === "unrestricted" ||
     integrationKeysForCarriedServer(server).every((key) =>
@@ -202,6 +214,169 @@ export async function personalWorkspaceExtensionMcpServers(
     }
   }
   return carried;
+}
+
+export type PersonalWorkspaceExtensionApiIntegration = ApiIntegrationRuntime & {
+  personalExtension: PersonalWorkspaceConnectorOrigin;
+};
+
+/**
+ * The policy key the owner's own setup of this API Integration in Personal
+ * would check: a curated definition's own id, or the custom key of its protocol
+ * for a workspace-authored one (see `integrationSourceForOrganizationPolicy`).
+ */
+function integrationKeyForCarriedApiIntegration(
+  integration: Pick<ApiIntegrationRuntime, "definitionProvenance" | "definitionId" | "protocol">,
+): string {
+  return integration.definitionProvenance === "curated"
+    ? integration.definitionId
+    : `custom:${integration.protocol}`;
+}
+
+/**
+ * API Integrations (for example Outlook, OneDrive or Teams, or a workspace's
+ * own OpenAPI or GraphQL service) a Personal workspace carries for its owner:
+ * the origin workspace's installed instances bound to one of the owner's own
+ * active "Only me" connections made there.
+ *
+ * The same rules as `personalWorkspaceExtensionMcpServers`: derived live and
+ * never persisted; only the workspace's own owner, only while they still
+ * belong to the origin workspace; never an instance bound to a workspace
+ * account or to anyone else's; the organization policy must allow the
+ * integration under the key its own setup would check. An API Integration
+ * holds one instance per account, so Personal's own instances sit beside the
+ * carried ones; only an instance Personal already has for the same account,
+ * or a server it already serves with the same id, wins. Shared workspaces
+ * are unchanged.
+ */
+export async function personalWorkspaceExtensionApiIntegrations(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string | null | undefined;
+    accountId?: string | undefined;
+    /** Server ids the workspace already serves (or how to read them, only when needed). */
+    takenServerIds: readonly string[] | (() => Promise<readonly string[]>);
+    /** Only instances with these runtime server ids (a live target fence). */
+    serverIds?: readonly string[];
+    /** The owner's origin connections when the caller already read them. */
+    origins?: readonly PersonalWorkspaceOriginConnections[];
+    /** Personal's own instances the owner sees, when the caller already read them. */
+    ownIntegrations?: readonly Pick<ApiIntegrationRuntime, "connectionRef">[];
+  },
+): Promise<PersonalWorkspaceExtensionApiIntegration[]> {
+  const subjectId = input.subjectId;
+  if (!subjectId || !(subjectId.startsWith("user:") || subjectId.startsWith("external_user:")))
+    return [];
+  if (input.serverIds && input.serverIds.length === 0) return [];
+  const accountId =
+    input.accountId ?? (await rlsContextForWorkspace(db, input.workspaceId)).accountId;
+  // One read at a time: `db` may be a single bounded transaction.
+  const origins =
+    input.origins ??
+    (await personalWorkspaceOwnerOriginConnections(db, {
+      accountId,
+      workspaceId: input.workspaceId,
+      subjectId,
+    }));
+  if (origins.length === 0) return [];
+  const policy = await readOrganizationIntegrationPolicyForServing(db, {
+    accountId,
+  });
+  const personalConnectionIds = new Set(
+    (
+      input.ownIntegrations ??
+      (await listInstalledApiIntegrations(db, input.workspaceId, subjectId))
+    ).flatMap((integration) =>
+      integration.connectionRef?.connectionId ? [integration.connectionRef.connectionId] : [],
+    ),
+  );
+  const taken = new Set(
+    typeof input.takenServerIds === "function"
+      ? await input.takenServerIds()
+      : input.takenServerIds,
+  );
+  const carried: PersonalWorkspaceExtensionApiIntegration[] = [];
+  for (const origin of origins) {
+    const ownConnectionIds = new Set(
+      origin.connections
+        .filter((connection) => connection.status === "active")
+        .map((connection) => connection.id),
+    );
+    const instances = await listInstalledApiIntegrations(
+      db,
+      origin.originWorkspaceId,
+      subjectId,
+      input.serverIds,
+    );
+    let originWorkspaceName: string | null = null;
+    for (const instance of instances) {
+      const ref = instance.connectionRef;
+      if (
+        !ref ||
+        ref.subjectScope !== "subject" ||
+        !ref.connectionId ||
+        !ownConnectionIds.has(ref.connectionId) ||
+        instance.connectionStatus !== "active" ||
+        personalConnectionIds.has(ref.connectionId) ||
+        taken.has(instance.serverId) ||
+        (policy.mode !== "unrestricted" &&
+          !policy.allowedIntegrationKeys.includes(integrationKeyForCarriedApiIntegration(instance)))
+      )
+        continue;
+      originWorkspaceName ??=
+        (await getWorkspace(db, origin.originWorkspaceId))?.name ?? "another workspace";
+      taken.add(instance.serverId);
+      carried.push({
+        ...instance,
+        personalExtension: {
+          originWorkspaceId: origin.originWorkspaceId,
+          originWorkspaceName,
+          catalogScope: instance.definitionProvenance === "curated" ? "global" : "workspace",
+        },
+      });
+    }
+  }
+  return carried;
+}
+
+/**
+ * The API Integrations a workspace lists for one person: its own installed
+ * instances that person can see, then, in their own Personal workspace, the
+ * instances carried in for them (see `personalWorkspaceExtensionApiIntegrations`).
+ * Carried instances keep `personalExtension` so surfaces can say where they
+ * come from and leave their management to that workspace.
+ */
+export async function listApiIntegrationsWithPersonalExtension(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string | null | undefined;
+    accountId?: string | undefined;
+    /** Deployment-configured MCP servers whose ids are already taken. */
+    deploymentMcpServerIds?: readonly string[];
+  },
+): Promise<
+  (ApiIntegrationRuntime &
+    Partial<Pick<PersonalWorkspaceExtensionApiIntegration, "personalExtension">>)[]
+> {
+  const own = await listInstalledApiIntegrations(
+    db,
+    input.workspaceId,
+    input.subjectId ?? undefined,
+  );
+  const carried = await personalWorkspaceExtensionApiIntegrations(db, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    accountId: input.accountId,
+    ownIntegrations: own,
+    takenServerIds: async () => [
+      ...(input.deploymentMcpServerIds ?? []),
+      ...(await listEnabledMcpCapabilityServers(db, input.workspaceId)).map((server) => server.id),
+      ...own.map((integration) => integration.serverId),
+    ],
+  });
+  return [...own, ...carried];
 }
 
 /**

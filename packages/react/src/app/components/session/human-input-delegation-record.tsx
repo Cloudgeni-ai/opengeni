@@ -1,19 +1,19 @@
 // The person's "Let the agent decide" message in the chat whose agent was
 // handed a sub-session's question: the question, then what the agent chose
-// once the sub-session's request settles.
+// once the sub-session's request settles. Polling stops once it is settled.
 import type { OpenGeniClient, SessionHumanInputRequest } from "@opengeni/sdk";
 import { CheckIcon } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { usePolledValue } from "../../../hooks/internal";
-import { useOpenGeniText } from "../../../messages/runtime";
+import { humanInputDelegationQuestionText } from "../../../human-input-delegation";
+import { useOpenGeniText, type OpenGeniText } from "../../../messages/runtime";
 import type { UserMessageItem } from "../../../timeline/types";
 import { cn } from "../../lib/utils";
 
 export type HumanInputDelegationRecordClient = Pick<OpenGeniClient, "getHumanInputRequest">;
 
-const POLL_MS = 10_000;
-const VISIBLE_PREFIX = "Let the agent decide: ";
+export const HUMAN_INPUT_DELEGATION_POLL_MS = 10_000;
 
 /** "main" or "Staging · Run the migrations": each answer, option ids shown as their labels. */
 export function humanInputDecisionSummary(request: SessionHumanInputRequest): string {
@@ -34,31 +34,45 @@ export function humanInputDecisionSummary(request: SessionHumanInputRequest): st
 }
 
 function decisionLine(
+  t: OpenGeniText,
   request: SessionHumanInputRequest | null,
-  deciding: string,
 ): {
   settled: boolean;
   text: string;
 } {
   if (!request || request.status === "pending") {
-    return { settled: false, text: deciding };
+    return { settled: false, text: t("humanInputModel.yourAgentIsDeciding") };
   }
   const byAgent = request.respondedBy?.startsWith("agent_attempt:") ?? false;
   if (request.status === "answered") {
     const summary = humanInputDecisionSummary(request);
-    const who = byAgent ? "Agent decided" : "Answered";
-    return { settled: true, text: summary ? `${who}: ${summary}` : who };
+    const text = byAgent
+      ? summary
+        ? t("messageTimeline.agentDecidedSummary", { summary })
+        : t("messageTimeline.agentDecided")
+      : summary
+        ? t("messageTimeline.answeredSummary", { summary })
+        : t("messageTimeline.answered");
+    return { settled: true, text };
   }
   if (request.status === "skipped") {
-    return { settled: true, text: byAgent ? "Agent skipped" : "Skipped" };
+    return {
+      settled: true,
+      text: byAgent ? t("messageTimeline.agentSkipped") : t("messageTimeline.skipped"),
+    };
   }
-  return { settled: true, text: request.status === "expired" ? "Expired" : "Cancelled" };
+  return {
+    settled: true,
+    text:
+      request.status === "expired" ? t("messageTimeline.expired") : t("messageTimeline.cancelled"),
+  };
 }
 
 export function HumanInputDelegationRecord({
   client,
   workspaceId,
   item,
+  viewerSubjectId,
   request: suppliedRequest,
 }: {
   client: HumanInputDelegationRecordClient;
@@ -66,6 +80,11 @@ export function HumanInputDelegationRecord({
   item: UserMessageItem & {
     humanInputDelegation: NonNullable<UserMessageItem["humanInputDelegation"]>;
   };
+  /**
+   * The person viewing the chat. A hand-off someone else sent is not "You";
+   * the sender line above the message names them.
+   */
+  viewerSubjectId?: string | undefined;
   /** Previews and tests may supply the request instead of reading it. */
   request?: SessionHumanInputRequest | null | undefined;
 }) {
@@ -74,16 +93,22 @@ export function HumanInputDelegationRecord({
     () => client.getHumanInputRequest(workspaceId, sessionId, requestId),
     [client, requestId, sessionId, workspaceId],
   );
+  // Poll only until the request settles: its answer cannot change after that.
+  const [readSettled, setReadSettled] = useState(false);
   const read = usePolledValue(load, {
-    pollIntervalMs: POLL_MS,
+    pollIntervalMs: readSettled ? undefined : HUMAN_INPUT_DELEGATION_POLL_MS,
     enabled: suppliedRequest === undefined,
   });
+  const loadedSettled = read.data != null && read.data.status !== "pending";
+  useEffect(() => {
+    setReadSettled(loadedSettled);
+  }, [loadedSettled]);
   const request = suppliedRequest === undefined ? read.data : suppliedRequest;
-  const question = item.text.startsWith(VISIBLE_PREFIX)
-    ? item.text.slice(VISIBLE_PREFIX.length)
-    : item.text;
   const t = useOpenGeniText();
-  const line = decisionLine(request, t("humanInputModel.yourAgentIsDeciding"));
+  const question = humanInputDelegationQuestionText(t, item.text);
+  const line = decisionLine(t, request);
+  const fromViewer =
+    !item.sender || viewerSubjectId === undefined || item.sender.subjectId === viewerSubjectId;
   return (
     <div
       data-testid="timeline-user"
@@ -92,7 +117,9 @@ export function HumanInputDelegationRecord({
       className="flex min-w-0 flex-col gap-1"
     >
       <p className="m-0 text-xs font-medium text-fg-muted">
-        {t("messageTimeline.youLetTheAgentDecide")}
+        {fromViewer
+          ? t("messageTimeline.youLetTheAgentDecide")
+          : t("humanInputModel.letTheAgentDecide")}
       </p>
       <p className="m-0 text-sm text-fg [overflow-wrap:anywhere]">{question}</p>
       <p

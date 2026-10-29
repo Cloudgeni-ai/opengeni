@@ -1,7 +1,10 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
-import { personalWorkspaceExtensionMcpServers } from "./personal-workspace-connectors";
+import {
+  personalWorkspaceExtensionApiIntegrations,
+  personalWorkspaceExtensionMcpServers,
+} from "./personal-workspace-connectors";
 import {
   boundMcpResponseBody,
   MCP_MAX_RESPONSE_BYTES,
@@ -131,13 +134,38 @@ export function connectorToolPermissionReference(
 
 async function resolveTarget(input: Input) {
   if (input.capabilityId.startsWith("api:")) {
-    const integrations = (
-      await listInstalledApiIntegrations(
-        input.db,
-        input.workspaceId,
-        input.personalOwnerVerified ? input.grant.subjectId : undefined,
-      )
-    ).filter((integration) => integration.capabilityId === input.capabilityId);
+    const own = await listInstalledApiIntegrations(
+      input.db,
+      input.workspaceId,
+      input.personalOwnerVerified ? input.grant.subjectId : undefined,
+    );
+    // An API Integration a Personal workspace carries for its verified owner
+    // is configured here like its own, with the same derived instance the
+    // session runs with. Its account stays in its origin workspace.
+    const carried = input.personalOwnerVerified
+      ? await personalWorkspaceExtensionApiIntegrations(input.db, {
+          workspaceId: input.workspaceId,
+          accountId: input.grant.accountId,
+          subjectId: input.grant.subjectId,
+          ownIntegrations: own,
+          takenServerIds: async () => [
+            ...input.settings.mcpServers.map((server) => server.id),
+            ...(await listEnabledMcpCapabilityServers(input.db, input.workspaceId)).map(
+              (server) => server.id,
+            ),
+            ...own.map((integration) => integration.serverId),
+          ],
+        })
+      : [];
+    const originWorkspaceIdByServerId = new Map(
+      carried.map((integration) => [
+        integration.serverId,
+        integration.personalExtension.originWorkspaceId,
+      ]),
+    );
+    const integrations = [...own, ...carried].filter(
+      (integration) => integration.capabilityId === input.capabilityId,
+    );
     const accountId = (integration: (typeof integrations)[number]) =>
       integration.connectionRef?.connectionId ??
       sessionMcpApprovalConnectionId(integration.serverId, integration.baseUrl);
@@ -156,7 +184,7 @@ async function resolveTarget(input: Input) {
     const connection = integration.connectionRef?.connectionId
       ? await getConnectionMetadata(
           input.db,
-          input.workspaceId,
+          originWorkspaceIdByServerId.get(integration.serverId) ?? input.workspaceId,
           integration.connectionRef.connectionId,
           input.grant.subjectId,
         )

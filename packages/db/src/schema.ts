@@ -458,6 +458,32 @@ export const siteToolAllowances = pgTable(
   ],
 );
 
+/**
+ * "Your default machine" (migration 1090): one person's own placement for the
+ * new chats they start in one workspace, ahead of the workspace default.
+ * Personal (RLS: own subject only). Session creation revalidates it on every
+ * use and falls back to the workspace default when it is no longer usable.
+ */
+export const workspaceMemberExecutionDefaults = pgTable(
+  "workspace_member_execution_defaults",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    target: jsonb("target").$type<Record<string, unknown>>().notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  ],
+);
+
 export const workspaceArtifactUploads = pgTable(
   "workspace_artifact_uploads",
   {

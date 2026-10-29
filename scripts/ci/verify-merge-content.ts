@@ -23,7 +23,7 @@ export function fetchPullHead(number: number, cwd: string): string | null {
 /** Recompute each landed merge independently of the provider's merge implementation.
  * A squash commit titled "... (#N)" is recomputed from its parent and PR #N's
  * head, as GitHub squashes. Other single-parent commits are reported, not attested.
- * This is detection after landing, not a substitute for merge_group checks.
+ * This is detection after landing, not a substitute for testing before it.
  */
 export function verifyMergeContent(
   base: string,

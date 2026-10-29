@@ -334,6 +334,16 @@ export default defineConfig({
               test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.tsx?$/,
             },
             {
+              // Session creation at startup and the app state both read the
+              // session tool helpers. Left to entry-aware grouping they can
+              // join the app-state chunk, which the startup context then
+              // imports back: a chunk cycle whose reads can run too early.
+              name: "session-tool-helpers",
+              test: /packages[\\/](?:react[\\/]src[\\/]app[\\/]lib[\\/]session-tools|contracts[\\/]src[\\/]github-repository)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
               // The SDK's error and wire-type runtime, and the attribution and
               // analytics helpers beside them, load at startup for every route.
               // Entry-aware splitting otherwise cuts this one unit in two as
@@ -448,9 +458,20 @@ export default defineConfig({
               // reads the rail context, so those leaves (and the icons both
               // sides draw) stay here rather than in the lazy action chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|text-search|zap|zap-off)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|mic|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|square|text-search|zap|zap-off)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
+            },
+            {
+              // The recording client: the chat's dictation (eager on a direct
+              // chat) and the lazy meeting recorder both use it, and the app's
+              // Start recording action reaches it too. Left to entry-aware
+              // merging it shares a chunk with the lazy action registry, which
+              // a direct chat load then downloads for nothing.
+              name: "recording-client",
+              test: /packages[\\/]sdk[\\/]src[\\/](?:recording-live|recording-owner|recordings)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
             },
             {
               // Payment and organization-identity glyphs are lazy-only, but

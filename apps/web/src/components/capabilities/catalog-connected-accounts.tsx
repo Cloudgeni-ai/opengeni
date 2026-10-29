@@ -11,6 +11,10 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
+import {
+  connectionAccountRows,
+  type AccountOriginWorkspace,
+} from "@opengeni/react/app/components/capabilities/connection-account-rows";
 
 const ACCOUNT_STATUS = {
   active: "connected",
@@ -26,6 +30,14 @@ export type CatalogConnectedAccountsManagement = {
   viewerSubjectId: string | null;
   /** The viewer holds connections:write in this workspace. */
   canWrite: boolean;
+  /** Whether the viewer may remove their own accounts in that workspace
+   * (connections:personal there). Your own account is removed in the
+   * workspace it was added in. Omit to fall back to `canWrite`. */
+  canRemoveOwnIn?: (workspaceId: string) => boolean;
+  /** Whether the viewer may sign their own account in again in that workspace
+   * (connections:write there: signing in needs it). Omit to fall back to
+   * `canWrite`. */
+  canReconnectOwnIn?: (workspaceId: string) => boolean;
   busy?: boolean;
   /** Re-run sign-in for exactly this account (OAuth accounts only). */
   onReconnect?: (account: ConnectionMetadata) => void;
@@ -42,20 +54,51 @@ export type CatalogConnectedAccountsProps = {
   accessDenied?: boolean;
   onRetry?: () => void;
   management?: CatalogConnectedAccountsManagement;
+  /** The workspace being viewed. Accounts added in another workspace name
+   * where they came from. */
+  workspaceId?: string | undefined;
+  workspaces?: readonly AccountOriginWorkspace[] | undefined;
 };
 
-/** Whether the viewer may disconnect this account: their own personal account,
- * or a shared workspace account when they can manage workspace connections.
- * Another person's personal account is never theirs to remove. */
+/** Whether the viewer may disconnect this account: their own personal
+ * account, wherever it was added, when they may remove their own accounts in
+ * that workspace; or a shared account of this workspace when they can manage
+ * workspace connections. Another person's personal account is never theirs,
+ * and a shared account from another workspace is managed by that workspace's
+ * admins. */
 export function canRemoveConnectedAccount(
-  account: Pick<ConnectionMetadata, "subjectId">,
-  management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management:
+    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canRemoveOwnIn">
+    | undefined,
+  workspaceId?: string | undefined,
 ): boolean {
-  if (!management?.canWrite) return false;
-  return (
-    account.subjectId === null ||
-    (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
-  );
+  return canActOnConnectedAccount(account, management, management?.canRemoveOwnIn, workspaceId);
+}
+
+/** Whether the viewer may sign this account in again: as for removal, but
+ * signing in needs connections:write in the account's workspace. */
+export function canReconnectConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management:
+    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canReconnectOwnIn">
+    | undefined,
+  workspaceId?: string | undefined,
+): boolean {
+  return canActOnConnectedAccount(account, management, management?.canReconnectOwnIn, workspaceId);
+}
+
+function canActOnConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
+  ownIn: ((workspaceId: string) => boolean) | undefined,
+  workspaceId: string | undefined,
+): boolean {
+  if (!management) return false;
+  if (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
+    return ownIn ? ownIn(account.workspaceId) : management.canWrite;
+  if (account.subjectId !== null || !management.canWrite) return false;
+  return !workspaceId || account.workspaceId === workspaceId;
 }
 
 /** Sign-in never produced a usable account identity. */
@@ -86,10 +129,13 @@ export function CatalogConnectedAccounts({
   accessDenied = false,
   onRetry,
   management,
+  workspaceId,
+  workspaces,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
     label: string;
+    origin: string | null;
   } | null>(null);
   if (
     item.kind !== "mcp" ||
@@ -117,6 +163,12 @@ export function CatalogConnectedAccounts({
     connections ?? [],
     item.mcpUrl ?? item.endpointUrl,
   ).filter((account) => account.status !== "revoked");
+  const rows = connectionAccountRows(accounts, {
+    fallbackName: item.name,
+    workspaceId,
+    workspaces,
+    labelOf: (account) => connectionSignInLabel(account, item.name),
+  });
   const busy = management?.busy === true;
   const addAction =
     management?.onAdd && management.canWrite && !accessDenied && !loadFailed && connections ? (
@@ -176,16 +228,18 @@ export function CatalogConnectedAccounts({
           className="m-0 list-none divide-y divide-border p-0"
         >
           {accounts.map((account) => {
-            const label = connectionSignInLabel(account, item.name);
+            const row = rows.get(account.id)!;
+            const label = row.label;
             const unfinished = connectedAccountSignInUnfinished(account);
+            // Re-signing in refreshes the same row wherever it was added.
             const reconnect =
               management?.onReconnect &&
               account.kind === "oauth2" &&
               account.status !== "active" &&
-              canRemoveConnectedAccount(account, management)
+              canReconnectConnectedAccount(account, management, workspaceId)
                 ? management.onReconnect
                 : null;
-            const removable = canRemoveConnectedAccount(account, management);
+            const removable = canRemoveConnectedAccount(account, management, workspaceId);
             return (
               <li
                 key={account.id}
@@ -194,7 +248,7 @@ export function CatalogConnectedAccounts({
                 <div className="min-w-0 flex-1 basis-48">
                   <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <MetaChip>{account.subjectId === null ? "This workspace" : "Only me"}</MetaChip>
+                    <MetaChip>{row.scope}</MetaChip>
                   </div>
                 </div>
                 {unfinished ? (
@@ -228,7 +282,7 @@ export function CatalogConnectedAccounts({
                         className="min-h-9 text-fg-muted hover:text-status-failed"
                         disabled={busy}
                         aria-label={`Remove ${label}`}
-                        onClick={() => setRemoveTarget({ account, label })}
+                        onClick={() => setRemoveTarget({ account, label, origin: row.origin })}
                       >
                         <TrashIcon aria-hidden="true" />
                         Remove
@@ -251,7 +305,9 @@ export function CatalogConnectedAccounts({
           description={
             removeTarget?.account.subjectId === null
               ? `${item.name} stops using this account for everyone in this workspace. You can add it again later.`
-              : `${item.name} stops using this account. You can add it again later.`
+              : removeTarget?.origin
+                ? `${item.name} stops using this account here and in ${removeTarget.origin}, where it was added. You can add it again later.`
+                : `${item.name} stops using this account. You can add it again later.`
           }
           confirmLabel="Remove account"
           pendingLabel="Removing…"
