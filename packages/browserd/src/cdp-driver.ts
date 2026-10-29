@@ -1041,6 +1041,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** The tab an earlier runtime of this session was using; start continues
    * in it rather than opening another. */
   private rebindTargetId: string | null = null;
+  /** The tabs an earlier runtime of this session opened, most recent first:
+   * start carries on in one of them when the selected one is gone. */
+  private rebindCandidates: string[] = [];
   private reportedOwnedTabs = "";
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
@@ -1174,6 +1177,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       for (const targetId of this.ownedTabs.previous.closedBlank)
         this.closedBlankTargetIds.add(targetId);
       this.rebindTargetId = this.ownedTabs.previous.selected;
+      this.rebindCandidates = [...this.ownedTabs.previous.created].reverse();
     }
     this.navigationCommitTimeoutMs =
       options.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
@@ -1250,6 +1254,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         result.status === "rejected" && !(result.reason instanceof CdpProtocolError),
     );
     if (failure) throw failure.reason;
+  }
+
+  /**
+   * Start a session that continues in the person's browser, where an earlier
+   * runtime of it left its tabs (after an idle release or a controller
+   * restart): carry on in the tab it was using, or else in another tab it
+   * opened that is still open. With none of its tabs left it starts with
+   * none, as it ended, and returns null: opening a tab nobody asked for would
+   * put a stray blank tab in the person's window. A session with no earlier
+   * runtime starts as start does.
+   */
+  async resume(): Promise<BrowserObservationValue | null> {
+    if (this.targetLifecycle !== "cdp" || !this.ownedTabs?.previous) return await this.start();
+    this.started = true;
+    const connection = await this.ensureConnection();
+    await this.windowParking?.presentNow();
+    const rebound = await this.rebindPreviousTarget(connection);
+    if (rebound) return rebound;
+    this.windowParking?.arm();
+    return null;
   }
 
   async start(
@@ -1667,9 +1691,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async rebindPreviousTarget(
     connection: BrowserCdpConnection,
   ): Promise<BrowserObservationValue | null> {
-    const targetId = this.rebindTargetId;
+    const selected = this.rebindTargetId;
+    const candidates = [
+      ...new Set([...(selected ? [selected] : []), ...this.rebindCandidates]),
+    ].filter((targetId) => !this.closedBlankTargetIds.has(targetId));
     this.rebindTargetId = null;
-    if (!targetId || this.closedBlankTargetIds.has(targetId)) return null;
+    this.rebindCandidates = [];
+    if (candidates.length === 0) return null;
+    // Only tabs still open are worth trying; the selected one first.
+    const open = new Set(
+      (await this.targetInfos(connection).catch(() => []))
+        .filter(isVisibleTarget)
+        .map((info) => info.targetId),
+    );
+    for (const targetId of candidates) {
+      if (!open.has(targetId)) continue;
+      const rebound = await this.rebindTarget(connection, targetId);
+      if (rebound) return rebound;
+    }
+    return null;
+  }
+
+  private async rebindTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<BrowserObservationValue | null> {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<null>((resolve) => {
       deadline = setTimeout(
@@ -1699,8 +1745,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     // A tab that cannot be read now (it closed meanwhile, Chrome will no
     // longer let the extension control it, or its page is not answering) is
-    // not worth failing the session for: open a new one, as a new session
-    // would. A read still waiting on the tab ends by itself.
+    // not worth failing the session for: move on to the session's next tab,
+    // or none. A read still waiting on the tab ends by itself.
     abandoned = true;
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     if (!this.attaching.has(targetId)) {

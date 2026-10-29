@@ -3372,6 +3372,12 @@ export type BrowserActionResolvedTarget = z.infer<typeof BrowserActionResolvedTa
  * and callers that do not send it receive receipts without the field. */
 export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
 
+/** Query parameter by which a caller tells a browser controller it can take
+ * a created session with no observation (`observation: null`): one that
+ * continued in the person's own browser with no tab of its own. Controllers
+ * that predate it ignore it; callers that do not send it get a new tab. */
+export const BROWSER_SESSION_NO_OBSERVATION_PARAMETER = "acceptsNoObservation";
+
 /** Something an action did that its completed state alone does not say. A
  * `network_busy` note is a network_idle wait on a page that loaded but whose
  * network never went quiet (it keeps polling or holds requests open): the wait

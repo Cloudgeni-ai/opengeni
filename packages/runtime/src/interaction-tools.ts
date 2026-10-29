@@ -110,6 +110,7 @@ import {
   BROWSER_LOCATOR_KIND_WORDS,
   BrowserTargetResolutionError,
   CurrentBrowserTab,
+  NO_OWN_TAB_IN_PERSONS_BROWSER,
   expandRefShorthand,
   type ResolvedBrowserSession,
   type ResolvedBrowserTarget,
@@ -1321,6 +1322,9 @@ export function createInteractionAttemptToolDefinitions(
       ),
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
+    personsBrowser: async (browserSessionId) =>
+      (await input.transport.getBrowserSession(input.workspaceId, browserSessionId)).placement
+        .kind === "attached_device",
   });
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
@@ -1645,6 +1649,19 @@ export function createInteractionAttemptToolDefinitions(
       if (tab && isGoneBrowserTabError(error))
         currentTab.forgetTarget(tab.browserSessionId, tab.targetId);
       else if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      // The tab the agent was working in is gone. In the person's own
+      // browser, with no other tab of its own left, say so plainly rather
+      // than that an ID the agent never named does not exist.
+      if (tab?.implicitTarget && isMissingBrowserTabError(error)) {
+        const next = await currentTab
+          .target({ browserSessionId: tab.browserSessionId })
+          .catch((resolution: unknown) => resolution);
+        if (
+          next instanceof BrowserTargetResolutionError &&
+          next.message === NO_OWN_TAB_IN_PERSONS_BROWSER
+        )
+          throw next;
+      }
       if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) {
         throw await explainMissingSession(error, "BrowserSession", value.browserSessionId);
       }
@@ -6254,6 +6271,17 @@ function isGoneBrowserTabError(error: unknown): boolean {
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
     /(?:^|: )browser target does not exist\b/u.test(error.message)
+  );
+}
+
+/** Either way a controller says a tab it was asked for does not exist: the
+ * driver's "browser target does not exist…", or the controller's own check,
+ * which names the tab ("browser target \"10\" does not exist…"). */
+function isMissingBrowserTabError(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    /(?:^|: )browser target (?:"[^"]*" )?does not exist\b/u.test(error.message)
   );
 }
 

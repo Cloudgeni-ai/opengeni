@@ -14,6 +14,7 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
@@ -298,7 +299,9 @@ export type PlacementBrowserSessionReference = {
 };
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
-  observation: BrowserObservationValue;
+  /** Null when a session continued in the person's own browser with none of
+   * its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservationValue | null;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
@@ -802,7 +805,7 @@ export class BrowserControlClient {
     try {
       data = await this.requestJson({
         method: "POST",
-        path: "/v1/browser-sessions",
+        path: `/v1/browser-sessions?${BROWSER_SESSION_NO_OBSERVATION_PARAMETER}=1`,
         token: this.adminToken,
         body: {
           ...reference,
@@ -841,7 +844,7 @@ export class BrowserControlClient {
     }
     return {
       ...returnedReference,
-      observation: BrowserObservation.parse(data.observation),
+      observation: data.observation === null ? null : BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
       ...creationDisplay(data.display),

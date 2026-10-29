@@ -25,7 +25,14 @@ export type CurrentBrowserTabDeps = {
   listTargets: (
     browserSessionId: string,
   ) => Promise<ReadonlyArray<{ id: string; kind: string; selected: boolean }>>;
+  /** Whether a BrowserSession runs in the person's own browser, whose other
+   * tabs are theirs: there only its selected tab is ever used implicitly. */
+  personsBrowser?: (browserSessionId: string) => Promise<boolean>;
 };
+
+/** Said when a session in the person's own browser has no tab of its own. */
+export const NO_OWN_TAB_IN_PERSONS_BROWSER =
+  "This browser session has no tab of its own in the person's browser. Open one with browser_tabs operation=open, or pass targetId to use one of the person's tabs.";
 
 export type ResolvedBrowserSession = {
   browserSessionId: string;
@@ -105,8 +112,14 @@ export class CurrentBrowserTab {
     const pages = (await this.deps.listTargets(session.browserSessionId)).filter(
       (target) => target.kind === "page" || target.kind === "popup",
     );
-    const chosen =
-      pages.find((target) => target.selected) ?? (pages.length === 1 ? pages[0] : null);
+    const selected = pages.find((target) => target.selected);
+    if (!selected && (await this.deps.personsBrowser?.(session.browserSessionId))) {
+      throw new BrowserTargetResolutionError(
+        "browser_target_required",
+        NO_OWN_TAB_IN_PERSONS_BROWSER,
+      );
+    }
+    const chosen = selected ?? (pages.length === 1 ? pages[0] : null);
     if (!chosen) {
       throw new BrowserTargetResolutionError(
         "browser_target_required",

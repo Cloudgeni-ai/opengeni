@@ -39,6 +39,28 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("tells the supervisor whether a create's caller can take a session with no observation", async () => {
+    await withServer(async ({ server, reference }) => {
+      const supervisor = (server as unknown as { supervisor: BrowserSupervisor }).supervisor;
+      const create = supervisor.createSession.bind(supervisor);
+      const creations: unknown[] = [];
+      supervisor.createSession = (async (options: never, creation?: unknown) => {
+        creations.push(creation);
+        return await create(options, creation as never);
+      }) as typeof supervisor.createSession;
+      for (const path of ["/v1/browser-sessions?acceptsNoObservation=1", "/v1/browser-sessions"]) {
+        const created = await request(server, path, {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBeLessThan(300);
+      }
+      // An older caller, which sends no parameter, is told apart.
+      expect(creations).toEqual([{ acceptsNoObservation: true }, { acceptsNoObservation: false }]);
+    });
+  });
+
   test("fences new controller work atomically and releases only the owning update", async () => {
     await withServer(async ({ server, reference }) => {
       const operationId = randomUUID();
