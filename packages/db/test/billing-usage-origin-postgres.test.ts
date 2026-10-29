@@ -10,6 +10,7 @@ import {
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   createDb,
+  createScheduledTask,
   createSession,
   expirePlanCreditPeriod,
   ensureManagedAccessForUser,
@@ -17,7 +18,10 @@ import {
   getSpendableCreditBalance,
   grantPlanCreditPeriod,
   initializeSessionStartAtomically,
+  manualScheduledTaskRunBillingOrigin,
+  markScheduledTaskApiBilled,
   nestedPostgresSqlState,
+  readScheduledTaskBillingOrigin,
   upsertOrganizationPlan,
   withBillingOriginOverride,
   withRlsContext,
@@ -446,4 +450,40 @@ test("documents uploaded with an API key record their origin", async () => {
     where conname = 'knowledge_index_billing_attribution_check'
       and connamespace = ${shared.schema}::regnamespace`;
   expect(jobs?.def).toContain("billingOrigin");
+}, 180_000);
+
+test("an API caller's edit or manual run makes a schedule set up in the app API use", async () => {
+  if (!client || !shared) return;
+  const grant = await workspace();
+  const task = await createScheduledTask(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    billingOrigin: "app",
+    name: "App schedule",
+    status: "active",
+    visibility: "workspace_shared",
+    schedule: { type: "manual" },
+    temporalScheduleId: `billing-origin-${crypto.randomUUID()}`,
+    runMode: "new_session_per_run",
+    overlapPolicy: "allow_concurrent",
+    agentConfig: { prompt: "Run", resources: [], tools: [], metadata: {}, sandboxBackend: "none" },
+    metadata: {},
+    createdBy: { kind: "subject", subjectId: grant.subjectId },
+  } as never);
+  const ref = { accountId: grant.accountId, workspaceId: grant.workspaceId, taskId: task.id };
+  expect(await readScheduledTaskBillingOrigin(client.db, ref)).toBe("app");
+  // A person's manual run in the app stays app; an API caller's is API.
+  expect(
+    await manualScheduledTaskRunBillingOrigin(client.db, { ...ref, callerOrigin: "app" }),
+  ).toBe("app");
+  expect(
+    await manualScheduledTaskRunBillingOrigin(client.db, { ...ref, callerOrigin: "api" }),
+  ).toBe("api");
+
+  await markScheduledTaskApiBilled(client.db, ref);
+  expect(await readScheduledTaskBillingOrigin(client.db, ref)).toBe("api");
+  // Every later run, including a person's, is API use.
+  expect(
+    await manualScheduledTaskRunBillingOrigin(client.db, { ...ref, callerOrigin: "app" }),
+  ).toBe("api");
 }, 180_000);

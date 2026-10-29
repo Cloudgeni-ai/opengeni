@@ -47,6 +47,36 @@ export async function readScheduledTaskBillingOrigin(
 }
 
 /**
+ * Once an API caller edits or triggers a schedule, its runs are billed as API
+ * from then on, so a key cannot spend plan credit through a task set up in
+ * the app. A task is never turned back from API into app.
+ */
+export async function markScheduledTaskApiBilled(
+  db: Database,
+  input: { accountId: string; workspaceId: string; taskId: string },
+): Promise<void> {
+  await withRlsContext(db, input, async (tx) => {
+    await tx.execute(
+      sql`UPDATE scheduled_tasks SET billing_origin = 'api'
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${input.taskId}::uuid AND billing_origin IS DISTINCT FROM 'api'`,
+    );
+  });
+}
+
+/**
+ * Who pays for a run a caller starts by hand: API when the caller or the
+ * task is API, else the task's app origin.
+ */
+export async function manualScheduledTaskRunBillingOrigin(
+  db: Database,
+  input: { accountId: string; workspaceId: string; taskId: string; callerOrigin: BillingOrigin },
+): Promise<BillingOrigin> {
+  if (input.callerOrigin === "api") return "api";
+  return await readScheduledTaskBillingOrigin(db, input);
+}
+
+/**
  * The origin a chat's next machine turn (a goal continuation, a resume)
  * inherits: its latest decided turn's, else its parent chat's, else app.
  * Mirrors the session_turns insert trigger, so admission and charge agree.

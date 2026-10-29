@@ -33,6 +33,11 @@ inherit the origin of the chat they run in, never the credential's.
   a chat's first turn, the parent chat's. Nothing to inherit stays null, which
   is billed as app (today's behaviour).
 - `scheduled_tasks.billing_origin` is the origin of whoever set the task up.
+  Once an API caller edits a task or runs it by hand, it is API from then on
+  (`markScheduledTaskApiBilled`), so a key cannot spend plan credit through a
+  schedule set up in the app. Pausing leaves it alone, and a task is never
+  turned back into app. A manual run is checked at the edge as API when the
+  caller or the task is API (`manualScheduledTaskTriggerBillingOrigin`).
 - `credit_ledger_entries.usage_origin` records the origin each usage debit was
   charged under. The debit writers resolve it from the explicit input, the
   attribution metadata, the turn, then the ambient request scope.
@@ -90,6 +95,12 @@ credits.
   published Sites, which stamp their requests in-process, are app.
 - A failed read of a turn's origin fails the request instead of guessing who
   pays; a turn that cannot be found is API.
+- Credits that API use may spend are general credit outside the plan. Two
+  older kinds of promotional credit are unscoped and so count as credits:
+  signup trial credit granted before trial credit was limited to models
+  (`eligible_model_ids` null), and 100%-off coupon credit written as a plain
+  `grant` when no promotion policy is configured. Both are bounded, already
+  issued amounts; new promotional credit is scoped and never pays for API use.
 - Inheriting "the chat's latest decided origin" reads the chat's newest turn
   with an origin; the existing turn indexes serve it. A dedicated partial
   index can follow if that read shows up.
@@ -112,8 +123,11 @@ billing. Its host account (Cloudgeni-Embedded) is on legacy billing terms:
 default lists CloudGeni's production host account, so no deployment
 configuration is needed (`none` lists no account). For a listed account all
 work is funded as app use, which is how every turn was funded before origins
-existed: any credit pays any use, in today's order. It also pays no own-key
-platform fee and none of the newly metered tool charges.
+existed: any credit pays any use, in today's order. Later billing changes
+(the own-key platform fee, newly metered tools) skip listed accounts too.
+Two shared changes do reach it, neither a new block or charge: paid tools may
+draw on a Free plan period's model-scoped credit first, and a failed video
+does not return the scoped plan credit it used.
 
 Why an account list: CloudGeni already pays cost plus margin from operator
 credit grants on that one account, and its people and embedded sessions must
