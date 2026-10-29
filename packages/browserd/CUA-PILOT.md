@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`bc18cf52f355a5beb3acb4492124b1c4090657f7`: upstream `cua-driver-rs-v0.37.0`
+`6121a0d723516235992c0c4c59eacbfef63f11b3`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -30,6 +30,11 @@ whose earlier step closed or hid its window can still open the app's menu.
 A `run_steps` step addressed to a window that reads no elements and is closed
 or off screen fails at once (`window_not_on_screen`) instead of waiting out
 its timeout.
+A background pixel click is checked against the element under the point in
+its own window (`cu-window-hit-test`): the app's accessibility hit test answers
+with the element of whichever of its windows is on top there, so a click on a
+web `<select>` in a browser window behind another of the browser's windows
+was not refused and opened the select's menu.
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -354,7 +359,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/bc18cf52f355a5beb3acb4492124b1c4090657f7/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/6121a0d723516235992c0c4c59eacbfef63f11b3/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
