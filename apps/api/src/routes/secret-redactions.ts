@@ -41,7 +41,7 @@ import { vaultProviderRegistryFor } from "./vault-providers";
    Remove secrets from stored session history (docs/secrets.md, "Removing
    secrets from stored history").
 
-   A workspace owner or admin names sessions and what to look for: a vault
+   A workspace admin, or the owner of a Personal workspace, names sessions and what to look for: a vault
    reference (its value is read in memory for matching and never returned,
    logged or audited; this also needs `secrets:use` on the item) or built-in
    patterns. Every stored copy in those sessions, and in their archives, is

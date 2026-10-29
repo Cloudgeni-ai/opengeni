@@ -345,6 +345,7 @@ const ACCESS_GATES: Readonly<Record<string, string | null>> = {
   requireFreshAccessGrant: null,
   requireMachineAccessGrant: null,
   requireWorkspaceSettingsGrant: "workspace:admin",
+  requireWorkspaceSettingsAuthorization: "workspace:admin",
 };
 
 /**

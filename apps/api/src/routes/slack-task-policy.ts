@@ -5,11 +5,8 @@ import {
   UpdateSlackTaskPolicyRequest,
 } from "@opengeni/contracts";
 import {
-  MissingPermissionRefusal,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
-  WORKSPACE_SETTINGS_REFUSAL,
-  workspaceSettingsAuthorized,
+  requireWorkspaceSettingsAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -84,18 +81,8 @@ export function registerSlackTaskPolicyRoutes(app: Hono, deps: ApiRouteDeps): vo
 
   app.put(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      context,
-      deps,
-      workspaceId,
-      "workspace:read",
-    );
     // Workspace admins, and the owner of a Personal workspace.
-    if (!(await workspaceSettingsAuthorized(deps, access, workspaceId))) {
-      throw new MissingPermissionRefusal("workspace:admin", {
-        message: WORKSPACE_SETTINGS_REFUSAL,
-      });
-    }
+    const access = await requireWorkspaceSettingsAuthorization(context, deps, workspaceId);
     requireDirectWorkspaceAdmin(access);
     const parsed = parseRequestBody(
       UpdateSlackTaskPolicyRequest,
