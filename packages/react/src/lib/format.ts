@@ -125,6 +125,24 @@ export function tryParseJson(text: string): unknown {
 export const CREDIT_EXHAUSTION_MESSAGE = (t: OpenGeniText) =>
   t("lib.format.outOfCreditsThisWorkspace");
 
+// The server's own refusals that only credits fix. Each gets its own sentence.
+const BYOK_PAID_CREDIT_TEXT = /add credits to use your own key/i;
+const API_CREDITS_TEXT = /api usage uses credits, not your plan credit/i;
+
+/** The credit-stop sentence for a refusal: own-key fee, API use, or no credit. */
+export function creditExhaustionText(
+  t: OpenGeniText,
+  ...texts: ReadonlyArray<string | null | undefined>
+): string {
+  if (texts.some((text) => typeof text === "string" && BYOK_PAID_CREDIT_TEXT.test(text))) {
+    return t("lib.format.byokPaidCreditRequired");
+  }
+  if (texts.some((text) => typeof text === "string" && API_CREDITS_TEXT.test(text))) {
+    return t("lib.format.apiCreditsRequired");
+  }
+  return CREDIT_EXHAUSTION_MESSAGE(t);
+}
+
 /** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
 export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE = (t: OpenGeniText) =>
   t("lib.format.usageLimitReachedAWorkspace");
@@ -350,7 +368,7 @@ export function humanizeFailureReason(t: OpenGeniText, reason: string | null): s
     return reason;
   }
   if (isCreditExhaustion(reason)) {
-    return CREDIT_EXHAUSTION_MESSAGE(t);
+    return creditExhaustionText(t, reason);
   }
   // A turn refused because the chat's model was retired or removed.
   if (

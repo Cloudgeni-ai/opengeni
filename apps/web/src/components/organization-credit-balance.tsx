@@ -58,10 +58,13 @@ export function OrganizationCreditBalance({
   }
   // A period without a monthly grant shows no "$0.00 monthly plan credit" row.
   const plan = showPlanCredit && (balance.plan?.creditGrantedMicros ?? 0) > 0 ? balance.plan : null;
-  if (balance.promotionalCredits?.length || plan) {
+  const byokFee = balance.byokPlatformFeeMonthMicros ?? 0;
+  if (balance.promotionalCredits?.length || plan || byokFee > 0) {
+    // Credits: what API use spends, and app use beyond plan credit.
     const general =
+      balance.creditsMicros ??
       (balance.generalBalanceMicros ?? balance.balanceMicros) -
-      (plan?.creditScoped ? 0 : (plan?.creditRemainingMicros ?? 0));
+        (plan?.creditScoped ? 0 : (plan?.creditRemainingMicros ?? 0));
     const scopedPlan = balance.promotionalCredits?.find((grant) => grant.planCredit);
     return (
       <div className="min-w-0">
@@ -74,11 +77,11 @@ export function OrganizationCreditBalance({
           {plan && !scopedPlan ? (
             <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
               <div>
-                <p className="text-sm font-medium text-fg">Monthly plan credit</p>
+                <p className="text-sm font-medium text-fg">Plan credit</p>
                 <p className="mt-0.5 text-xs text-fg-muted">
                   {plan.creditScoped
-                    ? "For free-credit models. Resets monthly."
-                    : "Used first. Resets monthly."}
+                    ? "For free-credit models in the app. Resets monthly."
+                    : "For app use. Resets monthly."}
                 </p>
               </div>
               <span className="shrink-0 text-sm font-medium text-fg tabular-nums">
@@ -89,7 +92,7 @@ export function OrganizationCreditBalance({
           {balance.promotionalCredits?.map((grant) => (
             <CreditScopeDetails
               key={grant.grantId}
-              label={grant.label}
+              label={grant.planCredit ? "Plan credit" : grant.label}
               amount={formatMoneyMicros(grant.remainingMicros, balance.currency)}
               eligibleModelIds={grant.eligibleModelIds}
               coversVoice={grant.coversVoice}
@@ -97,28 +100,39 @@ export function OrganizationCreditBalance({
                 grant.held
                   ? "On hold · Not available to spend"
                   : grant.planCredit
-                    ? "Used first · Resets monthly · View models"
+                    ? "For app use · Resets monthly · View models"
                     : undefined
               }
             />
           ))}
           <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
             <div className="min-w-0">
-              <p className="text-sm font-medium text-fg">
-                {plan ? "Other general credit" : "General credits"}
-              </p>
+              <p className="text-sm font-medium text-fg">Credits</p>
               <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
                 {general < 0
                   ? "Future purchases cover prior usage first."
                   : general === 0 && balance.promotionalCredits?.length
-                    ? "Other models need general credit."
-                    : "For any model and platform usage."}
+                    ? "Other models need credits."
+                    : plan
+                      ? "For API use, and app use beyond plan credit."
+                      : "For any model and platform usage."}
               </p>
             </div>
             <span className="shrink-0 text-sm font-medium text-fg tabular-nums">
               {formatMoneyMicros(general, balance.currency)}
             </span>
           </div>
+          {byokFee > 0 ? (
+            <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-fg">Platform fee on your own keys</p>
+                <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">This month.</p>
+              </div>
+              <span className="shrink-0 text-sm font-medium text-fg tabular-nums">
+                {formatMoneyMicros(byokFee, balance.currency)}
+              </span>
+            </div>
+          ) : null}
         </div>
       </div>
     );

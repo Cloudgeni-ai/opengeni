@@ -110,7 +110,11 @@ import {
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
-import { isPaymentRequiredError } from "../lib/model-access";
+import {
+  isPaymentRequiredError,
+  paymentRefusalCode,
+  type PaymentRefusalCode,
+} from "../lib/model-access";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -674,6 +678,7 @@ function SessionsIndexRouteContent({
     workspaceId: string;
     model: string;
     message: string;
+    code: PaymentRefusalCode | null;
   } | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
@@ -1038,6 +1043,7 @@ function SessionsIndexRouteContent({
       workspaceId,
       model: request.model ?? context.model,
       message: error.message,
+      code: paymentRefusalCode(error),
     });
     // Re-read funding so the notice and picker name what the credit covers now.
     void modelCatalog.refresh();
@@ -1826,6 +1832,7 @@ function SessionsIndexRouteContent({
             <CreditRefusalNotice
               gap={creditGap}
               message={refusedCreate?.message}
+              refusalCode={refusedCreate?.code}
               workspaceId={workspaceId}
               accountId={workspace?.accountId ?? null}
               canReadBilling={hasAccountPermission(

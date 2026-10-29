@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { AppContext } from "@opengeni/react/app/app-context";
+import { CreditRefusalNotice } from "@opengeni/react/app/components/credits/credit-refusal-notice";
 import { SubscriptionPlans } from "@/components/organization/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "@/components/organization/plan-seats";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
@@ -69,8 +71,18 @@ export function previewPlan(key: string): BillingPlanBalance {
   };
 }
 
+// A refusal the server already explained reads no balance, so no client calls.
+const refusalPreviewContext = { client: {} } as never;
+
 export function SubscriptionPlansPreview() {
-  const view = new URLSearchParams(window.location.search).get("plan") ?? "free";
+  const search = new URLSearchParams(window.location.search);
+  const view = search.get("plan") ?? "free";
+  const theme = search.get("theme");
+  useLayoutEffect(() => {
+    if (theme !== "light" && theme !== "dark") return;
+    document.documentElement.dataset.ogTheme = theme;
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
   const [plan, setPlan] = useState(() => previewPlan(view));
   const [amount, setAmount] = useState("25.00");
   const [message, setMessage] = useState("");
@@ -114,6 +126,8 @@ export function SubscriptionPlansPreview() {
       accountId: "00000000-0000-4000-8000-000000000001",
       balanceMicros: plan.creditRemainingMicros + 25_000_000,
       generalBalanceMicros: (plan.creditScoped ? 0 : plan.creditRemainingMicros) + 25_000_000,
+      creditsMicros: 25_000_000,
+      byokPlatformFeeMonthMicros: 1_840_000,
       promotionalCredits: plan.creditScoped
         ? [
             {
@@ -137,11 +151,32 @@ export function SubscriptionPlansPreview() {
           Development preview · Sample account · No live payments
         </p>
         <h1 className="mb-8 text-xl font-semibold tracking-[-0.5px]">
-          {view === "seats" ? "Invite people" : "Billing & usage"}
+          {view === "seats" ? "Invite people" : view === "refusal" ? "Chat" : "Billing & usage"}
         </h1>
         <SectionVariantProvider variant="group">
           <SectionStack>
-            {view === "seats" ? (
+            {view === "refusal" ? (
+              <AppContext.Provider value={refusalPreviewContext}>
+                <div className="space-y-4">
+                  {(["byok_paid_credit_required", "api_credits_required"] as const).map((code) => (
+                    <CreditRefusalNotice
+                      key={code}
+                      gap={{ modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: false }}
+                      refusalCode={code}
+                      workspaceId="00000000-0000-4000-8000-000000000003"
+                      canBuyCredits
+                      canConnectModel={false}
+                      onAddCredits={() => setMessage("Preview only. Add credits opens Stripe.")}
+                    />
+                  ))}
+                  {message ? (
+                    <p role="status" className="text-sm text-fg-muted">
+                      {message}
+                    </p>
+                  ) : null}
+                </div>
+              </AppContext.Provider>
+            ) : view === "seats" ? (
               <>
                 <PlanSeats plan={plan} />
                 <SeatLimitNotice
