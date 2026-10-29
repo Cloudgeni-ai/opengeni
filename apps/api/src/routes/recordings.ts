@@ -73,7 +73,11 @@ import {
   updateRecordingSpeakers,
   type CreditDebitAttribution,
 } from "@opengeni/db";
-import { voiceInputCreditBillingActive, type VoiceInputPricing } from "@opengeni/config";
+import {
+  isLegacyBillingAccount,
+  voiceInputCreditBillingActive,
+  type VoiceInputPricing,
+} from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
@@ -458,10 +462,24 @@ export function registerRecordingRoutes(
     );
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
-    const refused =
-      provider?.funding === "deployment" &&
-      voiceInputCreditBillingActive(deps.settings) &&
-      (recording.purpose === "dictation" || spec?.creditPricing)
+    const creditsBilled =
+      provider?.funding === "deployment" && voiceInputCreditBillingActive(deps.settings);
+    // A meeting model the deployment pays for with no credit price would be
+    // transcribed free while credits are billed, so it isn't served; legacy
+    // billing accounts (CloudGeni) keep today's behaviour.
+    const unpriced =
+      creditsBilled &&
+      recording.purpose !== "dictation" &&
+      !spec?.creditPricing &&
+      !isLegacyBillingAccount(deps.settings, actor.accountId);
+    const refused = unpriced
+      ? new ApiHttpError(503, {
+          code: "upstream_unavailable",
+          message: "This transcription model isn't available on this deployment.",
+          retryable: false,
+          details: { code: "unavailable", providerId: choice.providerId },
+        })
+      : creditsBilled && (recording.purpose === "dictation" || spec?.creditPricing)
         ? await creditRefusal(() =>
             deps.transcription?.admit?.({
               providerId: choice.providerId,
@@ -534,9 +552,19 @@ export function registerRecordingRoutes(
     }
   }
 
-  /** Live audio on a model the deployment pays for is charged in credits while they're billed. */
-  function liveChargedInCredits(provider: { funding: string } | undefined): boolean {
-    return provider?.funding === "deployment" && voiceInputCreditBillingActive(deps.settings);
+  /**
+   * Live audio on a model the deployment pays for is charged in credits while
+   * they're billed; an account on legacy billing (CloudGeni) keeps it free.
+   */
+  function liveChargedInCredits(
+    provider: { funding: string } | undefined,
+    accountId: string,
+  ): boolean {
+    return (
+      provider?.funding === "deployment" &&
+      voiceInputCreditBillingActive(deps.settings) &&
+      !isLegacyBillingAccount(deps.settings, accountId)
+    );
   }
 
   /**
@@ -559,7 +587,13 @@ export function registerRecordingRoutes(
     },
   ): Promise<void> {
     const billing = deps.transcription?.billing;
-    if (!liveChargedInCredits(registry.get(input.providerId)) || !billing || !input.pricing) return;
+    if (
+      !liveChargedInCredits(registry.get(input.providerId), actor.accountId) ||
+      !billing ||
+      !input.pricing
+    ) {
+      return;
+    }
     try {
       await billing.settle({
         accountId: actor.accountId,
@@ -1388,7 +1422,7 @@ export function registerRecordingRoutes(
     // A live model the deployment pays for spends credits, so the payer is
     // admitted before any audio can reach it; one with no credit price isn't
     // served while credits are billed.
-    if (liveChargedInCredits(provider)) {
+    if (liveChargedInCredits(provider, actor.accountId)) {
       if (!spec.creditPricing || !deps.transcription?.billing) {
         throw new ApiHttpError(503, {
           code: "upstream_unavailable",

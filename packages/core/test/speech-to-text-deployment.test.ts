@@ -82,16 +82,6 @@ describe("speech-to-text deployment", () => {
     expect(await deployment.available("azure-speech")).toBe(true);
   });
 
-  test("an unpriced Azure Speech account is withheld while credits are billed", async () => {
-    // Meetings on it were transcribed free while credits were billed.
-    const billed = createSpeechToTextDeployment({
-      settings: testSettings({ ...azure, usageLimitsMode: "managed" }),
-    });
-    expect(billed.registry.has("azure-speech")).toBe(false);
-    const free = createSpeechToTextDeployment({ settings: testSettings({ ...azure }) });
-    expect(free.registry.has("azure-speech")).toBe(true);
-  });
-
   test("the Azure Speech account signs in with the deployment's Entra identity and reports a refusal", async () => {
     const identity = {
       recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",

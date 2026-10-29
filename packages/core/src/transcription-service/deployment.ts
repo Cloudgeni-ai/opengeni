@@ -3,7 +3,6 @@ import {
   resolveVoiceInputProviderRegistry,
   sideFeatureProcessingResidency,
   sideFeatureRouteAllowed,
-  voiceInputCreditBillingActive,
   type Settings,
   type SideFeatureProcessingResidency,
   type SideFeatureTarget,
@@ -452,17 +451,15 @@ function azureSpeechAccount(
   }
   if (!credentials) return null;
   // A voice input MAI price, where set, prices this account's calls in
-  // credits. Without one the deployment-paid account isn't served while
-  // credits are billed, so meetings are never transcribed free.
+  // credits. Without one, meetings on it aren't admitted while credits are
+  // billed (recording routes), except for legacy billing accounts.
   const voiceMai = resolveVoiceInputProviderRegistry(settings).find(
     (config) => config.kind === "azure-mai",
   );
-  const creditPricing = voiceMai?.kind === "azure-mai" ? (voiceMai.pricing ?? null) : null;
-  if (!creditPricing && voiceInputCreditBillingActive(settings)) return null;
   return createAzureSpeechRecordingTranscriptionProvider({
     endpoint,
     credentials,
-    creditPricing,
+    creditPricing: voiceMai?.kind === "azure-mai" ? (voiceMai.pricing ?? null) : null,
     ...fetchOption,
   });
 }
