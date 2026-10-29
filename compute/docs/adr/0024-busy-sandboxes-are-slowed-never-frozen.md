@@ -80,7 +80,8 @@ samples once a second.
   whenever less than the low watermark is free under the VMs' high, the
   agent drops the group's cache, and only cache (`memory.reclaim` with
   `swappiness=0`, Linux 6.9 and later), by the difference, in the
-  background.
+  background, 32 MiB at a time, reading again after each step, and
+  stopping when a step frees less than a quarter of what it asked.
 - **What the kernel cannot hold costs the borrower too.** A `memory.high`
   only bounds what the kernel can compress: pages that do not compress
   (random or compressed data), a full pool or swap device leave a VM above
@@ -223,6 +224,14 @@ samples once a second.
   of not waiting, and per-sandbox stall time shows who waited.
 - A borrower's file cache is compressed with the rest of what it holds:
   its guest drops cache only when asked, in a shrink.
+- Some kernels drop more cache than asked. On Linux 7.0 with the
+  multi-generation LRU, each `memory.reclaim` write on the lab host took
+  about half of the group's coldest cache whatever amount it named
+  (526, 262, 131 and 65 MiB for four 32 MiB asks), where 6.18 took what
+  was asked. A drop there takes more than the reserve lacks, and that
+  cache is read from disk again when used. Only cache is over-dropped:
+  what a step compresses of a VM's own memory is bounded by the swap the
+  agent lets that step take, not by how much one write asks.
 - On kernels whose `memory.high` writes cannot be non-blocking (before
   `O_NONBLOCK` support), a write reclaims toward the new high before it
   returns. Since a high is set at most a thirty-second below what a VM

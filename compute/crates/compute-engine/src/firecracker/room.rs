@@ -28,6 +28,11 @@ use crate::cgroup::Cgroup;
 /// and the next reading asks again.
 const LEAST: u64 = 4 << 20;
 
+/// What one write asks for. The kernel may take a good deal more than a
+/// large ask (on Linux 7.0 with MGLRU, up to 687 MiB for 384 asked), so a
+/// drop asks in steps and reads again after each.
+const STEP: u64 = 32 << 20;
+
 /// [`Room::refused`]: the kernel took every drop asked so far.
 const TAKEN: u8 = 0;
 /// The kernel refused to drop cache alone, and nobody was told yet.
@@ -51,6 +56,9 @@ impl Room {
     /// while an earlier drop is under way. A drop that fails is asked
     /// again on the next call; one the kernel refuses for asking for cache
     /// alone is never asked again, and the next call says so, once.
+    /// A drop goes in [`STEP`]s, and stops early once a step frees less
+    /// than a quarter of what it asked: what is left is not cache the
+    /// kernel drops at once, and the next call looks again.
     pub(super) fn keep(self: &Arc<Self>, group: &Cgroup, reserve: u64) -> RoomKept {
         match self.refused.load(Ordering::Acquire) {
             TAKEN => {}
@@ -60,25 +68,58 @@ impl Room {
             }
             _ => return RoomKept::Free,
         }
-        let wanted = match (
-            group.memory_high(),
-            group.memory_current(),
-            group.droppable_cache(),
-        ) {
-            (Ok(high), Ok(current), Ok(droppable)) => to_drop(high, current, droppable, reserve),
-            _ => return RoomKept::Free,
+        let Some((wanted, _)) = wanted(group, reserve) else {
+            return RoomKept::Free;
         };
         if wanted == 0 || self.working.swap(true, Ordering::AcqRel) {
             return RoomKept::Free;
         }
         let (room, group) = (Arc::clone(self), group.clone());
         std::thread::spawn(move || {
-            if let Ok(None) = group.drop_cache(wanted) {
-                room.refused.store(REFUSED, Ordering::Release);
-            }
+            room.drop_steps(&group, reserve);
             room.working.store(false, Ordering::Release);
         });
         RoomKept::Dropping(wanted)
+    }
+
+    /// Drops `group`'s cache step by step until `reserve` is free under
+    /// its high, the cache is gone, or a step frees little.
+    fn drop_steps(&self, group: &Cgroup, reserve: u64) {
+        while let Some((wanted, current)) = wanted(group, reserve) {
+            if wanted == 0 {
+                return;
+            }
+            let asked = wanted.min(STEP);
+            match group.drop_cache(asked) {
+                Ok(Some(())) => {}
+                Ok(None) => {
+                    self.refused.store(REFUSED, Ordering::Release);
+                    return;
+                }
+                Err(_) => return,
+            }
+            let Ok(after) = group.memory_current() else {
+                return;
+            };
+            if current.saturating_sub(after) < asked / 4 {
+                return;
+            }
+        }
+    }
+}
+
+/// What `group` should drop for `reserve` to be free under its high, and
+/// what it holds now; `None` when it cannot be read.
+fn wanted(group: &Cgroup, reserve: u64) -> Option<(u64, u64)> {
+    match (
+        group.memory_high(),
+        group.memory_current(),
+        group.droppable_cache(),
+    ) {
+        (Ok(high), Ok(current), Ok(droppable)) => {
+            Some((to_drop(high, current, droppable, reserve), current))
+        }
+        _ => None,
     }
 }
 
