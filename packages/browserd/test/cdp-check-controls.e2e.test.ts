@@ -223,6 +223,144 @@ type Page = {
   observe: () => Promise<BrowserObservation>;
 };
 
+// Labels that hold more than one control or sit inside another, disabled
+// controls, native inputs hidden behind the box their label draws, and boxes
+// in the mixed state.
+const LABELS = `<!doctype html><meta charset="utf-8"><title>Labels, hidden inputs and mixed boxes</title>
+<style>body { font: 14px sans-serif; margin: 20px } p { margin: 10px 0 } .box { display: inline-block; width: 16px; height: 16px; border: 1px solid; vertical-align: middle }
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0 }</style>
+<p><label id="multi">Pick <input type="checkbox" id="m1"> first <input type="checkbox" id="m2"> second</label></p>
+<p><div role="checkbox" aria-checked="false" id="outer" tabindex="0" style="border: 1px solid; padding: 4px" ${toggle}>Outer all
+  <label><input type="checkbox" id="inner" onclick="event.stopPropagation()"> Inner item</label></div></p>
+<p><label for="far">Far label <input type="checkbox" id="near"></label> <input type="checkbox" id="far"></p>
+<p><input type="checkbox" id="dis" disabled><label for="dis">Disabled native</label></p>
+<p><div role="checkbox" aria-disabled="true" aria-checked="false" aria-label="Aria disabled" id="adis" tabindex="0" class="box" ${toggle}></div></p>
+<p><label><span role="checkbox" aria-disabled="true" aria-checked="false" id="adw" class="box" ${toggle}></span> Wrapped aria disabled</label></p>
+<p><label id="hid"><input type="checkbox" id="hidin" style="display: none"><span class="box"></span> Hidden display none</label></p>
+<p><label id="vhl"><input type="checkbox" id="vhin" style="visibility: hidden; position: absolute"><span class="box"></span> Visibility hidden</label></p>
+<p><label id="srl"><input type="checkbox" id="srin" class="sr"><span class="box"></span> Screen reader only</label></p>
+<p><input type="checkbox" id="srlink" class="sr"><label for="srlink">I accept the <a href="#elsewhere">terms of service and the privacy policy of this site</a></label></p>
+<p><input type="checkbox" id="ind"><label for="ind">Indeterminate native</label></p>
+<p><input type="checkbox" id="ind2"><label for="ind2">Indeterminate on</label></p>
+<p><div role="checkbox" aria-checked="mixed" aria-label="Tri-state" id="tri" tabindex="0" class="box"
+  onclick="this.setAttribute('aria-checked', { mixed: 'true', true: 'false', false: 'mixed' }[this.getAttribute('aria-checked')])"></div></p>
+<p><div role="checkbox" aria-checked="mixed" aria-label="Mixed aria" id="mix" tabindex="0" class="box"
+  onclick="this.setAttribute('aria-checked', 'true')"></div></p>
+<script>ind.indeterminate = true; ind2.indeterminate = true;</script>`;
+
+type CheckLocator = Extract<BrowserActionCommand["action"], { type: "check" }>["locator"];
+const byText = (value: string) => ({ kind: "text", text: value, exact: true }) as const;
+const byCss = (selector: string) => ({ kind: "css", selector }) as const;
+const done = { outcome: "completed", prompt: true };
+const refused = (message: string) => ({ outcome: `failed: ${message}`, prompt: true });
+
+/** Runs a test on the LABELS page with a check that reports its outcome and
+ * whether it came promptly (without waiting out the locator's time). */
+const onLabels =
+  (
+    body: (
+      page: Page & { check: (locator: CheckLocator, checked: boolean) => Promise<unknown> },
+    ) => Promise<void>,
+  ) =>
+  async () =>
+    await withPage(`data:text/html;charset=utf-8,${encodeURIComponent(LABELS)}`, async (page) => {
+      const check = async (locator: CheckLocator, checked: boolean) => {
+        const started = Date.now();
+        const result = await page.act({ type: "check", locator, checked });
+        return {
+          outcome:
+            result.state === "completed"
+              ? "completed"
+              : `${result.state}: ${result.error?.message}`,
+          prompt: Date.now() - started < 5_000,
+        };
+      };
+      await body({ ...page, check });
+    });
+
+e2e(
+  "a native input a person cannot see is checked through its label, never through a link in it",
+  onLabels(async ({ check, read }) => {
+    expect(await check(byCss("#hid"), true)).toEqual(done);
+    expect(await check(byText("Hidden display none"), false)).toEqual(done);
+    expect(await check(byCss("#vhl"), true)).toEqual(done);
+    expect(await check(byText("Screen reader only"), true)).toEqual(done);
+    expect(await check(byCss("#srin"), false)).toEqual(done);
+    expect(await read("[hidin.checked, vhin.checked, srin.checked]")).toEqual([false, true, false]);
+    const linked = (await check(byCss("#srlink"), true)) as { outcome: string };
+    expect(linked.outcome.startsWith("completed")).toBe(false);
+    expect(await read("[srlink.checked, location.hash]")).toEqual([false, ""]);
+  }),
+  90_000,
+);
+
+e2e(
+  "a label holding two controls stands for neither, and its for= names its control",
+  onLabels(async ({ check, read }) => {
+    const notCheckable = refused(
+      "browser locator is not a checkbox, switch or radio button; to toggle something else, click it and then look at it",
+    );
+    expect(await check(byText("second"), true)).toEqual(notCheckable);
+    expect(await check(byCss("#multi"), true)).toEqual(notCheckable);
+    expect(await read("[m1.checked, m2.checked]")).toEqual([false, false]);
+    expect(await check(byText("Far label"), true)).toEqual(done);
+    expect(await read("[near.checked, far.checked]")).toEqual([false, true]);
+  }),
+  90_000,
+);
+
+e2e(
+  "a label inside another checkbox stands for its own control",
+  onLabels(async ({ check, read }) => {
+    expect(await check(byCss("#outer label"), true)).toEqual(done);
+    expect(await read("[outer.getAttribute('aria-checked'), inner.checked]")).toEqual([
+      "false",
+      true,
+    ]);
+  }),
+  90_000,
+);
+
+e2e(
+  "a disabled control is refused at once, however it is located",
+  onLabels(async ({ check, read }) => {
+    expect(await check(byCss("label[for=dis]"), true)).toEqual(
+      refused("this checkbox is disabled"),
+    );
+    expect(await check(byCss("#adis"), true)).toEqual(refused("this checkbox is disabled"));
+    expect(await check(byText("Wrapped aria disabled"), true)).toEqual(
+      refused("this checkbox is disabled"),
+    );
+    expect(
+      await read(
+        "[dis.checked, adis.getAttribute('aria-checked'), adw.getAttribute('aria-checked')]",
+      ),
+    ).toEqual([false, "false", "false"]);
+  }),
+  90_000,
+);
+
+e2e(
+  "a box in the mixed state is done only once it shows exactly what was asked",
+  onLabels(async ({ act, check, read }) => {
+    expect(await check(byCss("#ind"), false)).toEqual(done);
+    expect(await read("[ind.checked, ind.indeterminate]")).toEqual([false, false]);
+    expect(await check(byCss("#ind2"), true)).toEqual(done);
+    expect(await read("[ind2.checked, ind2.indeterminate]")).toEqual([true, false]);
+    // A tri-state box turns on before it turns off.
+    expect(await check(byCss("#tri"), false)).toEqual(done);
+    expect(await read("tri.getAttribute('aria-checked')")).toBe("false");
+    const mixed = await act({ type: "check", locator: byCss("#mix"), checked: false });
+    expect({ state: mixed.state, message: mixed.error?.message }).toEqual({
+      state: "outcome_unknown",
+      message:
+        "the control was clicked but does not show unchecked; look at it before clicking it again",
+    });
+    expect(await read("mix.getAttribute('aria-checked')")).toBe("true");
+  }),
+  90_000,
+);
+
 e2e(
   "check works on whatever observe shows as a checkbox, switch or radio button",
   async () => {
