@@ -167,6 +167,35 @@ test("a linked person's 1:1 chat lands in their own Personal workspace; channels
   expect(await teamsChatPersonalWorkspace(f.deps, f.i, f.subject)).toBeNull();
 });
 
+test("a Personal 1:1 route whose chat hasn't started yet gets the admission notice when Personal workspaces are turned off", async () => {
+  const f = await fixture();
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id) values(${f.personal},${f.i.account_id})`;
+  await shared.admin`insert into session_tenancy_activations(account_id,activation_version,inventory_digest,parity_digest,activated_by) values(${f.i.account_id},1,${"1".repeat(64)},${"2".repeat(64)},'test')`;
+  await enqueueTeamsMessage(client.db, f.i, {
+    ...f.input,
+    personal: true,
+    channelId: null,
+    threadId: null,
+    sessionWorkspaceId: f.personal,
+  });
+  await shared.admin`insert into organization_privacy_preferences(account_id,personal_workspaces_enabled) values(${f.i.account_id},false) on conflict(account_id) do update set personal_workspaces_enabled=false`;
+  await f.tick();
+  expect(f.messages).toHaveLength(1);
+  expect(f.messages[0]).toContain("could not start");
+  expect(
+    (await shared.admin`select state from teams_bot_inbox where event_id=${f.input.eventId}`)[0]!
+      .state,
+  ).toBe("failed");
+  expect(
+    (
+      await shared.admin`select count(*)::int as n from sessions where account_id=${f.i.account_id}`
+    )[0]!.n,
+  ).toBe(0);
+  // The message is settled, so later ticks don't retry or resend it.
+  await f.tick();
+  expect(f.messages).toHaveLength(1);
+});
+
 test("a 1:1 route can't take a channel, and its proof doesn't create the chat in the installation's workspace", async () => {
   const f = await fixture();
   await expect(
@@ -203,7 +232,7 @@ test("a 1:1 route can't take a channel, and its proof doesn't create the chat in
         },
       },
     ),
-  ).rejects.toThrow();
+  ).rejects.toMatchObject({ status: 403 });
   const [count] =
     await shared.admin`select count(*)::int as n from sessions where id=${route.session_id}`;
   expect(count!.n).toBe(0);

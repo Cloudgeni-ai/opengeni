@@ -663,6 +663,17 @@ async function drainRoute(
       return;
     try {
       if (!r.session_bound) {
+        // Personal workspaces were turned off after this 1:1 route was made:
+        // refuse with the admission notice; the next message starts in the
+        // installation's workspace.
+        if (
+          r.session_workspace_id &&
+          (await personalWorkspaceClosedToNewWork(deps.db, {
+            accountId: i.account_id,
+            workspaceId: r.session_workspace_id,
+          }))
+        )
+          throw new HTTPException(403, { message: "personal_workspace_closed" });
         await createSessionForRequest(
           scoped,
           grant,

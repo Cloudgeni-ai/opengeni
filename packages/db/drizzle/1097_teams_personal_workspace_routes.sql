@@ -14,6 +14,9 @@
 --      only its owner works there.
 --   3. The native session event wake matches the route by its session's
 --      workspace.
+-- The new column is NULL in every existing row, so both constraints are added
+-- NOT VALID: they hold for every row written from now on without a scan.
+-- 1098 builds the session-workspace index online.
 -- Existing routes have no session_workspace_id and keep their workspace. A
 -- previous binary never writes the column. If a previous pump drains a new
 -- Personal route during rollout, it can start that one chat as Only me in the
@@ -25,14 +28,11 @@ SET LOCAL statement_timeout = '5min';
 ALTER TABLE teams_bot_routes ADD COLUMN session_workspace_id uuid;
 ALTER TABLE teams_bot_routes ADD CONSTRAINT teams_bot_routes_session_workspace_fkey
   FOREIGN KEY (session_workspace_id, account_id) REFERENCES workspaces(id, account_id)
-  ON DELETE CASCADE;
+  ON DELETE CASCADE NOT VALID;
 ALTER TABLE teams_bot_routes ADD CONSTRAINT teams_bot_routes_session_workspace_check
   CHECK (session_workspace_id IS NULL OR
     (personal AND channel_id IS NULL AND group_audience IS NULL
-      AND session_workspace_id <> workspace_id));
-CREATE INDEX teams_bot_routes_session_workspace
-  ON teams_bot_routes USING btree (session_workspace_id, session_id)
-  WHERE session_workspace_id IS NOT NULL;
+      AND session_workspace_id <> workspace_id)) NOT VALID;
 
 DROP POLICY workspace_isolation ON teams_bot_routes;
 CREATE POLICY workspace_isolation ON teams_bot_routes

@@ -89,7 +89,8 @@ workspace (named by their active organization membership) while Personal
 workspaces are on and they can start chats there; otherwise it stays in the
 installation's shared workspace. A chat that starts landing in the Personal
 workspace is a fresh conversation, and turning Personal workspaces off returns
-to the earlier one. The bot is still installed in, and its link still belongs
+to the earlier one; a first message still waiting to start its Personal chat
+then gets the usual admission notice. The bot is still installed in, and its link still belongs
 to, the shared workspace, so losing access there stops the chat. This does not
 grant the bot a canonical managed-browser session. Channel and group-chat
 sessions stay in the shared workspace and remain workspace-visible. Both
