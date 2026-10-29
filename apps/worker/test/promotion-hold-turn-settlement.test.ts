@@ -7,7 +7,7 @@ import { ensureRunAllowed, recordModelUsageAndDebitCredits } from "../src/activi
 // Fake databases have no per-task usage limit state.
 useNoSessionUsageLimitForFakeDatabases();
 
-// OPE-929: the admission time is what lets only calls admitted before a
+// The admission time is what lets only calls admitted before a
 // promotion hold settle against held funding. The PostgreSQL suites prove the
 // ledger rule; this pins the turn's hand-off from admission to settlement.
 const ACCOUNT = "acct-hold";

@@ -8,7 +8,7 @@ import {
 } from "../src/credit-balances";
 
 // Settlement planning never reaches a grant whose balance read marks it held.
-// The PostgreSQL suites prove when settlement reads funding as held (OPE-929).
+// The PostgreSQL suites prove when settlement reads funding as held.
 const M = 1_000_000;
 function balance(held: boolean): BillingBalance {
   return {

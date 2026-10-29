@@ -363,7 +363,7 @@ test("promotion holds preserve paid funding, historical receipts and in-flight s
   }
 }, 180_000);
 
-// OPE-929: a held account with a little purchased credit kept passing
+// Regression: a held account with a little purchased credit kept passing
 // admission while every settlement drained its held Free and trial funds.
 test("usage admitted after a hold never settles against held funding; release restores it", async () => {
   if (!client || !shared) return;

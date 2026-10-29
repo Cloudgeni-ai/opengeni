@@ -136,7 +136,7 @@ test("direct model API refuses held Free credits before dispatch and settles pos
       amountMicros: 3_000_000,
       idempotencyKey: crypto.randomUUID(),
     });
-    // OPE-929: purchased credit admits the calls and pays for them; the held
+    // Regression: purchased credit admits the calls and pays for them; the held
     // Free grant stays untouched however many calls follow.
     await call();
     await call();
