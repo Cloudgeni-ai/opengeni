@@ -67,6 +67,12 @@ export type ModelUsageSettlementInput = {
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
   creditPolicyRevision?: number | undefined;
+  /**
+   * Database time the call was admitted (`fundingAdmittedAt` from its
+   * admission balance). Only a call admitted before a promotion hold settles
+   * against the held funding; omitted means it never does.
+   */
+  fundingAdmittedAt?: string | undefined;
   gatewayBilling?: ModelResponseUsage["gatewayBilling"];
   normalizedUsage: ModelCallUsageNormalization;
   /** Durable source identity (for a turn, `${turnId}:${sourceKey}`). */
@@ -408,6 +414,7 @@ export async function settleModelUsage(
       requestedAmountMicros: costMicros,
       modelId: canonicalizeConfiguredModelId(settings, input.model),
       creditPolicyRevision: input.creditPolicyRevision,
+      fundingAdmittedAt: input.fundingAdmittedAt,
       sourceType: "model_response",
       sourceId: input.sourceId,
       idempotencyKey: `credit:model_usage_debit:${input.sourceId}`,

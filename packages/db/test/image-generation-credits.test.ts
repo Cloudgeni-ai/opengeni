@@ -412,6 +412,70 @@ describe("Opengeni-credit funded image generation", () => {
     expect(allocation?.amount).toBe(String(PRICE));
   }, 60_000);
 
+  test("an image admitted after a promotion hold never settles against the held trial grant", async () => {
+    if (!available) return;
+    const value = await fixture(1_000_000);
+    const accountId = value.grant.accountId;
+    await applyCreditLedgerEntry(client.db, {
+      accountId,
+      workspaceId: value.grant.workspaceId,
+      type: "grant",
+      amountMicros: 1_000_000,
+      eligibleModelIds: [CHAT_MODEL],
+      sourceType: "verified_signup_trial",
+      sourceId: accountId,
+      idempotencyKey: `test:image-credit-trial:${accountId}`,
+    });
+    const allocated = async (operationId: string) => {
+      const rows = await shared!.admin<{ amount: string }[]>`
+        select a.amount_micros::text as amount
+        from credit_debit_allocations a
+        join credit_ledger_entries d on d.id = a.debit_entry_id
+        where d.source_id = ${operationId}`;
+      return rows.map((row) => Number(row.amount));
+    };
+    const deliver = async (operation: Awaited<ReturnType<typeof preparePriced>>, id: string) => {
+      await retainReadyArtifact(value, operation, id, { completeOperation: true });
+      const balance = await getBillingBalance(client.db, accountId);
+      return { general: balance.generalBalanceMicros, held: balance.heldCreditMicros };
+    };
+    await shared!.admin`update promotion_enforcement set enabled = true`;
+    try {
+      // In its provider request when the hold lands: original funding pays.
+      const inFlight = await preparePriced(value, "call-held-in-flight", PRICE, CHAT_MODEL);
+      expect((await begin(value, inFlight)).started).toBe(true);
+      await shared!
+        .admin`select opengeni_private.set_promotion_decision(${accountId}::uuid,'held','test','farm','{}'::jsonb,'operator:test',0)`;
+      expect(await deliver(inFlight, "call-held-in-flight")).toEqual({
+        general: 1_000_000,
+        held: 1_000_000 - PRICE,
+      });
+      expect(await allocated(inFlight.id)).toEqual([PRICE]);
+
+      // Admitted on purchased credit after the hold: purchased credit pays.
+      const afterHold = await preparePriced(value, "call-after-hold", PRICE, CHAT_MODEL);
+      expect((await begin(value, afterHold)).started).toBe(true);
+      expect(await deliver(afterHold, "call-after-hold")).toEqual({
+        general: 1_000_000 - PRICE,
+        held: 1_000_000 - PRICE,
+      });
+      expect(await allocated(afterHold.id)).toEqual([]);
+
+      // Releasing the hold restores the remaining trial funding.
+      await shared!
+        .admin`select opengeni_private.set_promotion_decision(${accountId}::uuid,'eligible','test','review','{}'::jsonb,'operator:test',1)`;
+      const released = await preparePriced(value, "call-released", PRICE, CHAT_MODEL);
+      expect((await begin(value, released)).started).toBe(true);
+      expect(await deliver(released, "call-released")).toEqual({
+        general: 1_000_000 - PRICE,
+        held: 0,
+      });
+      expect(await allocated(released.id)).toEqual([PRICE]);
+    } finally {
+      await shared!.admin`update promotion_enforcement set enabled = false`;
+    }
+  }, 60_000);
+
   test("an image still in its provider request holds its price against parallel images", async () => {
     if (!available) return;
     const value = await fixture(400_000);

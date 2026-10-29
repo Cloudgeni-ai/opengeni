@@ -313,6 +313,9 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             chargesOpenGeniCredits,
             countsTowardTokenCap,
             creditPolicyRevision: admission.creditPolicyRevision,
+            ...(admission.fundingAdmittedAt
+              ? { fundingAdmittedAt: admission.fundingAdmittedAt }
+              : {}),
             ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
             normalizedUsage: normalizeModelCallUsage(usage.usage),
             sourceId,

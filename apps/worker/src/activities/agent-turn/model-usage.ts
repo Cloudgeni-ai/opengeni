@@ -285,6 +285,8 @@ export async function processModelResponseTerminalEvent(input: {
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
   creditPolicyRevision?: number | undefined;
+  /** Database admission time; only pre-hold calls settle against held promotional funding. */
+  fundingAdmittedAt?: string | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   /** The shared-core subscription connection that served the call (billing attribution). */
@@ -364,6 +366,7 @@ export async function processModelResponseTerminalEvent(input: {
         turnAttemptId: input.turnAttemptId,
         model: input.model,
         creditPolicyRevision: input.creditPolicyRevision,
+        fundingAdmittedAt: input.fundingAdmittedAt,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -491,6 +494,7 @@ export async function processCompactionModelUsageEvent(input: {
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
   creditPolicyRevision?: number | undefined;
+  fundingAdmittedAt?: string | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   /** The shared-core subscription connection that served the call (billing attribution). */
@@ -542,6 +546,7 @@ export async function processCompactionModelUsageEvent(input: {
         turnAttemptId: input.turnAttemptId,
         model: input.model,
         creditPolicyRevision: input.creditPolicyRevision,
+        fundingAdmittedAt: input.fundingAdmittedAt,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -862,6 +867,7 @@ export async function recordModelUsageAndDebitCredits(
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
     creditPolicyRevision?: number | undefined;
+    fundingAdmittedAt?: string | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
@@ -884,6 +890,7 @@ export async function recordModelUsageAndDebitCredits(
     chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
     countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
     creditPolicyRevision: input.creditPolicyRevision,
+    fundingAdmittedAt: input.fundingAdmittedAt,
     ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
     normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
     sourceId: `${input.turnId}:${input.sourceKey}`,

@@ -296,6 +296,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     turnExecutionPolicy.productModelId,
   );
   let compactionCreditPolicyRevision: number | undefined;
+  let compactionFundingAdmittedAt: string | undefined;
   // Wire fingerprint of the latest compaction request; its usage callback runs
   // after that request's response, before the next compaction request.
   let latestCompactionPromptCacheRequest: Promise<PromptCacheRequestFingerprint | null> | null =
@@ -308,6 +309,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     await processCompactionModelUsageEvent({
       usage,
       creditPolicyRevision: compactionCreditPolicyRevision,
+      fundingAdmittedAt: compactionFundingAdmittedAt,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
       settings,
@@ -372,7 +374,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             }),
           );
     const summarize: CompactionSummarizer = async (s, m) => {
-      compactionCreditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
+      const admission = await ensureRunAllowedBetweenModelCalls({
         settings: s,
         db,
         accountId: input.accountId,
@@ -385,6 +387,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         entitlements: deps.entitlements,
         sessionId: input.sessionId,
       });
+      compactionCreditPolicyRevision = admission?.creditPolicyRevision;
+      compactionFundingAdmittedAt = admission?.fundingAdmittedAt;
       return await summarizeModel(s, m);
     };
     summarize.estimatePrefixTokens = () => {

@@ -336,6 +336,17 @@ export class AllowanceExhaustedError extends Error {
   }
 }
 
+/**
+ * What a local credit admission hands to the settlement of the model call it
+ * admitted. `fundingAdmittedAt` (database time, present only when promotional
+ * funding was not held) lets only calls admitted before a promotion hold
+ * settle against the held funding.
+ */
+export type RunCreditAdmission = {
+  creditPolicyRevision: number | undefined;
+  fundingAdmittedAt?: string;
+};
+
 /** Revalidate between paid calls without replaying provider work or reserving credits. */
 export async function ensureRunAllowedBetweenModelCalls(input: {
   settings: Settings;
@@ -351,7 +362,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   /** The session whose task root usage limit gates this request. */
   sessionId?: string;
   serializedRunState?: () => string | null;
-}): Promise<number | undefined> {
+}): Promise<RunCreditAdmission | undefined> {
   try {
     return await ensureRunAllowed(
       input.settings,
@@ -401,8 +412,9 @@ export async function ensureRunAllowed(
   initiatingHumanSubjectId: string | null = null,
   modelId?: string,
   sessionId?: string,
-): Promise<number | undefined> {
+): Promise<RunCreditAdmission> {
   let creditPolicyRevision: number | undefined;
+  let fundingAdmittedAt: string | undefined;
   // Per-task usage limit: independent of funding, so it applies to
   // credit, subscription, workspace-key and free paths alike.
   if (sessionId) await ensureSessionUsageLimitAllows(db, { accountId, workspaceId, sessionId });
@@ -442,6 +454,7 @@ export async function ensureRunAllowed(
   ) {
     const balance = await getSpendableCreditBalance(db, accountId, modelId);
     creditPolicyRevision = balance.creditPolicyRevision;
+    fundingAdmittedAt = balance.fundingAdmittedAt;
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient workspace credits");
     }
@@ -481,5 +494,5 @@ export async function ensureRunAllowed(
       }
     }
   }
-  return creditPolicyRevision;
+  return { creditPolicyRevision, ...(fundingAdmittedAt ? { fundingAdmittedAt } : {}) };
 }

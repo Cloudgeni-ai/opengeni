@@ -142,7 +142,7 @@ describe("worker agent-run admission funding", () => {
           countsTowardTokenCap: true,
           initiatingHumanSubjectId: null,
         });
-        if (allowed) await expect(check).resolves.toBe(7);
+        if (allowed) await expect(check).resolves.toEqual({ creditPolicyRevision: 7 });
         else await expect(check).rejects.toThrow("insufficient workspace credits");
         expect(balance.mock.calls.slice(-3).map((call) => call.slice(0, 3))).toEqual([
           [services.db, ACCOUNT, model],

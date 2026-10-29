@@ -6672,6 +6672,12 @@ export async function applyCreditDebitUpToBalance(
     /** Canonical, accepted model ID. Omitted for non-model usage. */
     modelId?: string;
     creditPolicyRevision?: number | undefined;
+    /**
+     * Database time this usage was admitted (`fundingAdmittedAt` from the
+     * admission balance). Only usage admitted before a promotion hold settles
+     * against the held funding; omitted means it never does.
+     */
+    fundingAdmittedAt?: string | null | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -6706,7 +6712,7 @@ export async function applyCreditDebitUpToBalance(
         input.accountId,
         input.creditPolicyRevision,
         settledAt,
-        true,
+        input.fundingAdmittedAt,
       );
       const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
       const candidateDebitMicros = plan.debitedMicros;
@@ -6780,6 +6786,12 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /**
+     * Database time this usage was admitted. Only usage admitted before a
+     * promotion hold settles against the held funding; omitted means it
+     * never does, and general credit pays (possibly going negative).
+     */
+    fundingAdmittedAt?: string | null | undefined;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
@@ -6796,7 +6808,13 @@ export async function applyCreditDebitAfterUse(
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
+          await getBillingBalance(
+            scopedDb,
+            input.accountId,
+            undefined,
+            settledAt,
+            input.fundingAdmittedAt,
+          ),
           input.amountMicros,
           input.usage,
         );

@@ -13,7 +13,7 @@ import { acquireRestrictedRuntimeTestDatabase } from "@opengeni/testing/shared-p
 import { testSettings } from "@opengeni/testing/settings";
 import { createModelCallService } from "../src/model-calls/service";
 
-test("direct model API refuses held Free credits before dispatch and preserves paid funding", async () => {
+test("direct model API refuses held Free credits before dispatch and settles post-hold calls on paid funding only", async () => {
   const shared = await acquireRestrictedRuntimeTestDatabase("model-call-promotion-hold");
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL required");
@@ -56,7 +56,14 @@ test("direct model API refuses held Free credits before dispatch and preserves p
       currentPeriodEnd: period.periodEnd,
     });
     await grantPlanCreditPeriod(client.db, period);
-    const settings = testSettings({ billingMode: "stripe", usageLimitsMode: "managed" });
+    // 1,000 input tokens at $1/M: every settled call costs 1,000 micros.
+    const settings = testSettings({
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      modelPricingJson: JSON.stringify({
+        [model]: { inputMicrosPerMillionTokens: 1_000_000, outputMicrosPerMillionTokens: 0 },
+      }),
+    });
     const selection = {
       model: {
         id: model,
@@ -78,9 +85,17 @@ test("direct model API refuses held Free credits before dispatch and preserves p
         modelId: model,
       } as never),
     );
-    const dispatch = spyOn(provider, "runSingleModelCall").mockResolvedValue({
-      text: "offline fixture",
-    } as never);
+    // Runs between admission and settlement, like a hold landing mid-call.
+    let duringDispatch: (() => Promise<unknown>) | null = null;
+    const dispatch = spyOn(provider, "runSingleModelCall").mockImplementation((async () => {
+      const hook = duringDispatch;
+      duringDispatch = null;
+      await hook?.();
+      return {
+        text: "offline fixture",
+        usage: { usage: { inputTokens: 1_000, outputTokens: 0, totalTokens: 1_000 } },
+      };
+    }) as never);
     restores.push(dispatch);
     const service = createModelCallService({ db: client.db, settings });
     const call = () =>
@@ -93,16 +108,26 @@ test("direct model API refuses held Free credits before dispatch and preserves p
         requestId: crypto.randomUUID(),
         request: { messages: [{ role: "user", content: "fixture" }] } as never,
       });
+    const funds = async () => {
+      const balance = await getBillingBalance(client.db, grant.accountId);
+      return { general: balance.generalBalanceMicros, held: balance.heldCreditMicros };
+    };
 
     await call();
     expect(dispatch).toHaveBeenCalledTimes(1);
     await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','direct model admission regression',true)`;
-    await shared.admin`select opengeni_private.set_promotion_decision(${grant.accountId}::uuid,'held','test','direct API farming','{}'::jsonb,'operator:test',0)`;
+    expect(await funds()).toEqual({ general: 0, held: 0 });
+    // Admitted while eligible, held before settlement: the original Free funding pays.
+    duringDispatch = () =>
+      shared.admin`select opengeni_private.set_promotion_decision(${grant.accountId}::uuid,'held','test','direct API farming','{}'::jsonb,'operator:test',0)`;
+    await call();
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(await funds()).toEqual({ general: 0, held: 9_998_000 });
     await expect(call()).rejects.toMatchObject({ status: 402, code: "insufficient_credits" });
-    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledTimes(2);
     expect(await getBillingBalance(client.db, grant.accountId)).toMatchObject({
-      balanceMicros: 10_000_000,
-      heldCreditMicros: 10_000_000,
+      balanceMicros: 9_998_000,
+      heldCreditMicros: 9_998_000,
     });
 
     await applyCreditLedgerEntry(client.db, {
@@ -111,12 +136,22 @@ test("direct model API refuses held Free credits before dispatch and preserves p
       amountMicros: 3_000_000,
       idempotencyKey: crypto.randomUUID(),
     });
+    // OPE-929: purchased credit admits the calls and pays for them; the held
+    // Free grant stays untouched however many calls follow.
     await call();
-    expect(dispatch).toHaveBeenCalledTimes(2);
+    await call();
+    expect(dispatch).toHaveBeenCalledTimes(4);
+    expect(await funds()).toEqual({ general: 2_998_000, held: 9_998_000 });
     expect(await getBillingBalance(client.db, grant.accountId)).toMatchObject({
-      balanceMicros: 13_000_000,
-      heldCreditMicros: 10_000_000,
+      balanceMicros: 12_996_000,
+      heldCreditMicros: 9_998_000,
     });
+
+    // Releasing the hold restores the remaining Free funding, which pays first.
+    await shared.admin`select opengeni_private.set_promotion_decision(${grant.accountId}::uuid,'eligible','test','reviewed','{}'::jsonb,'operator:test',1)`;
+    await call();
+    expect(await funds()).toEqual({ general: 2_998_000, held: 0 });
+    expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(12_995_000);
   } finally {
     for (const mocked of restores.reverse()) mocked.mockRestore();
     await client.close();

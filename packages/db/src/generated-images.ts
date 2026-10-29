@@ -275,7 +275,9 @@ export async function beginImageGenerationOperation(
       .update(schema.imageGenerationOperations)
       .set({
         status: "provider_started",
-        providerStartedAt: now,
+        // Database clock, after admission's balance read under the account
+        // credit lock: settlement compares it with promotion decision times.
+        providerStartedAt: sql`clock_timestamp()`,
         updatedAt: now,
       })
       .where(eq(schema.imageGenerationOperations.id, current.id))
@@ -1064,13 +1066,29 @@ async function debitImageGenerationCredits(
   const settledAt = await beginPlanCreditSettlement(tx, operation.accountId);
   // The monthly plan pays first, then grants covering the turn's model, then
   // general credit, exactly as a settled chat response.
-  const allocations = operation.creditUsageModelId
-    ? planPostUseCreditAllocations(
-        await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
-        operation.pricedCostMicros,
-        operation.creditUsageModelId,
-      )
-    : [];
+  let allocations: { grantEntryId: string; amountMicros: number }[] = [];
+  if (operation.creditUsageModelId) {
+    // Credits were admitted in the transaction that stamped provider_started_at
+    // (database clock, microseconds). Promotional funding held only after
+    // that still pays; funding already held at admission never does.
+    const [started] = await rawRows<{ admitted_at: string | null }>(
+      tx,
+      sql`
+      select to_char(provider_started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as admitted_at
+      from image_generation_operations where id = ${operation.id}`,
+    );
+    allocations = planPostUseCreditAllocations(
+      await getBillingBalance(
+        tx,
+        operation.accountId,
+        undefined,
+        settledAt,
+        started?.admitted_at ?? null,
+      ),
+      operation.pricedCostMicros,
+      operation.creditUsageModelId,
+    );
+  }
   const now = new Date();
   const inserted = await tx
     .insert(schema.creditLedgerEntries)

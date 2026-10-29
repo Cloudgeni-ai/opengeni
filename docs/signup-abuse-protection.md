@@ -71,6 +71,32 @@ ledger history remains unchanged. Purchased credit and paid-plan allowances stay
 usable. Already-dispatched usage settles against its original funding; a hold does
 not manufacture a refund. Releasing a hold restores the remaining funds.
 
+Settlement decides by admission time, not by settlement time. Admission records the
+database clock just after its balance read, but only when promotional funding was
+spendable then. Usage settles against held funding only when that admission time
+precedes the decision's `updated_at`; decision writers take the account credit
+lock and stamp the database clock, so the order is exact. Usage admitted while
+funding is held, or settled without an admission time, uses only purchased credit
+and paid-plan allowances: prepaid model debits are capped at that balance, and
+post-use charges may take general credit negative. Otherwise a held account with
+a little purchased credit could keep passing admission while every settlement
+drained its held funds.
+
+- Direct model API calls and agent-turn model calls (responses, the aggregate
+  fallback, compaction and in-turn titles) carry the time from their own per-call
+  admission to settlement.
+- Generated images use `provider_started_at`, stamped with the database clock in
+  the transaction that admitted their credits.
+- Every other settlement path has no admission time and never uses held funding:
+  independent title workflows, dictation, live voice, web and knowledge search,
+  knowledge indexing and site publishing.
+
+An enforcement switch is not visible to runtime roles, so a call admitted while
+enforcement was off and settled after it was turned on, for a decision written
+earlier, settles against non-held funds. A decision rewritten while an image is
+in its provider request (for example from `held` to `denied`) can let that one
+image settle against held funding. Both are bounded to usage already in flight.
+
 Legacy unrestricted signup amounts that cannot be distinguished safely from paid
 funds are left untouched. Scoped signup grants and identifiable legacy Free plan
 period funding are covered. The billing UI shows available funds and free credit

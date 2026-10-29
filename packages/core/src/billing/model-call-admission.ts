@@ -14,7 +14,12 @@ export type ModelCallAdmissionDenial =
   | "monthly_token_limit";
 
 export type ModelCallAdmission =
-  | { allowed: true; creditPolicyRevision: number | undefined }
+  | {
+      allowed: true;
+      creditPolicyRevision: number | undefined;
+      /** Settlement input: lets only pre-hold calls use held promotional funding. */
+      fundingAdmittedAt?: string | undefined;
+    }
   | { allowed: false; denial: ModelCallAdmissionDenial; message: string };
 
 /**
@@ -41,6 +46,7 @@ export async function admitModelCall(
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
+  let fundingAdmittedAt: string | undefined;
   if (input.chargesOpenGeniCredits && metered) {
     if (services.entitlements) {
       const decision = await services.entitlements.admitRun({
@@ -59,6 +65,7 @@ export async function admitModelCall(
     } else {
       const balance = await getSpendableCreditBalance(db, input.accountId, input.model);
       creditPolicyRevision = balance.creditPolicyRevision;
+      fundingAdmittedAt = balance.fundingAdmittedAt;
       if (balance.balanceMicros <= 0) {
         return {
           allowed: false,
@@ -109,7 +116,11 @@ export async function admitModelCall(
       }
     }
   }
-  return { allowed: true, creditPolicyRevision };
+  return {
+    allowed: true,
+    creditPolicyRevision,
+    ...(fundingAdmittedAt ? { fundingAdmittedAt } : {}),
+  };
 }
 
 function startOfUtcMonth(): Date {

@@ -9,15 +9,56 @@ import { rawRows, withAccountRls } from "./database";
 import * as schema from "./schema";
 
 /** Read totals and grant remainders from one database snapshot. */
-type CreditBalanceSnapshot = BillingBalance & { creditPolicyRevision?: number };
+type CreditBalanceSnapshot = BillingBalance & {
+  creditPolicyRevision?: number;
+  /**
+   * Admission only ({@link getSpendableCreditBalance}): the database clock
+   * after this snapshot was read. Pass it to settlement as `fundingAdmittedAt`.
+   */
+  fundingAdmittedAt?: string;
+};
 
+/**
+ * A database-clock admission time from {@link getSpendableCreditBalance}, as
+ * an ISO-8601 UTC string with microseconds. Anything else is ignored, which
+ * keeps held promotional funding held: the safe default.
+ */
+const FUNDING_ADMITTED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/;
+
+export function validFundingAdmittedAt(value: string | null | undefined): string | null {
+  return typeof value === "string" &&
+    FUNDING_ADMITTED_AT.test(value) &&
+    Number.isFinite(Date.parse(value))
+    ? value
+    : null;
+}
+
+/**
+ * The balance as of one snapshot. Settlement passes `fundingAdmittedAt`, the
+ * database time its usage was admitted: promotional funding held by a
+ * non-eligible decision that took effect after that time still pays for the
+ * already-dispatched usage. Usage admitted after the decision, or with no
+ * trustworthy admission time, never settles against held funding.
+ */
 export async function getBillingBalance(
   db: Database,
   accountId: string,
   policyRevision?: number,
   settlementAt?: string,
-  includeHeldForSettlement = false,
+  fundingAdmittedAt?: string | null,
 ): Promise<CreditBalanceSnapshot> {
+  return (await readBillingBalance(db, accountId, policyRevision, settlementAt, fundingAdmittedAt))
+    .balance;
+}
+
+async function readBillingBalance(
+  db: Database,
+  accountId: string,
+  policyRevision?: number,
+  settlementAt?: string,
+  fundingAdmittedAt?: string | null,
+): Promise<{ balance: CreditBalanceSnapshot; readAt: string }> {
+  const admittedAt = validFundingAdmittedAt(fundingAdmittedAt);
   return await withAccountRls(db, accountId, async (tx) => {
     const [row] = await rawRows<{
       balance: string;
@@ -26,6 +67,8 @@ export async function getBillingBalance(
       plan: BillingPlanBalance | null;
       decision: NonNullable<BillingBalance["promotionDecision"]>;
       enforcement: boolean;
+      decided_after_admission: boolean;
+      read_at: string;
     }>(
       tx,
       sql`
@@ -37,6 +80,13 @@ export async function getBillingBalance(
       select
         coalesce((select decision from promotion_decisions where account_id=${accountId}::uuid), 'eligible') as decision,
         (select enabled from promotion_enforcement where singleton) as enforcement,
+        -- Decision writers hold the account credit lock and stamp the database
+        -- clock. Without an admission time this is false: funding stays held.
+        coalesce((select updated_at > ${admittedAt}::timestamptz
+          from promotion_decisions where account_id=${accountId}::uuid), false) as decided_after_admission,
+        -- Evaluated after this statement's snapshot: a hold visible here
+        -- always has an earlier updated_at than this admission time.
+        to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as read_at,
         coalesce((select revision from current_policy), 0)::int as revision,
         read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
         (select coalesce(sum(amount_micros), 0)::text
@@ -74,23 +124,26 @@ export async function getBillingBalance(
     // Expiry cannot depend on a maintenance worker being awake. Keep this read
     // lock-free; writers settle the same expiry under the account lock first.
     const balanceMicros = Number(row?.balance ?? 0) - (row?.plan?.creditPendingExpiryMicros ?? 0);
+    // Only the decision that held the funds can be newer than the admission;
+    // releasing a hold already makes the funds ordinary (not held) again.
+    const heldAfterAdmission = row?.decided_after_admission === true;
     const promotionalCredits = (row?.grants ?? []).map((grant) => ({
       ...grant,
-      held: includeHeldForSettlement ? false : grant.held,
+      held: heldAfterAdmission ? false : grant.held,
     }));
     const generalBalanceMicros =
       balanceMicros - promotionalCredits.reduce((sum, grant) => sum + grant.remainingMicros, 0);
     // Legacy Free periods were unrestricted, but have their own immutable
     // period usage accounting. Never mistake paid-plan periods for subsidies.
     const heldGeneralCreditMicros =
-      !includeHeldForSettlement &&
+      !heldAfterAdmission &&
       row?.enforcement &&
       row.decision !== "eligible" &&
       row.plan?.key === "free" &&
       !row.plan.creditScoped
         ? Math.min(Math.max(0, generalBalanceMicros), row.plan.creditRemainingMicros)
         : 0;
-    return {
+    const balance: CreditBalanceSnapshot = {
       accountId,
       creditPolicyRevision: row?.revision ?? 0,
       balanceMicros,
@@ -108,6 +161,7 @@ export async function getBillingBalance(
       currency: "usd",
       updatedAt: new Date().toISOString(),
     };
+    return { balance, readAt: row?.read_at ?? "" };
   });
 }
 
@@ -154,8 +208,16 @@ export async function getSpendableCreditBalance(
   await withAccountRls(db, accountId, async (tx) => {
     await tx.execute(sql`select free_plan_credit_eligible(${accountId}::uuid)`);
   });
-  const balance = await getBillingBalance(db, accountId, policyRevision, settlementAt);
-  return { ...balance, balanceMicros: spendableCreditMicros(balance, usage) };
+  const { balance, readAt } = await readBillingBalance(db, accountId, policyRevision, settlementAt);
+  // Usage admitted while funding is held never earns an admission time, so
+  // no later decision change can let its settlement reach held funds.
+  const fundingAdmittedAt =
+    balance.promotionDecision === "eligible" ? validFundingAdmittedAt(readAt) : null;
+  return {
+    ...balance,
+    balanceMicros: spendableCreditMicros(balance, usage),
+    ...(fundingAdmittedAt ? { fundingAdmittedAt } : {}),
+  };
 }
 
 /** Monthly plan credit pays first; then covering grants, oldest first. */

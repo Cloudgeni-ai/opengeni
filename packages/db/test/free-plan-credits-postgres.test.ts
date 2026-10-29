@@ -87,11 +87,13 @@ const charge = (
   amountMicros: number,
   modelId?: string,
   key = crypto.randomUUID(),
+  fundingAdmittedAt?: string,
 ) =>
   applyCreditDebitUpToBalance(client!.db, {
     accountId,
     requestedAmountMicros: amountMicros,
     ...(modelId ? { modelId } : {}),
+    ...(fundingAdmittedAt ? { fundingAdmittedAt } : {}),
     type: "model_debit",
     idempotencyKey: key,
   });
@@ -319,6 +321,8 @@ test("promotion holds preserve paid funding, historical receipts and in-flight s
   await ledger(id, 3 * M);
   await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','test activation',true)`;
   try {
+    // Admitted while still eligible: this call is in flight when the hold lands.
+    const inFlight = await getSpendableCreditBalance(client.db, id, "model-b");
     await shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'held','test','farm', '{}'::jsonb,'operator:test',0)`;
     const history =
       await shared.admin`select data_schema from opengeni_private.promotion_decision_history where account_id=${id}::uuid`;
@@ -331,7 +335,9 @@ test("promotion holds preserve paid funding, historical receipts and in-flight s
     // Exact replay returns the immutable receipt; it never restores eligibility.
     expect((await grantPlanCreditPeriod(client.db, input)).id).toBe(grant.id);
     // Accounting for an already-dispatched call still uses the admitted funds.
-    expect((await charge(id, M, "model-b")).debitedMicros).toBe(M);
+    expect(
+      (await charge(id, M, "model-b", undefined, inFlight.fundingAdmittedAt)).debitedMicros,
+    ).toBe(M);
     expect((await getBillingBalance(client.db, id)).heldCreditMicros).toBe(19 * M);
     await expect(
       Promise.resolve(
@@ -352,6 +358,81 @@ test("promotion holds preserve paid funding, historical receipts and in-flight s
     expect(spendableCreditMicros(paidBalance, "model-b")).toBe(
       paidBalance.plan!.creditRemainingMicros,
     );
+  } finally {
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+// OPE-929: a held account with a little purchased credit kept passing
+// admission while every settlement drained its held Free and trial funds.
+test("usage admitted after a hold never settles against held funding; release restores it", async () => {
+  if (!client || !shared) return;
+  const id = await owner();
+  await grantPlanCreditPeriod(client.db, await state(id));
+  await ledger(id, 3 * M);
+  const funds = async () => {
+    const balance = await getBillingBalance(client!.db, id);
+    return { general: balance.generalBalanceMicros, held: balance.heldCreditMicros };
+  };
+  const afterUse = (amountMicros: number, fundingAdmittedAt?: string) =>
+    applyCreditDebitAfterUse(client!.db, {
+      accountId: id,
+      type: "model_usage_debit",
+      amountMicros,
+      usage: "model-b",
+      sourceType: "test",
+      sourceId: crypto.randomUUID(),
+      idempotencyKey: crypto.randomUUID(),
+      ...(fundingAdmittedAt ? { fundingAdmittedAt } : {}),
+    });
+  await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','test activation',true)`;
+  try {
+    const eligible = await getSpendableCreditBalance(client.db, id, "model-b");
+    expect(eligible.balanceMicros).toBe(23 * M);
+    expect(eligible.fundingAdmittedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+    await shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'held','test','farm','{}'::jsonb,'operator:test',0)`;
+    const held = await getSpendableCreditBalance(client.db, id, "model-b");
+    expect(held.balanceMicros).toBe(3 * M);
+    // Admission while held hands settlement no time that could reach held funds.
+    expect(held.fundingAdmittedAt).toBeUndefined();
+    const [clock] =
+      await shared.admin`select to_char(clock_timestamp() at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as at`;
+    const afterHold = clock!.at as string;
+    expect(await funds()).toEqual({ general: 3 * M, held: 20 * M });
+
+    // Prepaid (direct model API and turns): in-flight calls admitted before the
+    // hold keep their original funding; later calls use purchased credit only.
+    let debit = await charge(id, M, "model-b", undefined, eligible.fundingAdmittedAt);
+    expect([debit.debitedMicros, debit.grantDebitedMicros]).toEqual([M, M]);
+    debit = await charge(id, M, "model-b");
+    expect([debit.debitedMicros, debit.grantDebitedMicros]).toEqual([M, 0]);
+    debit = await charge(id, M, "model-b", undefined, afterHold);
+    expect([debit.debitedMicros, debit.grantDebitedMicros]).toEqual([M, 0]);
+    expect(await funds()).toEqual({ general: M, held: 19 * M });
+    // Short of purchased credit, the debit is capped; held funds never top it up.
+    debit = await charge(id, 5 * M, "model-b");
+    expect([debit.debitedMicros, debit.grantDebitedMicros]).toEqual([M, 0]);
+    expect(await funds()).toEqual({ general: 0, held: 19 * M });
+
+    // Post-use full-amount settlement: general credit pays and may go negative.
+    await afterUse(2 * M);
+    await afterUse(M, afterHold);
+    // An untrustworthy admission time is ignored: the safe default.
+    await afterUse(M, "2000-01-01 00:00:00");
+    expect(await funds()).toEqual({ general: -4 * M, held: 19 * M });
+    await afterUse(M, eligible.fundingAdmittedAt);
+    expect(await funds()).toEqual({ general: -4 * M, held: 18 * M });
+
+    // Releasing the hold restores what remains for ordinary admission and use.
+    await shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'eligible','test','review','{}'::jsonb,'operator:test',1)`;
+    const released = await getSpendableCreditBalance(client.db, id, "model-b");
+    expect(released.balanceMicros).toBe(18 * M);
+    expect(released.fundingAdmittedAt).toBeDefined();
+    debit = await charge(id, M, "model-b");
+    expect([debit.debitedMicros, debit.grantDebitedMicros]).toEqual([M, M]);
+    await afterUse(M);
+    expect(await funds()).toEqual({ general: -4 * M, held: 0 });
+    expect((await getBillingBalance(client.db, id)).balanceMicros).toBe(12 * M);
   } finally {
     await shared.admin`update promotion_enforcement set enabled=false`;
   }

@@ -536,6 +536,10 @@ export async function runTurnStreamAttempt(
   let parallelSessionTitleFinished = false;
   let creditPolicyRevision: number | undefined;
   let titleCreditPolicyRevision: number | undefined;
+  // Database time of the latest local credit admission; absent when funding
+  // was held or no local read admitted the call (settlement keeps holds).
+  let fundingAdmittedAt: string | undefined;
+  let titleFundingAdmittedAt: string | undefined;
   let titleUsageModelId: string | null = null;
   const persistParallelSessionTitle = async (
     generated: GeneratedSessionTitle | null,
@@ -552,6 +556,7 @@ export async function runTurnStreamAttempt(
       await processSessionTitleModelUsageEvent({
         usage: generated.usage,
         creditPolicyRevision: titleCreditPolicyRevision,
+        fundingAdmittedAt: titleFundingAdmittedAt,
         state: sessionTitleUsageState,
         dispatchId: modelUsageDispatchId,
         settings,
@@ -870,7 +875,8 @@ export async function runTurnStreamAttempt(
     if (history.status === "rejected") throw history.reason;
     if (source.status === "rejected") throw source.reason;
     if (usage.status === "rejected") throw usage.reason;
-    creditPolicyRevision = usage.value;
+    creditPolicyRevision = usage.value?.creditPolicyRevision;
+    fundingAdmittedAt = usage.value?.fundingAdmittedAt;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
     if (pendingSteer.value) {
       // The request has not left the worker. The SDK finishes the run at
@@ -1371,6 +1377,7 @@ export async function runTurnStreamAttempt(
         const responseSettlementStartedAt = performance.now();
         const responseResult = await processModelResponseTerminalEvent({
           creditPolicyRevision,
+          fundingAdmittedAt,
           event: next.value,
           state: modelResponseState,
           dispatchId: modelUsageDispatchId,
@@ -2073,6 +2080,9 @@ export async function runTurnStreamAttempt(
           recordUsage: async () => {
             const billing = await recordModelUsageAndDebitCredits(settings, db, {
               creditPolicyRevision: aggregatePolicyRevision,
+              // The latest admission is the most conservative bound for
+              // aggregate usage across several admitted calls.
+              fundingAdmittedAt,
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
@@ -2619,6 +2629,7 @@ export async function runTurnStreamAttempt(
     !runtimeCancellationSignal.aborted
   ) {
     titleCreditPolicyRevision = creditPolicyRevision;
+    titleFundingAdmittedAt = fundingAdmittedAt;
     const titleRoute = sessionTitleRoute({
       resolvedModel,
       modelName: turnExecutionPolicy.upstreamModelId,
