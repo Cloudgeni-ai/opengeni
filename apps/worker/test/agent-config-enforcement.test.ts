@@ -1231,9 +1231,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
       '- {"name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian."}',
     );
     expect(captured.modelVisibleSkillCatalogText).toContain(
-      '- {"name":"' +
-        SKILL_SENTINEL +
-        '","description":"Installed test Skill"}',
+      '- {"name":"' + SKILL_SENTINEL + '","description":"Installed test Skill"}',
     );
     expect(captured.modelVisibleSkillCatalogText).toContain(
       "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions",
