@@ -539,3 +539,95 @@ e2e(
   },
   60_000,
 );
+
+// A result link that shows only outside its own box, and holds a closed
+// submenu of 5,000 items before the part that shows.
+const SUBMENU = fixture([
+  "<!doctype html><title>Submenu</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "#col{position:absolute;left:200px;top:0;width:300px;overflow:hidden}",
+  ".result{position:relative;height:90px}",
+  ".bar{position:absolute;left:0;top:0;width:300px;height:20px;background:#fff}",
+  "#submenu{display:none}",
+  "</style>",
+  '<div id="col"><div class="result"><span>Cached </span><a href="#m" id="menued"><ul id="submenu"></ul><span style="position:absolute;left:0;top:40px;width:280px;height:30px">Menu result</span></a><b class="bar">Ad</b></div></div>',
+  "<script>",
+  "globalThis.log=[];",
+  'const submenu=document.getElementById("submenu");',
+  'for (let i=0;i<5000;i+=1) submenu.appendChild(document.createElement("li"));',
+  'document.getElementById("menued").addEventListener("click",(event)=>{event.preventDefault();log.push("menued")});',
+  "</script>",
+]);
+
+e2e(
+  "a link that shows outside its own box is clicked there past a closed submenu of 5,000 items",
+  async () => {
+    await withSession(SUBMENU, async ({ evaluate, click }) => {
+      expect(
+        await evaluate('document.getElementById("menued").getElementsByTagName("*").length'),
+      ).toBe(5_002);
+      const result = await click({
+        type: "click",
+        locator: { kind: "role", role: "link", name: "Menu result", exact: true },
+      });
+      expect(result.error ?? null).toBeNull();
+      expect(result.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["menued"]);
+    });
+  },
+  60_000,
+);
+
+// An element wholly past a clipped edge that holds 100,000 descendants,
+// rendered or not: the search for a part that shows is bounded, so it is
+// refused about as fast as one with no descendants.
+const crowded = (tag: "b" | "u") =>
+  fixture([
+    "<!doctype html><title>Crowded</title>",
+    "<style>",
+    "body{margin:0;font:14px sans-serif}",
+    ".strip{width:260px;overflow:clip;white-space:nowrap}",
+    ".strip>div{padding-left:300px}",
+    "b{display:block;width:1px;height:1px}",
+    "u{display:none}",
+    "</style>",
+    '<div class="strip"><div><span id="crowded">Crowded past the edge</span></div></div>',
+    '<div class="strip"><div><span id="empty">Empty past the edge</span></div></div>',
+    "<script>",
+    `const parts=document.createDocumentFragment(); for (let i=0;i<100000;i+=1) parts.appendChild(document.createElement("${tag}")); document.getElementById("crowded").appendChild(parts);`,
+    "</script>",
+  ]);
+
+for (const [tag, kind] of [
+  ["b", "rendered"],
+  ["u", "unrendered"],
+] as const) {
+  e2e(
+    `an element past a clipped edge with 100,000 ${kind} descendants is refused about as fast as an empty one`,
+    async () => {
+      await withSession(crowded(tag), async ({ click }) => {
+        const refuse = async (id: string) => {
+          const started = performance.now();
+          const result = await click({
+            type: "click",
+            locator: { kind: "text", text: `${id} past the edge`, exact: true },
+          });
+          const elapsed = performance.now() - started;
+          // Hovering it to reveal it moves the pointer, so the refusal
+          // need not be definite.
+          expect(result.state).not.toBe("completed");
+          expect(result.error?.message).toContain("browser element is out of view");
+          return elapsed;
+        };
+        // Warm up once, then compare.
+        await refuse("Empty");
+        const empty = await refuse("Empty");
+        const many = await refuse("Crowded");
+        console.log(`${kind}: empty ${empty.toFixed(0)} ms, crowded ${many.toFixed(0)} ms`);
+        expect(many).toBeLessThan(empty + 2_000);
+      });
+    },
+    120_000,
+  );
+}

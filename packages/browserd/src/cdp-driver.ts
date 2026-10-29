@@ -7525,48 +7525,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const input = sessionId === undefined ? {} : { sessionId };
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
     try {
-      // Restarts the guard's clock and reports whether the page is hidden (a
-      // background tab without focus emulation). Best effort: a guard this
-      // cannot reach is judged by its readback, as before.
-      const arm = async () =>
-        guard !== null &&
-        !state.dialog &&
-        (await this.sendTarget<{ result?: unknown }>(
-          state,
-          "Runtime.callFunctionOn",
-          {
-            objectId: guard.objectId,
-            functionDeclaration: HIT_TARGET_GUARD_ARM_FUNCTION,
-            returnByValue: true,
-          },
-          { timeoutMs: 2_000 },
-        )
-          .then((armed) => isRecord(armed.result) && armed.result.value === true)
-          .catch(() => false));
-      const hidden = await arm();
-      // A hidden page draws no frames, and Chrome holds the pointer's move
-      // there for about five seconds before acknowledging it. The press
-      // that follows delivers the move first, in order, so there the press
-      // goes out as soon as the move has been sent.
-      let moveSent = () => {};
-      const sent = new Promise<void>((resolve) => {
-        moveSent = resolve;
-      });
-      const moved = this.sendActionTarget(
+      await this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
         { type: "mouseMoved", x, y },
-        { ...input, sent: moveSent },
+        input,
       );
-      if (hidden) {
-        void moved.catch(() => undefined);
-        await Promise.race([sent, moved]);
-      } else {
-        await moved;
-        // A page busy as the pointer arrives acknowledges the move only once
-        // it is done, which can outlast the guard's clock. Restart it right
-        // before the press.
-        await arm();
+      // A background tab can take seconds to acknowledge the pointer's move
+      // (it draws no frames), long enough for the guard to have disarmed
+      // itself before the press arrives. Its clock restarts here, right
+      // before the press. Best effort: a guard this cannot reach is judged
+      // by its readback, as before.
+      if (guard !== null && !state.dialog) {
+        await this.sendTarget(
+          state,
+          "Runtime.callFunctionOn",
+          { objectId: guard.objectId, functionDeclaration: "function () { this.arm(); }" },
+          { timeoutMs: 2_000 },
+        ).catch(() => undefined);
       }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
@@ -7582,7 +7558,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           input,
         );
       }
-      await moved;
     } catch (error) {
       // The input already fails or pauses this action (a JavaScript dialog,
       // an unresponsive tab), and reading the guard back now could wait on
@@ -9514,13 +9489,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
-    options: {
-      potentialEffect?: boolean;
-      sessionId?: string;
-      timeoutMs?: number;
-      /** Called once the command has gone out to the browser. */
-      sent?: () => void;
-    } = {},
+    options: { potentialEffect?: boolean; sessionId?: string; timeoutMs?: number } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
@@ -9553,7 +9522,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId: options.sessionId ?? this.commandSession(state, method),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
-    options.sent?.();
     try {
       const result = await Promise.race([
         command.then((value) => ({ kind: "result" as const, value })),
@@ -11073,19 +11041,31 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   // is positioned elsewhere, or whose box does not grow to hold its floated
   // children (no box at all). Only boxes that reach past its own are new.
   // Bounded, so a large element (a whole list or table) is not measured
-  // descendant by descendant.
+  // descendant by descendant. A subtree that is not rendered (a closed
+  // submenu) is skipped whole and does not count toward the bound.
   if (!points) {
     const outside = (box) =>
       box.left < rect.left || box.top < rect.top || box.right > rect.right || box.bottom > rect.bottom;
-    const descendants = element.getElementsByTagName("*");
+    // The element after node in document order, within the target; past
+    // node's own descendants when they are skipped.
+    const following = (node, descend) => {
+      if (descend && node.firstElementChild) return node.firstElementChild;
+      for (let at = node; at && at !== element; at = at.parentElement) {
+        if (at.nextElementSibling) return at.nextElementSibling;
+      }
+      return null;
+    };
+    let descendant = element.firstElementChild;
     let tried = 0;
-    for (let index = 0; index < 500 && tried < 50 && !points; index += 1) {
-      const descendant = descendants[index];
-      if (!descendant) break;
+    for (let visited = 0; descendant && visited < 500 && tried < 50 && !points; visited += 1) {
+      const unrendered =
+        descendant.getClientRects().length === 0 && getComputedStyle(descendant).display === "none";
       const box = descendant.getBoundingClientRect();
-      if (box.width <= 0 || box.height <= 0 || !outside(box)) continue;
-      tried += 1;
-      points = shown(box);
+      if (!unrendered && box.width > 0 && box.height > 0 && outside(box)) {
+        tried += 1;
+        points = shown(box);
+      }
+      descendant = following(descendant, !unrendered);
     }
   }
   if (!points) return null;
@@ -11189,13 +11169,9 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
 // reports what was held back, and its arm() restarts the clock below just
-// before the click's input. A guard that is never settled (a JavaScript
-// dialog interrupted the click) disarms itself a few seconds after that.
+// before the press. A guard that is never settled (a JavaScript dialog
+// interrupted the click) disarms itself a few seconds after that.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
-/** Restarts a guard's clock just before the click's input, and reports
- * whether its page is hidden. */
-const HIT_TARGET_GUARD_ARM_FUNCTION =
-  'function () { this.arm(); return document.visibilityState === "hidden"; }';
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported

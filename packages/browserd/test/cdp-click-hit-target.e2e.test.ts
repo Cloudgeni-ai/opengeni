@@ -135,26 +135,34 @@ e2e(
   60_000,
 );
 
-e2e(
-  "a layer that appears as the pointer arrives on a page busy for longer than five seconds receives no click",
-  async () => {
-    // Moving the pointer onto "Confirm" keeps the page busy for 6.5 seconds
-    // and then opens a card over it, so Chrome acknowledges the move only
-    // after that. The press that follows would land on the card.
-    const fixture = await openFixture(
-      '<!doctype html><title>Busy hover card</title><style>body{margin:0}#card{display:none;position:absolute;top:0;left:0;width:300px;height:100px;background:#fff}</style><div style="padding:30px"><button id="target">Confirm</button></div><div id="card" role="dialog" aria-label="Profile card"><button id="follow">Follow</button></div><script>globalThis.clicks={confirm:0,card:0};target.addEventListener("click",()=>clicks.confirm++);card.addEventListener("click",()=>clicks.card++);target.addEventListener("mouseenter",()=>{const until=performance.now()+6500;while(performance.now()<until){}card.style.display="block"});</script>',
-    );
-    try {
-      const refused = await fixture.click(fixture.initial, "Confirm");
-      expect(refused.state).not.toBe("completed");
-      expect(refused.error?.message).toContain('covered by dialog "Profile card"');
-      expect(await fixture.evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
-    } finally {
-      await fixture.close();
-    }
-  },
-  60_000,
-);
+// Moving the pointer onto "Confirm" keeps the page busy for longer than the
+// guard's five-second clock and then opens a card over it, so Chrome
+// acknowledges the move only after that. The press that follows would land
+// on the card.
+for (const [event, busyMs] of [
+  ["pointermove", 6_500],
+  ["pointermove", 12_000],
+  ["mouseenter", 6_500],
+  ["mouseenter", 12_000],
+] as const) {
+  e2e(
+    `a layer that appears after a ${busyMs} ms busy ${event} receives no click`,
+    async () => {
+      const fixture = await openFixture(
+        `<!doctype html><title>Busy hover card</title><style>body{margin:0}#card{display:none;position:absolute;top:0;left:0;width:300px;height:100px;background:#fff}</style><div style="padding:30px"><button id="target">Confirm</button></div><div id="card" role="dialog" aria-label="Profile card"><button id="follow">Follow</button></div><script>globalThis.clicks={confirm:0,card:0};target.addEventListener("click",()=>clicks.confirm++);card.addEventListener("click",()=>clicks.card++);target.addEventListener("${event}",()=>{const until=performance.now()+${busyMs};while(performance.now()<until){}card.style.display="block"});</script>`,
+      );
+      try {
+        const refused = await fixture.click(fixture.initial, "Confirm");
+        expect(refused.state).not.toBe("completed");
+        expect(refused.error?.message).toContain('covered by dialog "Profile card"');
+        expect(await fixture.evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
+      } finally {
+        await fixture.close();
+      }
+    },
+    90_000,
+  );
+}
 
 e2e(
   "a target the page re-renders as the pointer arrives still takes the click",
@@ -409,9 +417,6 @@ async function withBackgroundTab(
   const controllerGeneration = `controller-${randomUUID()}`;
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
-    // Headless on purpose: without focus emulation, headed Chrome delivers
-    // no presses at all to a tab that is not in front, so these cases would
-    // test Chrome rather than the driver.
     headed: false,
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -503,6 +508,35 @@ e2e(
   60_000,
 );
 
+// A background tab whose page stays busy as the pointer arrives, longer than
+// the guard's five-second clock, and then opens a card over the target.
+for (const [event, busyMs] of [
+  ["pointermove", 6_500],
+  ["pointermove", 12_000],
+  ["mouseenter", 6_500],
+  ["mouseenter", 12_000],
+] as const) {
+  e2e(
+    `a layer that appears after a ${busyMs} ms busy ${event} in a background tab receives no click`,
+    async () => {
+      await withBackgroundTab(
+        {
+          "/start": START,
+          "/page": `<!doctype html><title>Busy hover card</title><style>body{margin:0}#card{display:none;position:absolute;top:0;left:0;width:300px;height:100px;background:#fff}</style><div style="padding:30px"><button id="target">Confirm</button></div><div id="card" role="dialog" aria-label="Profile card"><button id="follow">Follow</button></div><script>globalThis.clicks={confirm:0,card:0};target.addEventListener("click",()=>clicks.confirm++);card.addEventListener("click",()=>clicks.card++);target.addEventListener("${event}",()=>{const until=performance.now()+${busyMs};while(performance.now()<until){}card.style.display="block"});</script>`,
+        },
+        async ({ page, click, evaluate }) => {
+          expect(await evaluate("document.visibilityState")).toBe("hidden");
+          const refused = await click(page, "#target");
+          expect(refused.state).not.toBe("completed");
+          expect(refused.error?.message).toContain('covered by dialog "Profile card"');
+          expect(await evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
+        },
+      );
+    },
+    90_000,
+  );
+}
+
 e2e(
   "a submit click in a background tab completes when its page is gone before the readback",
   async () => {
@@ -526,32 +560,6 @@ e2e(
         expect(result.error ?? null).toBeNull();
         expect(result.state).toBe("completed");
         await posted;
-      },
-    );
-  },
-  60_000,
-);
-
-e2e(
-  "a click in a background tab does not wait for Chrome to acknowledge the pointer's move",
-  async () => {
-    await withBackgroundTab(
-      {
-        "/start": START,
-        "/page":
-          '<!doctype html><title>Save</title><button id="save">Save</button><script>globalThis.log=[];for(const type of ["pointermove","pointerdown","click"])addEventListener(type,(event)=>log.push(event.type),true);</script>',
-      },
-      async ({ page, click, evaluate }) => {
-        expect(await evaluate("document.visibilityState")).toBe("hidden");
-        const started = performance.now();
-        const result = await click(page, "#save");
-        const elapsed = performance.now() - started;
-        expect(result.error ?? null).toBeNull();
-        expect(result.state).toBe("completed");
-        // The pointer still arrives before it presses.
-        expect(await evaluate("log")).toEqual(["pointermove", "pointerdown", "click"]);
-        // Chrome holds a hidden page's pointer move for about five seconds.
-        expect(elapsed).toBeLessThan(3_000);
       },
     );
   },
