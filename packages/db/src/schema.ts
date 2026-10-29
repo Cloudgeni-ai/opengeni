@@ -9270,6 +9270,9 @@ export const composerDrafts = pgTable(
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
+    // False: the draft follows the chat's current model policy and the stored
+    // policy columns are not authority. True: the person picked it.
+    modelProvided: boolean("model_provided").notNull().default(false),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

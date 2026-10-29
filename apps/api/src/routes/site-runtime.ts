@@ -1847,7 +1847,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const siteDraft = async (
       draft: Pick<
         z.infer<typeof SaveComposerDraftRequest>,
-        "text" | "resources" | "annotations" | "model" | "reasoningEffort" | "latencyMode"
+        | "text"
+        | "resources"
+        | "annotations"
+        | "model"
+        | "reasoningEffort"
+        | "latencyMode"
+        | "modelProvided"
       >,
     ) => {
       if (draft.text.length > MESSAGE_MAX_CHARS)
@@ -1882,6 +1888,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
         latencyMode: draft.latencyMode,
+        ...(draft.modelProvided === undefined ? {} : { modelProvided: draft.modelProvided }),
       };
     };
     switch (id) {

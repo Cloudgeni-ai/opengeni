@@ -41,6 +41,13 @@ export type ComposerPolicy = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * False while the policy follows the chat: the composer shows the chat's
+   * current model, picks up a switch made elsewhere (for example by the
+   * agent), and a send runs on the chat's model. Choosing a model,
+   * reasoning or latency in the composer makes it true. Absent means picked.
+   */
+  modelProvided?: boolean | undefined;
 };
 
 export type ComposerSendExtras = Omit<
@@ -148,6 +155,8 @@ type PendingComposerOperation = {
   annotationsAtSend: DraftTimelineAnnotation[];
   /** Latest local text/resources that must survive an uncertain delivery. */
   newerShadow: ComposerDraftShadow;
+  /** Whether the person picked the policy this operation was sent with. */
+  modelProvided?: boolean | undefined;
   clearDraftOnAccept: boolean;
   /** False after remount when the original input carried secret credentials. */
   canRetry: boolean;
@@ -1270,6 +1279,19 @@ export function useComposer(
             }
           }
         }
+        // The chat's policy changed elsewhere (for example the agent switched
+        // model) without a new draft revision: a policy that follows the chat
+        // shows the new one, whatever text is being typed. A picked policy is
+        // kept.
+        const chatPolicy = chatPolicyChange(policyRef.current, fetched);
+        if (chatPolicy && fetched.revision === draftRef.current?.revision) {
+          const clean = !localWasDirtyAtStart && localAtStart === localEditRevision.current;
+          draftRef.current = fetched;
+          setDraft(fetched);
+          policyRef.current = chatPolicy;
+          setPolicy(chatPolicy);
+          if (clean) lastSavedSignature.current = draftSignature(draftPayload(fetched));
+        }
       } catch (cause) {
         if (
           !requestAbort.signal.aborted &&
@@ -1444,6 +1466,22 @@ export function useComposer(
       if (targetKeyRef.current !== targetKey) return;
       draftRef.current = next;
       setDraft(next);
+      // An accepted send makes a picked policy the chat's own, and the next
+      // draft follows the chat again. A newer pick made while the send was in
+      // flight is kept.
+      const local = policyRef.current;
+      const followed =
+        local && next.modelProvided === false
+          ? local.modelProvided === false
+            ? chatPolicyChange(local, next)
+            : samePolicyFields(local, policyFromDraft(next))
+              ? policyFromDraft(next)
+              : null
+          : null;
+      if (followed) {
+        policyRef.current = followed;
+        setPolicy(followed);
+      }
       lastSavedSignature.current = draftSignature(draftPayload(next));
       setDraftConflict(null);
       setError(null);
@@ -1797,6 +1835,9 @@ export function useComposer(
               model: operation.draftPayload.model,
               reasoningEffort: operation.draftPayload.reasoningEffort,
               latencyMode: operation.draftPayload.latencyMode,
+              ...(operation.draftPayload.modelProvided === undefined
+                ? {}
+                : { modelProvided: operation.draftPayload.modelProvided }),
               expectedDraftRevision,
               clientEventId: operation.clientEventId,
               delivery: "send",
@@ -2147,6 +2188,9 @@ export function useComposer(
             model: input.model,
             reasoningEffort: input.reasoningEffort,
             latencyMode: input.latencyMode,
+            ...(operation.modelProvided === undefined
+              ? {}
+              : { modelProvided: operation.modelProvided }),
             expectedDraftRevision: input.expectedDraftRevision,
             clientEventId: input.clientEventId,
             delivery: operation.delivery,
@@ -2322,7 +2366,7 @@ export function useComposer(
         pendingClientEventId.current ??= generateClientEventId();
         const effectiveControl = effectiveControlRef.current;
         const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
-          ...currentPolicy,
+          ...policyMessageFields(currentPolicy),
           ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
           ...(durableDrafts && draftRef.current
             ? { expectedDraftRevision: draftRef.current.revision }
@@ -2342,6 +2386,9 @@ export function useComposer(
             annotations: cloneAnnotations(annotationsAtSend),
             policy: currentPolicy,
           },
+          ...(currentPolicy.modelProvided === undefined
+            ? {}
+            : { modelProvided: currentPolicy.modelProvided }),
           clearDraftOnAccept: explicit === undefined,
           canRetry: true,
         };
@@ -2466,7 +2513,7 @@ export function useComposer(
       const clientEventId = generateClientEventId();
       const effectiveControl = effectiveControlRef.current;
       const input = composeSendInput(sendText, clientEventId, extras, {
-        ...currentPolicy,
+        ...policyMessageFields(currentPolicy),
         ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
         resources,
         annotations: annotationsAtSend,
@@ -2923,8 +2970,11 @@ export function useComposer(
   }, []);
 
   const updatePolicy = useCallback(
-    (next: ComposerPolicy): void => {
+    (picked: ComposerPolicy): void => {
       if (targetKeyRef.current !== targetKey) return;
+      // A policy chosen in the composer is the person's pick: it no longer
+      // follows the chat and is what their next message runs on.
+      const next: ComposerPolicy = { ...picked, modelProvided: true };
       localEditRevision.current += 1;
       policyRef.current = next;
       const shadow = {
@@ -3215,7 +3265,12 @@ export function useComposer(
 
 /** Events that can atomically replace or clear this subject's durable draft. */
 export function isComposerDraftEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type === "user.message" || event.type === "session.queue.changed";
+  // A model switch changes the policy a draft that follows the chat shows.
+  return (
+    event.type === "user.message" ||
+    event.type === "session.queue.changed" ||
+    event.type === "session.model_settings.updated"
+  );
 }
 
 /**
@@ -3325,6 +3380,7 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
     latencyMode: draft.latencyMode,
+    ...(draft.modelProvided === undefined ? {} : { modelProvided: draft.modelProvided }),
   };
 }
 
@@ -3333,7 +3389,40 @@ function policyFromDraft(draft: ComposerDraft): ComposerPolicy {
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
     latencyMode: draft.latencyMode,
+    ...(draft.modelProvided === undefined ? {} : { modelProvided: draft.modelProvided }),
   };
+}
+
+/** The policy fields a message carries; whether it was picked is not one. */
+function policyMessageFields(
+  policy: ComposerPolicy,
+): Pick<ComposerPolicy, "model" | "reasoningEffort" | "latencyMode"> {
+  return {
+    model: policy.model,
+    reasoningEffort: policy.reasoningEffort,
+    latencyMode: policy.latencyMode,
+  };
+}
+
+/**
+ * The fetched policy when both it and the local one follow the chat and the
+ * chat's policy changed (for example the agent switched model), else null.
+ */
+function chatPolicyChange(
+  local: ComposerPolicy | null,
+  fetched: ComposerDraft,
+): ComposerPolicy | null {
+  if (!local || local.modelProvided !== false || fetched.modelProvided !== false) return null;
+  const next = policyFromDraft(fetched);
+  return samePolicyFields(local, next) ? null : next;
+}
+
+function samePolicyFields(left: ComposerPolicy, right: ComposerPolicy): boolean {
+  return (
+    left.model === right.model &&
+    left.reasoningEffort === right.reasoningEffort &&
+    left.latencyMode === right.latencyMode
+  );
 }
 
 function composerDraftPayload(
@@ -3352,6 +3441,7 @@ function composerDraftPayload(
     model: policy.model,
     reasoningEffort: policy.reasoningEffort,
     latencyMode: policy.latencyMode,
+    ...(policy.modelProvided === undefined ? {} : { modelProvided: policy.modelProvided }),
   };
 }
 

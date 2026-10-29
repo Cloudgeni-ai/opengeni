@@ -16,7 +16,8 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { submitComposerDraftForRequest } from "../src/application/composer-submit";
-import { saveHumanComposerDraft } from "../src/application/session-commands";
+import { getHumanComposerDraft, saveHumanComposerDraft } from "../src/application/session-commands";
+import { setSessionModel } from "../src/domain/sessions";
 import { normalizeResources } from "../src/domain/resources";
 
 let available = true;
@@ -467,5 +468,163 @@ describe("established-session composer drafts", () => {
         additionalResources: [{ ...hostRepository, ref: "changed" }],
       }),
     ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
+  }, 180_000);
+
+  test("a draft that follows the chat shows and runs on a model switched elsewhere", async () => {
+    if (!available) return;
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "test",
+      accountExternalId: `follow-account-${suffix}`,
+      accountName: "Composer follows the chat",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `follow-workspace-${suffix}`,
+      workspaceName: "Composer follows the chat",
+      subjectId: `user:follow-${suffix}`,
+    });
+    const grant = {
+      ...access.workspaceGrants[0]!,
+      principalKind: "human_session" as const,
+      permissions: ["sessions:read" as const, "sessions:control" as const],
+    };
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    };
+    const deps = {
+      settings: testSettings({ sandboxBackend: "none" }),
+      db,
+      bus: new MemoryEventBus(),
+      workflowClient: { wakeSessionWorkflow: async () => undefined },
+      objectStorage: null,
+    } as unknown as Parameters<typeof submitComposerDraftForRequest>[0] &
+      Parameters<typeof setSessionModel>[0];
+    const turnModel = async (turnId: string) =>
+      (
+        await shared!.admin`
+          select model, reasoning_effort as "reasoningEffort" from session_turns where id = ${turnId}`
+      )[0];
+    const sessionPolicy = async () =>
+      (
+        await shared!.admin`
+          select model, reasoning_effort as "reasoningEffort" from sessions where id = ${session.id}`
+      )[0];
+
+    // A fresh composer follows the chat.
+    const fresh = await getHumanComposerDraft({ db }, context);
+    expect(fresh).toMatchObject({ revision: 0, model: "gpt-5.6-sol", modelProvided: false });
+    const typed = await saveHumanComposerDraft({ db }, context, {
+      expectedRevision: 0,
+      text: "use the cheaper one now",
+      annotations: [],
+      resources: [],
+      model: fresh.model,
+      reasoningEffort: fresh.reasoningEffort,
+      latencyMode: fresh.latencyMode,
+      modelProvided: false,
+    });
+    expect(typed).toMatchObject({ revision: 1, modelProvided: false });
+
+    // The chat switches elsewhere (the agent's tool runs the same command).
+    const switched = await setSessionModel(deps, grant, session.id, {
+      model: "scripted-model",
+      reasoningEffort: "high",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(switched).toMatchObject({ model: "scripted-model", reasoningEffort: "high" });
+
+    // The composer now shows the switch without a new draft revision.
+    const shown = await getHumanComposerDraft({ db }, context);
+    expect(shown).toMatchObject({
+      revision: 1,
+      text: "use the cheaper one now",
+      model: "scripted-model",
+      reasoningEffort: "high",
+      modelProvided: false,
+    });
+
+    // Even a client still holding the old policy runs on the chat's model and
+    // leaves the switch in place.
+    const followed = await submitComposerDraftForRequest(deps, grant, workspaceId, session.id, {
+      clientEventId: crypto.randomUUID(),
+      expectedDraftRevision: typed.revision,
+      delivery: "send",
+      text: typed.text,
+      annotations: [],
+      resources: [],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      modelProvided: false,
+      connectionAccounts: [],
+    });
+    expect(await turnModel(followed.turn.id)).toEqual({
+      model: "scripted-model",
+      reasoningEffort: "high",
+    });
+    expect(await sessionPolicy()).toEqual({ model: "scripted-model", reasoningEffort: "high" });
+    expect(followed.draft).toMatchObject({
+      revision: typed.revision + 1,
+      model: "scripted-model",
+      reasoningEffort: "high",
+      modelProvided: false,
+    });
+
+    // A model the person picks in the composer still wins, and then becomes
+    // the policy the next draft follows.
+    const picked = await saveHumanComposerDraft({ db }, context, {
+      expectedRevision: followed.draft.revision,
+      text: "back to the other one",
+      annotations: [],
+      resources: [],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      modelProvided: true,
+    });
+    expect(picked).toMatchObject({ model: "gpt-5.6-sol", modelProvided: true });
+    const sent = await submitComposerDraftForRequest(deps, grant, workspaceId, session.id, {
+      clientEventId: crypto.randomUUID(),
+      expectedDraftRevision: picked.revision,
+      delivery: "send",
+      text: picked.text,
+      annotations: [],
+      resources: [],
+      model: picked.model,
+      reasoningEffort: picked.reasoningEffort,
+      latencyMode: picked.latencyMode,
+      modelProvided: true,
+      connectionAccounts: [],
+    });
+    expect(await turnModel(sent.turn.id)).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "low" });
+    expect(await sessionPolicy()).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "low" });
+    expect(sent.draft).toMatchObject({ model: "gpt-5.6-sol", modelProvided: false });
+
+    // A save from an older client, without the flag, is a pick as before.
+    const legacy = await saveHumanComposerDraft({ db }, context, {
+      expectedRevision: sent.draft.revision,
+      text: "",
+      annotations: [],
+      resources: [],
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(legacy).toMatchObject({ model: "scripted-model", modelProvided: true });
   }, 180_000);
 });

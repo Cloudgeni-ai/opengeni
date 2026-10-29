@@ -10169,6 +10169,15 @@ export const ComposerDraft = /* @__PURE__ */ defineSchema(() =>
     model: primitives.nonEmptyString,
     reasoningEffort: ReasoningEffort,
     latencyMode: LatencyMode,
+    /**
+     * True when the person picked this model policy (model, reasoning,
+     * latency) for their next message. False means the draft follows the
+     * chat: the policy shown is the chat's current one, a model switch made
+     * elsewhere (for example by the agent) shows up here, and a submit runs
+     * on the chat's model. Absent on a save or submit from an older client,
+     * which the server treats as picked.
+     */
+    modelProvided: primitives.optionalBoolean,
     sourceTurnId: primitives.nullableUuid,
     sourceTurnVersion: z.number().int().positive().nullable(),
     updatedAt: primitives.nullableString,
@@ -10227,6 +10236,7 @@ export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
     model: true,
     reasoningEffort: true,
     latencyMode: true,
+    modelProvided: true,
   }).extend({ expectedRevision: primitives.nonnegativeInteger }),
 );
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
@@ -10249,6 +10259,7 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       model: true,
       reasoningEffort: true,
       latencyMode: true,
+      modelProvided: true,
     })
       .extend({
         expectedDraftRevision: primitives.positiveInteger,

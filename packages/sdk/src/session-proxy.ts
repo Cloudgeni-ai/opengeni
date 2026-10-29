@@ -1076,11 +1076,15 @@ export function createSessionProxyHandler(
             // Save requires explicit policy fields. Use this actor's durable draft,
             // not browser choices. The API's expectedRevision fence rejects races.
             const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+            // The browser cannot pick, so whether the policy follows the chat
+            // is the durable draft's, too.
+            delete message.modelProvided;
             return await forward({
               ...message,
               model: draft.model,
               reasoningEffort: draft.reasoningEffort,
               latencyMode: draft.latencyMode,
+              ...(draft.modelProvided === undefined ? {} : { modelProvided: draft.modelProvided }),
             });
           }
           case "POST realtime": {

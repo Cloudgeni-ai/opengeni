@@ -2072,6 +2072,7 @@ function finalizePostUserMessageTurn(
           model: result.draft.model,
           reasoningEffort: result.draft.reasoningEffort as ReasoningEffort,
           latencyMode: result.draft.latencyMode as ComposerDraft["latencyMode"],
+          modelProvided: result.draft.modelProvided,
           sourceTurnId: result.draft.sourceTurnId,
           sourceTurnVersion: result.draft.sourceTurnVersion,
           updatedAt: result.draft.updatedAt.toISOString(),
@@ -5125,7 +5126,22 @@ export async function setSessionModel(
   );
   const event = await getSessionEvent(deps.db, grant.workspaceId, result.eventId);
   if (event) await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [event]);
-  return { sessionId, ...result, effectiveFrom: "future_turns" as const };
+  // Report what the chat's next turn runs on, read back from the stored
+  // session, never just the request: a replay or a later change elsewhere
+  // must not let the caller report a switch that is not in effect.
+  const stored = await getSession(deps.db, grant.workspaceId, sessionId);
+  return {
+    sessionId,
+    ...result,
+    ...(stored
+      ? {
+          model: stored.model,
+          reasoningEffort: stored.reasoningEffort,
+          latencyMode: stored.latencyMode,
+        }
+      : {}),
+    effectiveFrom: "future_turns" as const,
+  };
 }
 
 /**

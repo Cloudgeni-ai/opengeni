@@ -1242,6 +1242,8 @@ export async function saveComposerDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: LatencyMode;
+    /** Absent from an older client: its policy is treated as picked. */
+    modelProvided?: boolean | undefined;
     /**
      * Bound the workspace control prefix wait (request-scoped API callers pass
      * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
@@ -1285,6 +1287,7 @@ export async function saveComposerDraftInTransaction(
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     latencyMode: input.latencyMode,
+    modelProvided: input.modelProvided ?? true,
     // A queue edit is still the same accepted work item. Preserve its frozen
     // initiator through arbitrary draft saves; only a genuinely new compose or
     // Steer captures the submitting actor.
@@ -1709,6 +1712,8 @@ export async function editQueuedTurnInTransaction(
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
     latencyMode: turn.latencyMode,
+    // The edited turn's policy was already chosen for it.
+    modelProvided: true,
     sourceTurnId: turn.id,
     sourceTurnVersion: turn.version,
     updatedAt: new Date(),
@@ -2489,9 +2494,14 @@ export async function submitHumanPromptInTransaction(
         text: draft.text,
         annotations: DraftTimelineAnnotations.parse(draft.annotations),
         resources: withCanonicalResourceMountPaths(draft.resources),
-        model: draft.model,
-        reasoningEffort: draft.reasoningEffort,
-        latencyMode: draft.latencyMode,
+        // A draft that follows the chat carries no policy of its own to fence.
+        ...(draft.modelProvided
+          ? {
+              model: draft.model,
+              reasoningEffort: draft.reasoningEffort,
+              latencyMode: draft.latencyMode,
+            }
+          : {}),
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
@@ -2499,15 +2509,19 @@ export async function submitHumanPromptInTransaction(
           resources: withCanonicalResourceMountPaths(
             input.composerDraftResources ?? input.resources,
           ),
-          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
-          reasoningEffort:
-            input.turnExecutionPolicy?.reasoningEffort ??
-            input.reasoningEffort ??
-            (session.reasoningEffort as ReasoningEffort),
-          latencyMode:
-            input.turnExecutionPolicy?.latencyMode ??
-            input.latencyMode ??
-            (session.latencyMode as LatencyMode),
+          ...(draft.modelProvided
+            ? {
+                model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+                reasoningEffort:
+                  input.turnExecutionPolicy?.reasoningEffort ??
+                  input.reasoningEffort ??
+                  (session.reasoningEffort as ReasoningEffort),
+                latencyMode:
+                  input.turnExecutionPolicy?.latencyMode ??
+                  input.latencyMode ??
+                  (session.latencyMode as LatencyMode),
+              }
+            : {}),
         })
     ) {
       throw new QueueCommandConflictError(
@@ -2908,13 +2922,16 @@ export async function submitHumanPromptInTransaction(
     occurredAt: now,
   });
 
-  // Sending the exact saved composer chooses the chat's future policy, not
-  // just this turn's. Keep the write in prompt admission so a failed Send or
-  // replay cannot change defaults. Non-composer API/automated inputs retain
-  // their existing per-turn semantics. The boundary also prevents an older
-  // accepted turn that starts later from restoring the previous policy.
+  // Sending a saved composer whose policy the person picked chooses the
+  // chat's future policy, not just this turn's. A draft that follows the chat
+  // changes nothing, so it cannot undo a switch made elsewhere (for example
+  // by the agent) with a stale copy. Keep the write in prompt admission so a
+  // failed Send or replay cannot change defaults. Non-composer API/automated
+  // inputs retain their existing per-turn semantics. The boundary also
+  // prevents an older accepted turn that starts later from restoring the
+  // previous policy.
   const composerPolicy =
-    draft && (input.actor.type === "human" || input.actor.type === "operator")
+    draft?.modelProvided && (input.actor.type === "human" || input.actor.type === "operator")
       ? {
           model: turn.model,
           reasoningEffort: turn.reasoningEffort,
@@ -3172,6 +3189,8 @@ export async function submitHumanPromptInTransaction(
           resources: [],
           tools: [],
           toolsProvided: false,
+          // The pick is now the chat's policy; the next draft follows it.
+          modelProvided: false,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: now,

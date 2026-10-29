@@ -207,13 +207,17 @@ test("model settings preserves pause, queues and latency with exact retry receip
   const events =
     await shared.admin`select id from session_events where session_id = ${value.session.id} and type = 'session.model_settings.updated'`;
   expect(events).toHaveLength(1);
-  // Replaying the first write after a later choice does not reset the defaults.
+  // Replaying the first write after a later choice does not reset the
+  // defaults, and it reports the policy now in effect, not the old request.
   await call(value.grant, {
     ...input,
     reasoningEffort: "low",
     idempotencyKey: crypto.randomUUID(),
   });
-  expect(await call(value.grant, input)).toEqual(replay);
+  expect(await call(value.grant, input)).toEqual({
+    ...replay,
+    facts: { ...replay.facts, reasoningEffort: "low" },
+  });
   expect(await getSession(client.db, value.grant.workspaceId, value.session.id)).toMatchObject({
     reasoningEffort: "low",
   });

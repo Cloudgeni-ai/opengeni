@@ -7,6 +7,7 @@ import type {
 import type { AccessGrantAuthorization } from "../access";
 import type { AcceptSessionUserMessageDependencies } from "../dependencies";
 import { acceptSessionUserMessageWithOutcome } from "../domain/sessions";
+import { composerDraftFollowingChat } from "../domain/composer-draft-policy";
 
 export type SubmitComposerDraftForRequestOptions = {
   authorization?: AccessGrantAuthorization | undefined;
@@ -38,6 +39,10 @@ export async function submitComposerDraftForRequest(
   options: SubmitComposerDraftForRequestOptions = {},
 ): Promise<SubmitComposerDraftResponse> {
   const additionalResources = options.additionalResources ?? [];
+  // A draft that follows the chat runs on the chat's current policy, so a
+  // switch made elsewhere (for example by the agent) is never undone by the
+  // policy the composer last loaded. Only a policy the person picked is sent.
+  const followsChat = input.modelProvided === false;
   const result = await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, {
     text: input.text,
     annotations: input.annotations,
@@ -45,9 +50,13 @@ export async function submitComposerDraftForRequest(
     timeZone: input.timeZone ?? null,
     resources: [...input.resources, ...additionalResources],
     ...(additionalResources.length > 0 ? { composerDraftResources: input.resources } : {}),
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode,
+    ...(followsChat
+      ? {}
+      : {
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          latencyMode: input.latencyMode,
+        }),
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     connectionAccounts: input.connectionAccounts,
 
@@ -69,7 +78,7 @@ export async function submitComposerDraftForRequest(
   return {
     accepted: result.accepted,
     turn: result.turn,
-    draft: result.draft,
+    draft: await composerDraftFollowingChat(deps.db, workspaceId, sessionId, result.draft),
     receipt: result.receipt,
     routing: result.routing,
     interruptionCount: result.interruptionCount,

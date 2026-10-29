@@ -136,6 +136,7 @@ const DRAFT_FIELDS = [
   "model",
   "reasoningEffort",
   "latencyMode",
+  "modelProvided",
   "sourceTurnId",
   "sourceTurnVersion",
   "updatedAt",

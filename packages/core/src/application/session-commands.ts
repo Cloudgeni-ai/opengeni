@@ -62,6 +62,7 @@ import {
 } from "@opengeni/events";
 import type { SessionWorkflowClient } from "../dependencies";
 import { normalizeResources } from "../domain/resources";
+import { composerDraftFollowingChat } from "../domain/composer-draft-policy";
 import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
 import { initiatingHumanForAllowance } from "../domain/sessions";
 import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "../billing/limits";
@@ -675,6 +676,7 @@ function composerDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
     latencyMode: row.latencyMode as ComposerDraft["latencyMode"],
+    modelProvided: row.modelProvided,
     sourceTurnId: row.sourceTurnId,
     sourceTurnVersion: row.sourceTurnVersion,
     updatedAt: row.updatedAt.toISOString(),
@@ -1178,7 +1180,14 @@ export async function getHumanComposerDraft(
       }),
   );
   const mapped = composerDraft(row);
-  if (mapped) return mapped;
+  if (mapped) {
+    return await composerDraftFollowingChat(
+      deps.db,
+      context.workspaceId,
+      context.sessionId,
+      mapped,
+    );
+  }
   const session = await getSession(deps.db, context.workspaceId, context.sessionId);
   if (!session) throw new Error(`Session not found: ${context.sessionId}`);
   return {
@@ -1189,6 +1198,7 @@ export async function getHumanComposerDraft(
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     latencyMode: session.latencyMode,
+    modelProvided: false,
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,
@@ -1223,7 +1233,12 @@ export async function saveHumanComposerDraft(
         }),
       ),
   );
-  const saved = composerDraft(row)!;
+  const saved = await composerDraftFollowingChat(
+    deps.db,
+    context.workspaceId,
+    context.sessionId,
+    composerDraft(row)!,
+  );
   if (deps.settings) prepareDraftModel({ db: deps.db, settings: deps.settings }, context, saved);
   return saved;
 }

@@ -1,0 +1,12 @@
+-- deployment-mode: rolling
+-- Whether the person picked a composer draft's model policy. False means the
+-- draft follows the chat's current model, so a switch made elsewhere (for
+-- example by the agent) is what the next message uses and what the composer
+-- shows. The previous release never reads the column and its inserts get the
+-- default.
+--
+-- Existing drafts start out following the chat: before this column every
+-- draft carried the policy it was last loaded with, so it could not tell a
+-- pick from a stale copy, and treating copies as picks is what undid in-chat
+-- switches. A metadata-only column add; no row is rewritten.
+ALTER TABLE composer_drafts ADD COLUMN model_provided boolean NOT NULL DEFAULT false;

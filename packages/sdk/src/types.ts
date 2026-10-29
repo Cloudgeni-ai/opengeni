@@ -7335,6 +7335,13 @@ export type ComposerDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the person picked this model policy for their next message.
+   * False means the draft follows the chat: it shows the chat's current
+   * policy, including a switch made elsewhere (for example by the agent), and
+   * a submit runs on the chat's model. Absent on a save or submit is a pick.
+   */
+  modelProvided?: boolean | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
