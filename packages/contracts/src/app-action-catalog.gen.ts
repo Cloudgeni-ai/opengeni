@@ -2343,13 +2343,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "GET /v1/organizations/:organizationId/inference-residency",
-    "method": "GET",
-    "path": "/v1/organizations/:organizationId/inference-residency",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -3586,6 +3579,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GetOrganizationCredentialProviderResponse"
+    ]
+  },
+  {
+    "id": "getOrganizationInferenceResidency",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/inference-residency",
+    "request": [],
+    "response": [
+      "OrganizationInferenceResidency"
     ]
   },
   {
@@ -6358,15 +6360,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/organizations/:organizationId/codex/settings",
     "request": [
       "SubscriptionRotationSettingsRequest"
-    ],
-    "response": []
-  },
-  {
-    "id": "PATCH /v1/organizations/:organizationId/inference-residency",
-    "method": "PATCH",
-    "path": "/v1/organizations/:organizationId/inference-residency",
-    "request": [
-      "UpdateOrganizationInferenceResidencyRequest"
     ],
     "response": []
   },
@@ -9400,6 +9393,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "updateOrganizationInferenceResidency",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/inference-residency",
+    "request": [
+      "UpdateOrganizationInferenceResidencyRequest"
+    ],
+    "response": [
+      "OrganizationInferenceResidency"
     ]
   },
   {
