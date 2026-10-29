@@ -68,9 +68,11 @@ import {
   CdpAccessibilityTreeTooLargeError,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
+  withPageAccessibilityFacts,
   type CdpAccessibilityEntry,
   type CdpAccessibilitySnapshot,
   type CdpAxNode,
+  type PageAccessibilityFacts,
 } from "./cdp-accessibility";
 import {
   CdpCommandTimeoutError,
@@ -5078,6 +5080,155 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return result.result?.value === true;
   }
 
+  /**
+   * The main frame's accessibility nodes with what a person sees put right
+   * (see pageFactsExpression): content the page hides with aria-hidden while
+   * a person can see and press it, such as an open menu whose markup was
+   * never updated, joins the tree with the role and name the page gives it,
+   * so the outline lists it and locators find it; and, for an outline,
+   * decorations over a control that takes their clicks are marked to be left
+   * out of it. Every read looks at the page: Chromium can leave a hidden
+   * subtree out of its tree altogether (an aria-hidden container whose
+   * content arrived later), so the tree cannot tell when there is nothing to
+   * reveal. Best effort: a page that cannot be read this way keeps the tree
+   * Chromium gave.
+   */
+  private async withPageFacts(
+    state: TargetState,
+    nodes: CdpAxNode[],
+    outline: boolean,
+  ): Promise<CdpAxNode[]> {
+    if (this.engine === "lightpanda") return nodes;
+    const facts = await this.pageFacts(state, outline);
+    if (!facts) return nodes;
+    return withPageAccessibilityFacts(nodes, state.frame.id, facts);
+  }
+
+  private async pageFacts(
+    state: TargetState,
+    decorate: boolean,
+  ): Promise<PageAccessibilityFacts | null> {
+    const connection = await this.ensureConnection();
+    const sessionId = state.sessionId;
+    const objectGroup = `opengeni-page-facts-${this.createId()}`;
+    try {
+      const world = await connection.send<{ executionContextId?: unknown }>(
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return null;
+      const evaluated = await connection.send<{ result?: unknown; exceptionDetails?: unknown }>(
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          expression: pageFactsExpression(decorate),
+          objectGroup,
+          returnByValue: false,
+        },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (
+        evaluated.exceptionDetails ||
+        !isRecord(evaluated.result) ||
+        typeof evaluated.result.objectId !== "string"
+      )
+        return null;
+      const properties = await connection.send<{ result?: unknown }>(
+        "Runtime.getProperties",
+        { objectId: evaluated.result.objectId, ownProperties: true },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (!Array.isArray(properties.result)) return null;
+      const byIndex = new Map<number, Record<string, unknown>>();
+      for (const property of properties.result) {
+        if (!isRecord(property) || !isRecord(property.value)) continue;
+        const index = Number(property.name);
+        if (Number.isSafeInteger(index) && index >= 0) byIndex.set(index, property.value);
+      }
+      const encoded = byIndex.get(0)?.value;
+      if (typeof encoded !== "string") return null;
+      const parsed: unknown = JSON.parse(encoded);
+      if (
+        !isRecord(parsed) ||
+        !Array.isArray(parsed.revealed) ||
+        !Array.isArray(parsed.decorations)
+      )
+        return null;
+      const backendIds = new Map<number, number>();
+      await Promise.all(
+        [...byIndex.keys()]
+          .filter((index) => index > 0)
+          .map(async (index) => {
+            const objectId = byIndex.get(index)?.objectId;
+            if (typeof objectId !== "string") return;
+            const described = await connection
+              .send<{ node?: unknown }>(
+                "DOM.describeNode",
+                { objectId },
+                { sessionId, timeoutMs: 2_000 },
+              )
+              .catch(() => null);
+            const backendNodeId = isRecord(described?.node) ? described.node.backendNodeId : null;
+            if (typeof backendNodeId === "number") backendIds.set(index - 1, backendNodeId);
+          }),
+      );
+      const backendOf = (index: unknown): number | null =>
+        typeof index === "number" ? (backendIds.get(index) ?? null) : null;
+      const roots = new Map<number, number[]>();
+      for (const root of Array.isArray(parsed.roots) ? parsed.roots : []) {
+        if (!Array.isArray(root) || typeof root[0] !== "number" || !Array.isArray(root[1]))
+          continue;
+        roots.set(
+          root[0],
+          root[1].flatMap((index: unknown) => {
+            const backendNodeId = backendOf(index);
+            return backendNodeId === null ? [] : [backendNodeId];
+          }),
+        );
+      }
+      const revealed = parsed.revealed.map((fact: unknown, factIndex: number) => {
+        if (!Array.isArray(fact) || fact.length !== 5) return null;
+        const [index, role, name, states, parent] = fact;
+        const backendNodeId = backendOf(index);
+        if (
+          backendNodeId === null ||
+          typeof role !== "string" ||
+          typeof name !== "string" ||
+          typeof parent !== "number"
+        )
+          return null;
+        return {
+          backendNodeId,
+          role: role.slice(0, 64),
+          name,
+          properties: (Array.isArray(states) ? states : []).flatMap((entry: unknown) =>
+            Array.isArray(entry) && typeof entry[0] === "string"
+              ? [{ name: entry[0], value: { value: entry[1] } }]
+              : [],
+          ),
+          parent,
+          ancestors: roots.get(factIndex) ?? [],
+        };
+      });
+      const decorations = new Set<number>();
+      for (const index of parsed.decorations) {
+        const backendNodeId = backendOf(index);
+        if (backendNodeId !== null) decorations.add(backendNodeId);
+      }
+      return { revealed, decorations };
+    } catch (error) {
+      // The page navigated or went away while it was read; the tree stays.
+      if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
+        throw error;
+      return null;
+    } finally {
+      void connection
+        .send("Runtime.releaseObjectGroup", { objectGroup }, { sessionId })
+        .catch(() => undefined);
+    }
+  }
+
   /** The main frame's visible scrolling panels, by backend node, with the
    * directions each can still scroll ("down", "up,down"). The outline marks
    * them so an agent can scroll the panel that holds the content, not the
@@ -5220,6 +5371,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
       }
+      nodes = await this.withPageFacts(state, nodes, read === "outline");
       let accessibility: CdpAccessibilitySnapshot;
       try {
         accessibility = normalizeCdpAccessibilityTree({
@@ -7520,7 +7672,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (await this.relatedNode(state, backendDOMNodeId, POINTER_LABEL_FUNCTION, [])) ??
         backendDOMNodeId;
     }
-    const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
+    // A decoration that takes no pointer input over a control that does (a
+    // chevron drawn on its combobox) is pressed where it shows, as a person
+    // presses it: the click reaches that control, which the hit guard then
+    // expects. Only a decoration already in view is pressed this way, so
+    // nothing scrolls before it is known to have such a control; without
+    // one the target keeps its refusal, made before any input.
+    let point: { x: number; y: number } | null = null;
+    if (
+      backendDOMNodeId !== null &&
+      (await this.callOnNode(state, backendDOMNodeId, TAKES_NO_POINTER_FUNCTION, []).catch(
+        () => false,
+      )) === true
+    ) {
+      const pressed = await this.relatedNode(
+        state,
+        backendDOMNodeId,
+        DECORATION_PRESS_FUNCTION,
+        [],
+      );
+      if (pressed !== null) {
+        point = await this.actionPoint(state, backendDOMNodeId, false, frameId);
+        backendDOMNodeId = pressed;
+      }
+    }
+    point ??= await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
@@ -7831,6 +8007,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser node cannot receive pointer input",
       );
     }
+    // A target that shows but turns the pointer off for itself and all it
+    // holds can never take a press, whether or not it is in view: refuse
+    // before anything scrolls or the pointer moves, so nothing has happened.
+    // One that does not show may be revealed by hovering (below).
+    if (
+      requireHit &&
+      (await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        TAKES_NO_POINTER_FUNCTION,
+        [],
+        frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+      ).catch(() => false)) === true
+    ) {
+      throw new InteractionDefiniteDriverError("invalid_action", POINTER_EVENTS_NONE_REFUSAL, true);
+    }
     // Scrolling runs page scroll listeners, so it counts as a possible effect
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
@@ -8089,7 +8281,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ).catch(() => null);
     switch (reason) {
       case "pointer-events":
-        return "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control";
+        return POINTER_EVENTS_NONE_REFUSAL;
       case "outside":
         return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
       case "clipped":
@@ -10275,7 +10467,11 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
   for (const entry of entries) {
     if (entry.backendDOMNodeId !== null) byBackend.set(entry.backendDOMNodeId, entry);
   }
-  return byBackend.size === 1 ? [...byBackend.values()][0]! : null;
+  if (byBackend.size === 1) return [...byBackend.values()][0]!;
+  // Content revealed from behind aria-hidden can repeat what the page also
+  // exposes (a carousel's copied slides): the exposed element is the one meant.
+  const exposed = [...byBackend.values()].filter((entry) => entry.revealed !== true);
+  return exposed.length === 1 && exposed.length < byBackend.size ? exposed[0]! : null;
 }
 
 function sameAccessibleName(name: string | null, requested: string): boolean {
@@ -11801,6 +11997,290 @@ const SCROLL_PANELS_EXPRESSION = `(() => {
   found.sort((a, b) => b[0] - a[0]);
   const kept = found.slice(0, ${SCROLL_PANELS_MAX});
   return [kept.map((entry) => entry[2]).join("|"), ...kept.map((entry) => entry[1])];
+})()`;
+
+const POINTER_EVENTS_NONE_REFUSAL =
+  "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control";
+
+/** Elements a person presses as one control. Used to tell what a click on a
+ * decoration reaches, and whether content hidden with aria-hidden holds
+ * anything to press. */
+const PRESSABLE_CONTROL_SELECTOR =
+  'a[href], area[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [role=button], [role=link], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=tab], [role=option], [role=combobox], [role=textbox], [role=searchbox], [role=slider], [role=spinbutton], [role=treeitem]';
+
+// A decoration: an element that shows but sets pointer-events: none on
+// itself and on all it holds (a chevron or icon drawn over a field), so a
+// person's click there falls through to whatever is beneath. Set on itself,
+// not inherited from a container (a modal library turning the pointer off
+// behind its menu), which is not a decoration but shut out. pressedInstead:
+// what a click at its middle reaches, when that is an enabled control that
+// holds the decoration or sits beside it in the same small wrapper (its
+// parent or grandparent), or that wrapper itself when it frames exactly one
+// other enabled control (a field's frame around its input and chevron);
+// else null. Run with the element in view.
+const DECORATION_HELPER = `
+  const pressableSelector = ${JSON.stringify(PRESSABLE_CONTROL_SELECTOR)};
+  const flatParentOf = (node) => {
+    const next = node.assignedSlot ?? node.parentNode ?? null;
+    return next instanceof ShadowRoot ? next.host : next;
+  };
+  const holdsNode = (ancestor, node) => {
+    for (let current = node; current; current = flatParentOf(current)) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  };
+  const disabledControl = (element) =>
+    element.matches(":disabled") || element.closest('[aria-disabled="true"]') !== null;
+  const shows = (element) =>
+    typeof element.checkVisibility !== "function" ||
+    element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  const takesNoPointer = (element) => {
+    const view = element.ownerDocument.defaultView || window;
+    if (view.getComputedStyle(element).pointerEvents !== "none") return false;
+    const parent = flatParentOf(element);
+    if (parent instanceof Element && view.getComputedStyle(parent).pointerEvents === "none") return false;
+    if (!shows(element)) return false;
+    const inside = element.querySelectorAll("*");
+    if (inside.length > 200) return false;
+    for (const node of inside) if (view.getComputedStyle(node).pointerEvents !== "none") return false;
+    return true;
+  };
+  const hitAt = (doc, x, y) => {
+    let hit = doc.elementFromPoint(x, y);
+    for (let depth = 0; depth < 32 && hit && hit.shadowRoot; depth += 1) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
+  };
+  // The middle of the part of an element inside the window, or null.
+  const middleInView = (element) => {
+    const view = element.ownerDocument.defaultView || window;
+    const box = element.getBoundingClientRect();
+    const left = Math.max(box.left, 0);
+    const top = Math.max(box.top, 0);
+    const right = Math.min(box.right, view.innerWidth);
+    const bottom = Math.min(box.bottom, view.innerHeight);
+    return right - left >= 1 && bottom - top >= 1 ? [(left + right) / 2, (top + bottom) / 2] : null;
+  };
+  const pressedInstead = (element) => {
+    // Where it is, first: a box is cheaper to read than styles.
+    const middle = middleInView(element);
+    if (!middle || !takesNoPointer(element) || disabledControl(element)) return null;
+    const hit = hitAt(element.ownerDocument, middle[0], middle[1]);
+    if (!hit || holdsNode(element, hit)) return null;
+    let control = null;
+    for (let node = hit; node instanceof Element; node = flatParentOf(node)) {
+      if (node.matches(pressableSelector)) {
+        control = node;
+        break;
+      }
+    }
+    if (!control) {
+      const parent = flatParentOf(element);
+      const frame = hit === parent || (parent && hit === flatParentOf(parent));
+      if (!frame) return null;
+      const others = Array.from(hit.querySelectorAll(pressableSelector)).filter(
+        (node) => !holdsNode(element, node) && !disabledControl(node),
+      );
+      return others.length === 1 ? hit : null;
+    }
+    if (!control || holdsNode(element, control) || disabledControl(control)) return null;
+    let related = holdsNode(control, element);
+    for (let node = flatParentOf(element), depth = 0; !related && node instanceof Element && depth < 2; node = flatParentOf(node), depth += 1) {
+      related = holdsNode(node, control);
+    }
+    return related ? control : null;
+  };`;
+
+/** Whether the target is a decoration (see DECORATION_HELPER): it shows but
+ * takes no pointer input itself, nor does anything inside it. */
+const TAKES_NO_POINTER_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  ${DECORATION_HELPER}
+  return takesNoPointer(element);
+}`;
+
+/** The control a click on this decoration reaches, or null. */
+const DECORATION_PRESS_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  ${DECORATION_HELPER}
+  return pressedInstead(element);
+}`;
+
+/** Most nodes of aria-hidden content one read adds to the tree. */
+const REVEALED_HIDDEN_MAX_NODES = 400;
+/** Most decorations one outline marks. */
+const DECORATIONS_MAX = 200;
+
+/**
+ * What the main frame's accessibility tree leaves out or misstates about
+ * what a person sees, in the document and its open shadow roots. Content
+ * hidden with aria-hidden that shows and holds a control a person can press
+ * at its middle (an open menu whose markup still says hidden): its visible
+ * elements and text come back with a role, name and states read from the
+ * page, the way Chromium computes them without aria-hidden for common
+ * elements. With `decorate`, also the controls that are decorations over a
+ * control that takes their clicks (see DECORATION_HELPER). Returns [JSON
+ * facts, ...nodes]: facts.revealed lists [node index, role, name, states,
+ * parent's index in revealed or -1], facts.roots [index in revealed of a
+ * hidden root, node indexes of its nearest ancestors], and
+ * facts.decorations node indexes.
+ */
+const pageFactsExpression = (decorate: boolean): string => `(() => {
+  ${DECORATION_HELPER}
+  const decorate = ${decorate};
+  const nodes = [];
+  const facts = { revealed: [], decorations: [] };
+  const scopes = [document];
+  let visited = 0;
+  for (let index = 0; index < scopes.length; index += 1) {
+    const walker = document.createTreeWalker(scopes[index], 1);
+    for (let element = walker.nextNode(); element && visited < ${SCROLL_PANELS_MAX_ELEMENTS}; element = walker.nextNode()) {
+      visited += 1;
+      if (element.shadowRoot) scopes.push(element.shadowRoot);
+    }
+  }
+  const all = (selector) => scopes.flatMap((scope) => Array.from(scope.querySelectorAll(selector)));
+  if (decorate) {
+    for (const element of all(pressableSelector)) {
+      if (facts.decorations.length >= ${DECORATIONS_MAX}) break;
+      if (pressedInstead(element)) facts.decorations.push(nodes.push(element) - 1);
+    }
+  }
+  const clean = (value) => String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, 1000);
+  const hiddenByAria = (element) => String(element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true";
+  const insideHidden = (element) => {
+    for (let node = flatParentOf(element); node instanceof Element; node = flatParentOf(node)) {
+      if (hiddenByAria(node)) return true;
+    }
+    return false;
+  };
+  const pressableAtMiddle = (element) => {
+    if (!shows(element)) return false;
+    const middle = middleInView(element);
+    if (!middle) return false;
+    const hit = hitAt(element.ownerDocument, middle[0], middle[1]);
+    return Boolean(hit && holdsNode(element, hit));
+  };
+  // A box wholly outside the window, which a person cannot see. A box with
+  // no area (a container whose content is positioned on its own) does not
+  // count.
+  const outsideView = (element) => {
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && !middleInView(element);
+  };
+  // Where the pointer cursor starts: a control the page draws without a
+  // control role or element. Not inside a real control, whose own icons
+  // and labels these would otherwise be.
+  const pointerStart = (element) => {
+    const parent = flatParentOf(element);
+    if (getComputedStyle(element).cursor !== "pointer") return false;
+    if (parent instanceof Element && getComputedStyle(parent).cursor === "pointer") return false;
+    for (let node = parent; node instanceof Element; node = flatParentOf(node)) {
+      if (node.matches(pressableSelector)) return false;
+    }
+    return true;
+  };
+  const shown = (root) => {
+    const controls = [...(root.matches(pressableSelector) ? [root] : []), ...root.querySelectorAll(pressableSelector)];
+    if (controls.slice(0, 50).some(pressableAtMiddle)) return true;
+    const elements = [root, ...root.querySelectorAll("*")].slice(0, 200);
+    return elements.some((element) => pointerStart(element) && pressableAtMiddle(element));
+  };
+  const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button", image: "button" };
+  const roleOf = (element) => {
+    const explicit = String(element.getAttribute("role") || "").trim().split(/\\s+/)[0].toLowerCase();
+    if (explicit) return explicit === "presentation" ? "none" : explicit;
+    const tag = element.localName;
+    if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
+    if (tag === "button" || tag === "summary") return "button";
+    if (tag === "input") return inputRoles[String(element.type || "text").toLowerCase()] ?? "textbox";
+    if (tag === "select") return element.multiple || element.size > 1 ? "listbox" : "combobox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "li") return "listitem";
+    if (tag === "ul" || tag === "ol" || tag === "menu") return "list";
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    if (tag === "nav") return "navigation";
+    if (tag === "img") return element.getAttribute("alt") === "" ? "none" : "image";
+    if (tag === "p") return "paragraph";
+    if (tag === "hr") return "separator";
+    return "generic";
+  };
+  const fromContent = new Set(["button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "tab", "treeitem", "heading", "checkbox", "radio", "switch", "cell", "gridcell", "columnheader", "rowheader", "tooltip"]);
+  const nameOf = (element, role) => {
+    const label = clean(element.getAttribute("aria-label"));
+    if (label) return label;
+    const ids = String(element.getAttribute("aria-labelledby") || "").trim();
+    if (ids) {
+      const root = element.getRootNode();
+      const text = clean(ids.split(/\\s+/).map((id) => (typeof root.getElementById === "function" ? root.getElementById(id) : null)?.textContent ?? "").join(" "));
+      if (text) return text;
+    }
+    const tag = element.localName;
+    if (tag === "img" || (tag === "input" && element.type === "image")) {
+      const alt = clean(element.getAttribute("alt"));
+      if (alt) return alt;
+    }
+    if (tag === "input" && ["button", "submit", "reset"].includes(element.type)) return clean(element.value);
+    if (fromContent.has(role)) {
+      const text = clean(element.innerText ?? element.textContent);
+      if (text) return text;
+    }
+    return clean(element.getAttribute("title")) || (["textbox", "searchbox", "combobox"].includes(role) ? clean(element.getAttribute("placeholder")) : "");
+  };
+  const statesOf = (element, role) => {
+    const states = [];
+    if (element.matches(pressableSelector) || element.tabIndex >= 0) states.push(["focusable", true]);
+    if (disabledControl(element)) states.push(["disabled", true]);
+    const expanded = element.getAttribute("aria-expanded");
+    if (expanded === "true" || expanded === "false") states.push(["expanded", expanded === "true"]);
+    const checked = element.getAttribute("aria-checked");
+    if (checked === "true" || checked === "false" || checked === "mixed") states.push(["checked", checked]);
+    else if (element.localName === "input" && (element.type === "checkbox" || element.type === "radio")) states.push(["checked", element.checked ? "true" : "false"]);
+    const level = role === "heading" ? Number(element.getAttribute("aria-level") || element.localName.slice(1)) : NaN;
+    if (Number.isSafeInteger(level) && level > 0) states.push(["level", level]);
+    return states;
+  };
+  const add = (node, role, name, states, parent) => {
+    facts.revealed.push([nodes.push(node) - 1, role, name, states, parent]);
+    return facts.revealed.length - 1;
+  };
+  const collect = (node, parent) => {
+    if (facts.revealed.length >= ${REVEALED_HIDDEN_MAX_NODES}) return;
+    if (node.nodeType === 3) {
+      const text = clean(node.data);
+      if (text && node.parentElement && shows(node.parentElement)) add(node, "StaticText", text, [], parent);
+      return;
+    }
+    if (!(node instanceof Element) || !shows(node)) return;
+    const role = roleOf(node);
+    const index = add(node, role, nameOf(node, role), statesOf(node, role), parent);
+    const children = node.shadowRoot
+      ? node.shadowRoot.childNodes
+      : node.localName === "slot"
+        ? node.assignedNodes({ flatten: true })
+        : node.childNodes;
+    for (const child of children) collect(child, index);
+  };
+  // Each hidden root with its nearest ancestors, which tell where in the
+  // tree it goes when Chromium left out the root itself.
+  facts.roots = [];
+  for (const root of all('[aria-hidden]')) {
+    if (facts.revealed.length >= ${REVEALED_HIDDEN_MAX_NODES}) break;
+    if (!hiddenByAria(root) || outsideView(root) || insideHidden(root) || !shown(root)) continue;
+    const ancestors = [];
+    for (let node = flatParentOf(root); node instanceof Element && ancestors.length < 16; node = flatParentOf(node)) {
+      ancestors.push(nodes.push(node) - 1);
+    }
+    facts.roots.push([facts.revealed.length, ancestors]);
+    collect(root, -1);
+  }
+  return [JSON.stringify(facts), ...nodes];
 })()`;
 
 /** Why an element's text or value must not leave the page: it is, sits in, or

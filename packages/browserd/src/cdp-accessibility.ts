@@ -12,6 +12,7 @@ type CdpAxValue = {
 export type CdpAxNode = {
   nodeId?: unknown;
   ignored?: unknown;
+  ignoredReasons?: unknown;
   role?: CdpAxValue;
   name?: CdpAxValue & { sources?: unknown };
   description?: CdpAxValue;
@@ -21,6 +22,15 @@ export type CdpAxNode = {
   childIds?: unknown;
   backendDOMNodeId?: unknown;
   frameId?: unknown;
+  /** Set by the driver, never by Chromium: content the page hides from
+   * assistive technology with aria-hidden while a person can see and press
+   * it (an open menu), with the role and name read from the page. */
+  revealed?: boolean;
+  /** Set by the driver: a control drawn over another one that takes no
+   * pointer input itself (a field's chevron), so a click there reaches the
+   * control beneath. It stays resolvable by locators but is left out of the
+   * outline, which lists the control that takes the click. */
+  decoration?: boolean;
 };
 
 export type CdpAccessibilityEntry = {
@@ -34,6 +44,8 @@ export type CdpAccessibilityEntry = {
   states: string[];
   actions: string[];
   nameSources: string[];
+  /** See CdpAxNode.revealed. */
+  revealed?: true;
 };
 
 export type CdpAccessibilitySnapshot = {
@@ -80,6 +92,139 @@ export function namespaceCdpAccessibilityFrame(
       : {}),
     frameId: typeof node.frameId === "string" ? node.frameId : frameId,
   }));
+}
+
+/** One element or text node of content hidden with aria-hidden that a person
+ * can see, with what the page gives it, in document order (a parent before
+ * its children). `parent` is the index of its parent in that order, -1 for
+ * the outermost hidden element, whose `ancestors` (nearest first) say where
+ * it goes when Chromium left it out. */
+export type PageRevealedNode = {
+  backendNodeId: number;
+  role: string;
+  name: string;
+  properties: unknown[];
+  parent: number;
+  ancestors: number[];
+};
+
+/** What the driver read from a frame's page about what a person sees: hidden
+ * content to reveal (null where a node could not be identified) and the
+ * backend nodes of decorations. */
+export type PageAccessibilityFacts = {
+  revealed: Array<PageRevealedNode | null>;
+  decorations: ReadonlySet<number>;
+};
+
+/**
+ * A frame's accessibility nodes with page facts applied. A revealed node that
+ * Chromium ignored for aria-hidden takes the page's role and name; one it left
+ * out (it drops what an aria-hidden element holds) is added under its parent,
+ * with the id Chromium gives a DOM-backed node, so its ref is the same as if
+ * Chromium had listed it. A hidden root whose ancestors are all missing is
+ * left out. Decorations are marked (see CdpAxNode.decoration).
+ */
+export function withPageAccessibilityFacts(
+  nodes: readonly CdpAxNode[],
+  frameId: string,
+  facts: PageAccessibilityFacts,
+): CdpAxNode[] {
+  if (facts.revealed.length === 0 && facts.decorations.size === 0) return [...nodes];
+  const result = [...nodes];
+  const byBackend = new Map<number, number>();
+  const byId = new Map<string, number>();
+  let prefix: string | null = null;
+  for (const [index, node] of result.entries()) {
+    if (typeof node.nodeId === "string") byId.set(node.nodeId, index);
+    if (node.frameId !== frameId || typeof node.backendDOMNodeId !== "number") continue;
+    byBackend.set(node.backendDOMNodeId, index);
+    // A DOM-backed node's id is its backend node id under the frame's prefix.
+    const suffix = `\0${node.backendDOMNodeId}`;
+    if (prefix === null && typeof node.nodeId === "string" && node.nodeId.endsWith(suffix))
+      prefix = node.nodeId.slice(0, -String(node.backendDOMNodeId).length);
+  }
+  for (const backendNodeId of facts.decorations) {
+    const index = byBackend.get(backendNodeId);
+    if (index !== undefined && result[index]!.ignored !== true)
+      result[index] = { ...result[index]!, decoration: true };
+  }
+  if (prefix === null) return result;
+  const placed: Array<string | null> = [];
+  for (const fact of facts.revealed) {
+    if (fact === null) {
+      placed.push(null);
+      continue;
+    }
+    let parentId: string | null = null;
+    if (fact.parent >= 0) parentId = placed[fact.parent] ?? null;
+    else
+      for (const ancestor of fact.ancestors) {
+        const index = byBackend.get(ancestor);
+        if (index !== undefined && typeof result[index]!.nodeId === "string") {
+          parentId = result[index]!.nodeId as string;
+          break;
+        }
+      }
+    const known = byBackend.get(fact.backendNodeId);
+    if (known !== undefined) {
+      const node = result[known]!;
+      if (hiddenByAriaNode(node))
+        result[known] = {
+          ...node,
+          ignored: false,
+          role: { value: fact.role },
+          name: { value: fact.name },
+          properties: fact.properties,
+          revealed: true,
+        };
+      placed.push(typeof node.nodeId === "string" ? node.nodeId : null);
+      continue;
+    }
+    if (parentId === null) {
+      placed.push(null);
+      continue;
+    }
+    const nodeId = `${prefix}${fact.backendNodeId}`;
+    const parentIndex = byId.get(parentId);
+    if (parentIndex === undefined || byId.has(nodeId)) {
+      placed.push(null);
+      continue;
+    }
+    const parent = result[parentIndex]!;
+    result[parentIndex] = {
+      ...parent,
+      childIds: [...(Array.isArray(parent.childIds) ? parent.childIds : []), nodeId],
+    };
+    byBackend.set(fact.backendNodeId, result.length);
+    byId.set(nodeId, result.length);
+    result.push({
+      nodeId,
+      ignored: false,
+      role: { value: fact.role },
+      name: { value: fact.name },
+      properties: fact.properties,
+      parentId,
+      childIds: [],
+      backendDOMNodeId: fact.backendNodeId,
+      frameId,
+      revealed: true,
+    });
+    placed.push(nodeId);
+  }
+  return result;
+}
+
+/** An accessibility node Chromium ignores because of aria-hidden. */
+export function hiddenByAriaNode(node: CdpAxNode): boolean {
+  return (
+    node.ignored === true &&
+    Array.isArray(node.ignoredReasons) &&
+    node.ignoredReasons.some(
+      (reason: unknown) =>
+        isRecord(reason) &&
+        (reason.name === "ariaHiddenElement" || reason.name === "ariaHiddenSubtree"),
+    )
+  );
 }
 
 export function normalizeCdpAccessibilityTree(options: {
@@ -163,6 +308,7 @@ export function normalizeCdpAccessibilityTree(options: {
       states,
       actions: actionsForRole(role, states, backendDOMNodeId !== null),
       nameSources: nameSourceTokens(node.name?.sources),
+      ...(node.revealed === true ? { revealed: true as const } : {}),
     });
   }
   // The spin buttons of a native date/time input edit one part each and do
@@ -206,11 +352,24 @@ export function normalizeCdpAccessibilityTree(options: {
     }
     for (const childId of childIds(raw)) suppressSubtree(childId);
   }
+  // A decoration and what it draws stay out of the outline; unlike a
+  // suppressed subtree, they remain entries that locators resolve.
+  const outlineSkipped = new Set<string>();
+  const skipSubtree = (nodeId: string): void => {
+    if (outlineSkipped.has(nodeId)) return;
+    outlineSkipped.add(nodeId);
+    const raw = rawById.get(nodeId);
+    if (raw) for (const childId of childIds(raw)) skipSubtree(childId);
+  };
+  for (const [nodeId, node] of rawById) {
+    if (node.decoration === true && entriesByNodeId.has(nodeId)) skipSubtree(nodeId);
+  }
 
   const visit = (nodeId: string): InteractionSemanticNodeValue[] => {
     if (suppressed.has(nodeId) || visiting.has(nodeId) || emitted.has(nodeId)) return [];
     const raw = rawById.get(nodeId);
     if (!raw) return [];
+    if (outlineSkipped.has(nodeId)) return [];
     visiting.add(nodeId);
     const entry = entriesByNodeId.get(nodeId);
     const children = childIds(raw).flatMap(visit);
