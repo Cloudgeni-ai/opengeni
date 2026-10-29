@@ -204,14 +204,14 @@ export type PostAgentCompactionOutcome =
 export function standaloneCompactionInstructions(input: {
   settings: Settings;
   session: Pick<ClaimTurnOk["session"], "agent" | "instructions" | "resources"> &
-    Partial<Pick<ClaimTurnOk["session"], "metadata">>;
+    Partial<Pick<ClaimTurnOk["session"], "unattended">>;
   workspaceAgentInstructions: string | null | undefined;
   workspaceAgentIdentity: string | null;
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
   rig: { name: string; version: number } | undefined;
 }): string {
-  const unattended = sessionIsUnattended({ metadata: input.session.metadata ?? {} });
+  const unattended = sessionIsUnattended(input.session);
   if (input.session.agent) {
     return inspectPersistentAgentInstructions(input.settings, {
       agentConfig: input.session.agent,

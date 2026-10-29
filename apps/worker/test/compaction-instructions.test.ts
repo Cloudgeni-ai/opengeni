@@ -74,8 +74,7 @@ describe("standalone compaction instructions (AC16)", () => {
   });
 
   test("an unattended session keeps its guidance through compaction", () => {
-    const metadata = { _opengeniUnattended: true };
-    const legacy = { agent: null, instructions: "SESSION", resources: [], metadata };
+    const legacy = { agent: null, instructions: "SESSION", resources: [], unattended: true };
     expect(standaloneCompactionInstructions({ settings, session: legacy, ...context })).toBe(
       appendWorkspaceMemory(
         appendSessionInstructions(
@@ -88,7 +87,7 @@ describe("standalone compaction instructions (AC16)", () => {
       ),
     );
     const config = agentConfig();
-    const configured = { agent: config, instructions: "SESSION", resources: [], metadata };
+    const configured = { agent: config, instructions: "SESSION", resources: [], unattended: true };
     const instructions = standaloneCompactionInstructions({
       settings,
       session: configured,
@@ -109,7 +108,7 @@ describe("standalone compaction instructions (AC16)", () => {
     expect(
       standaloneCompactionInstructions({
         settings,
-        session: { ...configured, metadata: {} },
+        session: { ...configured, unattended: false },
         ...context,
       }),
     ).not.toContain(UNATTENDED_SESSION_GUIDANCE);

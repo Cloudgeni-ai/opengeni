@@ -60,6 +60,7 @@ import {
   skillReviewHumanInput,
   type McpAccountRouteLabel,
   type ToolAuthNeededPayload,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
@@ -3083,6 +3084,7 @@ describe("runtime event normalization", () => {
       sandboxBackend?: "none" | "modal";
       toolResultBytes?: number;
       spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+      unattended?: boolean;
     }) {
       const mcp = startTestMcpServer({
         toolResultIsError: input.toolResultIsError,
@@ -3179,9 +3181,94 @@ describe("runtime event normalization", () => {
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
+        ...(input.unattended ? { unattended: true } : {}),
       });
       return { agent, calls, mcp, prepared, settings };
     }
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "an unattended session refuses a call that needs approval instead of waiting (%s)",
+      async (lazyToolTransport) => {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          lazyToolTransport,
+          unattended: true,
+        });
+        try {
+          const model = new ScriptedModel([
+            {
+              output: [
+                scriptedFunctionCall("docs__search_documents", { query: "q" }, "unattended-call"),
+              ],
+            },
+            { outputText: "Left it for a person." },
+          ]);
+          const result = await runAgentStream(
+            // A clone of a clone keeps the refusal.
+            fixture.agent.clone({}).clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            // Drain the run.
+          }
+          await result.completed;
+          // No approval pause, nothing executed, nothing approved or begun.
+          expect(result.interruptions).toHaveLength(0);
+          expect(result.finalOutput).toBe("Left it for a person.");
+          expect(JSON.stringify(model.requests[1]?.input)).toContain(
+            UNATTENDED_APPROVAL_REFUSAL_TEXT,
+          );
+          expect(fixture.mcp.calls).toHaveLength(0);
+          expect(fixture.calls.filter((call) => !call.startsWith("prepare:"))).toEqual([]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
+    test("an unattended session runs calls its policy allows", async () => {
+      {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "allow",
+          unattended: true,
+        });
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          const required = await tool.needsApproval(new RunContext(), { query: "q" }, "call-1");
+          expect(required).toBe(false);
+          const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "call-1" },
+          } as any);
+          expect(JSON.stringify(output)).not.toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+          expect(fixture.mcp.calls).toHaveLength(1);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("an attended session still asks for approval", async () => {
+      const fixture = await connectorPolicyFixture({ connectorDecision: "ask" });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "q" }, "call-1")).toBe(true);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
 
     test.each([undefined, "codex_native", "generic_dispatch"] as const)(
       "account-qualified connector Ask pauses before executing a model call (%s)",

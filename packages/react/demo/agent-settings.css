@@ -1,0 +1,21 @@
+/* The web app's stylesheet stack (apps/web/src/styles.css), so the Agent tab
+   preview renders with the app tokens and utilities it uses there. */
+@import "tailwindcss";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
+@import "@opengeni/react/app.css";
+
+@source "../src";
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}

@@ -1,22 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import {
-  DEFAULT_FIRST_PARTY_MCP_TOOLS,
-  SESSION_UNATTENDED_METADATA_KEY,
-} from "@opengeni/contracts";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
 import {
   firstPartyToolsForAttendance,
+  sessionForAttempt,
   sessionIsUnattended,
 } from "../src/activities/agent-turn/unattended";
 
 describe("unattended turn tools", () => {
-  test("a turn is unattended only when its session was created so", () => {
-    expect(sessionIsUnattended({ metadata: {} })).toBe(false);
-    expect(sessionIsUnattended({ metadata: { [SESSION_UNATTENDED_METADATA_KEY]: "yes" } })).toBe(
-      false,
-    );
-    expect(sessionIsUnattended({ metadata: { [SESSION_UNATTENDED_METADATA_KEY]: true } })).toBe(
-      true,
-    );
+  test("a turn is unattended only when its session reads so", () => {
+    expect(sessionIsUnattended({})).toBe(false);
+    expect(sessionIsUnattended({ unattended: false })).toBe(false);
+    expect(sessionIsUnattended({ unattended: true })).toBe(true);
+  });
+
+  test("a person's answer resumes its turn attended; other attempts keep the setting", () => {
+    const unattended = { id: "s", unattended: true };
+    const attended = { id: "s", unattended: false };
+    expect(sessionForAttempt(unattended, true)).toEqual({ id: "s", unattended: false });
+    expect(sessionForAttempt(unattended, false)).toBe(unattended);
+    expect(sessionForAttempt(attended, true)).toBe(attended);
   });
 
   test("an unattended turn has no tool that waits for a person; an attended one is unchanged", () => {

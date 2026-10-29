@@ -12494,6 +12494,11 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       .min(SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS)
       .max(SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS)
       .optional(),
+    // Whether the chats this task starts run unattended (no person answers
+    // during the run). Omitted: unattended by default, unless
+    // approvalTimeoutSeconds is set (see scheduledTaskRunUnattendedSetting).
+    // Runs posted into an existing chat follow that chat.
+    unattended: primitives.optionalBoolean,
     // Agent configuration for every generated session; resolved at dispatch
     // (the whole-row execution digest covers it). Omitted keeps legacy.
     agent: AgentConfigRequest.optional(),
@@ -16029,6 +16034,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * older servers; treat absence as a live session without an exemption.
      */
     retention: z.lazy(() => SessionRetention).optional(),
+    /**
+     * Whether the session's next turns run unattended: no person will see or
+     * answer a question until the task ends. Absent on older servers; treat
+     * absence as attended. See `SessionUnattendedSetting` for where it comes from.
+     */
+    unattended: primitives.optionalBoolean,
     /** Optimistic archive-state revision; zero represents an absent personal relation. */
     archiveVersion: primitives.nonnegativeInteger.default(0),
     /**
@@ -19313,6 +19324,88 @@ export function withSessionUnattendedMetadata(
 ): Record<string, unknown> {
   const { [SESSION_UNATTENDED_METADATA_KEY]: _ignored, ...rest } = metadata;
   return unattended ? { ...rest, [SESSION_UNATTENDED_METADATA_KEY]: true } : rest;
+}
+
+/**
+ * A chat's changeable unattended setting, stored apart from its frozen
+ * metadata:
+ * - `unattended` / `attended`: an explicit choice (the chat's "Work without
+ *   me" switch, `PUT …/sessions/:id/unattended`, or a scheduled task that says
+ *   `unattended`). A person's message never changes it.
+ * - `unattended_by_default`: an automation (scheduled task or event trigger)
+ *   started the chat and nobody chose. It becomes `attended` when a person
+ *   writes in the chat.
+ * With no setting, the create option (`CreateSessionRequest.unattended`) decides.
+ */
+export const SessionUnattendedSetting = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["unattended", "attended", "unattended_by_default"]),
+);
+export type SessionUnattendedSetting = z.infer<typeof SessionUnattendedSetting>;
+
+/**
+ * Whether a session's turns run unattended. A fork is made by a person to
+ * continue the work: it keeps an explicit choice (copied with the row) but not
+ * the create option or an automation default.
+ */
+export function resolveSessionUnattended(input: {
+  setting: SessionUnattendedSetting | null;
+  createdUnattended: boolean;
+  forked: boolean;
+}): boolean {
+  if (input.setting === "unattended") return true;
+  if (input.setting === "attended") return false;
+  if (input.forked) return false;
+  return input.setting === "unattended_by_default" || input.createdUnattended;
+}
+
+/** Turn this chat's unattended mode on or off from its next turn. */
+export const UpdateSessionUnattendedRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      unattended: primitives.boolean,
+    })
+    .strict(),
+);
+export type UpdateSessionUnattendedRequest = z.infer<typeof UpdateSessionUnattendedRequest>;
+
+/**
+ * Model-facing result of a call refused in an unattended session because it
+ * needs a person's approval. Nothing ran and nothing was approved.
+ */
+export const UNATTENDED_APPROVAL_REFUSAL_TEXT =
+  "Not run: this call needs a person's approval, and no one can give it during this unattended session. Nothing was changed. Continue without it, and list it among the steps left for a person.";
+
+/** Surfaces through which a person, not a program, sends a message. */
+export const PERSON_MESSAGE_SURFACES: readonly SessionTurnSurface[] = ["web", "slack", "voice"];
+
+/**
+ * Whether a person (not an API key, service or agent) sent an accepted
+ * message, through the web app, Slack or a voice call. Such a message ends an
+ * automation's unattended default (`unattended_by_default`).
+ */
+export function messageSentByPerson(input: {
+  source: "user" | "api";
+  surface: SessionTurnSurface | null;
+}): boolean {
+  return (
+    input.source === "user" &&
+    input.surface !== null &&
+    PERSON_MESSAGE_SURFACES.includes(input.surface)
+  );
+}
+
+/**
+ * The unattended setting of a chat a scheduled task or event trigger starts:
+ * the task's explicit `unattended` choice, else unattended by default unless
+ * the task sets `approvalTimeoutSeconds` (its owner chose to answer its
+ * approvals).
+ */
+export function scheduledTaskRunUnattendedSetting(config: {
+  unattended?: boolean | undefined;
+  approvalTimeoutSeconds?: number | undefined;
+}): SessionUnattendedSetting | null {
+  if (config.unattended !== undefined) return config.unattended ? "unattended" : "attended";
+  return config.approvalTimeoutSeconds === undefined ? "unattended_by_default" : null;
 }
 
 export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(() =>

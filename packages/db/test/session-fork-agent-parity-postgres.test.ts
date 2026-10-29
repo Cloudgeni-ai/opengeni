@@ -51,6 +51,7 @@ const COPIED = [
   "sandbox_os",
   "channel_id",
   "keep_live",
+  "unattended_setting",
   "rig_id",
   "rig_version_id",
   "initial_xai_provider_account_authority_snapshot",

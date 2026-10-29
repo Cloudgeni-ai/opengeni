@@ -5257,6 +5257,10 @@ export const sessions = pgTable(
     importedArchiveNextOffset: integer("imported_archive_next_offset"),
     /** Never move this session's content to the idle-session archive. */
     keepLive: boolean("keep_live").notNull().default(false),
+    /** Changeable unattended setting (migration 1094); null defers to the create option. */
+    unattendedSetting: text("unattended_setting").$type<
+      "unattended" | "attended" | "unattended_by_default"
+    >(),
     /** Idle-session archive lifecycle: null (live), archiving, or archived (read-only). */
     contentArchiveState: text("content_archive_state").$type<"archiving" | "archived">(),
     contentArchiveStartedAt: timestamp("content_archive_started_at", { withTimezone: true }),

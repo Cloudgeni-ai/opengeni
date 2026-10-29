@@ -7,7 +7,9 @@ import {
   createDb,
   createSession,
   createSessionWithIdempotencyKeyResult,
+  endSessionUnattendedDefault,
   getSession,
+  setSessionUnattendedSetting,
 } from "../src/index";
 
 // An unattended session is recorded under a reserved, immutable metadata key
@@ -104,8 +106,10 @@ describe("unattended sessions", () => {
     expect(sessionMetadataUnattended(stored?.metadata)).toBe(true);
     const read = await getSession(client.db, grant.workspaceId!, fork.id);
     expect(sessionMetadataUnattended(read?.metadata)).toBe(false);
+    expect(read?.unattended).toBe(false);
     const original = await getSession(client.db, grant.workspaceId!, source.id);
     expect(sessionMetadataUnattended(original?.metadata)).toBe(true);
+    expect(original?.unattended).toBe(true);
   }, 60_000);
 
   test("a keyed retry that changes the option conflicts", async () => {
@@ -131,5 +135,67 @@ describe("unattended sessions", () => {
         createIdempotencyKey: key,
       }),
     ).rejects.toBeInstanceOf(SessionCreateIdempotencyConflictError);
+  }, 60_000);
+
+  test("the chat's switch is an explicit choice that wins over the create option", async () => {
+    const grant = await workspace();
+    const workspaceId = grant.workspaceId!;
+    const interactive = await createSession(client.db, sessionInput(grant));
+    const created = await createSession(client.db, { ...sessionInput(grant), unattended: true });
+    const unattended = async (id: string) =>
+      (await getSession(client.db, workspaceId, id))?.unattended;
+    expect(await unattended(interactive.id)).toBe(false);
+    expect(await unattended(created.id)).toBe(true);
+    for (const [id, value] of [
+      [interactive.id, true],
+      [created.id, false],
+    ] as const) {
+      expect(
+        await setSessionUnattendedSetting(client.db, {
+          workspaceId,
+          sessionId: id,
+          unattended: value,
+        }),
+      ).toEqual({ status: "updated" });
+      expect(await unattended(id)).toBe(value);
+      // A person writing changes neither choice.
+      expect(await endSessionUnattendedDefault(client.db, { workspaceId, sessionId: id })).toBe(
+        false,
+      );
+      expect(await unattended(id)).toBe(value);
+    }
+    expect(
+      await setSessionUnattendedSetting(client.db, {
+        workspaceId,
+        sessionId: crypto.randomUUID(),
+        unattended: true,
+      }),
+    ).toEqual({ status: "not_found" });
+    // Metadata stays as created: the setting lives in its own column.
+    expect(
+      sessionMetadataUnattended((await getSession(client.db, workspaceId, created.id))?.metadata),
+    ).toBe(true);
+  }, 60_000);
+
+  test("a fork keeps an explicit choice but not an automation default", async () => {
+    const grant = await workspace();
+    const workspaceId = grant.workspaceId!;
+    const source = await createSession(client.db, sessionInput(grant));
+    const forkOf = async (setting: string) => {
+      const fork = await createSession(client.db, sessionInput(grant));
+      await shared.admin.begin(async (sql) => {
+        await sql`set local session_replication_role = replica`;
+        await sql`update sessions set forked_from_session_id = ${source.id},
+            forked_from_visibility = 'workspace_shared', forked_from_authority_epoch = 1,
+            forked_at = now(), unattended_setting = ${setting},
+            forked_by_organization_membership_id =
+              coalesce(owner_organization_membership_id, gen_random_uuid())
+          where id = ${fork.id}`;
+      });
+      return (await getSession(client.db, workspaceId, fork.id))?.unattended;
+    };
+    expect(await forkOf("unattended")).toBe(true);
+    expect(await forkOf("attended")).toBe(false);
+    expect(await forkOf("unattended_by_default")).toBe(false);
   }, 60_000);
 });

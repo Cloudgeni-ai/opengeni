@@ -478,6 +478,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   const videoSkillSelected =
     bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
+  const unattended = sessionIsUnattended(session);
   // These are independent metadata reads on separate pool scopes, after the
   // linked-identity guard. No selection, credential or authority is cached.
   // Join every scope before proceeding or failing; executable preparation and
@@ -512,7 +513,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           )
         : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
     ),
-    sessionIsUnattended(session),
+    unattended,
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -548,8 +549,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       preview: async (call) =>
         await previewConnectorActionApproval(db, connectorActionIdentity, call),
-      prepare: async (call) =>
-        await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+      prepare: async (call) => {
+        // Nobody can answer an approval here, so an Ask opens no request for
+        // one: the call is refused (see the runtime) and nothing waits on it.
+        if (unattended) {
+          const preview = await previewConnectorActionApproval(db, connectorActionIdentity, call);
+          if (preview.managed && preview.decision === "ask" && !preview.requestId) return preview;
+        }
+        return await prepareConnectorActionApproval(db, connectorActionIdentity, call);
+      },
       begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
       complete: async ({ requestId, outcome }) =>
         await completeConnectorActionExecution(db, {
@@ -1252,6 +1260,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
       (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
       tools.inputWaitYield,
+      // Nobody answers an approval here: a call that needs one is refused.
+      unattended,
     );
     eventing.codemodeDispatcher.start();
   };

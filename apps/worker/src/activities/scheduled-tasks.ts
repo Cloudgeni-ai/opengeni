@@ -28,6 +28,7 @@ import {
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
   scheduledOccurrencePayloadUtf8Bytes,
+  scheduledTaskRunUnattendedSetting,
   stableJson,
   TurnExecutionPolicyV1,
   type McpConnectionAccountSelection,
@@ -154,6 +155,15 @@ import type {
   WakeSessionWorkflowSignal,
 } from "./types";
 import type { Database } from "@opengeni/db";
+
+/**
+ * The unattended setting for a chat this task starts: nobody answers during a
+ * scheduled or event-triggered run unless the task says otherwise.
+ */
+function unattendedSettingFor(config: ScheduledTask["agentConfig"]) {
+  const unattendedSetting = scheduledTaskRunUnattendedSetting(config);
+  return unattendedSetting ? { unattendedSetting } : {};
+}
 
 type ScheduledTemporalActivityIdentity = {
   namespace: string;
@@ -1592,6 +1602,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 accountId: task.accountId,
                 workspaceId: task.workspaceId,
                 initialMessage: task.agentConfig.prompt,
+                // No person answers during a run this task starts, unless it says so.
+                ...unattendedSettingFor(task.agentConfig),
                 resources: task.agentConfig.resources,
                 bundledSkillIds: task.agentConfig.bundledSkillIds,
                 tools: taskTools,
@@ -2792,6 +2804,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
       initialMessage: task.agentConfig.prompt,
+      // The same rule as admission, from the same accepted task snapshot.
+      ...unattendedSettingFor(task.agentConfig),
       resources: task.agentConfig.resources,
       bundledSkillIds: task.agentConfig.bundledSkillIds,
       tools: input.acceptedExecution.resolvedTools,

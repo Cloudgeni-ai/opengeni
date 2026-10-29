@@ -200,6 +200,7 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
@@ -3550,6 +3551,12 @@ export function buildOpenGeniAgent(
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+    if (options.unattended) {
+      installUnattendedApprovalRefusal(
+        agent as unknown as ApprovalCapableAgent,
+        options.approvedToolCallId,
+      );
+    }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     // Last, so it masks exactly what every other wrapper hands to the model.
     if (options.secretValueMemory) {
@@ -3692,6 +3699,12 @@ export function buildOpenGeniAgent(
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+  if (options.unattended) {
+    installUnattendedApprovalRefusal(
+      agent as unknown as ApprovalCapableAgent,
+      options.approvedToolCallId,
+    );
+  }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   // Last, so it masks exactly what every other wrapper hands to the model.
   if (options.secretValueMemory) {
@@ -4049,6 +4062,74 @@ export function toolPreflightFailureOutput(error: unknown): {
       },
     ],
   };
+}
+
+/** Model-facing result for a call refused because nobody can approve it. */
+export function unattendedApprovalRefusalOutput(): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  return { isError: true, content: [{ type: "text", text: UNATTENDED_APPROVAL_REFUSAL_TEXT }] };
+}
+
+/**
+ * In an unattended session nobody answers an approval, so a call that would
+ * wait for one is refused at once instead: the SDK is told no approval is
+ * needed and the matching `invoke` returns the refusal without running any
+ * inner wrapper, so nothing executes and nothing is approved. Policy is read
+ * exactly as configured; only the wait is replaced. An already approved call
+ * (`approvedToolCallId`) keeps its normal path.
+ *
+ * Installed before preflight containment, which wraps it like any other
+ * Opengeni approval hook (so a throwing policy check stays contained), and
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installUnattendedApprovalRefusal(
+  agent: ApprovalCapableAgent,
+  approvedToolCallId?: string,
+): void {
+  const refused = new Set<string>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof needsApproval>[0],
+            parsedInput: Parameters<typeof needsApproval>[1],
+            callId: Parameters<typeof needsApproval>[2],
+          ) => {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (!callId || callId === approvedToolCallId) return required;
+            if (!required) {
+              refused.delete(callId);
+              return false;
+            }
+            refused.add(callId);
+            return false;
+          },
+        ),
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && refused.delete(callId)) {
+            return unattendedApprovalRefusalOutput() as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installUnattendedApprovalRefusal(cloned, approvedToolCallId);
+      return cloned;
+    };
+  }
 }
 
 /**

@@ -155,8 +155,10 @@ import {
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
+  resolveSessionUnattended,
   sessionMetadataUnattended,
   withSessionUnattendedMetadata,
+  type SessionUnattendedSetting,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -30227,6 +30229,11 @@ export type SessionCreateInput = {
    * under the reserved metadata key, which a caller-supplied value never sets.
    */
   unattended?: boolean;
+  /**
+   * Changeable unattended setting (migration 1094), set only by first-party
+   * creators such as the scheduler; omitted leaves it to the create option.
+   */
+  unattendedSetting?: SessionUnattendedSetting;
   /** Vault narrowing for this session (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
@@ -31263,6 +31270,7 @@ async function createSessionInTransaction(
             : "portable"),
         codeSearchEnabled,
         agentConfig: input.agentConfig ?? null,
+        ...(input.unattendedSetting ? { unattendedSetting: input.unattendedSetting } : {}),
         // Creation reserves identity, not runnable work. The atomic start
         // transaction installs queued status together with its turn/wake.
         status: "idle",
@@ -35362,6 +35370,8 @@ async function readSessionListForSubject(
               initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
               agentConfig: sql<SessionRow["agentConfig"]>`null::jsonb`,
               mcpApprovalPolicies: sql<SessionRow["mcpApprovalPolicies"]>`null::jsonb`,
+              // Only list-entry fields are reliable here: `unattended` is not
+              // (the create option's key is left out) and SessionListEntry omits it.
               metadata: sql<SessionRow["metadata"]>`jsonb_build_object(
             'scheduledTaskId', ${schema.sessions.metadata}->'scheduledTaskId',
             '_opengeniSiteOrigin', ${schema.sessions.metadata}->'_opengeniSiteOrigin')`,
@@ -91699,6 +91709,11 @@ function mapSession(
         }
       : {}),
     retention: sessionRetentionFromRow(row),
+    unattended: resolveSessionUnattended({
+      setting: row.unattendedSetting ?? null,
+      createdUnattended: sessionMetadataUnattended(row.metadata),
+      forked: row.forkedFromSessionId !== null,
+    }),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: cleanStoredSessionTitle(row.title, row.titleSource),
@@ -92876,6 +92891,7 @@ export * from "./session-content-blobs";
 export * from "./session-content-compaction";
 export * from "./session-secret-redaction";
 export * from "./session-archive";
+export * from "./session-unattended";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";
