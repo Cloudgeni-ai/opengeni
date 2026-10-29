@@ -205,7 +205,7 @@ test("an extension from before site permissions is told apart without sending it
   }
 });
 
-test("before the person allows it, the agent is told to wait for them", async () => {
+test("before the person allows it, the agent is told to ask them", async () => {
   const bridge = new SitePermissionBridge(true, () => {
     throw new AttachedBrowserBridgeError(
       "driver_rejected",
@@ -222,7 +222,31 @@ test("before the person allows it, the agent is told to wait for them", async ()
       code: "permission_denied",
       retryable: false,
       message:
-        "The person must allow site permissions once in their Chrome first. A tab asking them to has opened there; try again after they allow it.",
+        "The person must allow site permissions once in their Chrome first. A tab asking them to is open there; ask them to allow it, then try again.",
+    });
+  } finally {
+    await driver.close();
+  }
+});
+
+test("after the person closed the page asking them, the agent is told to ask them where to allow it", async () => {
+  const bridge = new SitePermissionBridge(true, () => {
+    throw new AttachedBrowserBridgeError(
+      "driver_rejected",
+      "the person was asked and has not allowed site permissions in this Chrome profile",
+      false,
+      { extensionCode: "consent_declined" },
+    );
+  });
+  const { driver, observation } = await start(bridge);
+  try {
+    await expect(
+      driver.dispatch(permission(observation, { permission: "microphone", setting: "granted" })),
+    ).rejects.toMatchObject({
+      code: "permission_denied",
+      retryable: false,
+      message:
+        "The person has not allowed site permissions in their Chrome. Ask them to allow it in the browser extension's popup, then try again.",
     });
   } finally {
     await driver.close();
@@ -321,6 +345,13 @@ test("the extension's other refusals tell the agent what happened and what to do
         message:
           "The browser extension in the person's Chrome refused this permission request; nothing was set.",
       },
+    ],
+    [
+      // The extension's own check that an agent opened the tab.
+      new AttachedBrowserBridgeError("driver_rejected", "not a tab an agent opened", false, {
+        extensionCode: "not_opened_by_agent",
+      }),
+      { code: "permission_denied", message: NOT_OPENED_TAB },
     ],
   ] as const) {
     const bridge = new SitePermissionBridge(true, () => {

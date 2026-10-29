@@ -28,7 +28,7 @@ function event() {
 const EXTENSION = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
 const PAGE = `${EXTENSION}site-permissions.html`;
 
-/** The extension worker in a Chrome profile with a tab an agent can control
+/** The extension worker in a Chrome profile with a tab an agent can open
  * (7, `https://meet.example.test:8443`) and the person's own tab (9,
  * `https://mail.example.test`), where the person has or has not allowed site
  * permissions. */
@@ -37,10 +37,13 @@ function harness(options: { allowed: boolean }) {
   let allowed = options.allowed;
   // Every contentSettings call, in order: "microphone set <pattern> allow".
   const settings: string[] = [];
+  // The extension's own pages it opened, and whether each came to the front.
   const tabsCreated: string[] = [];
+  const tabsCreatedActive: boolean[] = [];
   const tabsActivated: number[] = [];
   const openTabs: any[] = [];
   let tabUrl = "https://meet.example.test:8443/room/42";
+  let tabIncognito = false;
   const contentSetting = (name: string) => ({
     set: async ({ primaryPattern, setting, secondaryPattern }: any) => {
       if (!allowed) throw new Error(`'contentSettings.ContentSetting.set' is not available`);
@@ -52,6 +55,15 @@ function harness(options: { allowed: boolean }) {
       settings.push(`${name} clear`);
     },
   });
+  const session = {
+    values: {} as Record<string, unknown>,
+    async get() {
+      return structuredClone(this.values);
+    },
+    async set(value: object) {
+      Object.assign(this.values, structuredClone(value));
+    },
+  };
   const local = {
     values: {} as Record<string, unknown>,
     async get() {
@@ -103,7 +115,7 @@ function harness(options: { allowed: boolean }) {
       ]),
     ),
     alarms: { onAlarm: event(), create: async () => {} },
-    storage: { local },
+    storage: { local, session },
     action: {
       setBadgeText: async () => {},
       setBadgeBackgroundColor: async () => {},
@@ -141,12 +153,16 @@ function harness(options: { allowed: boolean }) {
         if (id === 9) return personTab();
         throw new Error(`No tab with id: ${id}.`);
       },
-      create: async ({ url }: { url: string }) => {
+      // An agent's new tab is tab 7; the extension's own page gets a new id.
+      create: async ({ url, active }: { url: string; active: boolean }) => {
+        if (!url.startsWith(EXTENSION)) return tab();
         tabsCreated.push(url);
+        tabsCreatedActive.push(active);
         const created = { id: 100 + tabsCreated.length, url };
         openTabs.push(created);
         return created;
       },
+      getCurrent: async () => undefined,
       update: async (id: number) => {
         tabsActivated.push(id);
         return { id };
@@ -162,7 +178,7 @@ function harness(options: { allowed: boolean }) {
       title: "Call",
       active: true,
       pinned: false,
-      incognito: false,
+      incognito: tabIncognito,
     };
   }
   function personTab() {
@@ -222,7 +238,18 @@ function harness(options: { allowed: boolean }) {
     message,
     settings,
     tabsCreated,
+    tabsCreatedActive,
     tabsActivated,
+    liveState: () => session.values.liveState as { createdTabs?: number[] } | undefined,
+    /** The person closes a tab, or Chrome closes it. */
+    close: (id: number) => {
+      const index = openTabs.findIndex((open) => open.id === id);
+      if (index >= 0) openTabs.splice(index, 1);
+      chrome.tabs.onRemoved.emit(id, { windowId: 1, isWindowClosing: false });
+    },
+    incognito: () => {
+      tabIncognito = true;
+    },
     stored: () => local.values.sitePermissions,
     store: (values: Record<string, unknown>) => Object.assign(local.values, values),
     allow: () => {
@@ -239,8 +266,17 @@ function harness(options: { allowed: boolean }) {
 
 const MEET = "https://meet.example.test:8443";
 
-/** Attaches the agent's debugger to a tab and gives the attachment. */
-async function attach(command: (payload: object) => Promise<any>, tabId = "7"): Promise<number> {
+/** Opens the agent's tab (7) if asked for, attaches the agent's debugger to
+ * a tab and gives the attachment. */
+async function attach(
+  command: (payload: object) => Promise<any>,
+  tabId = "7",
+  options: { open: boolean } = { open: tabId === "7" },
+): Promise<number> {
+  if (options.open) {
+    const opened = await command({ type: "tabs.create", url: `${MEET}/room/42` });
+    expect(opened).toMatchObject({ ok: true, payload: { tab: { id: "7" } } });
+  }
   const reply = await command({ type: "debugger.attach", tabId });
   return reply.payload.attachment;
 }
@@ -271,9 +307,10 @@ describe("site permissions", () => {
       ).toMatchObject({ ok: false, error: { code: "consent_required", retryable: false } });
     }
     expect(h.settings).toEqual([]);
-    // Opened (and so shown) once; later requests leave the person's current
-    // tab alone instead of bringing the page forward again.
+    // Opened in front once; later requests leave the person's current tab
+    // alone instead of bringing the page forward again.
     expect(h.tabsCreated).toEqual([PAGE]);
+    expect(h.tabsCreatedActive).toEqual([true]);
     expect(h.tabsActivated).toEqual([]);
     // The page names what the agent asked for.
     expect((await h.message({ type: "site_permissions" }, PAGE)).answer).toEqual({
@@ -296,6 +333,65 @@ describe("site permissions", () => {
       allowed: false,
       entries: [],
     });
+  });
+
+  test("once the person closed the page, an agent's request never opens it again and is told they declined", async () => {
+    const h = harness({ allowed: false });
+    const command = await h.ready();
+    const attachment = await attach(command);
+    const set = () =>
+      command({
+        type: "permissions.set",
+        tabId: "7",
+        attachment,
+        origin: MEET,
+        permission: "camera",
+        setting: "granted",
+      });
+    expect(await set()).toMatchObject({ ok: false, error: { code: "consent_required" } });
+    expect(h.tabsCreatedActive).toEqual([true]);
+    // The person closes it, or chooses Not now, which closes it.
+    h.close(101);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      expect(await set()).toMatchObject({
+        ok: false,
+        error: { code: "consent_declined", retryable: false },
+      });
+    }
+    expect(h.tabsCreated).toEqual([PAGE]);
+    expect(h.tabsActivated).toEqual([]);
+    expect(h.settings).toEqual([]);
+    // The popup still shows what was asked, with the way to allow it.
+    expect((await h.message({ type: "site_permissions" })).answer).toMatchObject({
+      allowed: false,
+      request: { origin: MEET, permission: "camera", setting: "granted" },
+    });
+    // The person opens it themselves: in front, and while it is open agents
+    // are told it is there, without bringing it forward.
+    await h.message({ type: "open_site_permissions" });
+    expect(h.tabsCreatedActive).toEqual([true, true]);
+    expect(await set()).toMatchObject({ ok: false, error: { code: "consent_required" } });
+    expect(h.tabsCreated).toEqual([PAGE, PAGE]);
+    expect(h.tabsActivated).toEqual([]);
+  });
+
+  test("after the person turned it off, an agent's request does not open the page", async () => {
+    const h = harness({ allowed: true });
+    const command = await h.ready();
+    const attachment = await attach(command);
+    await h.message({ type: "turn_off_site_permissions" }, PAGE);
+    expect(
+      await command({
+        type: "permissions.set",
+        tabId: "7",
+        attachment,
+        origin: MEET,
+        permission: "camera",
+        setting: "granted",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "consent_declined" } });
+    expect(h.tabsCreated).toEqual([]);
+    expect(h.tabsActivated).toEqual([]);
   });
 
   test("once allowed, sets the permission for the exact site, port included, and records it", async () => {
@@ -345,12 +441,19 @@ describe("site permissions", () => {
         setting: "granted",
       });
     const refused = { ok: false, error: { code: "tab_changed" } };
-    // Tab 7 shows the site but no agent controls it yet.
+    const notOpened = { ok: false, error: { code: "not_opened_by_agent" } };
+    // Tab 7 shows the site but no agent opened it.
+    expect(await set("7", 1)).toMatchObject(notOpened);
+    await command({ type: "tabs.create", url: `${MEET}/room/42` });
+    // Opened by an agent, but no agent controls it yet.
     expect(await set("7", 1)).toMatchObject(refused);
-    const attachment = await attach(command);
-    // The person's own tab, which no agent controls, even when another tab
-    // is controlled and the attachment number is that tab's.
-    expect(await set("9", attachment, "https://mail.example.test")).toMatchObject(refused);
+    const attachment = await attach(command, "7", { open: false });
+    // The person's own tab, which no agent opened, even when another tab
+    // is controlled and the attachment number is that tab's, and even
+    // under an attachment of its own.
+    expect(await set("9", attachment, "https://mail.example.test")).toMatchObject(notOpened);
+    const personAttachment = await attach(command, "9");
+    expect(await set("9", personAttachment, "https://mail.example.test")).toMatchObject(notOpened);
     // Another attachment than the agent's current one of this tab.
     expect(await set("7", attachment + 1)).toMatchObject(refused);
     await command({ type: "debugger.detach", tabId: "7" });
@@ -362,6 +465,45 @@ describe("site permissions", () => {
     expect(await set("7", again)).toMatchObject(refused);
     expect(h.settings).toEqual([]);
     expect(h.stored()).toBeUndefined();
+  });
+
+  test("an incognito tab is refused even when the agent opened and controls it", async () => {
+    const h = harness({ allowed: true });
+    const command = await h.ready();
+    const attachment = await attach(command);
+    h.incognito();
+    expect(
+      await command({
+        type: "permissions.set",
+        tabId: "7",
+        attachment,
+        origin: MEET,
+        permission: "camera",
+        setting: "granted",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "tab_changed" } });
+    expect(h.settings).toEqual([]);
+  });
+
+  test("the tabs an agent opened outlive the worker and are forgotten once closed", async () => {
+    const h = harness({ allowed: true });
+    const command = await h.ready();
+    const attachment = await attach(command);
+    await flush();
+    expect(h.liveState()?.createdTabs).toEqual([7]);
+    h.close(7);
+    await flush();
+    expect(h.liveState()?.createdTabs).toEqual([]);
+    expect(
+      await command({
+        type: "permissions.set",
+        tabId: "7",
+        attachment,
+        origin: MEET,
+        permission: "camera",
+        setting: "granted",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "not_opened_by_agent" } });
   });
 
   test("a site Chrome cannot be given exactly is refused as unsupported, before asking the person", async () => {

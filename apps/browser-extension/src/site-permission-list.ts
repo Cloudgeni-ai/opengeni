@@ -1,11 +1,19 @@
 import {
   SITE_PERMISSION_LABELS,
   type SitePermissionEntry,
+  type SitePermissionRequest,
   type SitePermissionsState,
 } from "./site-permissions";
 
 export async function readSitePermissions(): Promise<SitePermissionsState> {
   return (await chrome.runtime.sendMessage({ type: "site_permissions" })) as SitePermissionsState;
+}
+
+/** What an agent asked for before the person allowed it. */
+export function sitePermissionRequestText(asked: SitePermissionRequest): string {
+  const verb = { granted: "allow", denied: "block", prompt: "reset" }[asked.setting];
+  const what = SITE_PERMISSION_LABELS[asked.permission].toLowerCase();
+  return `An agent asked to ${verb} ${what} for ${asked.origin}.`;
 }
 
 export async function removeSitePermissionEntry(entry: SitePermissionEntry): Promise<void> {

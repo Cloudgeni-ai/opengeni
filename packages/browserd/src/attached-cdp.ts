@@ -12,6 +12,7 @@ import {
 import {
   AgentBrowserDriver,
   isBlankTabUrl,
+  PERMISSION_OPENED_TABS_ONLY,
   type AgentBrowserDriverOptions,
   type BrowserCdpConnection,
   type BrowserCommandRunner,
@@ -66,7 +67,9 @@ const SITE_PERMISSION_UNSUPPORTED =
 const SITE_PERMISSIONS_OUTDATED =
   "The browser extension in the person's Chrome is too old to set site permissions; Chrome updates it on its own.";
 const SITE_PERMISSION_CONSENT_REQUIRED =
-  "The person must allow site permissions once in their Chrome first. A tab asking them to has opened there; try again after they allow it.";
+  "The person must allow site permissions once in their Chrome first. A tab asking them to is open there; ask them to allow it, then try again.";
+const SITE_PERMISSION_CONSENT_DECLINED =
+  "The person has not allowed site permissions in their Chrome. Ask them to allow it in the browser extension's popup, then try again.";
 const SITE_PERMISSION_TAB_CHANGED =
   "The tab left this site before the permission was set; observe the tab again.";
 const SITE_PERMISSION_UNSUPPORTED_SITE =
@@ -90,6 +93,13 @@ function sitePermissionRefusal(error: AttachedBrowserBridgeError): Error {
         "permission_denied",
         SITE_PERMISSION_CONSENT_REQUIRED,
       );
+    case "consent_declined":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_DECLINED,
+      );
+    case "not_opened_by_agent":
+      return new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
     case "tab_changed":
       return new InteractionDefiniteDriverError(
         "document_stale",

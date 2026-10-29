@@ -395,6 +395,9 @@ export function accessibilityRebuildWanted(input: {
   );
 }
 type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
+/** Where a browser lets a session set permissions only in tabs it opened. */
+export const PERMISSION_OPENED_TABS_ONLY =
+  "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.";
 const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
   geolocation: "geolocation",
   notifications: "notifications",
@@ -6920,10 +6923,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (!this.createdTargetIds.has(state.targetId) ||
         this.ownedTabs?.inUseElsewhere?.(state.targetId) === true)
     ) {
-      throw new InteractionDefiniteDriverError(
-        "permission_denied",
-        "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.",
-      );
+      throw new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
     }
     try {
       await (

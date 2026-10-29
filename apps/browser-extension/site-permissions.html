@@ -50,7 +50,14 @@
           Chrome asks you to confirm. Its wording covers more than {{product}} uses: {{product}}
           only ever changes the four permissions above, for the site in a tab an agent opened.
         </p>
-        <button type="button" data-allow>Allow</button>
+        <div class="actions">
+          <button type="button" data-allow>Allow</button>
+          <button type="button" class="secondary" data-not-now>Not now</button>
+        </div>
+        <p class="note">
+          If you choose Not now, agents are told to ask you instead. You can allow it later from the
+          {{product}} extension menu.
+        </p>
       </div>
     </main>
     <script type="module" src="site-permissions-page.js"></script>

@@ -86,6 +86,9 @@ type LiveState = {
   lastAttachment: number;
   // Attached tab ids, each with the number of its current attachment.
   attachments: Record<string, number>;
+  // Tabs an agent opened (with tabs.create) that are still open: only in
+  // those can an agent set a site permission.
+  createdTabs?: number[];
 };
 const LIVE_STATE_KEY = "liveState";
 // How a new worker found the live state of the workers before it, newest
@@ -118,6 +121,8 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 // name an attachment are refused once it has ended, so a late one can never
 // run under a newer attachment of the same tab.
 const attachedDebuggerTabs = new Map<number, number>();
+// Tabs an agent opened that are still open.
+const agentCreatedTabs = new Set<number>();
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
 let lastAttachment = Math.floor(Math.random() * 2 ** 40);
@@ -186,6 +191,9 @@ async function resumeLiveState(): Promise<string> {
       closed += 1;
     }
   }
+  for (const tabId of stored.createdTabs ?? []) {
+    if (await tabExists(tabId)) agentCreatedTabs.add(tabId);
+  }
   // Only now: until then nothing records the attachments or applies an update.
   currentStateGeneration = stored.stateGeneration;
   await recordLiveState();
@@ -209,6 +217,9 @@ function parseLiveState(value: unknown): LiveState | null {
       ? state.lastAttachment!
       : lastAttachment,
     attachments,
+    createdTabs: Array.isArray(state.createdTabs)
+      ? state.createdTabs.filter((tabId) => Number.isSafeInteger(tabId))
+      : [],
   };
 }
 
@@ -223,6 +234,7 @@ function recordLiveState(): Promise<void> {
     attachments: Object.fromEntries(
       [...attachedDebuggerTabs].map(([tabId, attachment]) => [String(tabId), attachment]),
     ),
+    createdTabs: [...agentCreatedTabs],
   };
   liveStateWrite = liveStateWrite
     .then(async () => await chrome.storage.session.set({ [LIVE_STATE_KEY]: state }))
@@ -546,6 +558,8 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       const created = await createTab(command.url);
       const tab = attachedTab(created);
       if (!tab) throw new BridgeCommandError("tab_unavailable", "Chrome did not create a tab");
+      agentCreatedTabs.add(created.id!);
+      void recordLiveState();
       scheduleInventory();
       return { tab };
     }
@@ -638,7 +652,10 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       return { downloads: await findDownloads(command.url, command.startedAfter) };
     case "permissions.set":
       try {
-        return await setSitePermission(command, controlledTab);
+        return await setSitePermission(command, {
+          openedByAgent: (tabId) => agentCreatedTabs.has(numericTabId(tabId)),
+          controlledTab,
+        });
       } catch (error) {
         if (error instanceof SitePermissionError) {
           throw new BridgeCommandError(error.code, error.message);
@@ -1130,6 +1147,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (agentCreatedTabs.delete(tabId)) void recordLiveState();
   frameRemovalTimes.delete(tabId);
   frameRemovals.delete(tabId);
   finishedFrameRemovals.delete(tabId);

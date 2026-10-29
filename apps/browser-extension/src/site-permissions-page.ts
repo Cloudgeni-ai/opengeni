@@ -2,12 +2,13 @@ import {
   readSitePermissions,
   removeSitePermissionEntry,
   renderSitePermissions,
+  sitePermissionRequestText,
 } from "./site-permission-list";
-import { SITE_PERMISSION_LABELS, type SitePermissionRequest } from "./site-permissions";
 
 const ask = document.querySelector<HTMLElement>("[data-ask]")!;
 const request = document.querySelector<HTMLElement>("[data-request]")!;
 const allow = document.querySelector<HTMLButtonElement>("[data-allow]")!;
+const notNow = document.querySelector<HTMLButtonElement>("[data-not-now]")!;
 const manage = document.querySelector<HTMLElement>("[data-manage]")!;
 const status = document.querySelector<HTMLElement>("[data-status]")!;
 const entries = document.querySelector<HTMLElement>("[data-entries]")!;
@@ -19,7 +20,9 @@ async function refresh(): Promise<void> {
   document.body.dataset.allowed = String(state.allowed);
   ask.hidden = state.allowed;
   request.hidden = !state.request;
-  request.textContent = state.request ? requestText(state.request) : "";
+  request.textContent = state.request
+    ? `${sitePermissionRequestText(state.request)} Nothing changes until you allow it.`
+    : "";
   manage.hidden = !state.allowed && state.entries.length === 0;
   turnOff.hidden = !state.allowed;
   empty.hidden = state.entries.length > 0;
@@ -35,13 +38,6 @@ async function refresh(): Promise<void> {
   });
 }
 
-/** What the agent that opened this page asked for. */
-function requestText(asked: SitePermissionRequest): string {
-  const verb = { granted: "allow", denied: "block", prompt: "reset" }[asked.setting];
-  const what = SITE_PERMISSION_LABELS[asked.permission].toLowerCase();
-  return `An agent asked to ${verb} ${what} for ${asked.origin}. Nothing changes until you allow it.`;
-}
-
 // Chrome shows its confirmation only in answer to a click on this page.
 allow.addEventListener("click", () => {
   allow.disabled = true;
@@ -52,6 +48,13 @@ allow.addEventListener("click", () => {
       allow.disabled = false;
       void refresh();
     });
+});
+
+// The same as closing this tab: agents do not open it again.
+notNow.addEventListener("click", () => {
+  void chrome.tabs.getCurrent().then((tab) => {
+    if (tab?.id !== undefined) void chrome.tabs.remove(tab.id);
+  });
 });
 
 turnOff.addEventListener("click", () => {

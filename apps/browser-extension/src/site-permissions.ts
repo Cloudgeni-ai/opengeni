@@ -52,11 +52,21 @@ export const SITE_PERMISSIONS_PAGE = "site-permissions.html";
 const CONTENT_SETTINGS: chrome.permissions.Permissions = { permissions: ["contentSettings"] };
 const STORAGE_KEY = "sitePermissions";
 const REQUEST_KEY = "sitePermissionRequest";
+// The page asking the person was shown in this profile (or they turned it
+// off): an agent's request does not open it again, so closing it, or Not
+// now, is a lasting answer until they open it themselves.
+const PAGE_SHOWN_KEY = "sitePermissionsPageShown";
 const MAX_ENTRIES = 1_000;
 
 export class SitePermissionError extends Error {
   constructor(
-    readonly code: "consent_required" | "tab_changed" | "unsupported_site" | "limit_reached",
+    readonly code:
+      | "consent_required"
+      | "consent_declined"
+      | "not_opened_by_agent"
+      | "tab_changed"
+      | "unsupported_site"
+      | "limit_reached",
     message: string,
   ) {
     super(message);
@@ -160,15 +170,19 @@ export function sitePermissionsState(): Promise<SitePermissionsState> {
 /**
  * Sets one permission for one site, which the exact tab the agent acts in
  * must show under the attachment the agent holds (`controlledTab` answers
- * that tab only while that attachment lasts). `prompt` removes the agent's
- * setting, so the site follows the person's own choice again. Without the
- * person's consent it sets nothing and shows the page that asks for it, but
- * brings that page forward only when it is not open already, so an agent
- * trying again never takes the person's tab away.
+ * that tab only while that attachment lasts); that tab must be one an agent
+ * opened. `prompt` removes the agent's setting, so the site follows the
+ * person's own choice again. Without the person's consent it sets nothing
+ * and opens the page that asks for it, in front, only the first time: an
+ * agent trying again never takes the person's tab away, and once they closed
+ * that page it stays closed.
  */
 export function setSitePermission(
   request: SitePermissionRequest & { tabId: string; attachment: number },
-  controlledTab: (tabId: string, attachment: number) => Promise<chrome.tabs.Tab | null>,
+  tabs: {
+    openedByAgent: (tabId: string) => boolean;
+    controlledTab: (tabId: string, attachment: number) => Promise<chrome.tabs.Tab | null>;
+  },
 ): Promise<{ origin: string; setting: SitePermissionSetting }> {
   return serialized(async () => {
     const pattern = sitePattern(request.origin);
@@ -180,13 +194,24 @@ export function setSitePermission(
           setting: request.setting,
         } satisfies SitePermissionRequest,
       });
-      await openSitePermissionsPage({ bringForward: false });
+      if (!(await askOnce())) {
+        throw new SitePermissionError(
+          "consent_declined",
+          "the person was asked and has not allowed site permissions in this Chrome profile",
+        );
+      }
       throw new SitePermissionError(
         "consent_required",
         "the person has not allowed site permissions in this Chrome profile",
       );
     }
-    const tab = await controlledTab(request.tabId, request.attachment);
+    if (!tabs.openedByAgent(request.tabId)) {
+      throw new SitePermissionError(
+        "not_opened_by_agent",
+        "site permissions can be set only in a tab an agent opened",
+      );
+    }
+    const tab = await tabs.controlledTab(request.tabId, request.attachment);
     if (!tab || tab.incognito || !tab.url || tabOrigin(tab.url) !== request.origin) {
       throw new SitePermissionError(
         "tab_changed",
@@ -265,15 +290,29 @@ export function turnOffSitePermissions(): Promise<SitePermissionsState> {
       await chrome.storage.local.set({ [STORAGE_KEY]: [], [REQUEST_KEY]: null });
       await chrome.permissions.remove(CONTENT_SETTINGS);
     }
+    // Turned off on purpose: no agent opens the page again.
+    await chrome.storage.local.set({ [PAGE_SHOWN_KEY]: true });
     return { allowed: await allowed(), entries: await storedEntries() };
   });
 }
 
-/** Shows the page that asks the person, reusing one already open. A page
- * already open is brought forward only when the person asked for it (from
- * the popup): an agent's request opens it once and leaves the person's
- * current tab alone after that. */
+/** For an agent's request: whether the page asking the person is open,
+ * opening it in front only if it was never shown in this profile. One
+ * already open stays where it is. */
+async function askOnce(): Promise<boolean> {
+  const url = chrome.runtime.getURL(SITE_PERMISSIONS_PAGE);
+  const [open] = await chrome.tabs.query({ url });
+  if (open) return true;
+  const stored = (await chrome.storage.local.get(PAGE_SHOWN_KEY)) as Record<string, unknown>;
+  if (stored[PAGE_SHOWN_KEY] === true) return false;
+  await openSitePermissionsPage({ bringForward: false });
+  return true;
+}
+
+/** Shows the page that asks the person, reusing one already open, which is
+ * brought forward only when the person asked for it (from the popup). */
 export async function openSitePermissionsPage(options: { bringForward: boolean }): Promise<void> {
+  await chrome.storage.local.set({ [PAGE_SHOWN_KEY]: true });
   const url = chrome.runtime.getURL(SITE_PERMISSIONS_PAGE);
   const [open] = await chrome.tabs.query({ url });
   if (open?.id !== undefined) {

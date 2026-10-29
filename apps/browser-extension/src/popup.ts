@@ -3,6 +3,7 @@ import {
   readSitePermissions,
   removeSitePermissionEntry,
   renderSitePermissions,
+  sitePermissionRequestText,
 } from "./site-permission-list";
 
 type Status = {
@@ -25,6 +26,7 @@ const sitePermissions = document.querySelector<HTMLElement>("[data-site-permissi
 const siteEntries = sitePermissions.querySelector<HTMLElement>("[data-entries]")!;
 const siteEmpty = sitePermissions.querySelector<HTMLElement>("[data-empty]")!;
 const siteStale = sitePermissions.querySelector<HTMLElement>("[data-stale]")!;
+const siteRequest = sitePermissions.querySelector<HTMLElement>("[data-request]")!;
 const manageSitePermissions = sitePermissions.querySelector<HTMLButtonElement>("[data-manage]")!;
 
 /** How often the open popup re-reads the connection state. */
@@ -46,12 +48,17 @@ async function refresh(options: { label: boolean }): Promise<void> {
   await refreshSitePermissions();
 }
 
-/** Shown once the person allowed agents to set site permissions, or while
- * changes from before are still in effect. */
+/** Shown once the person allowed agents to set site permissions, while
+ * changes from before are still in effect, or after an agent asked: the
+ * person can always get from here to the page that allows it. */
 async function refreshSitePermissions(): Promise<void> {
   const sites = await readSitePermissions();
-  sitePermissions.hidden = !sites.allowed && sites.entries.length === 0;
-  siteEmpty.hidden = sites.entries.length > 0;
+  sitePermissions.hidden = !sites.allowed && sites.entries.length === 0 && !sites.request;
+  siteEmpty.hidden = sites.entries.length > 0 || !sites.allowed;
+  siteRequest.hidden = !sites.request;
+  siteRequest.textContent = sites.request
+    ? `${sitePermissionRequestText(sites.request)} To allow it, open Manage.`
+    : "";
   // Removed outside this extension's own Turn off (on chrome://extensions):
   // the changes stay, and only allowing it again lets them be removed.
   siteStale.hidden = sites.allowed || sites.entries.length === 0;

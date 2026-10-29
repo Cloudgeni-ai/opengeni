@@ -68,6 +68,7 @@ body.page p, .points { color: var(--muted); }
 .points li { margin: 6px 0; }
 .note { font-size: 13px; }
 .ask button { padding: 10px 22px; }
+.ask .actions { display: flex; flex-wrap: wrap; gap: 10px; }
 body.page h3 { font-size: 15px; }
 body.page .entries .site { font-size: 13px; }
 body.page .manage .status { margin: 28px 0 0; color: inherit; font-size: 15px; }
