@@ -37,14 +37,26 @@ inherit the origin of the chat they run in, never the credential's.
   source's test event or a replayed delivery, it is API from then on
   (`markScheduledTaskApiBilled`, and in the delivery's own transaction for
   events), so a key cannot spend plan credit through a schedule or automation
-  set up in the app. An API caller rotating a webhook source's secret makes
-  every automation listening on it API use first. The pause endpoints leave it alone (a status change
+  set up in the app. The pause endpoints leave it alone (a status change
   through an ordinary update counts as an edit), and a task is never turned
   back into app. A manual run is checked at the edge as API when the caller or
   the task is API (`manualScheduledTaskTriggerBillingOrigin`). If a manual run
   fails to start after the mark commits, the task stays API. The origin is
   billing, not execution: it is excluded from a task's execution digest and
   never advances a personal-resource task's authority revision.
+- `event_sources.secret_billing_origin` is `api` once an API caller set or
+  received a webhook source's signing secret: created the source with one
+  (a standard webhook's generated secret is in the create response), rotated
+  it, or pasted one with `PATCH`. It is written in the same statement as the
+  secret, and never turned back, even when a person later rotates or pastes
+  a secret. Whoever holds the secret can sign deliveries to the public URL,
+  so the intake records every delivery it verifies for such a source as API
+  (`receiveEventWebhook`), which marks the automations it fires API use in
+  the delivery's own transaction, exactly as an API caller's test event or
+  replay does. That covers automations added to the source later and has no
+  window between marking and the new secret: the secret and its holder are
+  read from one row. A person's own secrets leave the source alone, and
+  CloudGeni's legacy account stays app (`fundedBillingOrigin` at intake).
 - `credit_ledger_entries.usage_origin` records the origin each usage debit was
   charged under. The debit writers resolve it from the explicit input, the
   attribution metadata, the turn, then the ambient request scope.
@@ -108,6 +120,14 @@ credits.
   (`eligible_model_ids` null), and 100%-off coupon credit written as a plain
   `grant` when no promotion policy is configured. Both are bounded, already
   issued amounts; new promotional credit is scoped and never pays for API use.
+- Only a webhook source's own signing secret marks its deliveries. Sources
+  whose deliveries are authenticated by the deployment (GitHub, Slack, Gmail)
+  or by an MCP server's subscription are not held by the caller. A person's
+  "This workspace" source turns their own workspace activity (recording
+  events) into events; activity an API caller causes there, such as a
+  product uploading a recording with a person's delegated token, fires the
+  person's automations under the automation's own origin. Only that person's
+  own automations listen on it, and a workspace key cannot create one.
 - Inheriting "the chat's latest decided origin" reads the chat's newest turn
   with an origin; the existing turn indexes serve it. A dedicated partial
   index can follow if that read shows up.
@@ -144,7 +164,7 @@ way. Processes install it at boot (`configureBillingLegacyAccounts`).
 
 ## Rollout
 
-Migration 1100 is rolling: three nullable columns with `NOT VALID` checks,
+Migration 1100 is rolling: four nullable columns with `NOT VALID` checks,
 two triggers with their private functions, new private helpers,
 same-signature replacements of existing function bodies (plan balances and
 expiry, and the scheduled-task execution digest and personal-resource fence,

@@ -24,7 +24,6 @@ import {
   getScheduledTask,
   listMcpEventStreamKeys,
   listRecentEventTypes,
-  markEventSourceAutomationsApiBilled,
   recordEventDelivery,
   resolveEventIngressRoute,
   updateEventSource,
@@ -79,6 +78,7 @@ import {
 import { eventSourceWebhookUrl } from "./webhook-url";
 import { errorMessage } from "@opengeni/contracts/values";
 import type { BillingOrigin } from "@opengeni/contracts";
+import { fundedBillingOrigin } from "../../billing-origin";
 
 /**
  * Event sources and the webhook intake. A webhook source is a URL a person
@@ -194,6 +194,8 @@ export async function createEventSourceForViewer(
     viewer: EventSourceViewer;
     request: ParsedCreateEventSourceRequest;
     baseUrl: string;
+    /** Who creates it: an API caller holding the secret makes its deliveries API use. */
+    billingOrigin?: BillingOrigin;
   } & McpEventSourceNetwork &
     GitHubEventSourceAccess,
 ): Promise<CreateEventSourceResponse> {
@@ -266,13 +268,26 @@ export async function createEventSourceForViewer(
     // Linear, Sentry and many other apps show their secret only once they have
     // the URL, so a source without one waits, blocked, until it is pasted.
     ...(secret
-      ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
+      ? {
+          secretEncrypted: encryptEnvironmentValue(key, secret),
+          ...secretHolder(input.billingOrigin),
+        }
       : { status: "blocked" as const, statusReason: awaitingSecretReason(format) }),
   });
   return {
     source: eventSourceForClient(source, input.baseUrl),
     ...(generated ? { signingSecret: generated } : {}),
   };
+}
+
+/**
+ * Whoever holds a webhook's signing secret can sign deliveries to its public
+ * URL. An API caller that sets or receives it marks the source, with the
+ * secret in the same write, so every delivery it verifies is API use (see
+ * `receiveEventWebhook`). A person's write never clears the mark.
+ */
+function secretHolder(origin: BillingOrigin | undefined): { secretBillingOrigin?: "api" } {
+  return origin === "api" ? { secretBillingOrigin: "api" } : {};
 }
 
 /** Apps whose preset names them in the "paste the secret" reason. */
@@ -457,6 +472,8 @@ export async function updateEventSourceForViewer(input: {
   source: EventSourceRecord;
   request: UpdateEventSourceRequest;
   baseUrl: string;
+  /** Who changes it: an API caller pasting a secret makes its deliveries API use. */
+  billingOrigin?: BillingOrigin;
 }): Promise<EventSource> {
   const { source, request } = input;
   if (request.visibility !== undefined && source.ownerSubjectId === null) {
@@ -532,6 +549,7 @@ export async function updateEventSourceForViewer(input: {
             requireEncryptionKey(input.settings),
             request.signingSecret,
           ),
+          ...secretHolder(input.billingOrigin),
         }
       : {}),
   });
@@ -544,7 +562,7 @@ export async function rotateEventSourceSecret(input: {
   db: Database;
   settings: Settings;
   source: EventSourceRecord;
-  /** Who rotates: an API caller makes the automations listening on it API use. */
+  /** Who rotates: an API caller receiving the new secret makes its deliveries API use. */
   billingOrigin?: BillingOrigin;
 }): Promise<{ signingSecret: string }> {
   if (input.source.kind !== "webhook" || input.source.adapter !== "standard") {
@@ -552,17 +570,10 @@ export async function rotateEventSourceSecret(input: {
       message: "Only standard webhook sources have a secret Opengeni makes",
     });
   }
-  // Before the new secret exists, so nothing it signs runs on plan credit.
-  if (input.billingOrigin === "api") {
-    await markEventSourceAutomationsApiBilled(input.db, {
-      accountId: input.source.accountId,
-      workspaceId: input.source.workspaceId,
-      sourceId: input.source.id,
-    });
-  }
   const signingSecret = generateStandardWebhookSecret();
   const updated = await updateEventSource(input.db, input.source.workspaceId, input.source.id, {
     secretEncrypted: encryptEnvironmentValue(requireEncryptionKey(input.settings), signingSecret),
+    ...secretHolder(input.billingOrigin),
   });
   if (!updated) throw new HTTPException(404, { message: "event source not found" });
   return { signingSecret };
@@ -675,6 +686,12 @@ export async function receiveEventWebhook(input: {
     dedupeKey: verification.deliveryKey ?? `sha256:${bodySha256}`,
     body: input.body,
     headers: retainedSourceHeaders(source, input.headers),
+    // The secret and its holder come from the same row: a delivery verified
+    // with a secret an API caller set or received fires its automations as
+    // API use. CloudGeni's legacy account stays app.
+    ...(source.secretBillingOrigin === "api"
+      ? { billingOrigin: fundedBillingOrigin(source.accountId, "api") }
+      : {}),
   });
   return {
     outcome: "stored",

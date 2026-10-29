@@ -101,6 +101,11 @@ export type EventSourceRecord = {
   statusReasonCode: string | null;
   statusReasonDetail: string | null;
   secretEncrypted: string | null;
+  /**
+   * 'api' once an API caller set or received the webhook signing secret:
+   * every delivery verified with it is API use. Never turned back.
+   */
+  secretBillingOrigin: "api" | null;
   externalKey: string | null;
   mcpServerId: string | null;
   /** A workspace MCP source's server URL, signed in by the credential provider. */
@@ -140,6 +145,7 @@ function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
     status: row.status as EventSourceStatus,
     ...statusReasonFields(row),
     secretEncrypted: row.secretEncrypted,
+    secretBillingOrigin: row.secretBillingOrigin === "api" ? "api" : null,
     externalKey: row.externalKey,
     mcpServerId: row.mcpServerId,
     mcpServerUrl: row.mcpServerUrl,
@@ -192,6 +198,8 @@ export type CreateEventSourceInput = {
   adapter?: WebhookEventAdapter | null;
   format?: WebhookFormat | null;
   secretEncrypted?: string | null;
+  /** 'api' when an API caller sets or receives the secret at creation. */
+  secretBillingOrigin?: "api" | null;
   /** Defaults to active; a pasted webhook waiting for its secret starts blocked. */
   status?: EventSourceStatus;
   statusReason?: EventStatusReason | null;
@@ -226,6 +234,7 @@ export async function createEventSource(
         ownerSubjectId: input.ownerSubjectId,
         visibility: input.visibility,
         secretEncrypted: input.secretEncrypted ?? null,
+        secretBillingOrigin: input.secretBillingOrigin ?? null,
         ...(input.status
           ? { status: input.status, ...storedStatusReason(input.status, input.statusReason) }
           : {}),
@@ -491,6 +500,11 @@ export async function updateEventSource(
     status?: EventSourceStatus;
     statusReason?: EventStatusReason | null;
     secretEncrypted?: string;
+    /**
+     * 'api' with a secret an API caller sets or receives, written with the
+     * secret in one statement. There is no way to clear it.
+     */
+    secretBillingOrigin?: "api";
     format?: WebhookFormat;
   },
 ): Promise<EventSourceRecord | null> {
@@ -504,6 +518,7 @@ export async function updateEventSource(
           ? { status: patch.status, ...storedStatusReason(patch.status, patch.statusReason) }
           : {}),
         ...(patch.secretEncrypted !== undefined ? { secretEncrypted: patch.secretEncrypted } : {}),
+        ...(patch.secretBillingOrigin === "api" ? { secretBillingOrigin: "api" } : {}),
         // A format makes the source custom, including one stored as `linear` or `sentry`.
         ...(patch.format !== undefined ? { webhookFormat: patch.format, adapter: "custom" } : {}),
         updatedAt: sql`now()`,
@@ -526,28 +541,6 @@ export async function updateEventSource(
  * Delete a source and its history. A source automations still use is kept:
  * the result names them so the caller can say which to change first.
  */
-/**
- * An API caller that takes over a source (a new webhook secret it can sign
- * with) makes every automation listening on it API use, so deliveries it
- * signs never pay from plan credit.
- */
-export async function markEventSourceAutomationsApiBilled(
-  db: Database,
-  input: { accountId: string; workspaceId: string; sourceId: string },
-): Promise<void> {
-  await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
-    scoped.execute(
-      sql`UPDATE scheduled_tasks task SET billing_origin = 'api'
-        WHERE task.account_id = ${input.accountId}::uuid
-          AND task.workspace_id = ${input.workspaceId}::uuid
-          AND task.billing_origin IS DISTINCT FROM 'api'
-          AND EXISTS (SELECT 1 FROM event_triggers trigger
-            WHERE trigger.workspace_id = task.workspace_id AND trigger.task_id = task.id
-              AND trigger.source_id = ${input.sourceId}::uuid)`,
-    ),
-  );
-}
-
 export async function deleteEventSource(
   db: Database,
   workspaceId: string,
@@ -681,9 +674,11 @@ export type RecordEventDeliveryInput = {
   /** How long the dispatcher waits for more events before starting a run. */
   settleMs?: number;
   /**
-   * Who started this delivery by hand (a test event or a replay). An API
-   * caller makes the automations it fires API use, in the same transaction,
-   * so their runs never pay from plan credit.
+   * Who is behind this delivery: the caller of a test event or a replay, or
+   * for a webhook, whoever holds its signing secret (see
+   * `EventSourceRecord.secretBillingOrigin`). API marks the automations it
+   * fires API use in this delivery's own transaction, before any of their
+   * runs can start, so those runs never pay from plan credit.
    */
   billingOrigin?: BillingOrigin;
 };
@@ -814,11 +809,15 @@ export async function recordEventDeliveryInTransaction(
   }
   const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
   if (input.billingOrigin === "api" && matched.length > 0) {
+    // Rows lock in id order, so concurrent deliveries can't deadlock here.
     await tx.execute(
       sql`UPDATE scheduled_tasks SET billing_origin = 'api'
-        WHERE account_id = ${input.accountId}::uuid AND workspace_id = ${input.workspaceId}::uuid
-          AND id = ANY(${`{${matched.join(",")}}`}::uuid[])
-          AND billing_origin IS DISTINCT FROM 'api'`,
+        WHERE workspace_id = ${input.workspaceId}::uuid AND id IN (
+          SELECT id FROM scheduled_tasks
+          WHERE account_id = ${input.accountId}::uuid AND workspace_id = ${input.workspaceId}::uuid
+            AND id = ANY(${`{${matched.join(",")}}`}::uuid[])
+            AND billing_origin IS DISTINCT FROM 'api'
+          ORDER BY id FOR UPDATE)`,
     );
   }
   const [updated] = await tx

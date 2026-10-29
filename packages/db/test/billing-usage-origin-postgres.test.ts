@@ -289,11 +289,12 @@ test("turns freeze their origin; undecided turns inherit the chat's, then the pa
   const checks = await shared.admin`
     select conname, pg_get_constraintdef(oid) as def from pg_constraint
     where conname in ('session_turns_billing_origin_valid', 'scheduled_tasks_billing_origin_valid',
-      'credit_ledger_entries_usage_origin_valid')
+      'credit_ledger_entries_usage_origin_valid', 'event_sources_secret_billing_origin_valid')
       and connamespace = ${shared.schema}::regnamespace
     order by conname`;
   expect(checks.map((row) => row.conname)).toEqual([
     "credit_ledger_entries_usage_origin_valid",
+    "event_sources_secret_billing_origin_valid",
     "scheduled_tasks_billing_origin_valid",
     "session_turns_billing_origin_valid",
   ]);

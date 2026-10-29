@@ -119,6 +119,10 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       baseUrl: baseUrl(c),
       githubApp: request.kind === "github" ? githubAppWebhookPort(deps) : null,
       ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
+      // An API caller that sets or receives a webhook's secret makes its deliveries API use.
+      ...(request.kind === "webhook"
+        ? { billingOrigin: await resolveTurnBillingOrigin(db, { grant }) }
+        : {}),
     });
     c.header("cache-control", "private, no-store");
     return c.json(
@@ -149,7 +153,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.patch("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
-    const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
     const request = await parseRequestJson(c, UpdateEventSourceRequest);
     const updated = await updateEventSourceForViewer({
@@ -158,6 +162,10 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       source,
       request,
       baseUrl: baseUrl(c),
+      // An API caller pasting a secret makes the source's deliveries API use.
+      ...(request.signingSecret !== undefined
+        ? { billingOrigin: await resolveTurnBillingOrigin(db, { grant }) }
+        : {}),
     });
     return c.json(EventSource.parse(forViewer(viewer, updated)));
   });

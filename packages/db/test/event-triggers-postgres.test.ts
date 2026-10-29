@@ -44,7 +44,6 @@ import {
   pruneEventIntake,
   recordEventDelivery,
   recordEventOccurrenceStartFailure,
-  markEventSourceAutomationsApiBilled,
   rearmScheduledTaskEvents,
   resolveEventIngressRoute,
   retireExhaustedScheduledTask,
@@ -592,18 +591,57 @@ describe("deliveries and matching", () => {
     // An API caller's: only the automation it fired becomes API use.
     expect((await send("api")).matchedTaskIds).toEqual([fired.id]);
     expect(await origins()).toEqual({ [fired.id]: "api", [quiet.id]: null });
-    // An API caller taking over the source (a new secret it can sign with)
-    // makes every automation listening on it API use.
-    const other = await task(space);
-    await markEventSourceAutomationsApiBilled(client.db, { ...space, sourceId: source.id });
-    expect(await origins()).toEqual({ [fired.id]: "api", [quiet.id]: "api" });
-    const [untouched] = await withWorkspaceRls(client.db, space.workspaceId, (scoped) =>
-      rawRows<{ billing_origin: string | null }>(
-        scoped,
-        sql`select billing_origin from scheduled_tasks where id = ${other.id}::uuid`,
+  });
+
+  test("a source remembers an API caller held its secret, with the secret, and never forgets", async () => {
+    const space = await workspace();
+    const stored = async (sourceId: string) =>
+      (await getEventSource(client.db, space.workspaceId, sourceId))?.secretBillingOrigin;
+    // A person's source: nobody outside the app holds its secret.
+    const source = await webhookSource(space);
+    expect(source.secretBillingOrigin).toBeNull();
+    expect(await stored(source.id)).toBeNull();
+    // A person's new secret leaves it so.
+    await updateEventSource(client.db, space.workspaceId, source.id, {
+      secretEncrypted: "person-secret",
+    });
+    expect(await stored(source.id)).toBeNull();
+    // An API caller's new secret marks it in the same write.
+    const marked = await updateEventSource(client.db, space.workspaceId, source.id, {
+      secretEncrypted: "api-secret",
+      secretBillingOrigin: "api",
+    });
+    expect(marked).toMatchObject({ secretEncrypted: "api-secret", secretBillingOrigin: "api" });
+    // A later person's secret or any other change never turns it back.
+    await updateEventSource(client.db, space.workspaceId, source.id, {
+      secretEncrypted: "person-again",
+      name: "Renamed",
+      status: "active",
+    });
+    expect(await stored(source.id)).toBe("api");
+    // A source created by an API caller with its secret starts marked.
+    const { source: created } = await createEventSource(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      createdBySubjectId: space.subjectId,
+      kind: "webhook",
+      adapter: "standard",
+      name: "Product deploys",
+      ownerSubjectId: space.subjectId,
+      visibility: "workspace",
+      secretEncrypted: "generated",
+      secretBillingOrigin: "api",
+    });
+    expect(created.secretBillingOrigin).toBe("api");
+    expect(await stored(created.id)).toBe("api");
+    // Only the two origins are stored.
+    await expect(
+      withWorkspaceRls(client.db, space.workspaceId, (scoped) =>
+        scoped.execute(
+          sql`update event_sources set secret_billing_origin = 'plan' where id = ${source.id}::uuid`,
+        ),
       ),
-    );
-    expect(untouched?.billing_origin).toBeNull();
+    ).rejects.toThrow();
   });
 
   test("matching queues events for active automations whose owner can see the source", async () => {

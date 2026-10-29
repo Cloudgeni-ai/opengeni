@@ -8,7 +8,7 @@
 -- expiry, the next period's opening debt). Document and index-job billing
 -- records may carry the origin. See docs/billing-origin.md.
 --
--- Rolling: three nullable columns (catalog-only; their checks are NOT VALID
+-- Rolling: four nullable columns (catalog-only; their checks are NOT VALID
 -- and only constrain new writes), new private trigger functions and helper,
 -- and same-signature replacements of existing function bodies. The previous
 -- release never writes the columns, and null keeps today's behaviour: null
@@ -36,6 +36,18 @@ ALTER TABLE credit_ledger_entries
   CHECK (usage_origin IN ('app', 'api')) NOT VALID;
 COMMENT ON COLUMN credit_ledger_entries.usage_origin IS
   'Funding origin of a usage debit. api debits never count against the monthly plan allowance. Null is legacy or non-usage.';
+
+-- Whoever holds a webhook source's signing secret can sign deliveries to its
+-- public URL. Once an API caller set or received it (created the source with
+-- it, rotated it, pasted one), every verified delivery is API use and makes
+-- the automations it fires API use. Never turned back; the previous release
+-- neither writes nor reads it.
+ALTER TABLE event_sources ADD COLUMN IF NOT EXISTS secret_billing_origin text;
+ALTER TABLE event_sources
+  ADD CONSTRAINT event_sources_secret_billing_origin_valid
+  CHECK (secret_billing_origin IN ('app', 'api')) NOT VALID;
+COMMENT ON COLUMN event_sources.secret_billing_origin IS
+  'api once an API caller set or received the signing secret: deliveries signed with it bill the automations they fire as API. Never turned back. Null: only the app has held it.';
 
 -- A turn's funding origin is set once, when it is accepted.
 CREATE OR REPLACE FUNCTION opengeni_private.prevent_session_turn_billing_origin_change()
@@ -73,6 +85,10 @@ BEGIN
           FROM scheduled_task_runs run JOIN scheduled_tasks task
             ON task.workspace_id = run.workspace_id AND task.id = run.task_id
           WHERE run.workspace_id = NEW.workspace_id AND run.id = NEW.scheduled_task_run_id;
+        -- Not reached in practice: the run row precedes its session, foreign
+        -- keys keep its task, and both share the turn's workspace RLS. Kept
+        -- fail-closed without the legacy account list, which lives in process
+        -- configuration (the worker's schedule admission applies it).
         NEW.billing_origin := coalesce(NEW.billing_origin, 'api');
         RETURN NEW;
       END IF;
