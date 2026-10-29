@@ -412,6 +412,18 @@ describe("app actions for a person in an embedded chat", () => {
       hint: "This isn't available to this person here. Tell them plainly, without pointing them to a page.",
     });
 
+    // The workspace budget is for people signed in to Opengeni: called
+    // directly, without searching first, the route refuses it the same way.
+    for (const id of ["getWorkspaceAllowance", "getWorkspaceAllowanceState"]) {
+      const budget = JSON.parse(
+        textOf(await embedded.call({ id, pathParameters: { workspaceId }, query: {} })),
+      );
+      expect(budget, id).toMatchObject({
+        status: 403,
+        hint: "This isn't available to this person here. Tell them plainly, without pointing them to a page.",
+      });
+    }
+
     // Changes stay off from an embed, said without naming a page.
     const change = await embedded.call({
       id: "updateWorkspace",

@@ -175,10 +175,11 @@ so one call is never counted twice.
 Reading the configuration shows a member the budget and how members share
 it, never anyone else's usage. The person's own delegated apps acting for them
 can read it too. Agents, services and other session-bound tokens can't, even
-when they carry `sessions:create`, and neither can a product's user acting
-through an organization key (asUser), so the key gains no read it lacks.
-In a chat, app actions offer this read to members acting as themselves, and
-not to people in an embedded chat.
+when they carry `sessions:create`. Neither can anyone using Opengeni through
+another product: a product's user (`external_user:`) in an embedded chat or
+Site, or anyone acting through an organization key (asUser), so the product's
+key gains no read it lacks. In a chat, app actions offer this read to members
+acting as themselves, and not to people in an embedded chat.
 Viewers (`workspace:read` only) still see just their own usage through
 `/usage/me`.
 

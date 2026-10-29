@@ -88,13 +88,16 @@ export function requireAllowanceAuthority(
       return;
     // A person who can start chats in the workspace sees its budget (how much
     // it has and how members share it), never the roster's usage. Agents and
-    // session-bound tokens were refused above; a product's user acting through
-    // its organization key (asUser) is not such a person, so the key gains
-    // nothing by acting as a user.
+    // session-bound tokens were refused above. Someone acting through another
+    // product is not such a person, whether a product's user in an embedded
+    // chat or Site (`external_user:`) or anyone acting through an
+    // organization key (asUser), so the product's key gains nothing.
     if (
       operation === "budget-read" &&
       !organizationKey &&
       !externalActorContinuationForAuthorization(authorization) &&
+      !grant.subjectId.startsWith("external_user:") &&
+      !context.subjectId.startsWith("external_user:") &&
       grant.principalKind === "human_session" &&
       !grant.serviceInitiator &&
       !context.subjectId.startsWith("api_key:") &&

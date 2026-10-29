@@ -185,9 +185,9 @@ type ActingAuthority = Exclude<SessionAppActionAuthority, { kind: "unavailable" 
 
 /**
  * Reads whose first check (`sessions:create`) an external person's access may
- * pass but whose route still refuses everyone acting through another product:
- * the workspace budget is for people signed in to Opengeni (see
- * `requireAllowanceAuthority`).
+ * pass but whose route refuses them: the workspace budget is for people of the
+ * organization, never someone using Opengeni through another product (see
+ * `requireAllowanceAuthority`). Not offering them saves a refused call.
  */
 const EXTERNAL_PERSON_REFUSED_READS: ReadonlySet<string> = new Set([
   "getWorkspaceAllowance",
