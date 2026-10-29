@@ -511,9 +511,16 @@ test("a frame capture the renderer does not answer holds the live view until it 
     expect((await iterator.next()).done).toBe(false);
     fixture.stallNext("Page.captureScreenshot");
     await fixture.waitUntilStalled();
+    const captures = fixture.calls.filter(
+      (call) => call.method === "Page.captureScreenshot",
+    ).length;
     const next = iterator.next();
     // Before the connection gives up on the stalled capture at 10 s.
     expect(await nextFrameWithin(next, 9_000)).toBe("pending");
+    // Still one capture at a time while waiting for its answer.
+    expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
+      captures,
+    );
     fixture.replyToStalled();
     expect(await nextFrameWithin(next, 3_000)).toBe("frame");
   } finally {
@@ -522,6 +529,24 @@ test("a frame capture the renderer does not answer holds the live view until it 
     await fixture.driver.close();
   }
 }, 20_000);
+
+test("a lost connection fails the live view instead of leaving a frozen subscription", async () => {
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    const failed = iterator.next().catch((error: unknown) => error);
+    fixture.disconnect();
+    expect(await failed).toBeInstanceOf(Error);
+    await expect(iterator.next()).rejects.toThrow();
+  } finally {
+    await frames?.close();
+    await fixture.driver.close();
+  }
+});
 
 test("frames that keep failing for another reason still end the live view", async () => {
   const fixture = await captureFixture();
