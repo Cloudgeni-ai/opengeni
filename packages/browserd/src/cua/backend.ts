@@ -37,6 +37,7 @@ import {
   type CuaDesktopRuntime,
   type ListedWindow,
   type RunStepsOutcome,
+  WINDOWS_SET_VALUE_REFUSED,
 } from "./wire";
 import {
   dateFieldFormat,
@@ -57,6 +58,7 @@ import {
 } from "./projection";
 import type { MacConsoleState, MacWindowPresence, MacWindows } from "./macos-windows";
 import type { WindowFronting } from "./windows-foreground";
+import type { WindowsTextFields } from "./windows-text";
 
 type Target = {
   native: ComputerBackendTarget;
@@ -106,6 +108,10 @@ type Operation = {
   /** The checked state a checkbox or switch this step presses must read
    * once the step has run. */
   expectToggle?: { ref: string; wanted: boolean };
+  /** Windows: where the element of this set_value step is on screen, so its
+   * text can be set through its own control when CUA cannot set its value
+   * (see windows-text.ts). */
+  textField?: { x: number; y: number; width: number; height: number };
   /** run_steps options of a step that names its element instead of carrying
    * a token: how long CUA waits for it, the check that holds first, and for
    * a checkbox or switch the checked state it is pressed into when it reads
@@ -215,6 +221,7 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly launchWindowWaitMs: number,
     private readonly macWindows: MacWindows | null,
     private readonly frontWindow: WindowFronting | null,
+    private readonly textFields: WindowsTextFields | null,
     private readonly personInput: PersonInputReader | null,
     private readonly agentInput: AgentInput,
   ) {
@@ -254,6 +261,9 @@ export class CuaComputerBackend implements ComputerBackend {
       /** Windows: bring a window to the foreground before CUA sends it
        * pointer or keyboard input (see windows-foreground.ts). */
       frontWindow?: WindowFronting | null;
+      /** Windows: set a text field's text through its own control when CUA
+       * cannot set its value (see windows-text.ts). */
+      textFields?: WindowsTextFields | null;
       /** macOS: how long ago a person used the keyboard, mouse or trackpad
        * (see macos-person-input.ts). Listings and observations say so when
        * it was within the last minute. */
@@ -275,6 +285,7 @@ export class CuaComputerBackend implements ComputerBackend {
           (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
         platform === "macos" ? (options.macWindows ?? null) : null,
         platform === "windows" ? (options.frontWindow ?? null) : null,
+        platform === "windows" ? (options.textFields ?? null) : null,
         platform === "macos" ? (options.personInput ?? null) : null,
         options.agentInput ?? processAgentInput,
       );
@@ -507,6 +518,10 @@ export class CuaComputerBackend implements ComputerBackend {
                 false,
                 true,
               );
+            if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
+              await this.writeTextField(acted, operation);
+              continue;
+            }
             // CUA's own wording names its raw tools; say what the caller does.
             if (
               error instanceof ComputerBackendError &&
@@ -2353,6 +2368,9 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
+            ...(this.identity.platform === "windows" && node.bounds
+              ? { textField: node.bounds }
+              : {}),
             // A slider is only checked when the window reads its value as a
             // number: many native sliders expose a range but no readable
             // value, and some read it as text such as "50 %".
@@ -2665,6 +2683,60 @@ export class CuaComputerBackend implements ComputerBackend {
     const frontWindow = this.frontWindow;
     if (!fronted.previous || steps.some(clicks)) return none;
     return { giveBack: async () => await frontWindow.giveBack(windowId, fronted.previous) };
+  }
+
+  /** Windows: after CUA refused set_value, sets the text of the text field
+   * the element is through the field's own control, as typing would and
+   * without bringing its window forward (see windows-text.ts). Returns once
+   * the field reads the value; otherwise throws what the write came to. */
+  private async writeTextField(acted: Target, operation: Operation): Promise<void> {
+    const value = operation.args.value;
+    const written =
+      this.textFields && operation.textField && typeof value === "string"
+        ? await this.textFields
+            .replace(acted.windowId, operation.textField, value)
+            .catch(() => ({ kind: "no_answer" as const }))
+        : ({ kind: "no_control" } as const);
+    const refused = (code: ComputerBackendErrorCode, message: string) =>
+      new ComputerBackendError(code, message, false, false);
+    switch (written.kind) {
+      case "replaced":
+        return;
+      case "no_control":
+        throw refused(
+          "unsupported",
+          "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+        );
+      case "read_only":
+        throw refused(
+          "invalid_action",
+          "This text field is read-only, so its value was not changed",
+        );
+      case "disabled":
+        throw refused(
+          "invalid_action",
+          "This text field is disabled, so its value was not changed",
+        );
+      case "single_line":
+        throw refused(
+          "invalid_action",
+          "This text field holds a single line, so a value with a line break was not set: give the value without line breaks",
+        );
+      case "not_applied":
+        throw new ComputerBackendError(
+          "driver_failed",
+          "The field's text was replaced, but the field reads something other than the value afterwards (it may limit or change what is typed); observe it before setting it again",
+          false,
+          true,
+        );
+      case "no_answer":
+        throw new ComputerBackendError(
+          "outcome_unknown",
+          "The app did not answer while this field's text was being replaced, so whether its value was set is unknown; observe the window before acting again",
+          false,
+          true,
+        );
+    }
   }
 }
 

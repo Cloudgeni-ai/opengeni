@@ -9,7 +9,8 @@ import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
-import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
+import { callDesktop, type CuaDesktopRuntime, WINDOWS_SET_VALUE_REFUSED } from "../src/cua/wire";
+import type { TextFieldWrite } from "../src/cua/windows-text";
 import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
@@ -1362,6 +1363,116 @@ describe("CUA desktop boundary", () => {
       retryable: false,
       message:
         "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+    });
+  });
+
+  test("Windows sets a text field's text through its own control when CUA refuses set_value, without fronting", async () => {
+    // Windows CUA refuses set_value on Notepad's document with this text only:
+    // it disables the window for the write, and the field then refuses it.
+    const refusal =
+      "set_value: element [1] does not implement ValuePattern or RangeValuePattern. For controls with TogglePattern (CheckBox) or SelectionItemPattern (RadioButton / ComboBoxItem), use the `click` tool instead.";
+    class RefusingFixture extends WindowsFixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "set_value")
+          return { text: refusal, images: [], isError: true, degraded: false, rawJson: "{}" };
+        if (name === "get_window_state") {
+          const state = JSON.parse(response.structuredJson!);
+          if (state.elements) state.elements[1].frame = { x: 60, y: 70, w: 120, h: 40 };
+          response.structuredJson = JSON.stringify(state);
+        }
+        return response;
+      }
+    }
+    const fixture = new RefusingFixture();
+    const writes: unknown[] = [];
+    let outcome: TextFieldWrite["kind"] = "replaced";
+    const backend = await CuaComputerBackend.open(fixture, "windows", {
+      frontWindow: {
+        front: async (windowId) => {
+          fixture.calls.push({ name: "(front)", args: { windowId } });
+          return { front: true, previous: 7 };
+        },
+        giveBack: async () => undefined,
+      },
+      textFields: {
+        replace: async (window, bounds, value) => {
+          writes.push({ window, bounds, value });
+          return { kind: outcome };
+        },
+      },
+    });
+    const setValue = async (value: string) => {
+      const observation = await backend.observe((await backend.targets())[0]!.id);
+      const field = observation.roots.find((node) => node.name === "Value")!;
+      return await backend.dispatch({
+        ...command(observation),
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: field.ref },
+          action: "set_value",
+          value,
+        },
+      });
+    };
+    try {
+      await setValue("Hello from Opengeni");
+      expect(writes).toEqual([
+        {
+          window: 1,
+          bounds: { x: 60, y: 70, width: 120, height: 40 },
+          value: "Hello from Opengeni",
+        },
+      ]);
+      expect(fixture.calls.some((call) => call.name === "(front)")).toBe(false);
+      for (const [kind, expected] of [
+        [
+          "read_only",
+          {
+            code: "invalid_action",
+            dispatched: false,
+            message: "This text field is read-only, so its value was not changed",
+          },
+        ],
+        [
+          "no_control",
+          {
+            code: "unsupported",
+            dispatched: false,
+            message:
+              "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+          },
+        ],
+        ["not_applied", { code: "driver_failed", dispatched: true }],
+        ["no_answer", { code: "outcome_unknown", dispatched: true }],
+      ] as const) {
+        outcome = kind;
+        await expect(setValue("Hello")).rejects.toMatchObject(expected);
+      }
+    } finally {
+      await backend.close();
+    }
+    // The refusal on its own is definite: CUA wrote nothing.
+    await expect(
+      callDesktop(
+        {
+          callTool: async () => ({
+            text: refusal,
+            images: [],
+            isError: true,
+            degraded: false,
+            rawJson: "{}",
+          }),
+          shutdown: async () => undefined,
+        },
+        "set_value",
+        {},
+        true,
+      ),
+    ).rejects.toMatchObject({
+      code: "unsupported",
+      dispatched: false,
+      cuaCode: WINDOWS_SET_VALUE_REFUSED,
     });
   });
 

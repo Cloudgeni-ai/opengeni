@@ -1,0 +1,5 @@
+---
+"@opengeni/browserd": patch
+---
+
+Windows computer use can set the text of Notepad's document and of other classic Edit and RichEdit text fields with `set_value`. In some apps (by program name, Notepad among them) CUA disables the app's window while it sets a value, so that the app cannot take the foreground, and a classic Edit control then refuses the write. CUA reported this as "does not implement ValuePattern", and the action came back as an unknown outcome, so the agent had to type instead. When CUA refuses that way, browserd now selects the field's whole text and replaces it through the field's own control, as typing would (the app sees the change and it can be undone), without bringing the window forward, then checks that the field reads the value. A read-only or disabled field gets a plain refusal with nothing changed, and an element that is not such a field gets a definite refusal that says to click into it and type instead. A window's title bar no longer offers `set_value`, since its value is its title and cannot be set.

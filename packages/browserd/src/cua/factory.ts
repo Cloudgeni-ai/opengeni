@@ -7,6 +7,7 @@ import { macPersonInput } from "./macos-person-input";
 import { createCuaRuntime, missingLinuxLibraryError } from "./sdk";
 import type { CuaDesktopRuntime } from "./wire";
 import { windowsFronting } from "./windows-foreground";
+import { windowsTextFields } from "./windows-text";
 
 /** The part of the CUA SDK a desktop runtime uses. */
 type CuaSdk = {
@@ -195,7 +196,7 @@ export async function createCuaComputerDriver(
           personInput: await macPersonInput(),
         }
       : process.platform === "win32"
-        ? { frontWindow: windowsFronting() }
+        ? { frontWindow: windowsFronting(), textFields: windowsTextFields() }
         : {},
   );
   return new ComputerDriver({

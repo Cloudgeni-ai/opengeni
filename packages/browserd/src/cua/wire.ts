@@ -343,6 +343,16 @@ export function deliveredUnconfirmed(call: {
   return (call.data.effect ?? call.result.action?.effect) === "unverifiable";
 }
 
+/** The code given to Windows CUA's refusal of set_value, which it reports
+ * only as text: it neither set the element's value through UI Automation nor
+ * wrote anything else. CUA says so both for an element with no value pattern
+ * and for one whose value write failed (a read-only field, or one in a window
+ * CUA disabled for the write). */
+export const WINDOWS_SET_VALUE_REFUSED = "windows_set_value_refused";
+
+const WINDOWS_SET_VALUE_REFUSAL =
+  /^set_value: element \[\d+\] does not implement ValuePattern or RangeValuePattern\b/u;
+
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
   name: string,
@@ -380,6 +390,18 @@ export async function callDesktop(
         true,
       );
     }
+    if (
+      mutation &&
+      name === "set_value" &&
+      result?.isError &&
+      WINDOWS_SET_VALUE_REFUSAL.test(result.text)
+    )
+      throw new CuaFailure(
+        "unsupported",
+        "Windows would not set this element's value, so nothing was changed",
+        false,
+        WINDOWS_SET_VALUE_REFUSED,
+      );
     // A failure CUA reports only as text (Windows launch_app does) still says
     // why; keep it, as written, like any other CUA reason.
     const reason = result?.isError && result.text.trim() ? `: ${result.text}` : "";
