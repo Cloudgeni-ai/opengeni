@@ -10,7 +10,6 @@ import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime, WINDOWS_SET_VALUE_REFUSED } from "../src/cua/wire";
-import type { TextFieldWrite } from "../src/cua/windows-text";
 import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
@@ -1366,138 +1365,66 @@ describe("CUA desktop boundary", () => {
     });
   });
 
-  test("Windows sets a text field's text through its own control when CUA refuses set_value, without fronting", async () => {
-    // Windows CUA refuses set_value on Notepad's document with this text only:
-    // it disables the window for the write, and the field then refuses it.
-    const refusal =
-      "set_value: element [1] does not implement ValuePattern or RangeValuePattern. For controls with TogglePattern (CheckBox) or SelectionItemPattern (RadioButton / ComboBoxItem), use the `click` tool instead.";
-    // A text box filling the field: another settable element with the very
-    // same area (a container shown as a text field, and the text box in it).
-    let filled = false;
-    class RefusingFixture extends WindowsFixture {
-      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
-        const response = await super.callTool(name, argumentsJson);
-        if (name === "set_value")
-          return { text: refusal, images: [], isError: true, degraded: false, rawJson: "{}" };
-        if (name === "get_window_state") {
-          const state = JSON.parse(response.structuredJson!);
-          if (state.elements) {
-            state.elements[1].frame = { x: 60, y: 70, w: 120, h: 40 };
-            if (filled)
-              state.elements.push({
-                element_index: 4,
-                element_token: `s${this.snapshot}:4`,
-                parent_index: 1,
-                role: "Edit",
-                label: "Inside",
-                actions: ["set_value"],
-                frame: { x: 60, y: 70, w: 120, h: 40 },
-              });
-          }
-          response.structuredJson = JSON.stringify(state);
-        }
-        return response;
+  test("Windows CUA's value-pattern refusal is a definite refusal that says to click and type", async () => {
+    const fixture = new WindowsFixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, args) => {
+      const response = await original(name, args);
+      if (name === "set_value")
+        return {
+          text: "set_value: element [1] does not implement ValuePattern or RangeValuePattern.",
+          images: [],
+          isError: true,
+          degraded: false,
+          rawJson: "{}",
+        };
+      if (name === "get_window_state") {
+        const state = JSON.parse(response.structuredJson!);
+        if (state.elements) state.elements[1].label = "Text Editor";
+        response.structuredJson = JSON.stringify(state);
       }
-    }
-    const fixture = new RefusingFixture();
-    const writes: unknown[] = [];
-    let outcome: TextFieldWrite["kind"] = "replaced";
-    let unconfirmed = 0;
-    const backend = await CuaComputerBackend.open(fixture, "windows", {
-      frontWindow: {
-        front: async (windowId) => {
-          fixture.calls.push({ name: "(front)", args: { windowId } });
-          return { front: true, previous: 7 };
-        },
-        giveBack: async () => undefined,
-      },
-      textFields: {
-        replace: async (window, bounds, value) => {
-          writes.push({ window, bounds, value });
-          return { kind: outcome };
-        },
-      },
-    });
-    const setValue = async (value: string) => {
-      const observation = await backend.observe((await backend.targets())[0]!.id);
-      const field = observation.roots.find((node) => node.name === "Value")!;
-      return await backend.dispatch(
-        {
-          ...command(observation),
-          action: {
-            type: "semantic",
-            locator: { kind: "ref", ref: field.ref },
-            action: "set_value",
-            value,
-          },
-        },
-        undefined,
-        () => (unconfirmed += 1),
-      );
+      return response;
     };
+    const backend = await CuaComputerBackend.open(fixture, "windows", { frontWindow: null });
     try {
-      await setValue("Hello from Opengeni");
-      expect(writes).toEqual([
-        {
-          window: 1,
-          bounds: { x: 60, y: 70, width: 120, height: 40 },
-          value: "Hello from Opengeni",
-        },
-      ]);
-      expect(fixture.calls.some((call) => call.name === "(front)")).toBe(false);
-      expect(unconfirmed).toBe(0);
-      // With another settable element in the very same area, the control
-      // there may be that element's: nothing is written, definitely.
-      filled = true;
-      writes.length = 0;
-      await expect(setValue("Hello")).rejects.toMatchObject({
+      const observation = await backend.observe((await backend.targets())[0]!.id);
+      const field = observation.roots.find((node) => node.name === "Text Editor")!;
+      let unconfirmed = 0;
+      await expect(
+        backend.dispatch(
+          {
+            ...command(observation),
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: field.ref },
+              action: "set_value",
+              value: "pannekake",
+            },
+          },
+          undefined,
+          () => {
+            unconfirmed += 1;
+          },
+        ),
+      ).rejects.toMatchObject({
         code: "unsupported",
         dispatched: false,
         message:
           "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
       });
-      expect(writes).toEqual([]);
-      filled = false;
-      // A password field took a value it holds as the value, but its text
-      // cannot be read back: the input is reported as unconfirmed.
-      outcome = "replaced_unread";
-      await setValue("foobar");
-      expect(unconfirmed).toBe(1);
-      for (const [kind, expected] of [
-        [
-          "read_only",
-          {
-            code: "invalid_action",
-            dispatched: false,
-            message: "This text field is read-only, so its value was not changed",
-          },
-        ],
-        [
-          "no_control",
-          {
-            code: "unsupported",
-            dispatched: false,
-            message:
-              "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
-          },
-        ],
-        [
-          "not_applied",
-          {
-            code: "driver_failed",
-            dispatched: true,
-            message:
-              "The text was sent to the field, but the field does not hold the value afterwards (it may ignore, limit or change what is typed); observe it before setting it again",
-          },
-        ],
-        ["no_answer", { code: "outcome_unknown", dispatched: true }],
-      ] as const) {
-        outcome = kind;
-        await expect(setValue("Hello")).rejects.toMatchObject(expected);
-      }
+      expect(unconfirmed).toBe(0);
+      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+      expect(fixture.calls.some((call) => call.name === "bring_to_front")).toBe(false);
     } finally {
       await backend.close();
     }
+  });
+
+  test("Windows CUA's text-only value-pattern refusal is definitely not dispatched", async () => {
+    // Windows CUA refuses set_value on Notepad's document with this text only:
+    // it disables the window for the write, and the field then refuses it.
+    const refusal =
+      "set_value: element [1] does not implement ValuePattern or RangeValuePattern. For controls with TogglePattern (CheckBox) or SelectionItemPattern (RadioButton / ComboBoxItem), use the `click` tool instead.";
     // The refusal on its own is definite: CUA wrote nothing.
     await expect(
       callDesktop(

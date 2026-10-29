@@ -58,7 +58,6 @@ import {
 } from "./projection";
 import type { MacConsoleState, MacWindowPresence, MacWindows } from "./macos-windows";
 import type { WindowFronting } from "./windows-foreground";
-import type { WindowsTextFields } from "./windows-text";
 
 type Target = {
   native: ComputerBackendTarget;
@@ -108,10 +107,6 @@ type Operation = {
   /** The checked state a checkbox or switch this step presses must read
    * once the step has run. */
   expectToggle?: { ref: string; wanted: boolean };
-  /** Windows: where the element of this set_value step is on screen, so its
-   * text can be set through its own control when CUA cannot set its value
-   * (see windows-text.ts). */
-  textField?: { x: number; y: number; width: number; height: number };
   /** run_steps options of a step that names its element instead of carrying
    * a token: how long CUA waits for it, the check that holds first, and for
    * a checkbox or switch the checked state it is pressed into when it reads
@@ -221,7 +216,6 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly launchWindowWaitMs: number,
     private readonly macWindows: MacWindows | null,
     private readonly frontWindow: WindowFronting | null,
-    private readonly textFields: WindowsTextFields | null,
     private readonly personInput: PersonInputReader | null,
     private readonly agentInput: AgentInput,
   ) {
@@ -261,9 +255,6 @@ export class CuaComputerBackend implements ComputerBackend {
       /** Windows: bring a window to the foreground before CUA sends it
        * pointer or keyboard input (see windows-foreground.ts). */
       frontWindow?: WindowFronting | null;
-      /** Windows: set a text field's text through its own control when CUA
-       * cannot set its value (see windows-text.ts). */
-      textFields?: WindowsTextFields | null;
       /** macOS: how long ago a person used the keyboard, mouse or trackpad
        * (see macos-person-input.ts). Listings and observations say so when
        * it was within the last minute. */
@@ -285,7 +276,6 @@ export class CuaComputerBackend implements ComputerBackend {
           (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
         platform === "macos" ? (options.macWindows ?? null) : null,
         platform === "windows" ? (options.frontWindow ?? null) : null,
-        platform === "windows" ? (options.textFields ?? null) : null,
         platform === "macos" ? (options.personInput ?? null) : null,
         options.agentInput ?? processAgentInput,
       );
@@ -519,12 +509,16 @@ export class CuaComputerBackend implements ComputerBackend {
                 true,
               );
             if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
-              // A password field's text cannot be read back, so nothing
-              // confirms it holds the value, only that it took a value of
-              // its length the way the field changes what is typed.
-              if ((await this.writeTextField(acted, operation)) === "unread")
-                unconfirmedInput = true;
-              continue;
+              // CUA resolved the token and refused before writing. It does
+              // not expose that element's native control identity. Matching
+              // a descendant by its rectangle is not a safe fallback: an
+              // omitted child or sibling can occupy the same rectangle.
+              throw new ComputerBackendError(
+                "unsupported",
+                "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+                false,
+                false,
+              );
             }
             // CUA's own wording names its raw tools; say what the caller does.
             if (
@@ -2372,16 +2366,6 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            // Only the element's own control may be written, and the control
-            // is found by the element's area: when another settable element
-            // here has the very same area (a text box filling a container
-            // that is itself shown as a text field), the control in that
-            // area may be that other element's, so none is written.
-            ...(this.identity.platform === "windows" &&
-            node.bounds &&
-            !sharesArea(observed.roots, node)
-              ? { textField: node.bounds }
-              : {}),
             // A slider is only checked when the window reads its value as a
             // number: many native sliders expose a range but no readable
             // value, and some read it as text such as "50 %".
@@ -2694,64 +2678,6 @@ export class CuaComputerBackend implements ComputerBackend {
     const frontWindow = this.frontWindow;
     if (!fronted.previous || steps.some(clicks)) return none;
     return { giveBack: async () => await frontWindow.giveBack(windowId, fronted.previous) };
-  }
-
-  /** Windows: after CUA refused set_value, sets the text of the text field
-   * the element is through the field's own control, as typing would and
-   * without bringing its window forward (see windows-text.ts). Returns once
-   * the field reads the value ("read"), or for a password field, whose text
-   * cannot be read, once it took a value it would hold as the value
-   * ("unread"); otherwise throws what the write came to. */
-  private async writeTextField(acted: Target, operation: Operation): Promise<"read" | "unread"> {
-    const value = operation.args.value;
-    const written =
-      this.textFields && operation.textField && typeof value === "string"
-        ? await this.textFields
-            .replace(acted.windowId, operation.textField, value)
-            .catch(() => ({ kind: "no_answer" as const }))
-        : ({ kind: "no_control" } as const);
-    const refused = (code: ComputerBackendErrorCode, message: string) =>
-      new ComputerBackendError(code, message, false, false);
-    switch (written.kind) {
-      case "replaced":
-        return "read";
-      case "replaced_unread":
-        return "unread";
-      case "no_control":
-        throw refused(
-          "unsupported",
-          "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
-        );
-      case "read_only":
-        throw refused(
-          "invalid_action",
-          "This text field is read-only, so its value was not changed",
-        );
-      case "disabled":
-        throw refused(
-          "invalid_action",
-          "This text field is disabled, so its value was not changed",
-        );
-      case "single_line":
-        throw refused(
-          "invalid_action",
-          "This text field holds a single line, so a value with a line break was not set: give the value without line breaks",
-        );
-      case "not_applied":
-        throw new ComputerBackendError(
-          "driver_failed",
-          "The text was sent to the field, but the field does not hold the value afterwards (it may ignore, limit or change what is typed); observe it before setting it again",
-          false,
-          true,
-        );
-      case "no_answer":
-        throw new ComputerBackendError(
-          "outcome_unknown",
-          "The app did not answer while this field's text was being replaced, so whether its value was set is unknown; observe the window before acting again",
-          false,
-          true,
-        );
-    }
   }
 }
 
@@ -3342,26 +3268,6 @@ function inputFailures(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
-}
-
-/** Whether another settable element of the window has exactly `node`'s
- * bounds. */
-function sharesArea(
-  nodes: readonly InteractionSemanticNodeValue[],
-  node: InteractionSemanticNodeValue,
-): boolean {
-  const area = node.bounds;
-  return nodes.some(
-    (other) =>
-      other.ref !== node.ref &&
-      other.actions.includes("set_value") &&
-      other.bounds !== undefined &&
-      area !== undefined &&
-      other.bounds.x === area.x &&
-      other.bounds.y === area.y &&
-      other.bounds.width === area.width &&
-      other.bounds.height === area.height,
-  );
 }
 
 /** What a person must do before this login session's windows can be read or
