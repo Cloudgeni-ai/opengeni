@@ -388,10 +388,7 @@ describe("latest started session policy", () => {
       );
     const read = () =>
       withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, async (db) =>
-        withEffectiveComposerDraftPolicy(
-          db,
-          await getComposerDraftInTransaction(db, scope),
-        ),
+        withEffectiveComposerDraftPolicy(db, await getComposerDraftInTransaction(db, scope)),
       );
     const storedModel = async () =>
       (await shared.admin`select model from sessions where id = ${value.session.id}`)[0]?.model;
