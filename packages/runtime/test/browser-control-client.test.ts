@@ -38,6 +38,51 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  for (const modern of [false, true]) {
+    test(`opts into passkey backup flags with legacy-compatible responses (${modern})`, async () => {
+      const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const url = new URL(request.url);
+          expect(url.pathname).toBe(
+            `/v1/browser-sessions/${reference.browserSessionId}/passkeys/sync`,
+          );
+          expect(url.searchParams.get("backupFlags")).toBe("1");
+          expect(await request.json()).toEqual({
+            protocolVersion: 1,
+            ...reference,
+            credentials: null,
+            acknowledgeEventIds: [],
+          });
+          return success({
+            ...reference,
+            authenticators: 0,
+            events: [],
+            ...(modern ? { supportsBackupFlags: true } : {}),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const response = await client
+          .sessionClient({ reference, controlToken, viewToken })
+          .passkeySync({
+            protocolVersion: 1,
+            ...reference,
+            credentials: null,
+            acknowledgeEventIds: [],
+          });
+        expect(response.supportsBackupFlags).toBe(modern ? true : undefined);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
   test.each([
     "exact",
     "session",
@@ -571,6 +616,73 @@ describe("BrowserControlClient", () => {
           `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=2`,
         ),
       );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("asks the controller for a tab's notices only when the caller is the one to be told", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const requests: string[] = [];
+    const observation = browserObservation(
+      browserTarget(reference.browserSessionId, reference.controllerGeneration),
+    );
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${request.method} ${url.pathname}${url.search}`);
+        if (url.pathname.endsWith("/actions")) {
+          const body = (await request.json()) as { operationId: string };
+          return success({
+            protocolVersion: 1,
+            operationId: body.operationId,
+            ...reference,
+            targetId: "target-1",
+            state: "completed",
+            dispatchedAt: "2026-08-10T12:00:00.000Z",
+            settledAt: "2026-08-10T12:00:01.000Z",
+            observation: null,
+            error: null,
+          });
+        }
+        return success(observation);
+      },
+    });
+    const browser = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+      },
+      { adminToken },
+    ).sessionClient({ reference, controlToken, viewToken });
+    const command = () => ({
+      protocolVersion: 1 as const,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system" as const, subjectId: "test" },
+      observationMode: "none" as const,
+      action: { type: "press" as const, key: "Enter" },
+    });
+    try {
+      await browser.observe("target-1");
+      await browser.observe("target-1", { notices: true });
+      await browser.selectTarget("target-1");
+      await browser.selectTarget("target-1", { notices: true });
+      await browser.action(command());
+      await browser.action(command(), { notices: true });
+      const base = `/v1/browser-sessions/${reference.browserSessionId}`;
+      expect(requests).toEqual([
+        `GET ${base}/targets/target-1/observation`,
+        `GET ${base}/targets/target-1/observation?notices=1`,
+        `POST ${base}/targets/target-1/select`,
+        `POST ${base}/targets/target-1/select?notices=1`,
+        `POST ${base}/actions?receiptTargets=1&receiptNotes=2`,
+        `POST ${base}/actions?receiptTargets=1&receiptNotes=2&notices=1`,
+      ]);
     } finally {
       server.stop(true);
     }
@@ -2717,8 +2829,36 @@ test("keeps a create's tab inventory only when it validates for the same binding
     for (const value of [undefined, [{ id: "x" }], [target, foreign], "not-a-list"]) {
       targets = value;
       const created = await client.createSession(input);
-      expect(created.observation.target.id).toBe(target.id);
+      expect(created.observation?.target.id).toBe(target.id);
       expect(created).not.toHaveProperty("targets");
+    }
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("accepts a continued session that has no tab, and still rejects a malformed observation", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-resume" };
+  let observation: unknown = null;
+  const searches: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      searches.push(new URL(request.url).searchParams.get("acceptsNoObservation") ?? "absent");
+      return success({ ...reference, observation });
+    },
+  });
+  const placement = await localPlacement();
+  const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+  const input = { ...reference, tokenGeneration: 1, controlToken, viewToken, headed: true };
+  try {
+    expect((await client.createSession(input)).observation).toBeNull();
+    // It tells the controller it can take that, so a controller can tell it
+    // apart from a caller that predates such sessions.
+    expect(searches).toEqual(["1"]);
+    for (const value of [undefined, { target: { id: "x" } }]) {
+      observation = value;
+      await expect(client.createSession(input)).rejects.toThrow();
     }
   } finally {
     await server.stop(true);

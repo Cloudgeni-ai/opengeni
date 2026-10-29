@@ -1753,6 +1753,54 @@ export type UpdateSessionVisibilityResponse = {
   revokedGrantCount: number;
 };
 
+/** One message a share link shows: the person's or the reply, as text. */
+export type SharedSessionMessage = {
+  role: "user" | "assistant";
+  text: string;
+  /**
+   * The name the chat shows for the person who sent a message, never an
+   * email address or id. Absent for replies, and when the chat has no such
+   * name for them.
+   */
+  sender?: string;
+};
+
+/** A chat's live read-only share link, as its owner sees it. */
+export type SessionShareLink = {
+  shareId: string;
+  /** The page anyone with the link opens. */
+  url: string;
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  /** Messages the link shows. */
+  messageCount: number;
+  createdAt: string;
+  /** When the snapshot behind the link was last taken. */
+  updatedAt: string;
+};
+
+/** Whether the person can share a chat here, and their live link. */
+export type SessionShareLinkState = {
+  /** False when this deployment has turned share links off. */
+  enabled: boolean;
+  link: SessionShareLink | null;
+};
+
+export type SessionShareLinkList = {
+  links: SessionShareLink[];
+};
+
+/** What anyone holding a share link reads, without signing in. */
+export type SharedSession = {
+  title: string;
+  /** When the snapshot was taken. */
+  sharedAt: string;
+  messages: SharedSessionMessage[];
+  /** Earlier messages left out to keep the snapshot within its size. */
+  omittedMessageCount: number;
+};
+
 export type ForkSessionRequest = {
   idempotencyKey: string;
   visibility: SessionVisibility;
@@ -3929,11 +3977,12 @@ export type CreateSessionRequest = {
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   /**
-   * First-party tools `modelContext` is for, such as the tool that reaches the
-   * open document it names. The first turn loads them before its first model
-   * request, as a tool search by name would, so it can use them without
-   * searching; the session's tools are unchanged. Decided once at creation;
-   * names outside the session's tool selection are ignored.
+   * Tools `modelContext` is for, such as the tool that reaches the open
+   * document it names, or the tools an application's MCP server publishes for
+   * the record it names (by their published names). The first turn loads them
+   * before its first model request, as a tool search by name would, so it can
+   * use them without searching; the session's tools are unchanged. Decided
+   * once at creation; names outside the session's tool selection are ignored.
    */
   modelContextTools?: string[] | undefined;
   /**

@@ -1485,7 +1485,8 @@ export const englishMessages = {
   "connectSetup.nothingIsConnectedUntilThen":
     "Nothing is connected until then. You can close this and keep working.",
   "connectSetup.onlyYourWorkCanUse": "Only your work can use this connection.",
-  "connectSetup.openProviderVerificationPageNew": "Open provider verification page (new tab)",
+  "connectSetup.openProviderVerificationPageNew": "Open the sign-in page",
+  "connectSetup.opensInNewTab": "(opens in a new tab)",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
@@ -1501,8 +1502,8 @@ export const englishMessages = {
   "connectSetup.verificationCode": "Verification code:",
   "connectSetup.verifyingConnection": "Verifying connection…",
   "connectSetup.waitingForAnOrganizationOwner": "Waiting for an organization owner",
-  "connectSetup.waitingForAuthorization": "Waiting for authorization…",
-  "connectSetup.waitingForAuthorization2": "Waiting for authorization",
+  "connectSetup.waitingForAuthorization": "Waiting for you to sign in…",
+  "connectSetup.waitingForAuthorization2": "Waiting for you to sign in",
   "connectSetup.workInThisWorkspaceCan": "Work in this workspace can use this connection.",
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
@@ -4567,6 +4568,7 @@ export const englishMessages = {
     "The agent continues once the person who asked connects their own account.",
   "sessionIntegrationCapabilityCard.notSetUp":
     "{name} isn't set up on this deployment yet. Ask its administrator to enable it.",
+  "sessionIntegrationCapabilityCard.openSignInAgain": "Open sign-in window",
   "sessionIntegrationCapabilityCard.personalUnavailable":
     "{name} can only be connected to your own account, and this app can't do that here. Ask its administrator for help.",
   "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
@@ -4574,6 +4576,8 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.retry": "Retry",
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
   "sessionIntegrationCapabilityCard.signInFailed": "Sign-in couldn't continue. Try again.",
+  "sessionIntegrationCapabilityCard.signInWindowGone":
+    "Finish signing in to {name}. If you closed the sign-in window, open it again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",

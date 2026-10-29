@@ -410,14 +410,15 @@ impl Backoff {
 }
 
 /// When the host frees memory held by idle sandboxes and, once they have
-/// none left to give, by sandboxes in use above their request.
+/// none left to give, by sandboxes in use above their request. A sandbox in
+/// use is never paused for memory (ADR 24).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryPolicy {
     /// Below this many available bytes, idle sandboxes are pushed deeper,
     /// least recently used first; when that is not enough, sandboxes in
     /// use above their request are asked to give memory back through
-    /// their balloons, and then the one furthest above its request is
-    /// paused and saved until there is room again.
+    /// their balloons. What they borrowed beyond that the kernel
+    /// compresses, and [`MemoryPolicy::outgrowth`] bounds.
     pub low_watermark: u64,
     /// Pushing continues until the expected available memory reaches this.
     pub high_watermark: u64,
@@ -426,6 +427,49 @@ pub struct MemoryPolicy {
     /// How long a guest asked to give memory back through its balloon is
     /// expected to take, counted as on its way meanwhile.
     pub balloon_grace: Duration,
+    /// How running sandboxes that borrow memory above their request are
+    /// held back when the host is short, shrunk from inside, and ended as
+    /// a last resort (ADR 24); `None` does none of it, as on a host whose
+    /// guests take their memory from a huge-page pool.
+    pub outgrowth: Option<Outgrowth>,
+}
+
+/// How running sandboxes that borrow memory are held back, shrunk and, as a
+/// last resort, ended (ADR 24). Each running VM's `memory.low` is its
+/// request plus what the kernel compressed of it, and while the host is
+/// short its `memory.high` lets it keep its request and a level of
+/// borrowed memory, the same for every sandbox at that level, idle ones
+/// held back before those in use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Outgrowth {
+    /// How long the host stays short with every sandbox held to its
+    /// request, or the kernel unable to hold a sandbox to its bound,
+    /// before a shrink.
+    pub hold: Duration,
+    /// How long a guest has to answer a shrink before it counts as unable;
+    /// the guest answers with what it managed well within it.
+    pub answer: Duration,
+    /// How long after a shrink or an end the next may come: what a guest
+    /// frees reaches the host over a few seconds.
+    pub settle: Duration,
+    /// Fewest bytes a shrink asks for, and the least a sandbox must be
+    /// above its request for its VM to be ended.
+    pub least: u64,
+    /// Smallest change of a VM's `memory.low` or `memory.high` worth
+    /// writing.
+    pub step: u64,
+}
+
+impl Default for Outgrowth {
+    fn default() -> Self {
+        Self {
+            hold: Duration::from_secs(10),
+            answer: Duration::from_secs(15),
+            settle: Duration::from_secs(10),
+            least: 256 << 20,
+            step: 64 << 20,
+        }
+    }
 }
 
 /// Host-wide policy.

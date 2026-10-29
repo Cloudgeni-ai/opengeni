@@ -335,7 +335,6 @@ export function ScheduleFormPage({
 function scheduledLearningScope(
   form: ScheduleDraft,
   sessions: Session[],
-  personal: boolean,
 ): "personal" | "workspace" {
   if (
     form.agentLearningBaselineScope &&
@@ -347,7 +346,6 @@ function scheduledLearningScope(
       ? sessions.find((session) => session.id === form.targetSessionId)
       : null;
   return form.knowledgeSource?.destination.kind === "personal" ||
-    personal ||
     target?.tenancy?.visibility === "private" ||
     target?.memoryScope === "user"
     ? "personal"
@@ -849,7 +847,7 @@ function AgentScheduleForm({
   };
 
   /* ----- agent learning (edit loads the stored overrides) */
-  const learningScope = scheduledLearningScope(draft, sessions, personal);
+  const learningScope = scheduledLearningScope(draft, sessions);
   const baselineDestinationKey = scheduledLearningDestinationKey(initial);
   const taskId = editing && task ? task.id : undefined;
   const [learningLoading, setLearningLoading] = useState(Boolean(taskId));
@@ -1127,7 +1125,7 @@ function AgentScheduleForm({
               now: submitNow,
               agentLearning: learningChanged
                 ? {
-                    scope: scheduledLearningScope(submitted, sessions, personal),
+                    scope: scheduledLearningScope(submitted, sessions),
                     baselineScope: submitted.agentLearningBaselineScope,
                     operationId: crypto.randomUUID(),
                     expectedVersion: submitted.agentLearningVersion!,
@@ -1157,7 +1155,7 @@ function AgentScheduleForm({
         workspaceId,
         createRequestFromDraft(submitted, {
           now: submitNow,
-          learningScope: scheduledLearningScope(submitted, sessions, personal),
+          learningScope: scheduledLearningScope(submitted, sessions),
         }),
       ),
     );

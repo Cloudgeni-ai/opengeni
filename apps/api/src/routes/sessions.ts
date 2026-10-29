@@ -5836,6 +5836,13 @@ export function sessionAuthorizationOperationForHttp(
   // Owner-only preview of the same change: identical authority to making it.
   if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
+  // A read-only link anyone holding it can open: reading the state is a read,
+  // creating, refreshing or stopping it is its own operation.
+  if (suffix === "/share-link") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT" || verb === "DELETE") return "session.share_link.write";
+    return null;
+  }
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.

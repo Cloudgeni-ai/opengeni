@@ -1,6 +1,9 @@
 import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
-import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
+import {
+  MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+} from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
   recordManagedAuthLoggedFailure,
@@ -109,6 +112,37 @@ export class ManagedAuthNewSignupsPausedError extends APIError {
   constructor() {
     super("FORBIDDEN", { code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, message: "signup disabled" });
   }
+}
+
+/**
+ * Thrown from the user-create hook when a deployment that restricts accounts to
+ * `allowedUserEmails` is asked to create an account for an address that isn't on
+ * the list. Better Auth returns it as `403 { code: "SIGNUP_EMAIL_NOT_ALLOWED" }` on
+ * email and passkey sign-up, and its OAuth callback turns the message into
+ * `error=signup_email_not_allowed`, so the sign-in page can say to ask whoever
+ * runs the service to allow the address instead of offering a retry that can
+ * never succeed. Allowed and refused addresses already got different
+ * responses, so this reveals nothing new.
+ */
+export class ManagedAuthSignupEmailNotAllowedError extends APIError {
+  constructor() {
+    super("FORBIDDEN", {
+      code: MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+      message: "signup email not allowed",
+    });
+  }
+}
+
+/** True when the user-create hook refuses only because the address isn't on the allowed list. */
+export function managedAuthSignupEmailNotAllowed(
+  settings: Pick<Settings, "allowedUserEmails"> &
+    Partial<Pick<Settings, "managedAuthNewSignupsEnabled">>,
+  email: unknown,
+): boolean {
+  return (
+    settings.managedAuthNewSignupsEnabled !== false &&
+    !managedUserEmailAllowed(settings.allowedUserEmails, email)
+  );
 }
 
 export function managedAuthUserCreateAdmission(
@@ -740,7 +774,12 @@ export function createManagedAuth(
               user,
               currentManagedAuthProviderId(),
             );
-            if (admission === false) return false;
+            if (admission === false) {
+              if (managedAuthSignupEmailNotAllowed(settings, user.email)) {
+                throw new ManagedAuthSignupEmailNotAllowedError();
+              }
+              return false;
+            }
             if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
             return admission;
           },

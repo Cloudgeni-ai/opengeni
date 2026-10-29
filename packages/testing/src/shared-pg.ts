@@ -1244,8 +1244,6 @@ export async function grantDeferredRuntimeAccess(
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.summarize_queued_turns_by_hold()
       TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
-      TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.redact_session_secret_cells_v1(uuid, text, jsonb)

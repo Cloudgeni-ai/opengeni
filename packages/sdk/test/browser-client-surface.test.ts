@@ -178,6 +178,11 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Chat share links: the public share page reads a link without the SDK (no
+// credentials, no SDK bundle for someone without an account), and listing a
+// person's links is offered to the agent and SDK callers, not a web screen yet.
+const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
+
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
 // public SDK methods stay for existing callers.
@@ -254,6 +259,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );

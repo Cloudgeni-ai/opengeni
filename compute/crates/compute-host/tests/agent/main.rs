@@ -13,7 +13,7 @@ use std::time::Duration;
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
-    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
+    MemorySource, MemoryStats, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -35,6 +35,7 @@ mod disk_reading;
 mod fleet;
 mod images;
 mod link;
+mod memory;
 mod observe;
 mod pool;
 mod ready;
@@ -210,6 +211,24 @@ struct World {
     /// While set, no guest takes a connection, as when the guard froze
     /// every VM on the host.
     frozen: AtomicBool,
+    /// What each VM holds of host memory as the fake reports it; 100 MiB
+    /// unless set.
+    resident: Mutex<Option<u64>>,
+    /// How each running VM pages as the fake reports it; nothing read
+    /// unless set.
+    paging: Mutex<Option<MemoryStats>>,
+    /// Whether the kernel may compress running VMs.
+    compresses_running: AtomicBool,
+    /// Memory bounds asked of VMs: which VM, its low and its high.
+    bounds: Mutex<Vec<(String, u64, Option<u64>)>>,
+    /// VM processes the kernel's out-of-memory killer ended, as the engine
+    /// reports it; `None` for an engine that cannot tell.
+    oom_kills: Mutex<Option<u64>>,
+    /// What a guest answers a shrink with; `None` for a guest of a release
+    /// before shrinking, which answers it as any line it does not know.
+    shrink_answer: Mutex<Option<String>>,
+    /// Every shrink a guest was asked, as the line it read.
+    shrinks: Mutex<Vec<String>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -667,6 +686,15 @@ impl GuestState {
                 "ok".into()
             }
             ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
+            // As a guest asked to free memory for the host answers, or one
+            // older than that, which does not know the line.
+            ("shrink", _) => {
+                world.shrinks.lock().unwrap().push(line.to_owned());
+                match world.shrink_answer.lock().unwrap().clone() {
+                    Some(answer) => answer,
+                    None => "unknown shrink".into(),
+                }
+            }
             // Counted, and held while the world says, as it is asked.
             ("sync", _) => "synced".into(),
             (other, _) => format!("unknown {other}"),
@@ -1002,11 +1030,38 @@ impl Engine for Fake {
     }
 
     fn resident_bytes(&self, _: &FakeVm) -> Result<u64, EngineError> {
-        Ok(100 << 20)
+        Ok(self.world.resident.lock().unwrap().unwrap_or(100 << 20))
     }
 
     fn memory_room(&self) -> Result<Option<u64>, EngineError> {
         Ok(*self.world.memory_room.lock().unwrap())
+    }
+
+    fn memory_stats(&self, _: &FakeVm) -> Result<MemoryStats, EngineError> {
+        self.world.paging.lock().unwrap().ok_or_else(|| {
+            EngineError::new(
+                ErrorKind::Transient,
+                "memory_stats",
+                "no paging set for the fake",
+            )
+        })
+    }
+
+    fn compresses_running(&self) -> bool {
+        self.world.compresses_running.load(Ordering::SeqCst)
+    }
+
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.oom_kills.lock().unwrap())
+    }
+
+    fn bound_memory(&self, vm: &FakeVm, low: u64, high: Option<u64>) -> Result<(), EngineError> {
+        self.world
+            .bounds
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), low, high));
+        Ok(())
     }
 
     fn set_guarantees(
@@ -1132,6 +1187,9 @@ struct Lab {
     handle: Handle,
 }
 
+// A lab takes its host policy by value as tests build it, once per test:
+// copying it costs nothing worth the references at every call.
+#[allow(clippy::large_types_passed_by_value)]
 impl Lab {
     /// Unix socket paths are short, so labs live directly under /tmp. The
     /// root is removed when the test process exits.

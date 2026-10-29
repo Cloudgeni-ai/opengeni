@@ -95,7 +95,7 @@ await og.createScheduledTask(workspaceId, {
 
 Your backend sends `{ "type": "ticket.created", "timestamp": "…", "data": { … } }` with the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers; any Standard Webhooks library signs it. Each run gets the events that started it. Redelivered events (same `webhook-id`) are ignored, and the agent treats event data as untrusted input.
 
-An app with its own webhook format needs no code: describe the format on a `custom` source and paste the app's secret. `signature.scheme` is `standard_webhooks`, `hmac_sha256` (the body's HMAC in a header, hex or base64, after an optional prefix), `timestamped_hmac_sha256` (`t=<unix seconds>,v1=<hex>` over `"<t>.<body>"`), or `token` (a shared secret in a header). The other fields are dot paths into each event, or headers. Tailscale, for example:
+An app with its own webhook format needs no code: describe the format on a `custom` source and paste the app's secret. `signature.scheme` is `standard_webhooks`, `hmac_sha256` (the body's HMAC in a header, hex or base64, after an optional prefix), `timestamped_hmac_sha256` (`t=<unix seconds>,v1=<hex>` over `"<t>.<body>"`), or `token` (a shared secret in a header). The other fields are dot paths into each event, or headers. `eventId` can also join `parts` with a `separator`: an alert's `status`, `fingerprint` and `startsAt` name one firing episode, so an alert sent again runs automations once, and an event missing a part has no id. Tailscale, for example:
 
 ```ts
 const { source } = await og.createEventSource(workspaceId, {

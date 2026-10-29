@@ -165,6 +165,7 @@ A preset decides which features show and single keys switch them:
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
 | `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
+| `shareLinks`: Share in the chat header, a read-only link anyone holding it can open | on | on | off |
 | `addCredits`: the new-chat page's "Add credits" button for people who manage billing (card billing only); the credits notice still shows when a model's credits run out | on | off | on |
 
 Everything else (model and effort, capabilities, repositories, runs on,
@@ -181,8 +182,9 @@ the composer (its `detail` in the tooltip), and the person can leave it out of
 their messages; a new label brings it back. Pass a new value whenever the
 context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
-An item may also name the first-party `tools` it is for, such as the tool that
-reaches the open document it describes. A new chat that starts with that item
+An item may also name the `tools` it is for, such as the tool that reaches the
+open document it describes, or the tools your own MCP server publishes for the
+record the page shows (by the names it publishes). A new chat that starts with that item
 loads those tools before its first model request, as a tool search by name
 would, so the agent can call them in its first step without searching. The
 chat's instructions and tool list stay the same as any other chat's, and its
