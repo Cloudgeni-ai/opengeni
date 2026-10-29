@@ -84,14 +84,22 @@ export function OrganizationCreditBalance({
           (plan.creditScoped ? 0 : plan.creditRemainingMicros))
       : (balance.generalBalanceMicros ?? balance.balanceMicros);
     const scopedPlan = balance.promotionalCredits?.find((grant) => grant.planCredit);
+    // With a plan, plan credit and credits pay for different use, so they
+    // show as two balances without a blended total.
     return (
       <div className="min-w-0">
-        <p className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums">
-          {formatMoneyMicros(balance.balanceMicros, balance.currency)}
-        </p>
-        <p className="mt-1 text-xs leading-[18px] text-fg-muted">Total balance</p>
+        {plan ? null : (
+          <>
+            <p className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums">
+              {formatMoneyMicros(balance.balanceMicros, balance.currency)}
+            </p>
+            <p className="mt-1 text-xs leading-[18px] text-fg-muted">Total balance</p>
+          </>
+        )}
         {holdNotice}
-        <div className="mt-4 -mx-2 divide-y divide-border">
+        <div
+          className={plan ? "-mx-2 divide-y divide-border" : "mt-4 -mx-2 divide-y divide-border"}
+        >
           {plan && !scopedPlan ? (
             <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
               <div>

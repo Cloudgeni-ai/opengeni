@@ -194,7 +194,6 @@ function UpgradeButton({ workspaceId }: { workspaceId: string }) {
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
         search={{ section: "billing" }}
-        {...analyticsAction("buy_credits")}
       >
         Upgrade to Pro
       </Link>
