@@ -17,6 +17,7 @@ import {
   setOrganizationAgentAdminAccess,
   submitHumanPromptInTransaction,
   turnCanChangeWorkspaceSettings,
+  turnWorkspaceSettingsAccess,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
   type Database,
@@ -531,19 +532,26 @@ describe("app actions in a chat", () => {
           durationHours: null,
         });
       }
-      return await turnCanChangeWorkspaceSettings(db, {
+      const scope = {
         accountId: org.accountId,
         workspaceId,
         sessionId: turn.sessionId,
         turnId: turn.turnId,
-      });
+      };
+      lastAccess = await turnWorkspaceSettingsAccess(db, scope);
+      const can = await turnCanChangeWorkspaceSettings(db, scope);
+      expect(can).toBe(lastAccess !== null);
+      return can;
     };
+    // Typed by assertion so the closure's assignments aren't narrowed away to null.
+    let lastAccess = null as Awaited<ReturnType<typeof turnWorkspaceSettingsAccess>>;
     const admin = ["workspace:admin"] as const;
 
     // An admin signed in to the app, whose changes they confirm in the chat.
     expect(
       await canChange(org.owner, { subjectId: org.owner, changes: "confirm", permissions: admin }),
     ).toBe(true);
+    expect(lastAccess).toBe("confirm");
     // The same admin, but the message's recorded access leaves settings out.
     expect(
       await canChange(org.owner, {
@@ -577,6 +585,7 @@ describe("app actions in a chat", () => {
     expect(
       await canChange(org.owner, { subjectId: org.owner, ...none }, org.workspaceId, true),
     ).toBe(true);
+    expect(lastAccess).toBe("full_access");
     // A Personal workspace's owner holds no admin grant there, but its settings
     // are theirs: with full access, or a confirmed turn that recorded them.
     const [own] = await shared!.admin<{ id: string }[]>`
