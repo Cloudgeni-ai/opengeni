@@ -24,6 +24,7 @@ const save = form.querySelector<HTMLButtonElement>("button")!;
 const sitePermissions = document.querySelector<HTMLElement>("[data-site-permissions]")!;
 const siteEntries = sitePermissions.querySelector<HTMLElement>("[data-entries]")!;
 const siteEmpty = sitePermissions.querySelector<HTMLElement>("[data-empty]")!;
+const siteStale = sitePermissions.querySelector<HTMLElement>("[data-stale]")!;
 const manageSitePermissions = sitePermissions.querySelector<HTMLButtonElement>("[data-manage]")!;
 
 /** How often the open popup re-reads the connection state. */
@@ -51,6 +52,9 @@ async function refreshSitePermissions(): Promise<void> {
   const sites = await readSitePermissions();
   sitePermissions.hidden = !sites.allowed && sites.entries.length === 0;
   siteEmpty.hidden = sites.entries.length > 0;
+  // Removed outside this extension's own Turn off (on chrome://extensions):
+  // the changes stay, and only allowing it again lets them be removed.
+  siteStale.hidden = sites.allowed || sites.entries.length === 0;
   renderSitePermissions(siteEntries, sites.entries, {
     canRemove: sites.allowed,
     onRemove: async (entry) => {

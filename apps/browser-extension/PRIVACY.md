@@ -35,7 +35,8 @@ not read or change the other extension's data.
 
 If you allow it on the extension's own page, Opengeni agents can allow or block
 camera, microphone, location and notifications for the exact site (scheme, host
-and port) shown in a tab Opengeni operates. The extension keeps a list of these
+and port) shown in a tab the agent opened itself and no other agent is using,
+never in your own tabs. The extension keeps a list of these
 changes (site, permission, setting and time) in Chrome local extension storage
 and shows it in its popup, where you can remove each change. Chrome shows these
 settings as set by an extension in its site settings. Turning this off on the

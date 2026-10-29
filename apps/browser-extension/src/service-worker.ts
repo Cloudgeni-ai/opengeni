@@ -486,7 +486,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       return { downloads: await findDownloads(command.url, command.startedAfter) };
     case "permissions.set":
       try {
-        return await setSitePermission(command, controlledTabs);
+        return await setSitePermission(command, controlledTab);
       } catch (error) {
         if (error instanceof SitePermissionError) {
           throw new BridgeCommandError(error.code, error.message);
@@ -509,12 +509,12 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
 
 const MAX_FOUND_DOWNLOADS = 16;
 
-/** The tabs this extension is debugging for an agent now. */
-async function controlledTabs(): Promise<chrome.tabs.Tab[]> {
-  const found = await Promise.all(
-    [...attachedDebuggerTabs.keys()].map((tabId) => chrome.tabs.get(tabId).catch(() => null)),
-  );
-  return found.filter((tab): tab is chrome.tabs.Tab => tab !== null);
+/** The tab, while the agent's attachment to it lasts. */
+async function controlledTab(tabId: string, attachment: number): Promise<chrome.tabs.Tab | null> {
+  const id = numericTabId(tabId);
+  if (attachedDebuggerTabs.get(id) !== attachment) return null;
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  return attachedDebuggerTabs.get(id) === attachment ? tab : null;
 }
 
 /**
@@ -1060,7 +1060,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
     case "turn_off_site_permissions":
       return answer(turnOffSitePermissions());
     case "open_site_permissions":
-      return answer(openSitePermissionsPage().then(() => ({ opened: true })));
+      return answer(openSitePermissionsPage({ bringForward: true }).then(() => ({ opened: true })));
   }
   return false;
 });

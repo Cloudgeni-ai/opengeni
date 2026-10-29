@@ -37,16 +37,26 @@ export type SitePermissionsState = {
   /** The person allowed this extension to set site permissions. */
   allowed: boolean;
   entries: SitePermissionEntry[];
+  /** What an agent last asked for while the person had not allowed it. */
+  request?: SitePermissionRequest;
+};
+
+/** A permission an agent asked to set before the person allowed it. */
+export type SitePermissionRequest = {
+  origin: string;
+  permission: SitePermission;
+  setting: SitePermissionSetting;
 };
 
 export const SITE_PERMISSIONS_PAGE = "site-permissions.html";
 const CONTENT_SETTINGS: chrome.permissions.Permissions = { permissions: ["contentSettings"] };
 const STORAGE_KEY = "sitePermissions";
+const REQUEST_KEY = "sitePermissionRequest";
 const MAX_ENTRIES = 1_000;
 
 export class SitePermissionError extends Error {
   constructor(
-    readonly code: "consent_required" | "tab_changed" | "invalid_request",
+    readonly code: "consent_required" | "tab_changed" | "unsupported_site" | "limit_reached",
     message: string,
   ) {
     super(message);
@@ -64,7 +74,7 @@ export function sitePattern(origin: string): string {
   try {
     url = new URL(origin);
   } catch {
-    throw new SitePermissionError("invalid_request", "site permission origin is invalid");
+    throw unsupportedSite();
   }
   // Only plain host names and IP addresses: in a pattern `*` or `[*.]`
   // would widen it to other sites.
@@ -73,10 +83,17 @@ export function sitePattern(origin: string): string {
     url.origin !== origin ||
     !/^(?:[a-z0-9_-]+(?:\.[a-z0-9_-]+)*|\[[0-9a-f:.]+\])$/u.test(url.hostname)
   ) {
-    throw new SitePermissionError("invalid_request", "site permission origin is invalid");
+    throw unsupportedSite();
   }
   const port = url.port || (url.protocol === "https:" ? "443" : "80");
   return `${url.protocol}//${url.hostname}:${port}/*`;
+}
+
+function unsupportedSite(): SitePermissionError {
+  return new SitePermissionError(
+    "unsupported_site",
+    "only http and https sites with a plain host name or IP address can be given a permission",
+  );
 }
 
 function contentSetting(permission: SitePermission): chrome.contentSettings.ContentSetting<string> {
@@ -125,39 +142,56 @@ async function reapply(permission: SitePermission, entries: SitePermissionEntry[
 }
 
 export function sitePermissionsState(): Promise<SitePermissionsState> {
-  return serialized(async () => ({ allowed: await allowed(), entries: await storedEntries() }));
+  return serialized(async () => {
+    const isAllowed = await allowed();
+    const stored = (await chrome.storage.local.get(REQUEST_KEY)) as Record<string, unknown>;
+    const request = stored[REQUEST_KEY] as SitePermissionRequest | null | undefined;
+    // Answered: a request from before the person allowed it is not shown
+    // again if the permission is later given back some other way.
+    if (isAllowed && request) await chrome.storage.local.set({ [REQUEST_KEY]: null });
+    return {
+      allowed: isAllowed,
+      entries: await storedEntries(),
+      ...(!isAllowed && request ? { request } : {}),
+    };
+  });
 }
 
 /**
- * Sets one permission for one site, for a tab this extension is controlling
- * that shows that site. `prompt` removes the agent's setting, so the site
- * follows the person's own choice again. Without the person's consent it
- * opens the page that asks for it and sets nothing.
+ * Sets one permission for one site, which the exact tab the agent acts in
+ * must show under the attachment the agent holds (`controlledTab` answers
+ * that tab only while that attachment lasts). `prompt` removes the agent's
+ * setting, so the site follows the person's own choice again. Without the
+ * person's consent it sets nothing and shows the page that asks for it, but
+ * brings that page forward only when it is not open already, so an agent
+ * trying again never takes the person's tab away.
  */
 export function setSitePermission(
-  request: { origin: string; permission: SitePermission; setting: SitePermissionSetting },
-  controlledTabs: () => Promise<chrome.tabs.Tab[]>,
+  request: SitePermissionRequest & { tabId: string; attachment: number },
+  controlledTab: (tabId: string, attachment: number) => Promise<chrome.tabs.Tab | null>,
 ): Promise<{ origin: string; setting: SitePermissionSetting }> {
   return serialized(async () => {
     const pattern = sitePattern(request.origin);
     if (!(await allowed())) {
-      await openSitePermissionsPage();
+      await chrome.storage.local.set({
+        [REQUEST_KEY]: {
+          origin: request.origin,
+          permission: request.permission,
+          setting: request.setting,
+        } satisfies SitePermissionRequest,
+      });
+      await openSitePermissionsPage({ bringForward: false });
       throw new SitePermissionError(
         "consent_required",
         "the person has not allowed site permissions in this Chrome profile",
       );
     }
-    const tabs = await controlledTabs();
-    const showing = tabs.some((tab) => {
-      if (tab.incognito || !tab.url) return false;
-      try {
-        return new URL(tab.url).origin === request.origin;
-      } catch {
-        return false;
-      }
-    });
-    if (!showing) {
-      throw new SitePermissionError("tab_changed", "no controlled tab shows this site now");
+    const tab = await controlledTab(request.tabId, request.attachment);
+    if (!tab || tab.incognito || !tab.url || tabOrigin(tab.url) !== request.origin) {
+      throw new SitePermissionError(
+        "tab_changed",
+        "the agent's tab no longer shows this site under its attachment",
+      );
     }
     const entries = await storedEntries();
     const others = entries.filter(
@@ -172,7 +206,10 @@ export function setSitePermission(
       return { origin: request.origin, setting: request.setting };
     }
     if (others.length >= MAX_ENTRIES) {
-      throw new SitePermissionError("invalid_request", "too many site permissions are set");
+      throw new SitePermissionError(
+        "limit_reached",
+        `agents already set ${MAX_ENTRIES} site permissions in this profile`,
+      );
     }
     await contentSetting(request.permission).set({
       primaryPattern: pattern,
@@ -190,6 +227,14 @@ export function setSitePermission(
     ]);
     return { origin: request.origin, setting: request.setting };
   });
+}
+
+function tabOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
 }
 
 /** The person removes one change, from the popup or the page. */
@@ -216,19 +261,23 @@ export function turnOffSitePermissions(): Promise<SitePermissionsState> {
   return serialized(async () => {
     if (await allowed()) {
       for (const permission of SITE_PERMISSIONS) await reapply(permission, []);
-      await storeEntries([]);
+      // An earlier agent's request is not a reason to allow it again.
+      await chrome.storage.local.set({ [STORAGE_KEY]: [], [REQUEST_KEY]: null });
       await chrome.permissions.remove(CONTENT_SETTINGS);
     }
     return { allowed: await allowed(), entries: await storedEntries() };
   });
 }
 
-/** Shows the page that asks the person, reusing one already open. */
-export async function openSitePermissionsPage(): Promise<void> {
+/** Shows the page that asks the person, reusing one already open. A page
+ * already open is brought forward only when the person asked for it (from
+ * the popup): an agent's request opens it once and leaves the person's
+ * current tab alone after that. */
+export async function openSitePermissionsPage(options: { bringForward: boolean }): Promise<void> {
   const url = chrome.runtime.getURL(SITE_PERMISSIONS_PAGE);
   const [open] = await chrome.tabs.query({ url });
   if (open?.id !== undefined) {
-    await chrome.tabs.update(open.id, { active: true });
+    if (options.bringForward) await chrome.tabs.update(open.id, { active: true });
     return;
   }
   try {

@@ -10,9 +10,12 @@ import {
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 
 const PAGE = "https://meet.example.test:8443/room/42?join=1";
+/** A tab the person had open before the session started. */
+const PERSON_PAGE = "https://mail.example.test/inbox";
+const DEVICE = { deviceId: "device-1", connectionGeneration: "generation-1" };
 
-/** A connected Chrome with one agent tab, whose extension sets site
- * permissions the way `answer` says. */
+/** A connected Chrome with the person's own tab (9) and the tab the agent
+ * opens (7), whose extension sets site permissions the way `answer` says. */
 class SitePermissionBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Readonly<Record<string, unknown>>> = [];
 
@@ -33,8 +36,17 @@ class SitePermissionBridge implements AttachedBrowserBridgeTransport {
       case "tabs.list":
       case "tabs.create": {
         const tab = { id: "7", title: "Call", active: false, controllable: true, url: PAGE };
-        return (payload.type === "tabs.list" ? { tabs: [tab] } : { tab }) as T;
+        const person = {
+          id: "9",
+          title: "Inbox",
+          active: true,
+          controllable: true,
+          url: PERSON_PAGE,
+        };
+        return (payload.type === "tabs.list" ? { tabs: [tab, person] } : { tab }) as T;
       }
+      case "debugger.attach":
+        return { attached: true, attachment: payload.tabId === "7" ? 5 : 6 } as T;
       case "debugger.poll":
         return { events: [], cursor: 0, truncated: false } as T;
       case "debugger.command":
@@ -54,8 +66,11 @@ class SitePermissionBridge implements AttachedBrowserBridgeTransport {
 
   private result(payload: Readonly<Record<string, unknown>>): unknown {
     switch (payload.method) {
-      case "Page.getFrameTree":
-        return { frameTree: { frame: { id: "frame-7", loaderId: "loader-7", url: PAGE } } };
+      case "Page.getFrameTree": {
+        const tab = String(payload.tabId);
+        const url = tab === "7" ? PAGE : PERSON_PAGE;
+        return { frameTree: { frame: { id: `frame-${tab}`, loaderId: `loader-${tab}`, url } } };
+      }
       case "Page.getLayoutMetrics":
         return {
           cssLayoutViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 },
@@ -90,13 +105,14 @@ async function start(bridge: SitePermissionBridge) {
   const connection = new AttachedChromeCdpConnection(bridge, {
     browserName: "Chrome",
     browserVersion: "151.0.0.0",
+    attachments: DEVICE,
   });
   const driver = createAttachedChromeDriver(
     { browserSessionId: randomUUID(), controllerGeneration: `fixture-${randomUUID()}` },
     { connection, runner: new AttachedChromeRunner(bridge, connection) },
   );
   const observation = await driver.start();
-  return { driver, observation };
+  return { driver, observation, bridge, connection };
 }
 
 function permission(
@@ -129,8 +145,11 @@ test("the person's own Chrome sets a site permission for the exact site of the a
       ["notifications", "notifications"],
     ] as const) {
       await driver.dispatch(permission(observation, { permission: name, setting: "granted" }));
+      // The exact tab, under this session's attachment to it.
       expect(bridge.sitePermissionCommands().at(-1)).toEqual({
         type: "permissions.set",
+        tabId: "7",
+        attachment: 5,
         origin: "https://meet.example.test:8443",
         permission: sent,
         setting: "granted",
@@ -230,5 +249,90 @@ test("a tab that left the site before the extension set the permission is stale"
     });
   } finally {
     await driver.close();
+  }
+});
+
+const NOT_OPENED_TAB =
+  "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.";
+
+test("the person's own tab is refused even after the session observed it, and the extension is never asked", async () => {
+  const bridge = new SitePermissionBridge(true);
+  const { driver } = await start(bridge);
+  try {
+    const personTab = await driver.selectTarget("9");
+    expect(personTab.target.id).toBe("9");
+    for (const setting of ["granted", "denied", "prompt"]) {
+      await expect(
+        driver.dispatch(permission(personTab, { permission: "notifications", setting })),
+      ).rejects.toMatchObject({ code: "permission_denied", message: NOT_OPENED_TAB });
+    }
+    expect(bridge.sitePermissionCommands()).toEqual([]);
+  } finally {
+    await driver.close();
+  }
+});
+
+test("a tab the session opened is refused while another session is using it", async () => {
+  const bridge = new SitePermissionBridge(true);
+  const { driver, observation } = await start(bridge);
+  // Another session in this browser holds Chrome's debugger on the same tab.
+  const other = new AttachedChromeCdpConnection(bridge, {
+    browserName: "Chrome",
+    browserVersion: "151.0.0.0",
+    attachments: { ...DEVICE, inherited: ["7"] },
+  });
+  try {
+    await expect(
+      driver.dispatch(permission(observation, { permission: "camera", setting: "denied" })),
+    ).rejects.toMatchObject({ code: "permission_denied", message: NOT_OPENED_TAB });
+    expect(bridge.sitePermissionCommands()).toEqual([]);
+  } finally {
+    await other.close();
+    await driver.close();
+  }
+});
+
+test("the extension's other refusals tell the agent what happened and what to do", async () => {
+  for (const [refusal, expected] of [
+    [
+      new AttachedBrowserBridgeError("driver_rejected", "only http and https sites", false, {
+        extensionCode: "unsupported_site",
+      }),
+      {
+        code: "unsupported",
+        message:
+          "In the person's own Chrome, permissions can be set only for http and https sites with a plain host name or IP address.",
+      },
+    ],
+    [
+      new AttachedBrowserBridgeError("driver_rejected", "agents already set 1000", false, {
+        extensionCode: "limit_reached",
+      }),
+      {
+        code: "invalid_action",
+        message:
+          "Agents have already set 1,000 site permissions in the person's Chrome; set ones no longer needed back to prompt, or ask the person to remove some in the extension's popup.",
+      },
+    ],
+    [
+      new AttachedBrowserBridgeError("invalid_request", "bridge command is malformed", false),
+      {
+        code: "invalid_action",
+        message:
+          "The browser extension in the person's Chrome refused this permission request; nothing was set.",
+      },
+    ],
+  ] as const) {
+    const bridge = new SitePermissionBridge(true, () => {
+      throw refusal;
+    });
+    const { driver, observation } = await start(bridge);
+    try {
+      await expect(
+        driver.dispatch(permission(observation, { permission: "camera", setting: "granted" })),
+      ).rejects.toMatchObject({ ...expected, retryable: false });
+    } finally {
+      await driver.close();
+    }
   }
 });

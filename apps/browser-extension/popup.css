@@ -72,6 +72,7 @@ body.page h3 { font-size: 15px; }
 body.page .entries .site { font-size: 13px; }
 body.page .manage .status { margin: 28px 0 0; color: inherit; font-size: 15px; }
 .manage button.secondary { margin-top: 18px; }
+body.page .request { color: inherit; font-weight: 550; }
 
 @media (prefers-color-scheme: light) {
   :root {

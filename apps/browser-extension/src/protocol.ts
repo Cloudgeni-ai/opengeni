@@ -1,6 +1,5 @@
 import {
   isSitePermission,
-  sitePattern,
   type SitePermission,
   type SitePermissionSetting,
 } from "./site-permissions";
@@ -108,11 +107,14 @@ export type BridgeCommand =
    * redirects) that started at or after `startedAfter`, oldest first. A
    * controlled tab's download events name the download but not its file. */
   | { type: "downloads.find"; url: string; startedAfter: string }
-  /** Sets one permission for one exact site (`https://example.com`) that a
-   * controlled tab shows. Extensions that answer `ping` with
-   * `sitePermissions: true` know it. */
+  /** Sets one permission for one exact site (`https://example.com`), which
+   * the tab `tabId` must show under the attachment `debugger.attach`
+   * reported. Extensions that answer `ping` with `sitePermissions: true`
+   * know it. */
   | {
       type: "permissions.set";
+      tabId: string;
+      attachment: number;
       origin: string;
       permission: SitePermission;
       setting: SitePermissionSetting;
@@ -319,9 +321,10 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
       return { type: command.type, url: boundedUrl(command.url), startedAfter };
     }
     case "permissions.set": {
-      exactKeys(command, ["type", "origin", "permission", "setting"]);
+      exactKeys(command, ["type", "tabId", "attachment", "origin", "permission", "setting"]);
+      // Whether the origin is one Chrome can be given is the extension's
+      // answer (`unsupported_site`), not a malformed request.
       const origin = boundedString(command.origin, 1, 2_048, "site permission origin");
-      sitePattern(origin);
       if (!isSitePermission(command.permission)) {
         throw new Error("site permission is unsupported");
       }
@@ -334,6 +337,8 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
       }
       return {
         type: command.type,
+        tabId: requireTabId(command.tabId),
+        attachment: boundedInteger(command.attachment, 1, Number.MAX_SAFE_INTEGER),
         origin,
         permission: command.permission,
         setting: command.setting,

@@ -812,7 +812,11 @@ export type AgentBrowserDriverOptions = {
   focusEmulation?: boolean;
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
-  permissionControl?: boolean;
+  /** Whether permission actions work. `"opened_tabs"`: only in a tab this
+   * session opened and no other session is using, and the command is sent on
+   * that tab's session so the browser knows the exact tab (a browser that is
+   * the person's own, where every other tab is theirs). */
+  permissionControl?: boolean | "opened_tabs";
   /** Experimental ephemeral context lease. Never a durable browser profile. */
   browserContextId?: string;
   /** Headless shell has no chrome://version page. Read its real Client Hints
@@ -969,7 +973,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private focusEmulation: boolean;
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
-  private readonly permissionControl: boolean;
+  private readonly permissionControl: boolean | "opened_tabs";
   private readonly browserContextId: string | undefined;
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
@@ -6783,15 +6787,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const origin = webOrigin(state.frame.url);
+    const inOpenedTab = this.permissionControl === "opened_tabs";
+    if (
+      inOpenedTab &&
+      (!this.createdTargetIds.has(state.targetId) ||
+        this.ownedTabs?.inUseElsewhere?.(state.targetId) === true)
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.",
+      );
+    }
     try {
       await (
         await this.ensureConnection()
-      ).send("Browser.setPermission", {
-        ...this.contextScope(),
-        permission: { name: CDP_PERMISSION_NAMES[action.permission] },
-        setting: action.setting,
-        origin,
-      });
+      ).send(
+        "Browser.setPermission",
+        {
+          ...this.contextScope(),
+          permission: { name: CDP_PERMISSION_NAMES[action.permission] },
+          setting: action.setting,
+          origin,
+        },
+        inOpenedTab ? { sessionId: state.sessionId } : undefined,
+      );
     } catch (error) {
       if (error instanceof CdpProtocolError) {
         throw new InteractionDefiniteDriverError(
