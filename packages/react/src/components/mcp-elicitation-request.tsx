@@ -1,19 +1,17 @@
 import { useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { ExternalLinkIcon, LoaderCircleIcon, MessageCircleQuestionIcon } from "lucide-react";
+import { LoaderCircleIcon, MessageCircleQuestionIcon } from "lucide-react";
 import {
-  isMcpElicitationUrlQuestion,
   mcpElicitationKind,
-  mcpElicitationUrlHost,
   mcpElicitationChoices,
   mcpElicitationDefaults,
   type McpElicitationApprovalRequest,
   type McpElicitationContent,
   type McpElicitationField,
-  type McpElicitationUrlQuestion,
   type McpElicitationValue,
 } from "@opengeni/contracts/mcp-elicitation";
 import { cn } from "../lib/cn";
 import { useOpenGeniText } from "../messages/runtime";
+import { DecisionActions, DecisionButton } from "./decision-card";
 import { DeclineButton, ToolReviewFrame } from "./tool-action-review";
 
 /** More choices than this become a drop-down instead of a list. */
@@ -27,10 +25,7 @@ const inputClass =
 /**
  * An MCP server's question in the middle of a tool call, answered in place:
  * its message, its form (prefilled with the server's defaults), and Decline.
- * A question with no fields is a plain confirmation answered with Allow. A
- * question that asks the person to open a web page shows the page's exact
- * host and a link that opens it in a new tab; Continue tells the server they
- * went there, and the server asks again if its step is not done yet.
+ * A question with no fields is a plain confirmation answered with Allow.
  */
 export function McpElicitationRequest({
   elicitation,
@@ -58,11 +53,10 @@ export function McpElicitationRequest({
   const titleId = useId();
   const [draft, setDraft] = useState<Draft>(() =>
     Object.fromEntries(
-      elicitation.requests.flatMap((request) =>
-        isMcpElicitationUrlQuestion(request)
-          ? []
-          : [[request.id, mcpElicitationDefaults(request.requestedSchema)]],
-      ),
+      elicitation.requests.map((request) => [
+        request.id,
+        mcpElicitationDefaults(request.requestedSchema),
+      ]),
     ),
   );
   const kind = mcpElicitationKind(elicitation);
@@ -86,9 +80,7 @@ export function McpElicitationRequest({
         submitting === "approve"
           ? kind === "form"
             ? t("approvalSurface.sendingAnswer")
-            : kind === "url"
-              ? t("approvalSurface.continuing")
-              : t("approvalSurface.approving")
+            : t("approvalSurface.approving")
           : submitting === "reject"
             ? t("approvalSurface.declining")
             : t("approvalSurface.serverAsks", { server: elicitation.server })
@@ -99,132 +91,70 @@ export function McpElicitationRequest({
       aria-busy={submitting !== null}
       data-og-mcp-elicitation=""
       footer={
-        <>
-          <div className="flex min-w-0 flex-1 basis-32 items-center">{details}</div>
-          <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
-            <DeclineButton
-              busy={busy}
-              submitting={submitting === "reject"}
-              label={t("approvalSurface.decline")}
-              onClick={onDecline}
-            />
-            <button
-              type="submit"
-              form={formId}
-              disabled={busy}
-              className="inline-flex min-h-9 items-center justify-center gap-2 rounded-og-md border border-og-primary-border bg-og-primary px-3.5 py-1.5 text-og-sm font-medium text-og-primary-fg transition-colors hover:bg-og-primary-hover disabled:opacity-60 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-            >
-              {submitting === "approve" ? (
-                <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden="true" />
-              ) : null}
-              {kind === "form"
-                ? t("approvalSurface.sendAnswer")
-                : kind === "url"
-                  ? t("approvalSurface.continue")
-                  : t("approvalSurface.allow")}
-            </button>
-          </div>
-        </>
+        // The same actions row as every approval card: stacked full width on a
+        // narrow card with the answer on top, one line at the end otherwise.
+        <DecisionActions lead={details}>
+          <DeclineButton
+            busy={busy}
+            submitting={submitting === "reject"}
+            label={t("approvalSurface.decline")}
+            onClick={onDecline}
+          />
+          <DecisionButton
+            kind="primary"
+            type="submit"
+            form={formId}
+            disabled={busy}
+            busy={submitting === "approve"}
+          >
+            {kind === "form" ? t("approvalSurface.sendAnswer") : t("approvalSurface.allow")}
+          </DecisionButton>
+        </DecisionActions>
       }
     >
       <form id={formId} onSubmit={submit} aria-labelledby={titleId} className="space-y-4">
-        {elicitation.requests.map((request) =>
-          isMcpElicitationUrlQuestion(request) ? (
-            <PageToOpen key={request.id} request={request} disabled={busy} />
-          ) : (
-            // mx-0 resets the browser's fieldset margin and leaves the vertical rhythm to space-y.
-            <fieldset
-              key={request.id}
-              disabled={busy}
-              className="mx-0 min-w-0 space-y-5 border-0 p-0"
-            >
-              {request.message ? (
-                <legend className="mb-4 whitespace-pre-wrap p-0 text-og-sm leading-relaxed text-og-fg [overflow-wrap:anywhere] last:mb-0">
-                  {request.message}
-                </legend>
-              ) : null}
-              {Object.entries(request.requestedSchema.properties).map(([name, field]) => (
-                <ElicitationField
-                  key={name}
-                  id={`${formId}-${request.id}-${name}`}
-                  name={name}
-                  field={field}
-                  required={(request.requestedSchema.required ?? []).includes(name)}
-                  value={draft[request.id]?.[name]}
-                  onChange={(value) =>
-                    setDraft((current) => ({
-                      ...current,
-                      [request.id]: { ...current[request.id], [name]: value },
-                    }))
-                  }
-                />
-              ))}
-            </fieldset>
-          ),
-        )}
+        {elicitation.requests.map((request) => (
+          // mx-0 resets the browser's fieldset margin and leaves the vertical rhythm to space-y.
+          <fieldset
+            key={request.id}
+            disabled={busy}
+            className="mx-0 min-w-0 space-y-5 border-0 p-0"
+          >
+            {request.message ? (
+              <legend className="mb-4 whitespace-pre-wrap p-0 text-og-sm leading-relaxed text-og-fg [overflow-wrap:anywhere] last:mb-0">
+                {request.message}
+              </legend>
+            ) : null}
+            {Object.entries(request.requestedSchema.properties).map(([name, field]) => (
+              <ElicitationField
+                key={name}
+                id={`${formId}-${request.id}-${name}`}
+                name={name}
+                field={field}
+                required={(request.requestedSchema.required ?? []).includes(name)}
+                value={draft[request.id]?.[name]}
+                onChange={(value) =>
+                  setDraft((current) => ({
+                    ...current,
+                    [request.id]: { ...current[request.id], [name]: value },
+                  }))
+                }
+              />
+            ))}
+          </fieldset>
+        ))}
       </form>
     </ToolReviewFrame>
   );
 }
 
-/**
- * The server's message and a link to the page it asks the person to open.
- * The link names the page's exact host and opens only when clicked, in a new
- * tab with no access back to Opengeni.
- */
-function PageToOpen({
-  request,
-  disabled,
-}: {
-  request: McpElicitationUrlQuestion;
-  disabled: boolean;
-}) {
-  const t = useOpenGeniText();
-  const host = mcpElicitationUrlHost(request.url);
-  const hintId = useId();
-  if (!host) return null;
-  return (
-    <div className="min-w-0 space-y-3" data-og-mcp-elicitation-page="">
-      {request.message ? (
-        <p className="whitespace-pre-wrap text-og-sm leading-relaxed text-og-fg [overflow-wrap:anywhere]">
-          {request.message}
-        </p>
-      ) : null}
-      <div className="space-y-1.5">
-        <a
-          href={request.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-describedby={hintId}
-          aria-disabled={disabled || undefined}
-          tabIndex={disabled ? -1 : undefined}
-          onClick={(event) => {
-            if (disabled) event.preventDefault();
-          }}
-          className={cn(
-            "inline-flex min-h-9 max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface-1 px-3.5 py-1.5 text-og-sm font-medium text-og-fg transition-colors hover:bg-og-surface-2 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40",
-            disabled && "pointer-events-none opacity-60",
-          )}
-        >
-          <ExternalLinkIcon className="size-3.5 shrink-0" aria-hidden="true" />
-          <span className="min-w-0 truncate">{t("approvalSurface.openPage", { host })}</span>
-        </a>
-        <p id={hintId} className="text-og-xs text-og-fg-muted">
-          {t("approvalSurface.openPageHint")}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/** What the person entered, without fields they left empty. A page to open has no entry. */
+/** What the person entered, without fields they left empty. */
 function answerContent(
   elicitation: McpElicitationApprovalRequest,
   draft: Draft,
 ): McpElicitationContent {
   const content: McpElicitationContent = {};
   for (const request of elicitation.requests) {
-    if (isMcpElicitationUrlQuestion(request)) continue;
     const values: Record<string, McpElicitationValue> = {};
     for (const [name, value] of Object.entries(draft[request.id] ?? {})) {
       if (value === undefined || value === "") continue;

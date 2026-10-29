@@ -17014,16 +17014,18 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     choices: z.array(z.object({ id: primitives.string, label: primitives.string })).max(4),
     /**
      * An approval whose tool's MCP server asks the person a question in the
-     * middle of the call: which server asks and how the person answers. A
-     * `confirm` is answered in one tap; `url` asks them to open `url` first
-     * and then continue; `form` has fields, answered in its form. The item's
-     * title is then the server's question. Null otherwise.
+     * middle of the call: which server asks, how the person answers and which
+     * of the call's questions it is (`round`, sent back as
+     * `elicitationRound`). The item's title is then the server's question. A
+     * `confirm` is one question with nothing to fill in, shown whole by the
+     * title, so it can be allowed from the item; anything else is a `form`,
+     * answered in the session. Null otherwise.
      */
     serverQuestion: z
       .object({
         server: primitives.string,
-        kind: z.enum(["confirm", "form", "url"]),
-        url: primitives.string.optional(),
+        kind: z.enum(["confirm", "form"]),
+        round: z.number().int().positive(),
       })
       .nullable()
       .default(null),
@@ -20070,6 +20072,13 @@ export const ClientSessionEvent = /* @__PURE__ */ defineSchema(() =>
          * defaults, so a form without required fields needs no content.
          */
         content: McpElicitationContent.optional(),
+        /**
+         * The `elicitation.round` this decision answers. Required to approve
+         * an approval with `elicitation`, so an approval sent for an earlier
+         * question (or by a surface that never showed it) cannot answer the
+         * server's current one.
+         */
+        elicitationRound: z.number().int().positive().optional(),
         // Write-only header rotation committed with the response before resume.
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
       }),

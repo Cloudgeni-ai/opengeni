@@ -6,7 +6,6 @@ import {
   createSession,
   getActiveSessionHistoryItemsPaged,
   getSession,
-  getToolActionReview,
   initializeSessionStartAtomically,
   listInboxItems,
   listSessionEvents,
@@ -21,8 +20,8 @@ import {
 } from "@opengeni/runtime";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
-  FakeMcpElicitationServer,
   startFakeMcpElicitationServer,
+  type FakeMcpElicitationServer,
 } from "@opengeni/testing/mcp-elicitation-server";
 import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
@@ -33,7 +32,7 @@ import {
 import { createActivityTestHarness } from "../src/activities";
 
 // An MCP server asks the person mid-call (MCP elicitation, multi round trip:
-// forms, confirmations and pages to open) through the real worker turn path:
+// forms and confirmations) through the real worker turn path:
 // real PostgreSQL in the production posture, the real SDK call flow over an
 // offline ScriptedModel, and a real MCP server over HTTP. Every answer comes
 // in a later attempt, as it would hours later in an unattended run.
@@ -58,7 +57,6 @@ afterAll(async () => {
 
 const SEND = prefixedMcpToolName("chat", "send_message");
 const BOOK = prefixedMcpToolName("chat", "book_meeting");
-const SIGN_IN = prefixedMcpToolName("chat", "sign_in");
 
 async function startSession(message: string) {
   const subjectId = `user:mcp-elicitation:${crypto.randomUUID()}`;
@@ -154,7 +152,11 @@ async function events(ctx: Ctx) {
 
 type Approval = {
   id: string;
-  elicitation?: { server: string; requests: Array<{ id: string; message: string }> };
+  elicitation?: {
+    server: string;
+    round: number;
+    requests: Array<{ id: string; message: string }>;
+  };
 };
 
 async function latestApprovals(ctx: Ctx): Promise<Approval[]> {
@@ -168,6 +170,7 @@ async function decide(
     approvalId: string;
     decision: "approve" | "reject";
     content?: unknown;
+    elicitationRound?: number;
     message?: string;
   },
 ) {
@@ -224,14 +227,8 @@ async function ledger(ctx: Ctx, callId: string) {
   };
 }
 
-/** What the inbox and the tool review (Slack, dialogs, embedders) show for a paused call. */
+/** What the inbox shows for a paused call. */
 async function surfaces(ctx: Ctx, callId: string) {
-  const review = await getToolActionReview(app.db, {
-    accountId: ctx.accountId,
-    workspaceId: ctx.workspaceId,
-    sessionId: ctx.sessionId,
-    approvalId: callId,
-  });
   const inbox = await listInboxItems(app.db, {
     accountId: ctx.accountId,
     subjectId: ctx.subjectId,
@@ -239,7 +236,7 @@ async function surfaces(ctx: Ctx, callId: string) {
   const item = inbox.find(
     (entry) => entry.sessionId === ctx.sessionId && entry.sourceKey === callId,
   );
-  return { question: review?.question, item };
+  return { item };
 }
 
 /** Model history keeps every call paired with exactly one result. */
@@ -286,6 +283,7 @@ test("a question pauses the call and a later answer sends it exactly once", asyn
     id: callId,
     elicitation: {
       server: "Chat",
+      round: 1,
       requests: [{ id: "confirm", message: `Send “${text}” to team?` }],
     },
   });
@@ -293,23 +291,30 @@ test("a question pauses the call and a later answer sends it exactly once", asyn
   expect(await getSession(app.db, ctx.workspaceId, ctx.sessionId)).toMatchObject({
     status: "requires_action",
   });
-  // The inbox and the tool review show the server's question, not the tool name.
+  // The inbox shows the server's question, not the tool name.
   const waiting = await surfaces(ctx, callId);
-  expect(waiting.question).toMatchObject({
-    server: "Chat",
-    requests: [{ id: "confirm", message: `Send “${text}” to team?` }],
-  });
   expect(waiting.item).toMatchObject({
     kind: "approval",
     title: `Send “${text}” to team?`,
-    serverQuestion: { server: "Chat", kind: "confirm" },
+    serverQuestion: { server: "Chat", kind: "confirm", round: 1 },
   });
 
-  // A confirmation has no fields: a plain approval answers it.
-  const decision = await decide(ctx, { approvalId: callId, decision: "approve" });
-  expect(decision.payload).toMatchObject({ content: { confirm: {} } });
+  // Approving must name the question it answers, so an approval from a
+  // surface that never showed the question cannot answer it.
+  await expect(decide(ctx, { approvalId: callId, decision: "approve" })).rejects.toThrow(
+    new SessionApprovalAnswerError(
+      "Chat asked a question about this call; answer it with elicitationRound 1",
+    ),
+  );
+  // A confirmation has no fields: approving its round answers it.
+  const decision = await decide(ctx, {
+    approvalId: callId,
+    decision: "approve",
+    elicitationRound: 1,
+  });
+  expect(decision.payload).toMatchObject({ content: { confirm: {} }, elicitationRound: 1 });
   // Answered: no open question and no open item.
-  expect(await surfaces(ctx, callId)).toEqual({ question: undefined, item: undefined });
+  expect(await surfaces(ctx, callId)).toEqual({ item: undefined });
   expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
   expect(fake.sent.filter((message) => message.text === text)).toEqual([{ chat: "team", text }]);
   const retry = fake.calls.findLast((call) => call.arguments.text === text);
@@ -337,26 +342,27 @@ test("a form is checked, then a second question in the same call is asked and an
     message: `Who should come to “${topic}”, and when?`,
   });
   const form = await surfaces(ctx, callId);
-  expect(form.question?.requests[0]?.requestedSchema.required).toEqual(["room", "attendees"]);
   expect(form.item).toMatchObject({
     title: `Who should come to “${topic}”, and when?`,
-    serverQuestion: { server: "Chat", kind: "form" },
+    serverQuestion: { server: "Chat", kind: "form", round: 1 },
   });
 
   // A required field without a default must be answered; nothing is recorded.
-  await expect(decide(ctx, { approvalId: callId, decision: "approve" })).rejects.toThrow(
-    new SessionApprovalAnswerError("People is required"),
-  );
+  await expect(
+    decide(ctx, { approvalId: callId, decision: "approve", elicitationRound: 1 }),
+  ).rejects.toThrow(new SessionApprovalAnswerError("People is required"));
   await expect(
     decide(ctx, {
       approvalId: callId,
       decision: "approve",
+      elicitationRound: 1,
       content: { details: { attendees: 30 } },
     }),
   ).rejects.toThrow("People must be at most 20");
   const first = await decide(ctx, {
     approvalId: callId,
     decision: "approve",
+    elicitationRound: 1,
     content: { details: { attendees: 3 } },
   });
   // The recorded answer includes the form's defaults.
@@ -366,19 +372,31 @@ test("a form is checked, then a second question in the same call is asked and an
   const [again] = await latestApprovals(ctx);
   expect(again).toMatchObject({
     id: callId,
-    elicitation: { requests: [{ id: "confirm", message: "Book small room for 3?" }] },
+    elicitation: { round: 2, requests: [{ id: "confirm", message: "Book small room for 3?" }] },
   });
-  // The new question reopens the inbox item and replaces the review's question.
+  // The new question reopens the inbox item with it.
   const asked = await surfaces(ctx, callId);
-  expect(asked.question?.requests.map((request) => request.id)).toEqual(["confirm"]);
   expect(asked.item).toMatchObject({
     title: "Book small room for 3?",
-    serverQuestion: { server: "Chat", kind: "confirm" },
+    serverQuestion: { server: "Chat", kind: "confirm", round: 2 },
   });
   // The model was not asked anything in between.
   expect(scripted.calls).toBe(1);
 
-  const second = await decide(ctx, { approvalId: callId, decision: "approve" });
+  // An approval sent for the first question (a stale card, a retried
+  // request) cannot answer the new one.
+  await expect(
+    decide(ctx, { approvalId: callId, decision: "approve", elicitationRound: 1 }),
+  ).rejects.toThrow(
+    new SessionApprovalAnswerError(
+      "Chat has asked a newer question about this call; answer that one",
+    ),
+  );
+  const second = await decide(ctx, {
+    approvalId: callId,
+    decision: "approve",
+    elicitationRound: 2,
+  });
   expect((await runTurn(ctx, scripted, second.id)).status).toBe("idle");
   expect(fake.booked.filter((booking) => booking.topic === topic)).toEqual([
     { topic, room: "small", attendees: 3 },
@@ -449,80 +467,6 @@ test("declining with a message tells the model the person's words", async () => 
   );
 });
 
-test("a page to open is continued after the person finishes it there", async () => {
-  const ctx = await startSession("Connect my work account");
-  const callId = `call-${ctx.sessionId}`;
-  const account = `work-${ctx.sessionId}`;
-  const scripted = new ScriptedModel([
-    { output: [functionCall(SIGN_IN, { account }, callId)] },
-    { output: [assistantMessage("Connected.")] },
-  ]);
-  expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
-  // The call declared it can send the person to a page.
-  expect(
-    fake.callsTo("sign_in").findLast((call) => call.arguments.account === account),
-  ).toMatchObject({
-    declaredElicitation: true,
-    declaredUrlElicitation: true,
-  });
-  const page = FakeMcpElicitationServer.signInUrl(account);
-  const [approval] = await latestApprovals(ctx);
-  expect(approval?.elicitation).toEqual({
-    server: "Chat",
-    requests: [
-      { id: "signIn", mode: "url", message: `Sign in to ${account} to continue.`, url: page },
-    ],
-  });
-  const waiting = await surfaces(ctx, callId);
-  expect(waiting.item).toMatchObject({
-    title: `Sign in to ${account} to continue.`,
-    serverQuestion: { server: "Chat", kind: "url", url: page },
-  });
-  // A page has nothing to fill in.
-  await expect(
-    decide(ctx, { approvalId: callId, decision: "approve", content: { signIn: { code: "1" } } }),
-  ).rejects.toThrow("Question signIn has nothing to fill in");
-
-  // Continuing before the page is done: the server asks again, the model is not woken.
-  const early = await decide(ctx, { approvalId: callId, decision: "approve" });
-  expect((await runTurn(ctx, scripted, early.id)).status).toBe("requires_action");
-  expect((await surfaces(ctx, callId)).item).toMatchObject({ serverQuestion: { kind: "url" } });
-  expect(scripted.calls).toBe(1);
-
-  fake.finishSignIn(account);
-  const done = await decide(ctx, { approvalId: callId, decision: "approve" });
-  expect((await runTurn(ctx, scripted, done.id)).status).toBe("idle");
-  const calls = fake.callsTo("sign_in").filter((call) => call.arguments.account === account);
-  expect(calls.map((call) => call.inputResponses)).toEqual([
-    undefined,
-    { signIn: { action: "accept" } },
-    { signIn: { action: "accept" } },
-  ]);
-  expect(await toolOutputs(ctx, callId)).toHaveLength(1);
-  expect(await expectPairedHistory(ctx)).toContain(`Signed in to ${account}.`);
-  expect(scripted.calls).toBe(2);
-});
-
-test("declining a page tells the server", async () => {
-  const ctx = await startSession("Connect my other account");
-  const callId = `call-${ctx.sessionId}`;
-  const account = `other-${ctx.sessionId}`;
-  const scripted = new ScriptedModel([
-    { output: [functionCall(SIGN_IN, { account }, callId)] },
-    { output: [assistantMessage("Okay.")] },
-  ]);
-  expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
-  const decision = await decide(ctx, { approvalId: callId, decision: "reject" });
-  expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
-  expect(
-    fake.callsTo("sign_in").findLast((call) => call.arguments.account === account)?.inputResponses,
-  ).toEqual({ signIn: { action: "decline" } });
-  const [output] = await toolOutputs(ctx, callId);
-  expect(output).toEqual(expect.stringContaining("Not signed in."));
-  expect(output).toEqual(expect.stringMatching(/\n\nThe person declined Chat's question\.$/u));
-  await expectPairedHistory(ctx);
-});
-
 test("a tool set to Ask is approved, then its server's question is answered, and it runs once", async () => {
   const ctx = await startSession("Tell the team we ship today");
   await setPolicy(ctx, "send_message", "ask");
@@ -548,7 +492,11 @@ test("a tool set to Ask is approved, then its server's question is answered, and
     decision: null,
     inputRound: 1,
   });
-  const answered = await decide(ctx, { approvalId: callId, decision: "approve" });
+  const answered = await decide(ctx, {
+    approvalId: callId,
+    decision: "approve",
+    elicitationRound: 1,
+  });
   expect((await runTurn(ctx, scripted, answered.id)).status).toBe("idle");
 
   expect(fake.sent.filter((message) => message.text === text)).toEqual([{ chat: "team", text }]);
@@ -607,7 +555,12 @@ test("an answer to a question the server did not ask is refused", async () => {
   ]);
   expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
   await expect(
-    decide(ctx, { approvalId: callId, decision: "approve", content: { other: {} } }),
+    decide(ctx, {
+      approvalId: callId,
+      decision: "approve",
+      elicitationRound: 1,
+      content: { other: {} },
+    }),
   ).rejects.toThrow("There is no question other to answer");
 });
 
@@ -623,7 +576,11 @@ test("a state-only answer is retried at once, and the question after it pauses",
   expect(approval?.elicitation?.requests).toEqual([
     expect.objectContaining({ id: "go", message: "Go?" }),
   ]);
-  const decision = await decide(ctx, { approvalId: callId, decision: "approve" });
+  const decision = await decide(ctx, {
+    approvalId: callId,
+    decision: "approve",
+    elicitationRound: 1,
+  });
   expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
   expect(await expectPairedHistory(ctx)).toContain("Warmed up.");
 });

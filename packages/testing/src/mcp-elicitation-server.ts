@@ -19,10 +19,6 @@ import * as z from "zod/v4";
  * - `book_meeting` asks for details in a form, then for confirmation in a
  *   second round, carrying its progress in `requestState`.
  * - `warm_up` first answers with state only, then asks.
- * - `sign_in` asks the person to open a sign-in page (URL mode) and asks
- *   again until the test calls `finishSignIn` for that account, as a real
- *   server would after its page's out-of-band step. The server SDK refuses to
- *   ask unless the client declared URL mode.
  */
 
 export type FakeMcpElicitationCall = {
@@ -30,8 +26,6 @@ export type FakeMcpElicitationCall = {
   arguments: Record<string, unknown>;
   /** Whether the call declared form elicitation in its per-request capabilities. */
   declaredElicitation: boolean;
-  /** Whether the call declared URL elicitation in its per-request capabilities. */
-  declaredUrlElicitation: boolean;
   inputResponses?: Record<string, unknown>;
   requestState?: string;
 };
@@ -43,7 +37,6 @@ export type FakeMcpElicitationServerOptions = {
 
 const SendArguments = { chat: z.string(), text: z.string() };
 const BookArguments = { topic: z.string() };
-const SignInArguments = { account: z.string() };
 const Sent = z.object({ sent: z.boolean(), chat: z.string() });
 
 export class FakeMcpElicitationServer {
@@ -51,8 +44,6 @@ export class FakeMcpElicitationServer {
   /** Messages actually sent, in order. */
   readonly sent: Array<{ chat: string; text: string }> = [];
   readonly booked: Array<Record<string, unknown>> = [];
-  /** Accounts whose sign-in page the person finished. */
-  private readonly signedIn = new Set<string>();
   private server: ReturnType<typeof Bun.serve> | null = null;
   private readonly trusted: ReadonlySet<string>;
 
@@ -94,26 +85,15 @@ export class FakeMcpElicitationServer {
     return this.calls.filter((call) => call.name === name);
   }
 
-  /** The person finished the sign-in page for this account (the out-of-band step). */
-  finishSignIn(account: string): void {
-    this.signedIn.add(account);
-  }
-
-  /** The page `sign_in` sends the person to for an account. */
-  static signInUrl(account: string): string {
-    return `https://accounts.example.com/sign-in?account=${encodeURIComponent(account)}`;
-  }
-
   private record(params: Record<string, unknown>): void {
     const meta = (params._meta ?? {}) as Record<string, unknown>;
     const capabilities = (meta[CLIENT_CAPABILITIES_META_KEY] ?? {}) as {
-      elicitation?: { form?: unknown; url?: unknown };
+      elicitation?: { form?: unknown };
     };
     this.calls.push({
       name: String(params.name),
       arguments: (params.arguments ?? {}) as Record<string, unknown>,
       declaredElicitation: capabilities.elicitation?.form !== undefined,
-      declaredUrlElicitation: capabilities.elicitation?.url !== undefined,
       ...(params.inputResponses
         ? { inputResponses: params.inputResponses as Record<string, unknown> }
         : {}),
@@ -241,32 +221,6 @@ export class FakeMcpElicitationServer {
         requestState: "asked",
       });
     });
-    mcp.registerTool(
-      "sign_in",
-      {
-        description: "Connect an account through its sign-in page.",
-        inputSchema: z.object(SignInArguments),
-      },
-      async ({ account }, ctx) => {
-        const answer = inputResponse(ctx.mcpReq.inputResponses, "signIn");
-        if (answer.kind === "elicit" && answer.action !== "accept") {
-          return { content: [{ type: "text" as const, text: "Not signed in." }] };
-        }
-        if (answer.kind === "elicit" && this.signedIn.has(account)) {
-          return { content: [{ type: "text" as const, text: `Signed in to ${account}.` }] };
-        }
-        // First call, or the person continued before finishing the page.
-        return inputRequired({
-          inputRequests: {
-            signIn: inputRequired.elicitUrl({
-              message: `Sign in to ${account} to continue.`,
-              url: FakeMcpElicitationServer.signInUrl(account),
-            }),
-          },
-          requestState: JSON.stringify({ account }),
-        });
-      },
-    );
     return mcp;
   }
 }

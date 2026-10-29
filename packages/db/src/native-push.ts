@@ -144,11 +144,11 @@ export type ClaimedNativePushDelivery = {
     /** The session event the push is about, so a tap lands on it (0664). */
     sequence?: number;
     /**
-     * An approval whose MCP server asks a question with fields to fill in or
-     * a page to open (1101): it is answered in the app, never on the lock
-     * screen. Absent for a plain confirmation.
+     * An approval whose MCP server asks the person a question (1101): it is
+     * answered in the app, where the question is shown, never on the lock
+     * screen.
      */
-    serverQuestionKind?: "form" | "url";
+    serverQuestionKind?: "confirm" | "form";
   };
   attempts: number;
 };

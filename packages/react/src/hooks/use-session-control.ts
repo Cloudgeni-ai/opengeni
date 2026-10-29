@@ -1,4 +1,4 @@
-import type { McpElicitationContent, SessionControlResponse, SessionEvent } from "@opengeni/sdk";
+import type { McpElicitationAnswer, SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
@@ -11,12 +11,13 @@ export type UseSessionControlResult = {
   controlling: boolean;
   /**
    * Approve a pending `requires_action` approval. An approval whose MCP server
-   * asked a question (`elicitation`) sends the answers as `answer.content`.
+   * asked a question (`elicitation`) sends `answer`: the answers and the
+   * round they answer.
    */
   approve: (
     approvalId: string,
     message?: string,
-    answer?: { content: McpElicitationContent },
+    answer?: McpElicitationAnswer,
   ) => Promise<SessionEvent | null>;
   /** Reject a pending `requires_action` approval. */
   reject: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
@@ -87,12 +88,12 @@ export function useSessionControl(
       approvalId: string,
       decision: "approve" | "reject",
       message?: string,
-      content?: McpElicitationContent,
+      answer?: McpElicitationAnswer,
     ): Promise<SessionEvent | null> => {
       if (!sessionId) {
         return null;
       }
-      const decisionKey = JSON.stringify([approvalId, decision, message ?? null, content ?? null]);
+      const decisionKey = JSON.stringify([approvalId, decision, message ?? null, answer ?? null]);
       if (pendingApproval.current?.decisionKey !== decisionKey) {
         pendingApproval.current = {
           targetKey: approvalTargetKey,
@@ -106,7 +107,7 @@ export function useSessionControl(
           approvalId,
           decision,
           ...(message !== undefined ? { message } : {}),
-          ...(content !== undefined ? { content } : {}),
+          ...(answer !== undefined ? answer : {}),
           clientEventId,
         }),
       );
@@ -123,8 +124,8 @@ export function useSessionControl(
   );
 
   const approve = useCallback(
-    async (approvalId: string, message?: string, answer?: { content: McpElicitationContent }) =>
-      await decide(approvalId, "approve", message, answer?.content),
+    async (approvalId: string, message?: string, answer?: McpElicitationAnswer) =>
+      await decide(approvalId, "approve", message, answer),
     [decide],
   );
   const reject = useCallback(

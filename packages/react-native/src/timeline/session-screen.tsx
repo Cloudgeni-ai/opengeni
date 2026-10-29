@@ -534,9 +534,9 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
-                onDecide={(id, decision, content) =>
+                onDecide={(id, decision, answer) =>
                   (decision === "approve"
-                    ? control.approve(id, undefined, content ? { content } : undefined)
+                    ? control.approve(id, undefined, answer)
                     : control.reject(id)
                   ).then(() => undefined)
                 }

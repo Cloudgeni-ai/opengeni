@@ -1166,6 +1166,7 @@ export type {
   IntegrationSourceInput,
   IntegrationSourceProjection,
   SessionApprovalRequest,
+  McpElicitationAnswer,
   McpElicitationApprovalRequest,
   McpElicitationContent,
   McpElicitationField,

@@ -1,5 +1,4 @@
 import {
-  isSlackServerQuestionPageAction,
   slackServerQuestion,
   slackToolReviewBlocks,
   slackToolReviewCanDecide,
@@ -719,9 +718,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const form = new URLSearchParams(signed.rawBody);
     const payload = parseJsonObject(form.get("payload") ?? "");
     if (payload.type === "block_actions") {
-      if (isSlackAppHomeLinkAction(payload) || isSlackServerQuestionPageAction(payload)) {
-        return c.json({ ok: true });
-      }
+      if (isSlackAppHomeLinkAction(payload)) return c.json({ ok: true });
       const entry = normalizedBlockActionInteraction(payload);
       const installation = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
       if (!installation) {
@@ -4739,6 +4736,12 @@ async function executeSlackAction(
   if (handle.actionKind === "approval_approve" || handle.actionKind === "approval_reject") {
     if (!handle.targetId) throw new SlackInteractionPermanentError("slack_action_target_invalid");
     const decision = handle.actionKind === "approval_approve" ? "approve" : "reject";
+    // An MCP server's question names the round the card showed, so a card
+    // for an earlier question cannot answer a newer one.
+    const elicitationRound =
+      handle.targetValue && /^[1-9]\d?$/u.test(handle.targetValue)
+        ? Number(handle.targetValue)
+        : undefined;
     let accepted: Awaited<ReturnType<typeof acceptSessionApprovalDecision>>;
     try {
       accepted = await acceptSessionApprovalDecision(deps.db, {
@@ -4746,16 +4749,20 @@ async function executeSlackAction(
         workspaceId: grant.workspaceId,
         sessionId: handle.sessionId,
         subjectId: grant.subjectId,
-        payload: { approvalId: handle.targetId, decision },
+        payload: {
+          approvalId: handle.targetId,
+          decision,
+          ...(elicitationRound !== undefined ? { elicitationRound } : {}),
+        },
         clientEventId: `slack-action:${handle.id}`,
       });
     } catch (error) {
-      // An MCP server asked questions that need typed answers; Slack shows
-      // only Approve and Decline, so the person answers in the session.
+      // The MCP server's question needs typed answers, or it asked again
+      // since this card was posted: the person answers in the session.
       if (!(error instanceof SessionApprovalAnswerError)) throw error;
       return {
         result: "needs_answer",
-        text: `${mention}This approval asks questions that need answers. Answer them in the session. ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
+        text: `${mention}This approval has a question to answer in the session. ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
       };
     }
     if (accepted.action === "conflict") {
@@ -5329,13 +5336,18 @@ async function slackApprovalCard(
         : [
             {
               actionKind: "approval_approve" as const,
-              actionKey: `approval:${approval.id}:approve`,
+              actionKey: approval.question
+                ? `approval:${approval.id}:approve:${approval.question.round}`
+                : `approval:${approval.id}:approve`,
               targetId: approval.id,
+              ...(approval.question ? { targetValue: String(approval.question.round) } : {}),
             },
           ]),
       {
         actionKind: "approval_reject" as const,
-        actionKey: `approval:${approval.id}:reject`,
+        actionKey: approval.question
+          ? `approval:${approval.id}:reject:${approval.question.round}`
+          : `approval:${approval.id}:reject`,
         targetId: approval.id,
       },
     ])
@@ -5352,13 +5364,13 @@ async function slackApprovalCard(
   const byKey = new Map(handles.map((handle) => [handle.actionKey, handle]));
   const blocks: SlackMessageBlock[] = [];
   for (const approval of approvals) {
-    const approve = byKey.get(`approval:${approval.id}:approve`);
-    const reject = byKey.get(`approval:${approval.id}:reject`);
+    const round = approval.question ? `:${approval.question.round}` : "";
+    const approve = byKey.get(`approval:${approval.id}:approve${round}`);
+    const reject = byKey.get(`approval:${approval.id}:reject${round}`);
     const review = reviewById.get(approval.id);
     if (approval.question) {
       // What the call does (when it can be shown), then the server's question
-      // right above its answer: a page to open is opened from its link button
-      // before Continue. Anything to fill in is answered in the session.
+      // right above its answer. Anything to fill in is answered in the session.
       if (review && slackToolReviewCanDecide(review)) {
         blocks.push(...slackToolReviewBlocks(review, privateAudience));
       }
@@ -5372,16 +5384,11 @@ async function slackApprovalCard(
       }
       const elements: Extract<SlackMessageBlock, { type: "actions" }>["elements"] = [];
       if (question.answerableInSlack && approve) {
-        elements.push(...question.pageButtons);
         elements.push({
           type: "button",
           action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
           value: approve.id,
-          text: {
-            type: "plain_text",
-            text: question.kind === "url" ? "Continue" : "Allow",
-            emoji: true,
-          },
+          text: { type: "plain_text", text: "Allow", emoji: true },
           style: "primary",
         });
       }

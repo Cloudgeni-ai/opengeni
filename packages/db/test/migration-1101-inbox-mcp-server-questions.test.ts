@@ -118,6 +118,7 @@ type Person = Awaited<ReturnType<typeof person>>;
 
 const confirm = {
   server: "Messages",
+  round: 1,
   requests: [
     {
       id: "confirm",
@@ -129,6 +130,7 @@ const confirm = {
 
 const form = {
   server: "Calendar",
+  round: 1,
   requests: [
     {
       id: "details",
@@ -190,14 +192,16 @@ describe("1101 MCP server questions in the inbox and phone alerts", () => {
       sourceKey: "call_confirm",
       title: "Send “On my way” to Design team? It isn't on your list of chats.",
       body: "Send message",
-      serverQuestion: { server: "Messages", kind: "confirm" },
+      serverQuestion: { server: "Messages", kind: "confirm", round: 1 },
     });
     const [push] = await pushes(owner);
+    // Marked as a server question, so the push offers no lock-screen Approve
+    // that could answer a question asked after it.
     expect(push!.payload).toMatchObject({
       eventType: "session.requiresAction",
       body: "Messages asks: Send “On my way” to Design team? It isn't on your list of chats.",
+      serverQuestionKind: "confirm",
     });
-    expect(push!.payload).not.toHaveProperty("serverQuestionKind");
   });
 
   test("a question with fields is marked for its form, with no lock-screen answer", async () => {
@@ -207,7 +211,7 @@ describe("1101 MCP server questions in the inbox and phone alerts", () => {
     const [item] = await items(owner);
     expect(item).toMatchObject({
       title: "Which room should I book?",
-      serverQuestion: { server: "Calendar", kind: "form" },
+      serverQuestion: { server: "Calendar", kind: "form", round: 1 },
     });
     const [push] = await pushes(owner);
     expect(push!.payload).toMatchObject({
@@ -216,54 +220,54 @@ describe("1101 MCP server questions in the inbox and phone alerts", () => {
     });
   });
 
-  test("a page to open is marked with its address, with no lock-screen answer", async () => {
+  test("a confirmation the title cannot show whole is answered in the session", async () => {
     if (!client) return;
-    const owner = await person("url");
+    const owner = await person("long");
+    const message = `Send this? ${"x".repeat(240)}`;
     await ask(owner, [
-      approval("call_url", {
-        server: "Accounts",
-        requests: [
-          {
-            id: "confirm",
-            message: "Sign in first?",
-            requestedSchema: confirm.requests[0]!.requestedSchema,
-          },
-          {
-            id: "sign-in",
-            mode: "url",
-            message: "Sign in to your work account to continue.",
-            url: "https://accounts.example.com/sign-in?account=work",
-          },
-        ],
-      }),
+      approval("call_long", { ...confirm, requests: [{ ...confirm.requests[0]!, message }] }),
     ]);
     const [item] = await items(owner);
-    expect(item).toMatchObject({
-      title: "Sign in first?",
-      serverQuestion: {
-        server: "Accounts",
-        kind: "url",
-        url: "https://accounts.example.com/sign-in?account=work",
-      },
-    });
-    const [push] = await pushes(owner);
-    expect(push!.payload).toMatchObject({
-      body: "Accounts asks: Sign in first?",
-      serverQuestionKind: "url",
-    });
-    // Fields to fill in outrank a page: the form shows both.
-    const mixed = await person("mixed");
-    await ask(mixed, [
-      approval("call_mixed", {
-        server: "Calendar",
-        requests: [
-          { id: "sign-in", mode: "url", message: "Sign in.", url: "https://cal.example.com/in" },
-          form.requests[0],
-        ],
+    expect(item?.title).toBe(message.slice(0, 200));
+    expect(item?.serverQuestion).toEqual({ server: "Messages", kind: "form", round: 1 });
+    // Two questions are answered together in the session as well.
+    const two = await person("two");
+    await ask(two, [
+      approval("call_two", {
+        ...confirm,
+        requests: [confirm.requests[0], { ...confirm.requests[0]!, id: "again" }],
       }),
     ]);
-    expect((await items(mixed))[0]?.serverQuestion).toEqual({ server: "Calendar", kind: "form" });
-    expect((await pushes(mixed))[0]?.payload).toMatchObject({ serverQuestionKind: "form" });
+    expect((await items(two))[0]?.serverQuestion).toMatchObject({ kind: "form" });
+  });
+
+  test("an entry without a round is not a server question", async () => {
+    if (!client) return;
+    const owner = await person("no-round");
+    const { round: _round, ...withoutRound } = confirm;
+    await ask(owner, [approval("call_no_round", withoutRound)]);
+    const [item] = await items(owner);
+    expect(item).toMatchObject({ title: "Send message", body: "Messages", serverQuestion: null });
+  });
+
+  test("a set-aside item comes back when the server asks a new question", async () => {
+    if (!client) return;
+    const owner = await person("dismissed");
+    await ask(owner, [approval("call_dismissed", confirm)]);
+    await owned!.admin`
+      update opengeni_private.inbox_items set status = 'dismissed'
+      where session_id = ${owner.session.id} and source_key = 'call_dismissed'`;
+    // The same question again (a later pause of the turn) leaves it set aside.
+    await ask(owner, [approval("call_dismissed", confirm)]);
+    expect(await items(owner)).toHaveLength(0);
+    await ask(owner, [{ id: "call_dismissed", elicitation: { ...form, round: 2 } }]);
+    const [item] = await items(owner);
+    expect(item).toMatchObject({
+      sourceKey: "call_dismissed",
+      title: "Which room should I book?",
+      body: "Send message",
+      serverQuestion: { server: "Calendar", kind: "form", round: 2 },
+    });
   });
 
   test("an ordinary approval is unchanged", async () => {
@@ -271,13 +275,10 @@ describe("1101 MCP server questions in the inbox and phone alerts", () => {
     const owner = await person("plain");
     await ask(owner, [approval("call_plain")]);
     const [item] = await items(owner);
-    expect(item).toMatchObject({
-      title: "send_message",
-      body: "Send message",
-      serverQuestion: null,
-    });
+    // As 1067 projects it: the call's title, under its server.
+    expect(item).toMatchObject({ title: "Send message", body: "Messages", serverQuestion: null });
     const [push] = await pushes(owner);
-    expect(push!.payload).toMatchObject({ body: "Approve send_message?" });
+    expect(push!.payload).toMatchObject({ body: "Needs your approval: Send message (Messages)" });
     expect(push!.payload).not.toHaveProperty("serverQuestionKind");
   });
 
@@ -289,12 +290,12 @@ describe("1101 MCP server questions in the inbox and phone alerts", () => {
       { type: "user.approvalDecision", payload: { approvalId: "call_again", decision: "approve" } },
     ]);
     expect(await items(owner)).toHaveLength(0);
-    await ask(owner, [approval("call_again", form)]);
+    await ask(owner, [approval("call_again", { ...form, round: 2 })]);
     const [item] = await items(owner);
     expect(item).toMatchObject({
       sourceKey: "call_again",
       title: "Which room should I book?",
-      serverQuestion: { server: "Calendar", kind: "form" },
+      serverQuestion: { server: "Calendar", kind: "form", round: 2 },
       unread: true,
     });
   });

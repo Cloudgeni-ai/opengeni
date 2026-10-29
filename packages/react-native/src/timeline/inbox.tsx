@@ -2,7 +2,6 @@
 // approvals, goals paused on them) and what they chose to tell them. The same
 // rules as the web Inbox page: rows are messages, approvals decide in place, a
 // single short choice answers in one tap, everything else opens its session.
-import { mcpElicitationUrlHost } from "@opengeni/contracts/mcp-elicitation";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -562,16 +561,18 @@ export function NativeInboxList({
       await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
         approvalId: item.sourceKey,
         decision,
+        // An MCP server's confirmation is answered for the question shown.
+        ...(decision === "approve" && item.serverQuestion
+          ? { elicitationRound: item.serverQuestion.round }
+          : {}),
       });
       leave(item);
       onNotice?.(
         decision === "reject"
           ? t("native.timeline.inbox.denied")
-          : item.serverQuestion?.kind === "url"
-            ? t("native.timeline.inbox.continued")
-            : item.serverQuestion
-              ? t("native.timeline.inbox.allowed")
-              : t("native.timeline.inbox.approved"),
+          : item.serverQuestion
+            ? t("native.timeline.inbox.allowed")
+            : t("native.timeline.inbox.approved"),
       );
     });
 
@@ -713,13 +714,7 @@ export function NativeInboxList({
   const actions = (item: InboxItem) => {
     const pending = busy[item.id];
     if (item.kind === "approval" && item.serverQuestion) {
-      // A plain confirmation is answered here, and a page to open is opened
-      // from here before continuing; fields are filled in the session.
-      const pageHost =
-        item.serverQuestion.kind === "url" && item.serverQuestion.url
-          ? mcpElicitationUrlHost(item.serverQuestion.url)
-          : null;
-      const pageUrl = pageHost ? item.serverQuestion.url : undefined;
+      // A plain confirmation is answered here; fields are filled in the session.
       return (
         <>
           <Button
@@ -743,24 +738,6 @@ export function NativeInboxList({
               disabled={Boolean(pending)}
               onPress={() => decide(item, "approve")}
             />
-          ) : pageHost && pageUrl ? (
-            <>
-              <Button
-                label={t("approvalSurface.openPage", { host: pageHost })}
-                icon="external-link"
-                onPress={() => openLink(pageUrl)}
-              />
-              <Button
-                label={
-                  pending === "approve"
-                    ? t("approvalSurface.continuing")
-                    : t("approvalSurface.continue")
-                }
-                icon="check"
-                disabled={Boolean(pending)}
-                onPress={() => decide(item, "approve")}
-              />
-            </>
           ) : (
             <Button
               label={t("native.timeline.inbox.answer")}

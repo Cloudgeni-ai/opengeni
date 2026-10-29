@@ -7,17 +7,10 @@ import {
   type InboxItem,
   type InboxSettings,
   type InboxTidyPolicy,
-  type McpElicitationContent,
   type SessionHumanInputRequest,
   type SubmitHumanInputResponseRequest,
-  type ToolActionReview,
 } from "@opengeni/sdk";
-import { mcpElicitationUrlHost } from "@opengeni/contracts/mcp-elicitation";
-import {
-  HumanInputForm,
-  McpElicitationRequest,
-  OpenGeniLinkProvider,
-} from "@opengeni/react/session-ui";
+import { HumanInputForm, OpenGeniLinkProvider } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -37,7 +30,7 @@ import {
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -360,7 +353,6 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const [scope, setScope] = useState<"all" | "workspace">("all");
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [answering, setAnswering] = useState<InboxItem | null>(null);
-  const [answeringServer, setAnsweringServer] = useState<InboxItem | null>(null);
   // Unread items keep their dot for this visit; the server learns they were seen.
   const unreadThisVisit = useRef(new Set<string>());
   const now = Date.now();
@@ -421,15 +413,6 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 
   const leave = (item: InboxItem) =>
     inbox.patchItems((current) => current.filter((candidate) => candidate.id !== item.id));
-  // Stable, so an open answer dialog does not reload (and lose its draft) on every poll.
-  const { refresh } = inbox;
-  const answered = useCallback(
-    (item: InboxItem) => {
-      patchItems((current) => current.filter((candidate) => candidate.id !== item.id));
-      void refresh();
-    },
-    [patchItems, refresh],
-  );
 
   const run = async (item: InboxItem, label: string, action: () => Promise<unknown>) => {
     setBusy((current) => ({ ...current, [item.id]: label }));
@@ -448,19 +431,15 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       await context.client.sendApprovalDecision(item.workspaceId, item.sessionId, {
         approvalId: item.sourceKey,
         decision,
+        // An MCP server's confirmation is answered for the question shown.
+        ...(decision === "approve" && item.serverQuestion
+          ? { elicitationRound: item.serverQuestion.round }
+          : {}),
       });
       leave(item);
       toast.success(
-        decision === "reject"
-          ? "Denied"
-          : item.serverQuestion?.kind === "url"
-            ? "Continued"
-            : item.serverQuestion
-              ? "Allowed"
-              : "Approved",
-        {
-          description: item.sessionTitle ?? undefined,
-        },
+        decision === "reject" ? "Denied" : item.serverQuestion ? "Allowed" : "Approved",
+        { description: item.sessionTitle ?? undefined },
       );
     });
 
@@ -546,12 +525,8 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const control = (item: InboxItem): ReactNode => {
     const pending = busy[item.id];
     if (item.kind === "approval" && item.serverQuestion) {
-      // A plain confirmation is answered here, and a page to open is opened
-      // from here before continuing; fields are filled in the dialog.
-      const pageHost =
-        item.serverQuestion.kind === "url" && item.serverQuestion.url
-          ? mcpElicitationUrlHost(item.serverQuestion.url)
-          : null;
+      // A plain confirmation is answered here; a form is answered in the
+      // session, where its approval card shows the fields.
       return (
         <>
           <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "reject")}>
@@ -563,21 +538,8 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
               <CheckIcon />
               {pending === "approve" ? "Allowing…" : "Allow"}
             </RowButton>
-          ) : pageHost && item.serverQuestion.url ? (
-            <>
-              <RowButton asChild>
-                <a href={item.serverQuestion.url} target="_blank" rel="noopener noreferrer">
-                  Open {pageHost}
-                  <ArrowUpRightIcon />
-                </a>
-              </RowButton>
-              <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
-                <CheckIcon />
-                {pending === "approve" ? "Continuing…" : "Continue"}
-              </RowButton>
-            </>
           ) : (
-            <RowButton disabled={Boolean(pending)} onClick={() => setAnsweringServer(item)}>
+            <RowButton disabled={Boolean(pending)} onClick={() => openSession(item)}>
               Answer
             </RowButton>
           )}
@@ -791,11 +753,13 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           </SectionStack>
         </div>
       </div>
-      <AnswerDialog item={answering} onClose={() => setAnswering(null)} onAnswered={answered} />
-      <ServerQuestionDialog
-        item={answeringServer}
-        onClose={() => setAnsweringServer(null)}
-        onAnswered={answered}
+      <AnswerDialog
+        item={answering}
+        onClose={() => setAnswering(null)}
+        onAnswered={(item) => {
+          leave(item);
+          void inbox.refresh();
+        }}
       />
     </ContentPage>
   );
@@ -1111,106 +1075,6 @@ function AnswerDialog({
               decisionButtons
             />
           </OpenGeniLinkProvider>
-        ) : (
-          <div className="grid gap-3 py-2" aria-busy="true">
-            <Skeleton className="h-5 w-3/4" />
-            <Skeleton className="h-9 w-full" />
-            <Skeleton className="h-9 w-full" />
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * Answer an MCP server's question in the middle of a tool call without leaving
- * the inbox: the same form as in the session, sent as the approval's answer.
- */
-function ServerQuestionDialog({
-  item,
-  onClose,
-  onAnswered,
-}: {
-  item: InboxItem | null;
-  onClose: () => void;
-  onAnswered: (item: InboxItem) => void;
-}) {
-  const context = useAppContext();
-  const [review, setReview] = useState<ToolActionReview | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState<"approve" | "reject" | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setReview(null);
-    setLoadError(null);
-    setSubmitError(null);
-    if (!item) return;
-    let current = true;
-    void context.client
-      .getToolActionReview(item.workspaceId, item.sessionId, item.sourceKey)
-      .then((loaded) => {
-        if (!current) return;
-        if (!loaded.question) {
-          setLoadError("This question was already answered or is no longer open.");
-          onAnswered(item);
-          return;
-        }
-        setReview(loaded);
-      })
-      .catch((error: unknown) => {
-        if (current) setLoadError(userErrorText(error, "Couldn't load the question."));
-      });
-    return () => {
-      current = false;
-    };
-  }, [item, context.client, onAnswered]);
-
-  const decide = async (decision: "approve" | "reject", content?: McpElicitationContent) => {
-    if (!item || submitting) return;
-    setSubmitting(decision);
-    setSubmitError(null);
-    try {
-      await context.client.sendApprovalDecision(item.workspaceId, item.sessionId, {
-        approvalId: item.sourceKey,
-        decision,
-        ...(content ? { content } : {}),
-      });
-      onAnswered(item);
-      onClose();
-      toast.success(decision === "approve" ? "Answer sent" : "Declined", {
-        description: item.sessionTitle ?? undefined,
-      });
-    } catch (error) {
-      setSubmitError(userErrorText(error, "Couldn't send your answer. Try again."));
-    } finally {
-      setSubmitting(null);
-    }
-  };
-
-  return (
-    <Dialog open={item !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Answer</DialogTitle>
-          <DialogDescription>{item?.sessionTitle ?? "Untitled session"}</DialogDescription>
-        </DialogHeader>
-        {loadError ? (
-          <Notice tone="failed">{loadError}</Notice>
-        ) : review?.question ? (
-          <div className="grid gap-3">
-            <McpElicitationRequest
-              elicitation={review.question}
-              title={review.title}
-              subtitle={review.accountLabel ?? undefined}
-              submitting={submitting}
-              disabled={false}
-              onAnswer={(content) => void decide("approve", content)}
-              onDecline={() => void decide("reject")}
-            />
-            {submitError ? <Notice tone="failed">{submitError}</Notice> : null}
-          </div>
         ) : (
           <div className="grid gap-3 py-2" aria-busy="true">
             <Skeleton className="h-5 w-3/4" />

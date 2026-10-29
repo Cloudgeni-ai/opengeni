@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MCP_ELICITATION_MAX_ROUNDS,
   McpElicitationApprovalRequest,
   mcpElicitationChoices,
   mcpElicitationDefaults,
   mcpElicitationKind,
   mcpElicitationNeedsInput,
-  mcpElicitationUrlHost,
   resolveMcpElicitationContent,
   type McpElicitationRequestedSchema,
   type McpElicitationValue,
@@ -43,6 +43,7 @@ const details: McpElicitationRequestedSchema = {
 function request(...schemas: McpElicitationRequestedSchema[]): McpElicitationApprovalRequest {
   return McpElicitationApprovalRequest.parse({
     server: "Calendar",
+    round: 1,
     requests: schemas.map((requestedSchema, index) => ({
       id: `q${index + 1}`,
       message: "Question",
@@ -72,6 +73,7 @@ describe("MCP elicitation forms", () => {
   test("the request schema rejects required fields the form does not define", () => {
     const parsed = McpElicitationApprovalRequest.safeParse({
       server: "Calendar",
+      round: 1,
       requests: [
         {
           id: "q1",
@@ -157,65 +159,43 @@ describe("MCP elicitation forms", () => {
   });
 });
 
-describe("MCP elicitation pages to open", () => {
-  const signIn = (url: string) =>
-    McpElicitationApprovalRequest.safeParse({
-      server: "Accounts",
-      requests: [{ id: "signIn", mode: "url", message: "Sign in to continue.", url }],
-    });
-
-  test("only plain https links are offered, shown by their exact host", () => {
-    expect(signIn("https://accounts.example.com/sign-in?next=%2F").success).toBe(true);
-    expect(mcpElicitationUrlHost("https://accounts.example.com/sign-in")).toBe(
-      "accounts.example.com",
+describe("MCP elicitation questions", () => {
+  test("only form questions are offered; URL mode is refused", () => {
+    const parse = (question: Record<string, unknown>) =>
+      McpElicitationApprovalRequest.safeParse({
+        server: "Accounts",
+        round: 1,
+        requests: [question],
+      });
+    expect(parse({ id: "q1", mode: "form", message: "?", requestedSchema: confirm }).success).toBe(
+      true,
     );
-    // The host a link really leads to, never what its text suggests.
-    expect(mcpElicitationUrlHost("https://bank.example@evil.example/")).toBeNull();
-    expect(mcpElicitationUrlHost("https://xn--bnk-sna.example/")).toBe("xn--bnk-sna.example");
-    for (const unsafe of [
-      "http://accounts.example.com/",
-      "javascript:alert(1)",
-      "data:text/html,hi",
-      "https://user:secret@accounts.example.com/",
-      "accounts.example.com",
-    ]) {
-      expect(mcpElicitationUrlHost(unsafe)).toBeNull();
-      expect(signIn(unsafe).success).toBe(false);
-    }
+    expect(
+      parse({
+        id: "signIn",
+        mode: "url",
+        message: "Sign in to continue.",
+        url: "https://accounts.example.com/sign-in",
+      }).success,
+    ).toBe(false);
+    expect(
+      parse({ id: "q1", mode: "url", message: "?", requestedSchema: confirm, url: "https://x" })
+        .success,
+    ).toBe(false);
   });
 
-  test("a page takes no answer beyond the approval", () => {
-    const parsed = signIn("https://accounts.example.com/sign-in");
-    if (!parsed.success) throw parsed.error;
-    expect(resolveMcpElicitationContent(parsed.data, undefined)).toEqual({ ok: true, content: {} });
-    expect(resolveMcpElicitationContent(parsed.data, { signIn: {} })).toEqual({
-      ok: true,
-      content: {},
-    });
-    expect(resolveMcpElicitationContent(parsed.data, { signIn: { code: "1" } })).toEqual({
-      ok: false,
-      problem: "Question signIn has nothing to fill in",
-    });
+  test("a question names its round, from 1 up to the limit", () => {
+    const parse = (round: unknown) =>
+      McpElicitationApprovalRequest.safeParse({ ...request(confirm), round });
+    expect(parse(1).success).toBe(true);
+    expect(parse(MCP_ELICITATION_MAX_ROUNDS).success).toBe(true);
+    expect(parse(0).success).toBe(false);
+    expect(parse(MCP_ELICITATION_MAX_ROUNDS + 1).success).toBe(false);
+    expect(parse(undefined).success).toBe(false);
   });
 
   test("the kind of question says how the person answers it", () => {
     expect(mcpElicitationKind(request(confirm))).toBe("confirm");
     expect(mcpElicitationKind(request(confirm, details))).toBe("form");
-    const page = signIn("https://accounts.example.com/sign-in");
-    if (!page.success) throw page.error;
-    expect(mcpElicitationKind(page.data)).toBe("url");
-    expect(
-      mcpElicitationKind({
-        server: "Accounts",
-        requests: [...request(confirm).requests, ...page.data.requests],
-      }),
-    ).toBe("url");
-    // Fields outrank a page: the form's card shows both.
-    expect(
-      mcpElicitationKind({
-        server: "Accounts",
-        requests: [...request(details).requests, ...page.data.requests],
-      }),
-    ).toBe("form");
   });
 });

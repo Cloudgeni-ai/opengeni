@@ -624,6 +624,7 @@ test("an approval whose MCP server asks a question needs the answer, or says why
     id: "crm-call",
     elicitation: {
       server: "CRM",
+      round: 1,
       requests: [
         {
           id: "room",
@@ -639,21 +640,31 @@ test("an approval whose MCP server asks a question needs the answer, or says why
   });
   const { app, bus, signals } = appFor(f);
 
-  const unanswered = await send(app, f, null);
+  const withAnswer = (extra: Record<string, unknown>) =>
+    ({ ...f.event, payload: { ...f.event.payload, ...extra } }) as ClientSessionEvent;
+
+  // An approval that does not name the question it answers is refused.
+  const unnamed = await send(app, f, null, withAnswer({ content: { room: { name: "Small" } } }));
+  expect(unnamed.status).toBe(422);
+  expect(await unnamed.text()).toContain("answer it with elicitationRound 1");
+  const stale = await send(app, f, null, withAnswer({ elicitationRound: 2 }));
+  expect(stale.status).toBe(422);
+  expect(await stale.text()).toContain("has asked a newer question");
+  const unanswered = await send(app, f, null, withAnswer({ elicitationRound: 1 }));
   expect(unanswered.status).toBe(422);
   expect(await unanswered.text()).toContain("Room is required");
   expect(await responseEvents(f)).toHaveLength(0);
   expect(bus.published).toHaveLength(0);
   expect(signals).toHaveLength(0);
 
-  const answer: ClientSessionEvent = {
-    ...f.event,
-    payload: { ...f.event.payload, content: { room: { name: "Small" } } },
-  } as ClientSessionEvent;
+  const answer = withAnswer({ content: { room: { name: "Small" } }, elicitationRound: 1 });
   expect((await send(app, f, null, answer)).status).toBe(202);
   const [recorded] = (await responseEvents(f)) as unknown as Array<{
-    payload: { content?: unknown };
+    payload: { content?: unknown; elicitationRound?: unknown };
   }>;
-  expect(recorded?.payload.content).toEqual({ room: { name: "Small" } });
+  expect(recorded?.payload).toMatchObject({
+    content: { room: { name: "Small" } },
+    elicitationRound: 1,
+  });
   expect(signals).toHaveLength(1);
 });

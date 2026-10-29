@@ -798,6 +798,7 @@ describe("native MCP server question", () => {
       arguments: { doc: "plan" },
       elicitation: {
         server: "Docs",
+        round: 2,
         requests: [
           {
             id: "q1",
@@ -823,8 +824,11 @@ describe("native MCP server question", () => {
     expect(text).toContain("Share the plan with the whole team?");
     expect(buttonLabels()).toEqual(expect.arrayContaining(["Decline", "Allow"]));
     await act(async () => buttonNamed("Allow")!.click());
-    // The same empty answer the web card sends for a plain confirmation.
-    expect(decided).toEqual([["call-share", "approve", { q1: {} }]]);
+    // The same empty answer the web card sends for a plain confirmation,
+    // naming the question it answers.
+    expect(decided).toEqual([
+      ["call-share", "approve", { content: { q1: {} }, elicitationRound: 2 }],
+    ]);
   });
 
   test("a form is filled in place, checked like the server checks it, then sent", async () => {
@@ -866,7 +870,11 @@ describe("native MCP server question", () => {
     await act(async () => typeInto(copies, "3"));
     await act(async () => buttonNamed("Send answer")!.click());
     expect(decided).toEqual([
-      ["call-share", "approve", { q1: { folder: "planning", copies: 3, notify: true } }],
+      [
+        "call-share",
+        "approve",
+        { content: { q1: { folder: "planning", copies: 3, notify: true } }, elicitationRound: 2 },
+      ],
     ]);
   });
 

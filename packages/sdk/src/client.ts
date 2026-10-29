@@ -3209,6 +3209,8 @@ export class OpenGeniClient {
       message?: string;
       /** Answers to the approval's `elicitation` forms; only with `approve`. */
       content?: McpElicitationContent;
+      /** The `elicitation.round` this answers; required to approve one. */
+      elicitationRound?: number;
       clientEventId?: string;
     },
   ): Promise<SessionEvent> {

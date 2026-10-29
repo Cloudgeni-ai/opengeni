@@ -22,7 +22,10 @@ import {
 import { DecisionActions } from "./decision-card";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { McpElicitationRequest } from "./mcp-elicitation-request";
-import type { McpElicitationContent } from "@opengeni/contracts/mcp-elicitation";
+import type {
+  McpElicitationAnswer,
+  McpElicitationContent,
+} from "@opengeni/contracts/mcp-elicitation";
 
 export type ApprovalSurfaceMessages = {
   title: string;
@@ -50,12 +53,9 @@ export type ApprovalSurfaceProps = {
   approvals: PendingApproval[];
   /**
    * `answer` is present when the approval answers its MCP server's questions
-   * (`approval.elicitation`); send its `content` with the decision.
+   * (`approval.elicitation`); send it with the decision.
    */
-  onApprove: (
-    approval: PendingApproval,
-    answer?: { content: McpElicitationContent },
-  ) => void | Promise<void>;
+  onApprove: (approval: PendingApproval, answer?: McpElicitationAnswer) => void | Promise<void>;
   onReject: (approval: PendingApproval) => void | Promise<void>;
   responding?: boolean | undefined;
   error?: string | Error | null | undefined;
@@ -119,7 +119,7 @@ export function ApprovalSurface({
   const decide = async (
     approval: PendingApproval,
     decision: "approve" | "reject",
-    answer?: { content: McpElicitationContent },
+    answer?: McpElicitationAnswer,
   ) => {
     if (responding || pendingRef.current) return;
     pendingRef.current = approval.id;
@@ -198,7 +198,14 @@ export function ApprovalSurface({
             submitting={pending?.id === approval.id ? pending.decision : null}
             disabled={Boolean(responding || pending)}
             onApprove={() => void decide(approval, "approve")}
-            onAnswer={(content) => void decide(approval, "approve", { content })}
+            onAnswer={(content) =>
+              approval.elicitation
+                ? void decide(approval, "approve", {
+                    content,
+                    elicitationRound: approval.elicitation.round,
+                  })
+                : undefined
+            }
             onReject={() => void decide(approval, "reject")}
           />
         ))}
@@ -434,7 +441,7 @@ function ApprovalRequest({
         {custom}
         <McpElicitationRequest
           // A new question on the same call starts a fresh answer.
-          key={JSON.stringify(stableApproval.elicitation)}
+          key={`${stableApproval.elicitation.round}:${JSON.stringify(stableApproval.elicitation)}`}
           elicitation={stableApproval.elicitation}
           title={fallback.title}
           subtitle={fallback.accountLabel}

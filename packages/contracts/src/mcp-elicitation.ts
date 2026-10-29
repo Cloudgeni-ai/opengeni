@@ -2,11 +2,11 @@ import { z } from "zod";
 import { defineSchema } from "./define-schema";
 
 /**
- * MCP elicitation (protocol revision 2026-07-28): an MCP server asks the
- * person a question in the middle of a tool call, either a form to fill in or
- * a web page to open. Opengeni shows the question as an approval of that call;
- * these are its public shapes, the question on a `session.requiresAction`
- * approval entry and the answer in `user.approvalDecision`.
+ * MCP form elicitation (protocol revision 2026-07-28): an MCP server asks the
+ * person to fill in a form, or just confirm, in the middle of a tool call.
+ * Opengeni shows the question as an approval of that call; these are its
+ * public shapes, the question on a `session.requiresAction` approval entry and
+ * the answer in `user.approvalDecision`. URL-mode questions are not offered.
  *
  * This module must not import `./index`.
  */
@@ -95,28 +95,11 @@ export const McpElicitationRequestedSchema = /* @__PURE__ */ defineSchema(() =>
 );
 export type McpElicitationRequestedSchema = z.infer<typeof McpElicitationRequestedSchema>;
 
-/**
- * The host a person is sent to by a URL question, or null when the link is
- * not one Opengeni offers: only `https` links without embedded credentials.
- * Surfaces show this host next to the link so the person sees exactly where
- * it leads.
- */
-export function mcpElicitationUrlHost(url: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
-  return parsed.hostname || null;
-}
-
 const QuestionId = z.string().min(1).max(256);
 const QuestionMessage = z.string().max(16_384);
 
 /** A form to fill in (or, with no fields, a plain confirmation). */
-export const McpElicitationFormQuestion = /* @__PURE__ */ defineSchema(() =>
+export const McpElicitationQuestion = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: QuestionId,
     mode: z.literal("form").optional(),
@@ -124,49 +107,23 @@ export const McpElicitationFormQuestion = /* @__PURE__ */ defineSchema(() =>
     requestedSchema: McpElicitationRequestedSchema,
   }),
 );
-export type McpElicitationFormQuestion = z.infer<typeof McpElicitationFormQuestion>;
-
-/**
- * A web page the server wants the person to open, for example to sign in or
- * pay. Nothing is entered in Opengeni and the page's contents never pass
- * through it; continuing tells the server the person agreed to go there.
- */
-export const McpElicitationUrlQuestion = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    id: QuestionId,
-    mode: z.literal("url"),
-    message: QuestionMessage,
-    url: z
-      .string()
-      .max(8_192)
-      .refine((url) => mcpElicitationUrlHost(url) !== null, {
-        message: "Only https links without credentials can be opened",
-      }),
-  }),
-);
-export type McpElicitationUrlQuestion = z.infer<typeof McpElicitationUrlQuestion>;
-
-/** One of a server's questions: a form, or a web page to open. */
-export const McpElicitationQuestion = /* @__PURE__ */ defineSchema(() =>
-  z.union([McpElicitationUrlQuestion, McpElicitationFormQuestion]),
-);
 export type McpElicitationQuestion = z.infer<typeof McpElicitationQuestion>;
 
-export function isMcpElicitationUrlQuestion(
-  question: McpElicitationQuestion,
-): question is McpElicitationUrlQuestion {
-  return question.mode === "url";
-}
+/** How many times one tool call's server may ask before the call stops. */
+export const MCP_ELICITATION_MAX_ROUNDS = 10;
 
 /**
  * `elicitation` on a `session.requiresAction` approval entry: the server is
  * asking the person these questions before the call can finish. `requests`
- * keeps the server's order; `id` is the key the answer uses. A question with
- * `mode: "url"` asks the person to open a web page; any other is a form.
+ * keeps the server's order; `id` is the key the answer uses. `round` counts
+ * the questions this call has asked (1 for the first); a server can ask again
+ * after an answer, under the same approval id, so an approval names the round
+ * it answers.
  */
 export const McpElicitationApprovalRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     server: z.string().min(1).max(256),
+    round: z.number().int().min(1).max(MCP_ELICITATION_MAX_ROUNDS),
     requests: z.array(McpElicitationQuestion).min(1).max(20),
   }),
 );
@@ -174,20 +131,16 @@ export type McpElicitationApprovalRequest = z.infer<typeof McpElicitationApprova
 
 /**
  * How a person answers a server's questions: `confirm` is a yes or no with
- * nothing to fill in, `url` asks them to open a web page first, and `form` has
- * fields to fill in (its card also shows any page to open). Only a
- * confirmation can be answered in one tap.
+ * nothing to fill in, and `form` has fields to fill in.
  */
-export type McpElicitationKind = "confirm" | "form" | "url";
+export type McpElicitationKind = "confirm" | "form";
 
 export function mcpElicitationKind(request: McpElicitationApprovalRequest): McpElicitationKind {
-  const hasFields = request.requests.some(
-    (question) =>
-      !isMcpElicitationUrlQuestion(question) &&
-      Object.keys(question.requestedSchema.properties).length > 0,
-  );
-  if (hasFields) return "form";
-  return request.requests.some(isMcpElicitationUrlQuestion) ? "url" : "confirm";
+  return request.requests.some(
+    (question) => Object.keys(question.requestedSchema.properties).length > 0,
+  )
+    ? "form"
+    : "confirm";
 }
 
 export const McpElicitationValue = /* @__PURE__ */ defineSchema(() =>
@@ -195,14 +148,20 @@ export const McpElicitationValue = /* @__PURE__ */ defineSchema(() =>
 );
 export type McpElicitationValue = z.infer<typeof McpElicitationValue>;
 
-/**
- * The answers in `user.approvalDecision.content`: field values keyed by
- * request id. A URL question has nothing to fill in and no entry.
- */
+/** The answers in `user.approvalDecision.content`: field values keyed by request id. */
 export const McpElicitationContent = /* @__PURE__ */ defineSchema(() =>
   z.record(z.string().min(1).max(256), z.record(z.string().min(1).max(256), McpElicitationValue)),
 );
 export type McpElicitationContent = z.infer<typeof McpElicitationContent>;
+
+/**
+ * What approving an approval with `elicitation` sends with the decision: the
+ * answers and the round they answer.
+ */
+export type McpElicitationAnswer = {
+  content: McpElicitationContent;
+  elicitationRound: number;
+};
 
 /** The server's own defaults for one form, as the starting answer. */
 export function mcpElicitationDefaults(
@@ -335,7 +294,6 @@ export type McpElicitationContentResolution =
  * The complete answer to a server's questions: each form's defaults overlaid
  * with what the person entered, checked against the form. A plain approval
  * (no `content`) is a valid answer when every required field has a default.
- * URL questions take no answer beyond the approval itself.
  */
 export function resolveMcpElicitationContent(
   request: McpElicitationApprovalRequest,
@@ -347,12 +305,6 @@ export function resolveMcpElicitationContent(
   }
   const resolved: McpElicitationContent = {};
   for (const entry of request.requests) {
-    if (isMcpElicitationUrlQuestion(entry)) {
-      if (Object.keys(content?.[entry.id] ?? {}).length > 0) {
-        return { ok: false, problem: `Question ${entry.id} has nothing to fill in` };
-      }
-      continue;
-    }
     const schema = entry.requestedSchema;
     const given = content?.[entry.id] ?? {};
     for (const name of Object.keys(given)) {

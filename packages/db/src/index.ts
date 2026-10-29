@@ -89801,7 +89801,11 @@ export class SessionApprovalAnswerError extends Error {
  * The decision payload to record for one pending approval. An approval with
  * MCP server questions records the complete answer (the forms' defaults plus
  * what the person entered), checked against each form; a rejection carries no
- * answer. `content` for an approval without questions is refused.
+ * answer. Approving must name the question's round: the server can ask again
+ * under the same approval id, so an approval sent for an earlier question, or
+ * from a surface that never showed this one, must not answer it. A rejection
+ * needs no round; declining is always safe to deliver. `content` or a round
+ * for an approval without questions is refused.
  */
 function approvalDecisionPayloadWithAnswer(
   pending: unknown,
@@ -89811,22 +89815,29 @@ function approvalDecisionPayloadWithAnswer(
     pending && typeof pending === "object"
       ? (pending as { elicitation?: unknown }).elicitation
       : undefined;
-  const { content, ...withoutContent } = payload;
+  const { content, elicitationRound, ...withoutAnswer } = payload;
   if (elicitation === undefined) {
-    if (content !== undefined) {
+    if (content !== undefined || elicitationRound !== undefined) {
       throw new SessionApprovalAnswerError("This approval has no questions to answer");
     }
     return payload;
   }
-  if (payload.decision !== "approve") return withoutContent;
   const request = McpElicitationApprovalRequest.parse(elicitation);
+  if (payload.decision !== "approve") return withoutAnswer;
+  if (elicitationRound !== request.round) {
+    throw new SessionApprovalAnswerError(
+      elicitationRound === undefined
+        ? `${request.server} asked a question about this call; answer it with elicitationRound ${request.round}`
+        : `${request.server} has asked a newer question about this call; answer that one`,
+    );
+  }
   const given = content === undefined ? undefined : McpElicitationContent.safeParse(content);
   if (given && !given.success) {
     throw new SessionApprovalAnswerError("The answer is not a set of form values");
   }
   const resolution = resolveMcpElicitationContent(request, given?.data);
   if (!resolution.ok) throw new SessionApprovalAnswerError(resolution.problem);
-  return { ...withoutContent, content: resolution.content };
+  return { ...withoutAnswer, elicitationRound: request.round, content: resolution.content };
 }
 
 /**
@@ -90185,7 +90196,7 @@ async function scheduledHumanWaitTargetInRlsContext(
   workspaceId: string,
   turn: { id: string; sessionId: string; executionGeneration: number },
 ): Promise<
-  | { kind: "approval"; approvalId: string }
+  | { kind: "approval"; approvalId: string; elicitationRound?: number }
   | { kind: "input"; requestId: string; denyQuestionIds: string[] | null }
   | null
 > {
@@ -90207,10 +90218,25 @@ async function scheduledHumanWaitTargetInRlsContext(
   const pendingApprovals = runState
     ? fromPostgresLosslessJson(runState.pendingApprovals, runState.pendingApprovalsCodecVersion)
     : [];
-  const approvalId = (Array.isArray(pendingApprovals) ? pendingApprovals : [])
-    .map((pending) => approvalIdentifier(pending))
-    .find((id): id is string => typeof id === "string" && id.length > 0);
-  if (approvalId) return { kind: "approval", approvalId };
+  const pendingApproval = (Array.isArray(pendingApprovals) ? pendingApprovals : []).find(
+    (pending) => {
+      const id = approvalIdentifier(pending);
+      return typeof id === "string" && id.length > 0;
+    },
+  );
+  const approvalId = pendingApproval ? approvalIdentifier(pendingApproval) : undefined;
+  if (typeof approvalId === "string") {
+    // An MCP server can ask again under the same approval id after a
+    // timeout's decline; each of its questions times out on its own.
+    const question = McpElicitationApprovalRequest.safeParse(
+      (pendingApproval as { elicitation?: unknown }).elicitation,
+    );
+    return {
+      kind: "approval",
+      approvalId,
+      ...(question.success ? { elicitationRound: question.data.round } : {}),
+    };
+  }
   const requests = await scopedDb
     .select({
       id: schema.sessionHumanInputRequests.id,
@@ -90334,6 +90360,10 @@ export async function expireScheduledRunHumanWait(
     .update(
       `${turn.id}\0${turn.executionGeneration}\0${target.kind}\0${
         target.kind === "approval" ? target.approvalId : target.requestId
+      }${
+        target.kind === "approval" && target.elicitationRound !== undefined
+          ? `\0${target.elicitationRound}`
+          : ""
       }`,
       "utf8",
     )

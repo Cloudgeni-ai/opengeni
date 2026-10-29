@@ -6,7 +6,7 @@
 // "Let the agent decide" instead hands a question to this chat's own agent,
 // which answers it for the sub-session.
 import type {
-  McpElicitationContent,
+  McpElicitationAnswer,
   OpenGeniClient,
   SessionEvent,
   SessionHumanInputRequest,
@@ -264,13 +264,13 @@ function DescendantRequestItem({
   const decide = async (
     approval: PendingApproval,
     decision: "approve" | "reject",
-    answer?: { content: McpElicitationContent },
+    answer?: McpElicitationAnswer,
   ) => {
     try {
       await client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId: approval.id,
         decision,
-        ...(answer ? { content: answer.content } : {}),
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", { description: userErrorText(error) });

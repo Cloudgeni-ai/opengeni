@@ -320,7 +320,7 @@ import { isPersonalMachine, moveChatToMachine } from "../lib/move-chat-to-machin
 import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
-  McpElicitationContent,
+  McpElicitationAnswer,
   LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
@@ -1570,13 +1570,13 @@ export function SessionRoute({
   async function approve(
     approvalId: string,
     decision: "approve" | "reject",
-    answer?: { content: McpElicitationContent },
+    answer?: McpElicitationAnswer,
   ) {
     try {
       await context.client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId,
         decision,
-        ...(answer ? { content: answer.content } : {}),
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
@@ -2106,7 +2106,7 @@ function SessionChatPane(props: {
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
-  onApprove: (approvalId: string, answer?: { content: McpElicitationContent }) => Promise<void>;
+  onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
@@ -2407,11 +2407,7 @@ function SessionChatPane(props: {
     }
   }, [props.session.status]);
   const decideApproval = useCallback(
-    async (
-      approvalId: string,
-      decision: "approve" | "reject",
-      answer?: { content: McpElicitationContent },
-    ) => {
+    async (approvalId: string, decision: "approve" | "reject", answer?: McpElicitationAnswer) => {
       if (approvalPending[approvalId] || approvalSettled[approvalId]) {
         return;
       }

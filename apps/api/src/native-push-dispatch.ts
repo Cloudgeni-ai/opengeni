@@ -173,7 +173,8 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
 /**
  * The notification category the app registers actions for: an approval can be
  * approved (behind device unlock) or denied, a question answered inline. An
- * MCP server's question with fields to fill in or a page to open opens the app.
+ * MCP server's question opens the app: an approval must name the question it
+ * answers, which a lock-screen action cannot do.
  */
 export function nativePushCategory(
   payload: NativePushPayload,

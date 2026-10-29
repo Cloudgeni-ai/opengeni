@@ -37,6 +37,7 @@ function pending(elicitation: unknown): PendingApproval[] {
 
 const details = {
   server: "Calendar",
+  round: 1,
   requests: [
     {
       id: "details",
@@ -53,7 +54,13 @@ const details = {
             ],
             default: "small",
           },
-          attendees: { type: "integer", title: "People", minimum: 1, maximum: 20 },
+          attendees: {
+            type: "integer",
+            title: "People",
+            description: "Including you.",
+            minimum: 1,
+            maximum: 20,
+          },
           note: { type: "string", title: "Note", maxLength: 200 },
         },
         required: ["room", "attendees"],
@@ -94,15 +101,14 @@ async function submit() {
   });
 }
 
-function render(
-  approvals: PendingApproval[],
-  decisions: Array<{ decision: string; content?: unknown }>,
-) {
+type Decision = { decision: string; content?: unknown; elicitationRound?: number };
+
+function render(approvals: PendingApproval[], decisions: Decision[]) {
   return renderComponent(
     createElement(ApprovalSurface, {
       approvals,
       onApprove: (_approval, answer) => {
-        decisions.push({ decision: "approve", ...(answer ? { content: answer.content } : {}) });
+        decisions.push({ decision: "approve", ...answer });
       },
       onReject: () => {
         decisions.push({ decision: "reject" });
@@ -113,14 +119,18 @@ function render(
 
 test("the projection keeps a valid question and drops a malformed one", () => {
   expect(pending(details)[0]?.elicitation).toEqual(details as never);
-  expect(pending({ server: "Calendar", requests: [] })[0]?.elicitation).toBeUndefined();
+  expect(pending({ ...details, requests: [] })[0]?.elicitation).toBeUndefined();
+  // Every question names its round; one without is not offered.
+  const { round: _round, ...withoutRound } = details;
+  expect(pending(withoutRound)[0]?.elicitation).toBeUndefined();
 });
 
 test("a confirmation shows the server's question with Allow and Decline", async () => {
-  const decisions: Array<{ decision: string; content?: unknown }> = [];
+  const decisions: Decision[] = [];
   mounted = await render(
     pending({
       server: "Chat",
+      round: 3,
       requests: [
         {
           id: "confirm",
@@ -141,11 +151,14 @@ test("a confirmation shows the server's question with Allow and Decline", async 
   expect(labels).toContain("Decline");
   expect(labels).toContain("Details");
   await submit();
-  expect(decisions).toEqual([{ decision: "approve", content: { confirm: {} } }]);
+  // The answer names the question it answers.
+  expect(decisions).toEqual([
+    { decision: "approve", content: { confirm: {} }, elicitationRound: 3 },
+  ]);
 });
 
 test("a form is prefilled with the server's defaults and sends what the person entered", async () => {
-  const decisions: Array<{ decision: string; content?: unknown }> = [];
+  const decisions: Decision[] = [];
   mounted = await render(pending(details), decisions);
   await act(async () => undefined);
   expect(button("Send answer")).toBeTruthy();
@@ -154,6 +167,17 @@ test("a form is prefilled with the server's defaults and sends what the person e
   const text = mounted.container.textContent ?? "";
   expect(text).toContain("Who should come, and where?");
   expect(text).toContain("Optional");
+  // The question labels its fields; each field has a label and its help.
+  const form = mounted.container.querySelector("form")!;
+  expect(form.querySelector("fieldset > legend")?.textContent).toBe("Who should come, and where?");
+  const people = form.querySelector<HTMLInputElement>('input[type="number"]')!;
+  expect(people.required).toBe(true);
+  expect(form.querySelector(`label[for="${people.id}"]`)?.textContent).toContain("People");
+  expect(
+    mounted.container.querySelector(`#${CSS.escape(people.getAttribute("aria-describedby")!)}`)
+      ?.textContent,
+  ).toBe("Including you.");
+  expect(form.querySelector('[role="radiogroup"], fieldset fieldset > legend')).toBeTruthy();
 
   // People is required: the form does not send without it.
   await submit();
@@ -165,59 +189,35 @@ test("a form is prefilled with the server's defaults and sends what the person e
   });
   await submit();
   expect(decisions).toEqual([
-    { decision: "approve", content: { details: { room: "large", attendees: 3 } } },
+    {
+      decision: "approve",
+      content: { details: { room: "large", attendees: 3 } },
+      elicitationRound: 1,
+    },
   ]);
 });
 
 test("Decline rejects without an answer", async () => {
-  const decisions: Array<{ decision: string; content?: unknown }> = [];
+  const decisions: Decision[] = [];
   mounted = await render(pending(details), decisions);
   await act(async () => undefined);
   await act(async () => button("Decline").click());
   expect(decisions).toEqual([{ decision: "reject" }]);
 });
 
-const signIn = {
-  server: "Accounts",
-  requests: [
-    {
-      id: "sign-in",
-      mode: "url",
-      message: "Sign in to your work account to continue.",
-      url: "https://accounts.example.com/sign-in?account=work",
-    },
-  ],
-};
-
-test("a page to open names its host, opens only in a new tab, and Continue sends no answer", async () => {
-  const decisions: Array<{ decision: string; content?: unknown }> = [];
-  mounted = await render(pending(signIn), decisions);
-  await act(async () => undefined);
-  const text = mounted.container.textContent ?? "";
-  expect(text).toContain("Accounts asks");
-  expect(text).toContain("Sign in to your work account to continue.");
-  const link = mounted.container.querySelector<HTMLAnchorElement>(
-    "[data-og-mcp-elicitation-page] a",
-  )!;
-  expect(link.textContent).toBe("Open accounts.example.com");
-  expect(link.getAttribute("href")).toBe("https://accounts.example.com/sign-in?account=work");
-  expect(link.getAttribute("target")).toBe("_blank");
-  expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-  const labels = buttons().map((candidate) => candidate.textContent);
-  expect(labels).toContain("Continue");
-  expect(labels).not.toContain("Allow");
-  await submit();
-  expect(decisions).toEqual([{ decision: "approve", content: {} }]);
-});
-
-test("a page that is not a plain https link is never offered", () => {
-  for (const url of [
-    "http://accounts.example.com",
-    "https://user:pw@accounts.example.com",
-    "javascript:alert(1)",
-  ]) {
-    expect(
-      pending({ ...signIn, requests: [{ ...signIn.requests[0], url }] })[0]?.elicitation,
-    ).toBeUndefined();
-  }
+test("a page to open (URL mode) is never offered: only forms are", () => {
+  expect(
+    pending({
+      server: "Accounts",
+      round: 1,
+      requests: [
+        {
+          id: "sign-in",
+          mode: "url",
+          message: "Sign in to your work account to continue.",
+          url: "https://accounts.example.com/sign-in?account=work",
+        },
+      ],
+    })[0]?.elicitation,
+  ).toBeUndefined();
 });

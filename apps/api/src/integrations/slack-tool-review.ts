@@ -1,30 +1,22 @@
 import {
-  isMcpElicitationUrlQuestion,
   mcpElicitationKind,
-  mcpElicitationUrlHost,
   type McpElicitationApprovalRequest,
   type McpElicitationKind,
   type ToolActionReview,
 } from "@opengeni/contracts";
 import type { SlackMessageBlock } from "./slack-bot";
 
-/** Action ids of a server question's "Open <host>" link buttons, numbered per page. */
-const SERVER_QUESTION_PAGE_ACTION = "opengeni.approval.open_page";
-
 /**
  * An MCP server's question, as plain text from the approval event itself so a
- * replayed post has the same bytes. Slack answers a plain confirmation, and a
- * page to open (a link button naming its host, then Continue), when it is
- * short enough to show whole. Anything to fill in is answered in the session,
- * because a Slack form needs a modal opened within three seconds of the click
- * and decisions here go through the durable action queue.
+ * replayed post has the same bytes. Slack answers a plain confirmation when it
+ * is short enough to show whole. Anything to fill in is answered in the
+ * session, because a Slack form needs a modal opened within three seconds of
+ * the click and decisions here go through the durable action queue.
  */
 export function slackServerQuestion(question: McpElicitationApprovalRequest): {
   block: SlackMessageBlock;
   kind: McpElicitationKind;
   answerableInSlack: boolean;
-  /** Link buttons for the pages a `url` question asks the person to open. */
-  pageButtons: Array<Extract<SlackMessageBlock, { type: "actions" }>["elements"][number]>;
 } {
   const text = [
     `${question.server} asks:`,
@@ -32,50 +24,14 @@ export function slackServerQuestion(question: McpElicitationApprovalRequest): {
   ].join("\n");
   const fits = text.length <= 2800;
   const kind = mcpElicitationKind(question);
-  const pageButtons =
-    kind === "url"
-      ? question.requests.filter(isMcpElicitationUrlQuestion).flatMap((request, index) => {
-          const host = mcpElicitationUrlHost(request.url);
-          return host && request.url.length <= 3000
-            ? [
-                {
-                  type: "button" as const,
-                  action_id: `${SERVER_QUESTION_PAGE_ACTION}.${index}`,
-                  url: request.url,
-                  text: { type: "plain_text" as const, text: `Open ${host}`.slice(0, 75) },
-                },
-              ]
-            : [];
-        })
-      : [];
   return {
     block: {
       type: "section",
       text: { type: "plain_text", text: fits ? text : `${text.slice(0, 2799)}…` },
     },
     kind,
-    answerableInSlack:
-      fits &&
-      (kind === "confirm" ||
-        (kind === "url" &&
-          pageButtons.length === question.requests.filter(isMcpElicitationUrlQuestion).length)),
-    pageButtons,
+    answerableInSlack: fits && kind === "confirm",
   };
-}
-
-/**
- * A click on a server question's page link: Slack opens the page in the
- * browser and still reports the click, which is acknowledged and never queued.
- */
-export function isSlackServerQuestionPageAction(payload: unknown): boolean {
-  if (typeof payload !== "object" || payload === null) return false;
-  const { type, actions } = payload as { type?: unknown; actions?: unknown };
-  if (type !== "block_actions" || !Array.isArray(actions) || actions.length !== 1) return false;
-  const action = actions[0] as { action_id?: unknown } | null;
-  return (
-    typeof action?.action_id === "string" &&
-    /^opengeni\.approval\.open_page\.\d{1,2}$/u.test(action.action_id)
-  );
 }
 
 /** Shared review facts, projected only into a proven private bot conversation. */

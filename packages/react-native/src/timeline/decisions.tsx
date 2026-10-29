@@ -5,10 +5,7 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import type { PendingApproval } from "@opengeni/react/session";
-import {
-  mcpElicitationKind,
-  type McpElicitationContent,
-} from "@opengeni/contracts/mcp-elicitation";
+import { mcpElicitationKind, type McpElicitationAnswer } from "@opengeni/contracts/mcp-elicitation";
 import {
   approvalAnswerLabels,
   approvalArgumentsText,
@@ -856,13 +853,14 @@ export const defaultApprovalStripMessages = (t: OpenGeniText): ApprovalStripMess
 export interface ApprovalStripProps {
   approvals: PendingApproval[];
   /**
-   * `content` is present when an approval answers its MCP server's questions
-   * (`approval.elicitation`); send it with the decision.
+   * `answer` is present when approving answers its MCP server's question
+   * (`approval.elicitation`): the answers and the round they answer. Send
+   * both with the decision.
    */
   onDecide: (
     approvalId: string,
     decision: "approve" | "reject",
-    content?: McpElicitationContent,
+    answer?: McpElicitationAnswer,
   ) => void | Promise<void>;
   messages?: Partial<ApprovalStripMessages> | undefined;
 }
@@ -918,12 +916,12 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
   const decide = async (
     id: string,
     decision: "approve" | "reject",
-    content?: McpElicitationContent,
+    answer?: McpElicitationAnswer,
     key = id,
   ) => {
     setPending((current) => ({ ...current, [key]: decision }));
     try {
-      await (content ? onDecide(id, decision, content) : onDecide(id, decision));
+      await (answer ? onDecide(id, decision, answer) : onDecide(id, decision));
       setSettled((current) => ({ ...current, [key]: decision }));
     } finally {
       setPending((current) => {
@@ -995,7 +993,12 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
           const resolved = mcpQuestionAnswer(answering.elicitation, answering.draft);
           if (!resolved.ok) return answering.update(answering.draft, resolved.problem);
           answering.update(answering.draft);
-          void decide(approval.id, "approve", resolved.content, key);
+          void decide(
+            approval.id,
+            "approve",
+            { content: resolved.content, elicitationRound: answering.elicitation.round },
+            key,
+          );
         };
         return (
           <DecisionCard key={approval.id} accessibilityLabel={review.title}>
@@ -1048,7 +1051,10 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                       }
                     />
                     {answering.problem ? (
-                      <Text accessibilityRole="alert" style={{ ...small, color: c["status-failed"] }}>
+                      <Text
+                        accessibilityRole="alert"
+                        style={{ ...small, color: c["status-failed"] }}
+                      >
                         {answering.problem}
                       </Text>
                     ) : null}

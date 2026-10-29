@@ -38,6 +38,7 @@ import type {
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
 export type {
+  McpElicitationAnswer,
   McpElicitationApprovalRequest,
   McpElicitationContent,
   McpElicitationField,
@@ -6839,10 +6840,10 @@ export type InboxItem = {
   choices: InboxItemChoice[];
   /**
    * An approval whose tool's MCP server asks the person a question in the
-   * middle of the call: the title is then the server's question. Only a
-   * `confirm` is answered in one tap; a `url` question asks the person to open
-   * `url` first, and a `form` has fields to fill in (load it with
-   * `getToolActionReview`). Null or absent otherwise.
+   * middle of the call: the title is then the server's question. A `confirm`
+   * is answered with Allow or Deny (send `elicitationRound: round` with the
+   * approval); a `form` is answered in the session, where the approval card
+   * shows its fields. Null or absent otherwise.
    */
   serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
@@ -6875,14 +6876,14 @@ export type InboxItemLink = { url: string; label: string };
 export type InboxItemChoice = { id: string; label: string };
 
 /**
- * The MCP server asking about an approval in the inbox, and how the person
- * answers: in one tap (`confirm`), after opening `url` (`url`), or in a form.
+ * The MCP server asking about an approval in the inbox, how the person
+ * answers (`confirm` has nothing to fill in, `form` has fields) and which of
+ * the call's questions it is: send `round` back as `elicitationRound`.
  */
 export type InboxItemServerQuestion = {
   server: string;
-  kind: "confirm" | "form" | "url";
-  /** The https page a `url` question asks the person to open. */
-  url?: string;
+  kind: "confirm" | "form";
+  round: number;
 };
 
 export type ListInboxResponse = {
@@ -10346,9 +10347,10 @@ export type SessionApprovalRequest = {
   arguments: unknown;
   /**
    * Present when the tool's MCP server stopped mid-call to ask the person
-   * (form elicitation). Approving sends the answers as `content`, keyed by
-   * `requests[].id` and then by field name; omitted fields take the form's
-   * defaults. Rejecting declines the question and ends the call.
+   * (form elicitation). Approving sends `elicitationRound: elicitation.round`
+   * and the answers as `content`, keyed by `requests[].id` and then by field
+   * name; omitted fields take the form's defaults. Rejecting tells the server
+   * the person declined.
    */
   elicitation?: McpElicitationApprovalRequest | undefined;
   [compatibilityField: string]: unknown;
@@ -10364,6 +10366,8 @@ export type UserApprovalDecisionEventInput = {
     message?: string | undefined;
     /** Answers to the approval's `elicitation` forms; only with `approve`. */
     content?: McpElicitationContent | undefined;
+    /** The `elicitation.round` an approval answers; required to approve one. */
+    elicitationRound?: number | undefined;
     /** Server-owned header rotation applied atomically when the response is accepted. */
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
