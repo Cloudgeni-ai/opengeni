@@ -6382,6 +6382,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "type":
         if (action.locator) {
           const node = await this.resolveActionLocator(state, action.locator);
+          // Check the target before focusing it: focus is an input effect,
+          // so a refusal after it would surface as an unknown outcome.
+          if (
+            action.text &&
+            action.mode !== "keys" &&
+            this.engine !== "lightpanda" &&
+            (await this.callOnNode(state, node.backendDOMNodeId, TEXT_INSERT_TARGET_FUNCTION, [
+              { value: false },
+            ])) === false
+          ) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+            );
+          }
           await this.focusNode(state, node.backendDOMNodeId);
         }
         if (
@@ -6396,17 +6411,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
           );
         }
+        if (
+          action.text &&
+          action.mode !== "keys" &&
+          this.engine !== "lightpanda" &&
+          (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+        ) {
+          // Chromium drops inserted text without any event when the focused
+          // element is not a text field (a canvas, a button, the page
+          // itself), so the action would report text that never arrived.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+          );
+        }
         if (action.text && action.mode === "keys") {
           // One key press per character for split one-time-code boxes and
           // pages that listen for keydown and move focus themselves.
           // Such pages usually move focus a frame after the key (React
           // effects), so the next key waits for that frame; sent at once,
           // keys land in the old box and overwrite or drop characters.
+          // A character with no US key goes as text only. A text field takes
+          // it; a page that reads physical keys (a remote desktop) gets
+          // nothing, so say which characters may not have arrived. Focus is
+          // checked as each one is sent: earlier keys may have opened an
+          // editor (a grid cell).
+          const mayBeLost = new Set<string>();
           let first = true;
           for (const character of action.text) {
             if (!first) await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
             first = false;
-            await this.pressKey(state, characterKey(character));
+            const key = characterKey(character);
+            if (
+              key.code === "" &&
+              this.engine !== "lightpanda" &&
+              !mayBeLost.has(key.text) &&
+              (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+            )
+              mayBeLost.add(key.text);
+            await this.pressKey(state, key);
+          }
+          if (mayBeLost.size > 0) {
+            const characters = [...mayBeLost];
+            throw new InteractionOutcomeUnknownDriverError(
+              "outcome_unknown",
+              `${TYPE_KEYS_TEXT_ONLY_MESSAGE}${characters
+                .slice(0, 20)
+                .map((character) => JSON.stringify(character))
+                .join(", ")}${characters.length > 20 ? ", …" : ""}`,
+            );
           }
           return;
         }
@@ -8765,24 +8818,71 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async pressKey(state: TargetState, key: ParsedKey): Promise<void> {
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-      ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
-      ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
-        ? { commands: ["selectAll"] }
-        : {}),
-    });
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-    });
+    // Each modifier goes down as its own key first and comes up last, as a
+    // person presses it: pages that track physical keys (remote-desktop
+    // viewers sending scancodes) only see a modifier that was pressed.
+    const modifiers = MODIFIER_KEYS.filter((modifier) => (key.modifiers & modifier.bit) !== 0);
+    const pressed: (typeof MODIFIER_KEYS)[number][] = [];
+    let held = 0;
+    const keyUp = { type: "keyUp", key: key.key, code: key.code, modifiers: key.modifiers };
+    const releaseModifier = (modifier: (typeof MODIFIER_KEYS)[number]) => {
+      held &= ~modifier.bit;
+      return this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: modifier.key,
+        code: modifier.code,
+        modifiers: held,
+        windowsVirtualKeyCode: modifier.keyCode,
+        location: 1,
+      });
+    };
+    let keyDown = false;
+    try {
+      for (const modifier of modifiers) {
+        // Counted as down before it is sent: a send that fails may still
+        // have reached the page.
+        pressed.push(modifier);
+        held |= modifier.bit;
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: modifier.key,
+          code: modifier.code,
+          modifiers: held,
+          windowsVirtualKeyCode: modifier.keyCode,
+          location: 1,
+        });
+      }
+      keyDown = true;
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: key.key,
+        code: key.code,
+        modifiers: key.modifiers,
+        windowsVirtualKeyCode: key.keyCode,
+        ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
+        ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
+          ? { commands: ["selectAll"] }
+          : {}),
+      });
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        ...keyUp,
+        windowsVirtualKeyCode: key.keyCode,
+      });
+      keyDown = false;
+      while (pressed.length) await releaseModifier(pressed.pop()!);
+    } catch (error) {
+      // Release whatever may be down, so no key stays held on the page (a
+      // remote desktop would keep Ctrl or Shift pressed), then report the
+      // original failure.
+      if (keyDown) {
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          ...keyUp,
+          windowsVirtualKeyCode: key.keyCode,
+        }).catch(() => undefined);
+      }
+      while (pressed.length) await releaseModifier(pressed.pop()!).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async dragNodes(
@@ -10580,7 +10680,49 @@ type ParsedKey = {
   text: string;
 };
 
-/** A literal character as one key press (typed with `type.mode: "keys"`). */
+// The keys of a US keyboard that give printable ASCII characters other than
+// letters and digits, as [unshifted, shifted, code, Windows virtual key code].
+const US_SYMBOL_KEYS: readonly (readonly [string, string, string, number])[] = [
+  ["1", "!", "Digit1", 49],
+  ["2", "@", "Digit2", 50],
+  ["3", "#", "Digit3", 51],
+  ["4", "$", "Digit4", 52],
+  ["5", "%", "Digit5", 53],
+  ["6", "^", "Digit6", 54],
+  ["7", "&", "Digit7", 55],
+  ["8", "*", "Digit8", 56],
+  ["9", "(", "Digit9", 57],
+  ["0", ")", "Digit0", 48],
+  ["`", "~", "Backquote", 192],
+  ["-", "_", "Minus", 189],
+  ["=", "+", "Equal", 187],
+  ["[", "{", "BracketLeft", 219],
+  ["]", "}", "BracketRight", 221],
+  ["\\", "|", "Backslash", 220],
+  [";", ":", "Semicolon", 186],
+  ["'", '"', "Quote", 222],
+  [",", "<", "Comma", 188],
+  [".", ">", "Period", 190],
+  ["/", "?", "Slash", 191],
+];
+
+const US_SYMBOL_KEY_BY_CHARACTER = new Map<
+  string,
+  { code: string; keyCode: number; shift: boolean }
+>(
+  US_SYMBOL_KEYS.flatMap(([plain, shifted, code, keyCode]) => [
+    [plain, { code, keyCode, shift: false }],
+    [shifted, { code, keyCode, shift: true }],
+  ]),
+);
+
+const SHIFT_MODIFIER = 8;
+
+/** A literal character as one key press (typed with `type.mode: "keys"`): the
+ * key a person presses for it on a US keyboard, with Shift held when that key
+ * needs it, so that pages reading physical keys and Shift (remote-desktop
+ * viewers) get the same character as pages reading the key's text. Other
+ * characters are sent as text with no physical key. */
 function characterKey(character: string): ParsedKey {
   if (character === "\n" || character === "\r") {
     return { key: "Enter", code: "Enter", keyCode: 13, modifiers: 0, text: "\r" };
@@ -10601,12 +10743,30 @@ function characterKey(character: string): ParsedKey {
       key: character,
       code: `Key${upper}`,
       keyCode: upper.charCodeAt(0),
-      modifiers: 0,
+      modifiers: character === upper ? SHIFT_MODIFIER : 0,
+      text: character,
+    };
+  }
+  const symbol = US_SYMBOL_KEY_BY_CHARACTER.get(character);
+  if (symbol) {
+    return {
+      key: character,
+      code: symbol.code,
+      keyCode: symbol.keyCode,
+      modifiers: symbol.shift ? SHIFT_MODIFIER : 0,
       text: character,
     };
   }
   return { key: character, code: "", keyCode: 0, modifiers: 0, text: character };
 }
+
+// The modifier keys behind the CDP modifier bits, in the order they go down.
+const MODIFIER_KEYS: readonly { bit: number; key: string; code: string; keyCode: number }[] = [
+  { bit: 2, key: "Control", code: "ControlLeft", keyCode: 17 },
+  { bit: 1, key: "Alt", code: "AltLeft", keyCode: 18 },
+  { bit: 4, key: "Meta", code: "MetaLeft", keyCode: 91 },
+  { bit: SHIFT_MODIFIER, key: "Shift", code: "ShiftLeft", keyCode: 16 },
+];
 
 /** Replace `{{secret:…}}` references with the controller-private values right
  * before dispatch. The returned command no longer carries the side map, so
@@ -10652,11 +10812,22 @@ function parseKey(input: string, mac: boolean): ParsedKey {
     throw new InteractionDefiniteDriverError("invalid_action", "browser key is unsupported");
   }
   const upper = rawKey.toUpperCase();
+  // A digit or symbol is the key that gives it on a US keyboard, with Shift
+  // held when that key needs it, as typed text is.
+  const symbol = /[a-z]/iu.test(rawKey) ? undefined : US_SYMBOL_KEY_BY_CHARACTER.get(rawKey);
+  // A letter in a key combination is the key a browser reports for it:
+  // lowercase unless Shift is held, whichever case was written.
+  const letterKey =
+    /^[a-z]$/iu.test(rawKey) && modifiers !== 0
+      ? (modifiers & SHIFT_MODIFIER) !== 0
+        ? upper
+        : rawKey.toLowerCase()
+      : rawKey;
   return {
-    key: rawKey,
-    code: /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
-    keyCode: upper.codePointAt(0) ?? 0,
-    modifiers,
+    key: letterKey,
+    code: symbol ? symbol.code : /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
+    keyCode: symbol ? symbol.keyCode : (upper.codePointAt(0) ?? 0),
+    modifiers: symbol?.shift ? modifiers | SHIFT_MODIFIER : modifiers,
     text: modifiers === 0 ? rawKey : "",
   };
 }
@@ -12099,6 +12270,44 @@ const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
   }
   return (${COPY_BROWSER_TEXT_FUNCTION}).call(element, content);
 }`;
+
+const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
+  "the target is not a text field, so inserted text would not arrive and nothing was typed; type into a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
+
+const TYPE_KEYS_TEXT_ONLY_MESSAGE =
+  "keys were sent, but these characters have no US keyboard key, so a canvas or remote desktop reading key presses may not have received them: ";
+
+/** Whether inserted text can reach an element: true for a text field,
+ * editable content or an EditContext element (code editors), false for an
+ * element that takes no text (the page itself, a canvas, a button), null
+ * for a frame, a plugin or a shadow host whose focused part this document
+ * cannot see. With `focused`, `this` is a document's active element and the
+ * check follows focus into open shadow roots and same-origin frames. Without
+ * it, `this` is about to be focused, and an element holding a text field is
+ * null: focusing it may move focus into that field. */
+const TEXT_INSERT_TARGET_FUNCTION = `function (focused) { try {
+  let element = this;
+  while (focused && element) {
+    if (element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
+    else if ((element.localName === "iframe" || element.localName === "frame") && element.contentDocument && element.contentDocument.activeElement) element = element.contentDocument.activeElement;
+    else break;
+  }
+  if (!element || element.nodeType !== 1) return false;
+  const owner = element.ownerDocument;
+  const textField = (node) => node.isContentEditable || !!node.editContext || node.localName === "textarea" || (node.localName === "input" && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(node.type));
+  const holdsTextField = (root) => [...root.querySelectorAll("*")].some((node) => textField(node) || (node.shadowRoot && holdsTextField(node.shadowRoot)));
+  if (owner.designMode === "on" || textField(element)) return true;
+  if (element === owner.body || element === owner.documentElement) return false;
+  const tag = element.localName;
+  if (tag === "input") return false;
+  if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-") || element.shadowRoot) return null;
+  if (!focused && holdsTextField(element)) return null;
+  // An element focused in its own right takes no text. A shadow host focused
+  // for a field inside its closed shadow root is not focusable itself.
+  return element.tabIndex >= 0 || element.hasAttribute("tabindex") ? false : null;
+} catch { return null; } }`;
+
+const TEXT_INSERT_TARGET_EXPRESSION = `(${TEXT_INSERT_TARGET_FUNCTION}).call(document.activeElement, true)`;
 
 const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
   const element = document.activeElement;
