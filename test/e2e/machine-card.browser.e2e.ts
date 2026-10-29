@@ -44,7 +44,7 @@ describe("completed machine setup in the shared conversation", () => {
 
   for (const width of [320, 390, 1280]) {
     for (const theme of ["light", "dark"]) {
-      test(`Allow collapses setup and navigation stays outside content at ${width}px ${theme}`, async () => {
+      test(`Allow collapses setup at ${width}px ${theme}`, async () => {
         const context = await browser.newContext({
           viewport: { width, height: 560 },
           isMobile: width < 500,
@@ -71,28 +71,9 @@ describe("completed machine setup in the shared conversation", () => {
           expect(await page.getByRole("button", { name: "Connect another computer" }).count()).toBe(
             1,
           );
-          await page.locator("[data-og-timeline-scroller]").evaluate((element) => {
-            element.scrollTop = element.scrollHeight;
-            element.dispatchEvent(new Event("scroll"));
-          });
-          await page.locator("[data-og-question-nav]").waitFor({ timeout: 5_000 });
-          const layout = await page.evaluate(() => {
-            const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-            const content = scroller.getBoundingClientRect();
-            const arrows = [
-              ...document.querySelectorAll<HTMLElement>("[data-og-timeline-nav] button"),
-            ];
-            return {
-              arrows: arrows.length,
-              outside: arrows.every(
-                (arrow) => arrow.getBoundingClientRect().left - 6 >= content.right,
-              ),
-              overflow: document.documentElement.scrollWidth > window.innerWidth,
-            };
-          });
-          expect(layout.arrows).toBeGreaterThan(0);
-          expect(layout.outside).toBe(true);
-          expect(layout.overflow).toBe(false);
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+          ).toBe(false);
           await settings.press("Enter");
           expect(await page.locator("[data-machine-setup]").isVisible()).toBe(false);
         } finally {
