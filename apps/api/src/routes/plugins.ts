@@ -230,11 +230,6 @@ export function registerPluginRoutes(
       bindings: payload.bindings,
       ...(memberCreate ? { memberCreate: true } : {}),
     });
-    // Members add plugins; updating one that is already installed stays with admins.
-    if (memberCreate && resolved.preview.installed)
-      throw new MissingPermissionRefusal("capabilities:manage", {
-        message: "This plugin is already installed. Only an admin can update it.",
-      });
     if (resolved.preview.manifestDigest !== payload.expectedManifestDigest) {
       throw new HTTPException(409, {
         message: "The Plugin manifest changed after preview. Review the new components.",
@@ -281,8 +276,13 @@ export function registerPluginRoutes(
         ...(payload.expectedInstallationVersion !== undefined
           ? { expectedInstallationVersion: payload.expectedInstallationVersion }
           : {}),
+        // Members add plugins and retry their own install; updating one that
+        // is already installed stays with admins (decided in the transaction).
+        ...(memberCreate ? { memberCreate: true } : {}),
       });
     } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       throw pluginMutationHttpError(error);
     }
     if (prepared.replayResult?.status === "installed") {

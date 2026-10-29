@@ -922,9 +922,29 @@ describe("Plugin routes", () => {
     };
     // A member adds a plugin whose components are all new.
     const newUrl = "https://127.0.0.1/plugin-member-new-mcp.json";
-    const added = await installResponse(newUrl, await preview(newUrl), crypto.randomUUID(), MEMBER);
+    const firstPreview = await preview(newUrl);
+    const key = crypto.randomUUID();
+    const added = await installResponse(newUrl, firstPreview, key, MEMBER);
     expect(added.status).toBe(201);
     expect((await status("mcp:configured:member_new_mcp"))?.status).toBe("active");
+    // Retrying the same request replays it.
+    const replayed = await installResponse(newUrl, firstPreview, key, MEMBER);
+    expect(replayed.status).toBe(200);
+    expect(((await replayed.json()) as { status: string }).status).toBe("installed");
+    // An install that stopped partway resumes when the member retries it.
+    await shared.admin`update capability_operations set status = 'running', result = null, completed_at = null
+      where workspace_id = ${workspaceId} and idempotency_key = ${key}`;
+    await shared.admin`update capability_plugin_installations set status = 'needs_attention'
+      where workspace_id = ${workspaceId} and id = (
+        select (metadata ->> 'pluginOwnerInstallationId')::uuid from capability_installations
+        where workspace_id = ${workspaceId} and capability_id = 'mcp:configured:member_new_mcp')`;
+    const resumed = await installResponse(newUrl, firstPreview, key, MEMBER);
+    expect(resumed.status).toBeLessThan(300);
+    const [plugin] = await shared.admin<{ status: string }[]>`
+      select status from capability_plugin_installations where workspace_id = ${workspaceId} and id = (
+        select (metadata ->> 'pluginOwnerInstallationId')::uuid from capability_installations
+        where workspace_id = ${workspaceId} and capability_id = 'mcp:configured:member_new_mcp')`;
+    expect(plugin?.status).toBe("active");
     // Updating it once it is installed stays with admins.
     const update = await installResponse(
       newUrl,

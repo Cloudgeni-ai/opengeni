@@ -232,6 +232,12 @@ export async function preparePluginPackageInstall(
     idempotencyKey: string;
     requestDigest: string;
     expectedInstallationVersion?: number;
+    /**
+     * A member's install: adding a plugin that is not installed (or was
+     * removed) and retrying or resuming the same request are allowed;
+     * updating an installed plugin throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberCreate?: boolean;
   },
 ): Promise<PreparedPluginPackage> {
   return await withRlsContext(
@@ -378,6 +384,10 @@ export async function preparePluginPackageInstall(
           )
           .for("update")
           .limit(1);
+        if (input.memberCreate && installation && !resuming && installation.status !== "disabled")
+          throw new IntegrationChangeRequiresAdminError(
+            "This plugin is already installed. Only an admin can update it.",
+          );
         if (
           installation &&
           !resuming &&
