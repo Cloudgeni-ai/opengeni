@@ -7,17 +7,17 @@ use std::time::Duration;
 
 use compute_core::{
     Action, BalloonRequest, DiskSpace, Durability, Failure, Input, Level, Notice, OpId, Outcome,
-    State, Step,
+    ShrinkRequest, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
 use tokio::time::{Instant, sleep};
 
 use crate::layout::{Paths, vm_spec};
 use crate::observe::notes::Notes;
-use crate::observe::{Alarm, Cause, alarm_event};
+use crate::observe::{Alarm, Cause, ShrinkOutcome, alarm_event};
 use crate::pool::{Loaning, Template};
 use crate::protocol::{Id, StepStats};
-use crate::restore_notice::{Commands, REACH_LIMIT, ask_commands};
+use crate::restore_notice::{Commands, REACH_LIMIT, Shrunk, ask_commands, ask_shrink};
 use crate::state::{Disk, Record};
 use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
 use crate::store::Store;
@@ -30,6 +30,10 @@ use super::{Event, HostAgent, HostError, Leftover, Reply, Running, Slot, TEARDOW
 /// take the connection as a check gives it ([`REACH_LIMIT`]), so a guest
 /// slow to take one but not stopped is not kept awake for it.
 const ASK_LIMIT: Duration = Duration::from_secs(1);
+
+/// How long a guest has to answer a shrink on a host without a memory
+/// rule that says (one whose policy never asks for shrinks).
+const SHRINK_LIMIT: Duration = Duration::from_secs(15);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
@@ -129,6 +133,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 sandbox: id.0,
                 request,
             }),
+            Event::Shrunk {
+                id,
+                request,
+                answer,
+            } => self.shrunk(id, request, answer),
         }
     }
 
@@ -273,14 +282,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn execute(&mut self, action: Action) {
         match action {
             Action::Start { sandbox, op, step } => {
-                if step == Step::Pause
-                    && self
-                        .core
-                        .sandbox(sandbox)
-                        .is_some_and(|view| view.paused_for_memory.is_some())
-                {
-                    tracing::warn!(id = %Id(sandbox), "pausing and saving a sandbox in use for host memory");
-                }
                 self.start_step(Id(sandbox), op, step);
             }
             Action::Cancel { sandbox, op } => {
@@ -323,7 +324,124 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Action::Discard { sandbox } => self.discard_spare(Id(sandbox)),
+            Action::Shrink {
+                sandbox,
+                free,
+                keep,
+                request,
+            } => self.shrink(Id(sandbox), free, keep, request),
+            Action::EndForMemory { sandbox } => self.end_for_memory(Id(sandbox)),
+            Action::Bound { sandbox, low, high } => {
+                if let Some(live) = self.slots.get(&sandbox).and_then(|slot| slot.vm.as_ref())
+                    && let Err(error) = self.engine.bound_memory(&live.vm, low, high)
+                {
+                    tracing::warn!(id = %Id(sandbox), %error, "could not bound a VM's memory");
+                }
+            }
         }
+    }
+
+    /// Asks the guest of `id`'s running VM to free `free` bytes of memory,
+    /// keeping `keep` in use, in the background (ADR 24). Its answer, or
+    /// that it gave none, names `request`.
+    fn shrink(&self, id: Id, free: u64, keep: u64, request: ShrinkRequest) {
+        let events = self.events_tx.clone();
+        let (Some(port), Some(slot)) = (
+            self.restore_notice_port,
+            self.slots.get(&id.0).filter(|slot| slot.vm.is_some()),
+        ) else {
+            // Not asked: no guest to ask.
+            let _ = events.send(Event::Shrunk {
+                id,
+                request,
+                answer: None,
+            });
+            return;
+        };
+        let limit = self
+            .memory_policy
+            .and_then(|memory| memory.outgrowth)
+            .map_or(SHRINK_LIMIT, |rule| rule.answer);
+        let vsock = slot.spec.vsock_path();
+        tracing::warn!(%id, free_mib = free >> 20, keep_mib = keep >> 20, "host short of memory: asking a guest to shrink");
+        tokio::spawn(async move {
+            let answer = match ask_shrink(&vsock, port, free, keep, limit).await {
+                Ok(answer) => Some(answer),
+                Err(error) => {
+                    tracing::warn!(%id, %error, "the guest did not shrink");
+                    None
+                }
+            };
+            let _ = events.send(Event::Shrunk {
+                id,
+                request,
+                answer,
+            });
+        });
+    }
+
+    /// Takes in a guest's answer to the shrink of `request`.
+    fn shrunk(&mut self, id: Id, request: ShrinkRequest, answer: Option<Shrunk>) {
+        let metrics = self.observer.metrics();
+        let Some(answer) = answer else {
+            metrics.shrink(ShrinkOutcome::Failed, 0, 0);
+            self.input(Input::ShrinkFailed {
+                sandbox: id.0,
+                request,
+            });
+            return;
+        };
+        let outcome = if answer.spent {
+            ShrinkOutcome::Spent
+        } else {
+            ShrinkOutcome::Freed
+        };
+        metrics.shrink(outcome, answer.freed, answer.ended);
+        let names = answer.names.join(",");
+        tracing::warn!(
+            %id,
+            freed_mib = answer.freed >> 20,
+            ended = answer.ended,
+            %names,
+            spent = answer.spent,
+            "a guest shrank for host memory"
+        );
+        self.observer.emit(
+            crate::observe::Event::new("compute.memory.shrink", crate::observe::Severity::Warn)
+                .with("compute.sandbox.id", id.to_string())
+                .with("compute.memory.freed", answer.freed)
+                .with("compute.processes.ended", u64::from(answer.ended))
+                .with("compute.processes.names", names)
+                .with("compute.memory.spent", answer.spent),
+        );
+        self.input(Input::Shrunk {
+            sandbox: id.0,
+            request,
+            freed: answer.freed,
+            spent: answer.spent,
+        });
+    }
+
+    /// Ends `id`'s running VM for host memory (ADR 24): the host is short
+    /// with every running sandbox held to its request, and its guest could
+    /// not be shrunk. It is restored from its last copy as any lost VM is.
+    fn end_for_memory(&mut self, id: Id) {
+        let Some(incarnation) = self
+            .slots
+            .get(&id.0)
+            .and_then(|slot| slot.vm.as_ref())
+            .map(|live| live.incarnation)
+        else {
+            // A step holds it, or it is gone: the core asks again.
+            return;
+        };
+        tracing::error!(%id, "host out of memory with every sandbox at its request: ending a VM");
+        self.alarm(
+            id,
+            Alarm::EndedForMemory,
+            "VM ended for host memory: its guest could not be shrunk",
+        );
+        self.lost_vm(id, incarnation);
     }
 
     /// Asks the guest of `id`'s running VM to give `bytes` back through its
