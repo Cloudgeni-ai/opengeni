@@ -411,6 +411,49 @@ describe("connection ownership UI", () => {
     }
   });
 
+  test("a person alone in the workspace connects their own account without the sharing question", async () => {
+    const notes = CapabilityCatalogItemSchema.parse({
+      id: "mcp:notes",
+      kind: "mcp",
+      source: "manual",
+      name: "Notes",
+      category: "integrations",
+      providerDomain: "notes.example",
+      mcpUrl: "https://notes.example/mcp",
+      endpointUrl: "https://notes.example/mcp",
+      authKind: "oauth2",
+      runtime: { available: true, mcpServerId: "notes-runtime", notes: null },
+      metadata: {},
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={notes}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+          nobodyToShareWith
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).not.toContain("Who can use this connection?");
+      expect(rendered.container.querySelector('input[type="radio"]')).toBeNull();
+      const connect = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Connect",
+      );
+      expect(connect).toBeDefined();
+      await act(async () => connect!.click());
+      expect(onAction).toHaveBeenCalledWith({ type: "oauth", item: notes, ownership: "personal" });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("curated presentation renders consent copy; an uncurated connector stays generic", async () => {
     const base = {
       id: "registry:copy",

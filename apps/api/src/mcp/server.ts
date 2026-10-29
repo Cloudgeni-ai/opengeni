@@ -417,7 +417,9 @@ import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import {
   marketplacePluginCapabilityItem,
   marketplacePluginCapabilityItems,
+  mcpConnectionEndpointKey,
   pluginCapabilitySetup,
+  pluginMcpEndpointKeys,
 } from "../integrations/marketplace-plugin-catalog";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
@@ -7238,7 +7240,47 @@ function registerCapabilityDiscoveryTools(
       const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
       const candidates = [...current.items, ...recommendations(), ...pluginItems];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
-      const setups = await setupProjections(ranked.map(({ item }) => item));
+      // A plugin installs for the whole workspace. When the catalogue also
+      // offers one of its MCP servers as a connection, its setup names that
+      // connection for requests about the person's own account. Matches and
+      // their order are unchanged.
+      const pluginEndpoints = new Set(
+        ranked.flatMap(({ item }) =>
+          item.kind === "plugin" && !item.enabled ? pluginMcpEndpointKeys(item) : [],
+        ),
+      );
+      const connections =
+        pluginEndpoints.size === 0
+          ? []
+          : [
+              ...new Map(
+                candidates
+                  .filter((item) => {
+                    if (item.kind !== "mcp" || !capabilityCatalogItemIsTrustedForExposure(item))
+                      return false;
+                    const key = mcpConnectionEndpointKey(item.mcpUrl ?? item.endpointUrl);
+                    return key !== null && pluginEndpoints.has(key);
+                  })
+                  .map((item) => [item.id, item] as const),
+              ).values(),
+            ];
+      const projected = await setupProjections([...ranked.map(({ item }) => item), ...connections]);
+      const setups = projected.slice(0, ranked.length);
+      const usableConnections = connections.filter(
+        (_, index) => projected[ranked.length + index]!.status !== "unavailable",
+      );
+      for (const [index, { item }] of ranked.entries()) {
+        if (item.kind !== "plugin" || item.enabled) continue;
+        const endpoints = new Set(pluginMcpEndpointKeys(item));
+        setups[index] = pluginCapabilitySetup(
+          item,
+          usableConnections
+            .filter((connection) =>
+              endpoints.has(mcpConnectionEndpointKey(connection.mcpUrl ?? connection.endpointUrl)!),
+            )
+            .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
+        );
+      }
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
         capabilityId: item.id,
         name: item.name,
