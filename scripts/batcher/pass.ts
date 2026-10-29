@@ -8,6 +8,8 @@ import {
   VERSION_BRANCH,
   decide,
   isControlPlane,
+  numberTaken,
+  numberedFiles,
   parseManifest,
   renderManifest,
   squashTitle,
@@ -15,6 +17,7 @@ import {
   type Batch,
   type Manifest,
   type Member,
+  type NumberedFile,
   type Observation,
   type QueuedPull,
   type Settings,
@@ -22,6 +25,12 @@ import {
 
 export const PR_CHECK = "PR CI";
 export const PR_WORKFLOW = ".github/workflows/pr-ci.yml";
+
+export const CONFLICTING =
+  "it conflicts with main. Merge main into the branch, then queue it again.";
+
+/** File statuses that put a new path on main. */
+const ADDED = new Set(["added", "renamed", "copied"]);
 
 export const VERSION_OVERLAP =
   "main changed files this Version PR also changes after it was generated, so it cannot land as reviewed. Run the Open Version PR workflow to regenerate it from current main; do not merge main into it.";
@@ -62,6 +71,16 @@ async function observe(ctx: Context): Promise<Observation> {
   const mainSha = await gh.mainSha();
   const pulls: QueuedPull[] = [];
   ctx.autoMerge.clear();
+  // Main's numbered files per directory, read once a pass and only when needed.
+  const mainNumbered = new Map<string, Promise<NumberedFile[]>>();
+  const onMain = (directory: string) => {
+    let files = mainNumbered.get(directory);
+    if (!files) {
+      files = gh.listDirectory(directory.replace(/\/$/, ""), mainSha).then(numberedFiles);
+      mainNumbered.set(directory, files);
+    }
+    return files;
+  };
   for (const pull of await gh.queuedPulls(QUEUE_LABEL)) {
     if (pull.draft || !pull.sameRepository) continue;
     if (pull.autoMergeAt !== null) ctx.autoMerge.set(pull.number, pull.id);
@@ -71,7 +90,14 @@ async function observe(ctx: Context): Promise<Observation> {
       check.conclusion === "success" &&
       check.workflow === PR_WORKFLOW &&
       check.runHeadSha === pull.headSha;
-    const files = green ? await gh.pullFiles(pull.number) : [];
+    const changed = green ? await gh.pullFiles(pull.number) : [];
+    const files = changed?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ?? null;
+    const added = numberedFiles(
+      (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
+    );
+    let conflict = pull.mergeable === "CONFLICTING" ? CONFLICTING : null;
+    for (const directory of new Set(added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1))))
+      conflict ??= numberTaken(added, await onMain(directory));
     pulls.push({
       number: pull.number,
       title: pull.title,
@@ -80,7 +106,8 @@ async function observe(ctx: Context): Promise<Observation> {
         ...[pull.labeledAt, pull.autoMergeAt].filter((t): t is number => t !== null),
       ),
       greenAt: green ? (check.completedAt ?? now) : null,
-      conflicting: pull.mergeable === "CONFLICTING",
+      conflict,
+      slots: added.map((f) => f.slot),
       priority: pull.labels.includes(PRIORITY_LABEL),
       version: pull.headRef === VERSION_BRANCH,
       // Too many files to list is treated like a CI change: it runs alone.

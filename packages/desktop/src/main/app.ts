@@ -1460,6 +1460,7 @@ export class DesktopShell {
           connected: false,
           running: false,
           reconnecting: false,
+          needsReconnect: false,
           needsPermissions: false,
           missingPermissions: [],
         };

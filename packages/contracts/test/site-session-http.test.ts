@@ -13,6 +13,7 @@ import {
   siteFrameOperation,
   siteHostWorkspacePath,
   siteSessionPath,
+  withoutFileResources,
 } from "../src/site-session-http";
 
 const host = "/v1/workspaces/site-host";
@@ -319,4 +320,33 @@ test("a Site view conversation's context names its Site and the version shown", 
   expect(
     siteConversationContext({ siteId: "s", title: " ", versionId: "v", revision: 1 }),
   ).toContain("“Untitled Site”");
+});
+
+test("only file attachments are set aside for the console's Site view check", () => {
+  const files = [{ kind: "file", fileId: "f-1" }];
+  const create = (resources: unknown) =>
+    siteFrameBodyRefusal(
+      "sessions.create",
+      "/sessions",
+      withoutFileResources({
+        initialMessage: "hi",
+        resources,
+      }),
+    );
+  expect(withoutFileResources({ initialMessage: "hi", resources: files })).toEqual({
+    initialMessage: "hi",
+  });
+  expect(create(files)).toBeNull();
+  // A repository, or files mixed with one, still reaches the Site-frame check.
+  expect(create([{ kind: "repository", uri: "r", ref: "main" }])).toBe("resources");
+  expect(create([...files, { kind: "repository", uri: "r", ref: "main" }])).toBe("resources");
+  expect(create("files")).toBe("resources");
+  // Site frames are checked against the whole body.
+  expect(
+    siteFrameBodyRefusal("sessions.create", "/sessions", {
+      initialMessage: "hi",
+      resources: files,
+    }),
+  ).toBe("resources");
+  expect(withoutFileResources(null)).toBeNull();
 });

@@ -44,6 +44,8 @@ import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
   normalizeOrganizationAccessPolicy,
+  REGION_RESTRICTED,
+  REGION_RESTRICTED_MESSAGE,
 } from "@opengeni/contracts";
 import {
   httpRejectionFactsFromEnvelope,
@@ -200,6 +202,9 @@ import {
   resolveWorkspaceCatalogSettings,
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
+  inferenceFeatureAvailability,
+  inferenceFeatureRegionRestricted,
+  settingsWithInferenceResidency,
   selectDefaultSessionModel,
   isWorkspaceModelAdmissible,
   resolveWorkspaceModelSelection,
@@ -275,6 +280,7 @@ import {
   resolveOrganizationMcpOAuthAccess,
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
+import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -317,6 +323,7 @@ import {
 } from "./routes/model-account-settings";
 import { registerModelAccountChoiceRoutes } from "./routes/model-account-choice";
 import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
+import { registerSecretRedactionRoutes } from "./routes/secret-redactions";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
@@ -362,6 +369,7 @@ import { registerAutomationTemplateRoutes } from "./routes/automation-templates"
 import { registerBotTemplateRoutes } from "./routes/bot-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -416,7 +424,7 @@ import {
   scrubManagedAuthProviderResponse,
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
-import { projectClientModel } from "./model-catalog";
+import { projectClientModel, withRegionAvailability } from "./model-catalog";
 import {
   createSpeechToTextDeployment,
   createTranscriptionService,
@@ -555,6 +563,14 @@ export function createAppComposition(deps: AppDependencies): {
   const getDocumentServices = () => {
     documentServices ??= createDocumentServices(deps.settings);
     return documentServices;
+  };
+  // The Knowledge embedder for availability answers; none when it cannot be built.
+  const configuredEmbedder = () => {
+    try {
+      return getDocumentServices().embedder;
+    } catch {
+      return null;
+    }
   };
   const documentIndexer = deps.documentIndexer ?? {
     indexDocument: async ({
@@ -1504,6 +1520,8 @@ export function createAppComposition(deps: AppDependencies): {
       creditsAvailable: false,
     });
     let modelSelectionForbidden = false;
+    // EU-only inference for the caller's workspace (none without one).
+    let requiredModelGeography: "eu" | undefined;
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
@@ -1558,6 +1576,13 @@ export function createAppComposition(deps: AppDependencies): {
             modelSelectionForbidden = true;
             selections = [];
           }
+          requiredModelGeography = (
+            await settingsWithInferenceResidency(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              settings: catalogSettings,
+            })
+          ).requiredModelGeography;
           const workspace = await getWorkspace(deps.db, workspaceId);
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
             workspace?.settings.voiceInput,
@@ -1593,6 +1618,7 @@ export function createAppComposition(deps: AppDependencies): {
         modelSelectionForbidden = true;
       }
     }
+    const residencySettings = { ...deps.settings, requiredModelGeography };
     const models = selections.filter(isWorkspaceModelAdmissible);
     const defaultModel = defaultSelection.model;
     const fallbackDefinition = selections.find(
@@ -1628,10 +1654,12 @@ export function createAppComposition(deps: AppDependencies): {
         allowedModels: models.length > 0 ? models.map(({ model }) => model.id) : [defaultModel],
         ...(legacyModelFallback ? { legacyModelFallback } : {}),
         // Availability remains an observation hint, not the admission predicate.
-        models: models.map(({ model, availability }) => ({
-          ...projectClientModel(model),
-          availability,
-        })),
+        models: withRegionAvailability(models, requiredModelGeography).map(
+          ({ model, availability }) => ({
+            ...projectClientModel(model),
+            availability,
+          }),
+        ),
         defaultReasoningEffort: defaultSelection.reasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         defaultSandboxBackend: deps.settings.sandboxBackend,
@@ -1640,7 +1668,7 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
-        codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        codeSearch: codeSearchDeploymentPolicy(residencySettings),
         // Archiving needs object storage; without it the worker never archives.
         ...(deps.settings.sessionArchiveEnabled && objectStorage
           ? {
@@ -1650,7 +1678,14 @@ export function createAppComposition(deps: AppDependencies): {
               },
             }
           : {}),
-        agentConfig: clientAgentConfig(deps.settings),
+        agentConfig: clientAgentConfig(residencySettings),
+        // Region availability of every model-backed side feature for the
+        // caller's workspace: `region_restricted` shows "Not supported in EU".
+        // Knowledge reads the deployment's embedder (only resolved under EU).
+        inferenceFeatures: inferenceFeatureAvailability(
+          residencySettings,
+          requiredModelGeography === "eu" ? { embedder: configuredEmbedder() } : {},
+        ),
         // Producer capability for per-task usage limits. Clients only offer a
         // new limit when enabled; existing limits stay visible and removable.
         sessionUsageLimits: {
@@ -1727,6 +1762,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
     };
     let caller: OrganizationMcpCaller;
+    let auditProvenance: ActionAuditProvenance | undefined;
     let organizationKeyAccountId: string | null = null;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
@@ -1739,6 +1775,13 @@ export function createAppComposition(deps: AppDependencies): {
           accountId: connection.accountId,
           subjectId: connection.subjectId,
           access: connection.organizationAccess,
+        };
+        // A connected agent (signed in with the person's Opengeni login).
+        auditProvenance = {
+          source: "agent",
+          principalKind: "organization_mcp_connection",
+          via: "organization_mcp",
+          organizationMcpConnectionId: connection.refreshFamilyId,
         };
       } else if (personalKey) {
         // A personal API key: the person who created it, with its access.
@@ -1753,6 +1796,11 @@ export function createAppComposition(deps: AppDependencies): {
             permissions: [...personalKey.permissions],
             workspaceScope: personalKey.workspaceScope,
           }),
+        };
+        auditProvenance = {
+          source: "api",
+          principalKind: "personal_api_key",
+          via: "organization_mcp",
         };
       } else {
         const context = await requireAccessContext(c, routeDeps);
@@ -1804,6 +1852,7 @@ export function createAppComposition(deps: AppDependencies): {
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
+      ...(auditProvenance ? { auditProvenance } : {}),
       origin: new URL(c.req.url).origin,
       publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       dispatch: async (request) => await app.fetch(request, c.env),
@@ -2452,6 +2501,9 @@ export function createAppComposition(deps: AppDependencies): {
   // only classifies the session module's own paths.
   registerInboxRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  // After the session module, so its fail-closed middleware authorizes the
+  // per-chat share-link routes like every other session route.
+  registerSessionShareLinkRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
@@ -2468,6 +2520,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerModelAccountSettingsRoutes(app, routeDeps);
   registerModelAccountChoiceRoutes(app, routeDeps);
   registerSessionAdminAccessRoutes(app, routeDeps);
+  registerSecretRedactionRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
@@ -4219,14 +4272,30 @@ function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
 }
 
 /** Client-safe agent-configuration projection. */
-function clientAgentConfig(settings: Settings): ClientAgentConfig {
+export function clientAgentConfig(settings: Settings): ClientAgentConfig {
   const policy = agentConfigDeploymentPolicy(settings);
+  // EU-only: capabilities whose routes here are all outside the EU. One the
+  // server turned off keeps that reason; it isn't the region's doing.
+  const regionRestricted: Partial<Record<(typeof AGENT_CAPABILITY_IDS)[number], boolean>> = {
+    webSearch: inferenceFeatureRegionRestricted(settings, "web_search"),
+    media:
+      inferenceFeatureRegionRestricted(settings, "image_generation") &&
+      inferenceFeatureRegionRestricted(settings, "video_generation"),
+  };
   return {
     // Deprecated: agent configuration is always on. Kept for client compatibility.
     enabled: true,
     defaultForNewSessions: true,
     capabilities: AGENT_CAPABILITY_IDS.map((id) => {
       const reason = policy.unavailable[id];
+      if (reason === undefined && regionRestricted[id]) {
+        return {
+          id,
+          available: false,
+          reason: REGION_RESTRICTED_MESSAGE,
+          code: REGION_RESTRICTED,
+        };
+      }
       return reason === undefined ? { id, available: true } : { id, available: false, reason };
     }),
   };

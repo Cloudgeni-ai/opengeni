@@ -228,6 +228,88 @@ test("tabs a relaunched browser reopened keep their IDs; a tab that did not reop
   }
 });
 
+test("a tab a relaunch reopened has its reload notice to give once, and actions on it run", async () => {
+  const reopened = {
+    tabs: [{ targetId: "old-prior", replacementId: "prior" }],
+  };
+  // Reading the tab does not use the notice up; the agent's observation
+  // takes it, once.
+  const observing = inventoryFixture();
+  try {
+    observing.driver.noteRelaunchedTabs({
+      reason: "idle_release",
+      idleReleaseMinutes: 10,
+      ...reopened,
+    });
+    await observing.driver.targetState("old-prior");
+    expect((await observing.driver.observe("old-prior")).target.id).toBe("old-prior");
+    expect(observing.driver.takeReloadedTabNotice("old-prior")).toBe(
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
+    );
+    expect(observing.driver.takeReloadedTabNotice("old-prior")).toBeNull();
+  } finally {
+    await observing.driver.detach();
+  }
+  // An action runs whatever was seen before: a stale element reference
+  // fails on its own, and the receipt's observation carries the notice.
+  const acting = inventoryFixture();
+  try {
+    acting.driver.noteRelaunchedTabs({ reason: "controller_restart", ...reopened });
+    const state = await acting.driver.targetState("old-prior");
+    const sent = acting.calls.length;
+    await acting.driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId: state.browserSessionId,
+      controllerGeneration: state.controllerGeneration,
+      targetId: "old-prior",
+      expectedTargetGeneration: state.targetGeneration,
+      expectedDocumentGeneration: state.documentGeneration,
+      expectedFrameId: state.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "press", key: "Enter" },
+    });
+    expect(
+      acting.calls.slice(sent).filter((call) => call.method === "Input.dispatchKeyEvent").length,
+    ).toBeGreaterThan(0);
+    expect(acting.driver.takeReloadedTabNotice("old-prior")).toBe(
+      "This browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
+    );
+  } finally {
+    await acting.driver.detach();
+  }
+});
+
+test("a tab a relaunch reopened without loading it loads on first use instead of reading as crashed", async () => {
+  // Chrome restores the pages of only the first few tabs it reopens; the
+  // rest have no renderer until they are used.
+  const restored = inventoryFixture(false, 0, {}, false, new Set(["prior"]));
+  try {
+    restored.driver.noteRelaunchedTabs({
+      reason: "idle_release",
+      idleReleaseMinutes: 10,
+      tabs: [{ targetId: "old-prior", replacementId: "prior" }],
+      restoredTargetIds: ["prior"],
+    });
+    const observation = await restored.driver.observe("old-prior");
+    expect(observation.target.id).toBe("old-prior");
+    expect(observation.target.url).toBe("https://prior.example.test/");
+    // Its page was started once, in the background, without activating it.
+    expect(restored.calls.filter((call) => call.method === "Page.reload")).toHaveLength(1);
+    expect(restored.calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
+  } finally {
+    await restored.driver.detach();
+  }
+  // A tab the relaunch did not reopen, with no renderer, did crash.
+  const crashed = inventoryFixture(false, 0, {}, false, new Set(["prior"]));
+  try {
+    await expect(crashed.driver.observe("prior")).rejects.toMatchObject({ code: "tab_crashed" });
+    expect(crashed.calls.some((call) => call.method === "Page.reload")).toBe(false);
+  } finally {
+    await crashed.driver.detach();
+  }
+});
+
 test("a tab takes an earlier ID only when neither ID already belongs to another tab", async () => {
   const fixture = inventoryFixture();
   try {
@@ -311,6 +393,9 @@ function inventoryFixture(
   closedTabListings = 0,
   driverOptions: Partial<ConstructorParameters<typeof AgentBrowserDriver>[0]> = {},
   connectionEndsAfterClose = false,
+  /** Tabs with no renderer yet, as Chrome leaves most tabs it restores:
+   * attaching reports a crash until a reload starts their page. */
+  unloaded = new Set<string>(),
 ) {
   const browserSessionId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -340,6 +425,7 @@ function inventoryFixture(
     navigated = false,
     closed = false;
   const closing = new Map<string, number>();
+  const listeners: Array<{ method: string; sessionId?: string; listener: () => void }> = [];
   const connection: BrowserCdpConnection = {
     async send<T>(
       method: string,
@@ -378,6 +464,14 @@ function inventoryFixture(
         return { success: true } as T;
       }
       if (method === "Target.attachToTarget") return { sessionId: params.targetId } as T;
+      if (method === "Inspector.enable" && unloaded.has(options?.sessionId ?? "")) {
+        for (const entry of listeners) {
+          if (entry.method === "Inspector.targetCrashed" && entry.sessionId === options?.sessionId)
+            entry.listener();
+        }
+        return {} as T;
+      }
+      if (method === "Page.reload") unloaded.delete(options?.sessionId ?? "");
       const page = pages.get(options?.sessionId ?? "");
       if (method === "Page.navigate") {
         page!.url = "https://redirect.example.test/final";
@@ -395,7 +489,11 @@ function inventoryFixture(
           },
         } as T;
       }
-      if (method === "Runtime.evaluate") return { result: { value: "complete" } } as T;
+      if (method === "Runtime.evaluate") {
+        // A reopened tab's page is shown and parsed.
+        const ready = String(params.expression ?? "").startsWith("document.readyState !==");
+        return { result: { value: ready ? true : "complete" } } as T;
+      }
       if (method === "Accessibility.getFullAXTree")
         return {
           nodes: [
@@ -409,7 +507,18 @@ function inventoryFixture(
         } as T;
       return {} as T;
     },
-    on: () => () => {},
+    on: (method, listener, sessionId) => {
+      const entry = {
+        method,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        listener: () => listener({ method, params: {} } as never),
+      };
+      listeners.push(entry);
+      return () => {
+        const index = listeners.indexOf(entry);
+        if (index >= 0) listeners.splice(index, 1);
+      };
+    },
     waitForEvent: async () => {
       throw new Error("unexpected fixture event wait");
     },

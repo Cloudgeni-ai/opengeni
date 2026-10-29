@@ -82,6 +82,7 @@ import {
   type Settings,
   type VoiceInputPricing,
 } from "@opengeni/config";
+import { findInferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import {
@@ -709,6 +710,16 @@ export function createRecordingActivities(
         if (!found.spec.capabilities.wordTimestamps && !aligner) {
           throw new PermanentRecordingFailure("model_unavailable");
         }
+        // EU-only: a provider without an EU route never receives the audio,
+        // and the job never moves to another provider.
+        if (
+          !(await deployment.regionAllowed(job.version.providerId, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }))
+        ) {
+          throw new PermanentRecordingFailure("region_restricted");
+        }
         const resolved = await deployment.credentials(job.version.providerId, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -961,6 +972,10 @@ export function createRecordingActivities(
         // those retries leaves it to Temporal; past the budget that retry
         // fails it as timed_out. The charge is settled once by its source id.
         if (budget.signal.aborted && !finishing) return await fail("timed_out", error);
+        // EU-only refused the route before any audio was sent; a retry gets
+        // the same answer, and the job never moves to another provider.
+        if (findInferenceRegionRestrictedError(error))
+          return await fail("region_restricted", error);
         if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
         if (error instanceof RecordingAudioError) {
           if (error.code === "missing_chunk") {

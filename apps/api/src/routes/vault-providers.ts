@@ -92,6 +92,7 @@ import {
 } from "@opengeni/vaults";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { parseRequestJson } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   loadOnePasswordModule,
@@ -933,6 +934,7 @@ export function registerVaultProviderRoutes(
       connectionId,
       grant.subjectId,
       connection.version,
+      { audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }) },
     );
     if (!revoked) {
       throw new HTTPException(409, {
@@ -1215,6 +1217,7 @@ export function registerVaultProviderRoutes(
           connectionId,
           grant.subjectId,
           connection.version,
+          { audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }) },
         );
         if (!revoked)
           throw new HTTPException(409, {

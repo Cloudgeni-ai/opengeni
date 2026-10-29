@@ -323,6 +323,7 @@ export function SuperGrokConnectPage({
   const signingIn = Boolean(grok.pending);
   return (
     <ModelsFormPage
+      connectStep
       title="Connect SuperGrok"
       description="Sign in with the xAI account whose SuperGrok plan should pay for Grok models."
       onClose={onClose}

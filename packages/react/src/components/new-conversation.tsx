@@ -1,5 +1,5 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { lazy, useRef, type ComponentProps, type FormEvent } from "react";
+import { lazy, useRef, type ComponentProps, type FormEvent, type ReactNode } from "react";
 import {
   useNewConversation,
   type NewConversationController,
@@ -99,8 +99,7 @@ export function NewConversationView({
 }: NewConversationViewProps) {
   const t = useOpenGeniText();
   const labels = { ...DEFAULT_LABELS(t), ...overrides };
-  const { composer, config, catalog, files, uploadsEnabled, available, error, pending } = creation;
-  const formatError = useErrorMessage();
+  const { composer, config, catalog, files, uploadsEnabled, available } = creation;
   const root = useRef<HTMLFormElement>(null);
   const hostTheme = useHostTheme(root, { theme, surface });
   const transcription = useComposerTranscription(
@@ -109,27 +108,7 @@ export function NewConversationView({
     voiceInput && available ? config.voiceInput : null,
     typeof voiceInput === "object" ? voiceInput : undefined,
   );
-  const models = useRealtimeVoiceModels(
-    creation.client,
-    creation.workspaceId,
-    creation.realtimeVoiceEnabled && available,
-  );
-  const voice = models.length ? (
-    <LazyPart onLoadFailure="hide" fallback={null}>
-      <LazyNewVoice
-        client={
-          creation.client as unknown as ComponentProps<typeof NewSessionRealtimeControl>["client"]
-        }
-        workspaceId={creation.workspaceId}
-        codexConnected={realtimeVoiceProps?.codexConnected ?? false}
-        modelMenu={realtimeVoiceProps?.modelMenu}
-        disabled={
-          composer.sending || pending !== null || creation.finishingUploads || files.hasUnresolved
-        }
-        onStart={creation.startRealtime}
-      />
-    </LazyPart>
-  ) : null;
+  const voice = useNewConversationVoice(creation, realtimeVoiceProps);
   return (
     <form
       onSubmit={(event: FormEvent) => {
@@ -196,6 +175,64 @@ export function NewConversationView({
         }
         responsiveBasis={composerProps?.responsiveBasis ?? "container"}
       />
+      <NewConversationStatus creation={creation} labels={labels} />
+      <div aria-hidden className="min-h-0 flex-[3]" />
+    </form>
+  );
+}
+
+/**
+ * The voice-first start for a new chat, or null when the workspace offers no
+ * voice model. Shared by the stock view and the console's own layouts.
+ */
+export function useNewConversationVoice(
+  creation: NewConversationController,
+  realtimeVoiceProps?: SessionConversationProps["realtimeVoiceProps"] | undefined,
+): ReactNode {
+  const models = useRealtimeVoiceModels(
+    creation.client,
+    creation.workspaceId,
+    creation.realtimeVoiceEnabled && creation.available,
+  );
+  if (!models.length) return null;
+  return (
+    <LazyPart onLoadFailure="hide" fallback={null}>
+      <LazyNewVoice
+        client={
+          creation.client as unknown as ComponentProps<typeof NewSessionRealtimeControl>["client"]
+        }
+        workspaceId={creation.workspaceId}
+        codexConnected={realtimeVoiceProps?.codexConnected ?? false}
+        modelMenu={realtimeVoiceProps?.modelMenu}
+        disabled={
+          creation.composer.sending ||
+          creation.pending !== null ||
+          creation.finishingUploads ||
+          creation.files.hasUnresolved
+        }
+        onStart={creation.startRealtime}
+      />
+    </LazyPart>
+  );
+}
+
+/**
+ * What stands between a new chat and its creation: unavailable, a failed or
+ * unconfirmed create (with Retry), or uploads still finishing.
+ */
+export function NewConversationStatus({
+  creation,
+  labels: overrides,
+}: {
+  creation: NewConversationController;
+  labels?: Partial<NewConversationLabels> | undefined;
+}) {
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...overrides };
+  const formatError = useErrorMessage();
+  const { available, error, pending, composer } = creation;
+  return (
+    <>
       {!available ? (
         <p className="text-center text-og-sm text-og-fg-muted" data-og-new-chat-unavailable="">
           {labels.unavailable}
@@ -230,7 +267,6 @@ export function NewConversationView({
           {labels.finishingUploads}
         </p>
       ) : null}
-      <div aria-hidden className="min-h-0 flex-[3]" />
-    </form>
+    </>
   );
 }

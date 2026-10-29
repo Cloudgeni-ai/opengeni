@@ -5,7 +5,11 @@
 // workspace's shared Codex or Claude subscription accounts serve. With no such
 // model it does not start, so it never spends Opengeni credits or an API key.
 import { resolveTurnExecutionPolicyV1, type Settings } from "@opengeni/config";
-import type { DefaultModelSelection, FirstPartyMcpToolName } from "@opengeni/contracts";
+import {
+  isEuResidency,
+  type DefaultModelSelection,
+  type FirstPartyMcpToolName,
+} from "@opengeni/contracts";
 import {
   agentRunAdmissionDenial,
   applySessionAgentConfigWriteThrough,
@@ -19,6 +23,7 @@ import {
   resolveSessionAgentConfigForCreate,
   resolveWorkspaceModelSelection,
   selectDefaultSessionModel,
+  settingsWithInferenceResidency,
   type WorkspaceModelSelection,
 } from "@opengeni/core";
 import {
@@ -46,18 +51,27 @@ export type MeetingSummaryOutcome =
 /**
  * The model a summary runs on: the one a new chat would get, when the
  * workspace's subscription accounts serve it, else the first model they serve.
- * Null when no subscription account can serve one.
+ * Null when no subscription account can serve one. Under EU-only inference
+ * only a model whose route's residency record is EU counts.
  */
 export function meetingSummaryModel(input: {
   settings: Settings;
   selections: readonly WorkspaceModelSelection[];
   chatDefault: DefaultModelSelection;
 }): DefaultModelSelection | null {
-  const chat = input.selections.find((selection) => selection.model.id === input.chatDefault.model);
+  const selections =
+    input.settings.requiredModelGeography === "eu"
+      ? input.selections.map((selection) =>
+          isEuResidency(selection.model.residency)
+            ? selection
+            : { ...selection, availability: { ...selection.availability, selectable: false } },
+        )
+      : input.selections;
+  const chat = selections.find((selection) => selection.model.id === input.chatDefault.model);
   if (chat?.availability.selectable && chat.model.cost === "subscription") return input.chatDefault;
   const subscription = selectDefaultSessionModel({
     settings: input.settings,
-    selections: input.selections,
+    selections,
     workspaceDefaults: null,
     organizationDefaults: null,
     creditsAvailable: false,
@@ -97,17 +111,30 @@ export async function startMeetingSummary(
       subjectId: MEETING_SUMMARY_SUBJECT_ID,
     }),
   );
-  const chosen = meetingSummaryModel({
+  const chatDefault = await resolveDefaultSessionModelForSelections(service.db, {
     settings,
+    accountId: input.accountId,
+    workspaceSettings,
     selections,
-    chatDefault: await resolveDefaultSessionModelForSelections(service.db, {
-      settings,
-      accountId: input.accountId,
-      workspaceSettings,
-      selections,
-    }),
   });
-  if (!chosen) return { started: false, reason: "no_subscription" };
+  // EU-only inference: choose only a model whose route is EU, before any
+  // session exists, so the owner never gets a chat the turn would refuse.
+  const regionSettings = await settingsWithInferenceResidency(service.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    settings,
+  });
+  const chosen = meetingSummaryModel({ settings: regionSettings, selections, chatDefault });
+  if (!chosen) {
+    const regionOnly =
+      regionSettings.requiredModelGeography === "eu" &&
+      meetingSummaryModel({
+        settings: { ...settings, requiredModelGeography: undefined },
+        selections,
+        chatDefault,
+      }) !== null;
+    return { started: false, reason: regionOnly ? "region_restricted" : "no_subscription" };
+  }
   await assertWorkspaceModelPolicyAllows(service.db, settings, input.workspaceId, chosen.model);
   const denial = await agentRunAdmissionDenial(
     { ...service, settings },

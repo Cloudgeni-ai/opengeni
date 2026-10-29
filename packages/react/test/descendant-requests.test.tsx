@@ -452,6 +452,20 @@ describe("DescendantRequests", () => {
     expect(button("Let the agent decide")).toBeUndefined();
   });
 
+  test("a hand-off that cannot be sent shows the API's own message", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk");
+    const child = summary("child");
+    const { client } = fakeClient({ requests: { child: [request("child")] } });
+    (client as unknown as { sendMessage: () => Promise<never> }).sendMessage = async () => {
+      throw new OpenGeniApiError(503, "", { code: "maintenance" });
+    };
+    await render({ client, waiting: [child] });
+    await click(button("Let the agent decide")!);
+    expect(container().textContent).toContain("The service is updating. Try again in a moment.");
+    // The card stays answerable.
+    expect(button("Let the agent decide")).toBeDefined();
+  });
+
   test("shares an unsent answer with the sub-session's own page", async () => {
     const child = summary("child");
     const { client } = fakeClient({ requests: { child: [request("child")] } });

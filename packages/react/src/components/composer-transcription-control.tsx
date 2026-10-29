@@ -79,6 +79,8 @@ export type ComposerTranscriptionMessages = {
   errorInsufficientCredits: string;
   errorAllowanceExhausted: string;
   errorPolicyBlocked: string;
+  /** The workspace is EU-only and voice input has no EU route here. */
+  errorRegionRestricted: string;
   errorTooLarge: string;
   errorInvalidAudio: string;
   errorStorageUnavailable: string;
@@ -114,6 +116,7 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
   errorInsufficientCredits: t("composerTranscriptionControl.voiceInputNeedsCreditsRecording"),
   errorAllowanceExhausted: t("composerTranscriptionControl.usageLimitReachedRecordingSaved"),
   errorPolicyBlocked: t("composerTranscriptionControl.voiceInputIsnTAllowed"),
+  errorRegionRestricted: t("inferenceRegion.notSupportedInEu"),
   errorTooLarge: t("composerTranscriptionControl.recordingIsTooLargeTry"),
   errorInvalidAudio: t("composerTranscriptionControl.theRecordingCouldNotBe"),
   errorStorageUnavailable: t("composerTranscriptionControl.voiceInputStoppedBecauseAudio"),
@@ -670,6 +673,8 @@ function transcriptionErrorMessage(code: string, messages: ComposerTranscription
       return messages.errorAllowanceExhausted;
     case "policy_blocked":
       return messages.errorPolicyBlocked;
+    case "region_restricted":
+      return messages.errorRegionRestricted;
     case "permission_denied":
       return messages.errorPermissionDenied;
     case "not_supported":

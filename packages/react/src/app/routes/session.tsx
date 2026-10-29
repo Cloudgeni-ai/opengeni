@@ -194,7 +194,21 @@ import { SessionWorkspace } from "../components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "../components/session/artifact-link-boundary";
 import { Button } from "../../ui/button";
 import { EmptyState } from "../../ui/empty-state";
-import { useAppContext } from "../app-context";
+import {
+  createSessionEventFeedStore,
+  useAppContext,
+  type SessionCreationHandoff,
+} from "../app-context";
+import { useLiveSessionEvents } from "../../hooks/use-live-session-events";
+import {
+  sessionRouteAppState,
+  sessionRouteCreationHandoff,
+  type SessionRoutePlacement,
+} from "../lib/session-route-placement";
+import { SessionStartupProvider } from "../../lib/session-startup";
+import { useFindShortcut } from "../lib/find-shortcut";
+import type { InitialComposerDraft } from "../../hooks/use-composer";
+import { cn } from "../lib/utils";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
 import type {
   SessionEditableArtifactSummary,
@@ -412,28 +426,59 @@ export function SessionRoute({
   launch = EMPTY_COMPOSER_LAUNCH,
   realtimeAutostartModel,
   searchTarget = EMPTY_SEARCH_TARGET,
+  placement = "page",
+  onEvent,
+  messageContext,
+  creationHandoff: givenCreationHandoff,
+  initialDraft,
+  onNewSession,
+  onRealtimeAutostartConsumed,
 }: {
   workspaceId: string;
   sessionId: string;
   launch?: ComposerLaunchSearch | undefined;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   searchTarget?: SessionSearchRoute | undefined;
+  /**
+   * `panel`: this chat sits beside another view (the Site view) in a narrow
+   * panel, so it uses narrower gutters and is not remembered as the last
+   * session route. Whatever else differs is the host's: it turns off the
+   * session panel with `SessionUiFeaturesOff` and passes the callbacks below.
+   */
+  placement?: SessionRoutePlacement | undefined;
+  /** Each event newer than the loaded history, in order. */
+  onEvent?: ((event: SessionEvent) => void) | undefined;
+  /** The host view's per-message model context, read at send time. */
+  messageContext?: (() => string | undefined) | undefined;
+  /** A conversation the host view just created, shown at once with its first prompt. */
+  creationHandoff?: SessionCreationHandoff | null | undefined;
+  /** What the person typed in the host view's new-chat composer while it was created. */
+  initialDraft?: InitialComposerDraft | undefined;
+  /** Start a new chat; defaults to the new-chat page. */
+  onNewSession?: (() => void) | undefined;
+  /** The voice call a new chat asked for has started; defaults to dropping it from the address. */
+  onRealtimeAutostartConsumed?: (() => void) | undefined;
 }) {
   const uiEvents = useUiEventTarget("document");
   const dockEnabled = useSessionUiFeature("dock");
   useReadSessionInbox(sessionId);
   const context = useAppContext();
+  const routed = placement === "page";
   const rail = useRail();
   const navigate = useNavigate();
   const page = usePage();
   const consumeRealtimeAutostart = useCallback(() => {
+    if (onRealtimeAutostartConsumed) {
+      onRealtimeAutostartConsumed();
+      return;
+    }
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId, sessionId },
       search: {},
       replace: true,
     });
-  }, [navigate, sessionId, workspaceId]);
+  }, [navigate, onRealtimeAutostartConsumed, sessionId, workspaceId]);
   // The session-search origin only labels the navigation that opened the find
   // bar. Drop it once the bar closes so a reload or shared link starts plain.
   const hasSearchOrigin = searchTarget.searchOrigin === "session-search";
@@ -472,8 +517,10 @@ export function SessionRoute({
   // Consented funnel telemetry: a session this page started reached its first
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
+  useLiveSessionEvents(sessionId, events, initialHistoryReady, onEvent);
   // The embedding host follows the open chat from this stream.
-  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
+  // A chat in a panel beside another view isn't the page's open chat.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading }, routed);
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -512,6 +559,7 @@ export function SessionRoute({
     loadError,
     restoredSessionId,
     leave: leaveRestoredSession,
+    enabled: routed,
   });
   useEffect(
     () => () =>
@@ -523,10 +571,13 @@ export function SessionRoute({
       context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
     }
   }, [context.sessionChannelProjectionAuthority, loadError]);
-  const creationHandoff =
-    context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
-      ? context.sessionCreationHandoff
-      : null;
+  const creationHandoff = sessionRouteCreationHandoff({
+    sessionId,
+    given: givenCreationHandoff,
+    app: context.sessionCreationHandoff,
+    appSession: context.session,
+    routed,
+  });
   const pendingCreationHandoff = creationHandoffReconciled(creationHandoff, events)
     ? null
     : creationHandoff;
@@ -663,14 +714,16 @@ export function SessionRoute({
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
+  // A chat in a panel beside another view (the Site view) isn't the page's
+  // open chat: the header, the sidebar's projections and the command menu
+  // keep following the page, so it keeps its state to itself.
+  const [panelEventFeed] = useState(createSessionEventFeedStore);
+  const { client, captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
   const {
-    client,
-    captureWorkspaceInvocation,
-    ownsWorkspaceInvocation,
     setSession: setContextSession,
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
-  } = context;
+  } = sessionRouteAppState(placement, context, panelEventFeed);
   const acknowledgedProjectionRef = useRef<string | null>(null);
   const confirmedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
@@ -1351,6 +1404,9 @@ export function SessionRoute({
       realtimeAutostartModel={realtimeAutostartModel}
       onRealtimeAutostartConsumed={consumeRealtimeAutostart}
       onSearchOriginConsumed={consumeSearchOrigin}
+      placement={placement}
+      messageContext={messageContext}
+      initialDraft={initialDraft}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -1418,11 +1474,13 @@ export function SessionRoute({
             });
         }
       }}
-      onNewSession={() =>
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions",
-          params: { workspaceId },
-        })
+      onNewSession={
+        onNewSession ??
+        (() =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions",
+            params: { workspaceId },
+          }))
       }
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
@@ -1430,7 +1488,8 @@ export function SessionRoute({
       onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
-      onOpenSandboxFile={openSandboxFile}
+      // A file link opens the session panel's Files tab; without the panel it is plain text.
+      onOpenSandboxFile={dockEnabled ? openSandboxFile : undefined}
       // Both open the session panel's Agent tab; without the panel, neither shows.
       onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}
       onOpenUsageLimit={dockEnabled ? openUsageLimit : undefined}
@@ -1438,7 +1497,7 @@ export function SessionRoute({
     />
   );
 
-  return (
+  const routeView = (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       {reconnectRequest && (
         <LazyPart fallback={<LoadingPanel label="Opening connection setup" />}>
@@ -1491,6 +1550,13 @@ export function SessionRoute({
       />
     </div>
   );
+  // The shell times the page's open chat; a panel chat times its own start, so
+  // its "starting" and "retrying" rows show too.
+  return routed ? (
+    routeView
+  ) : (
+    <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
+  );
 
   async function approve(approvalId: string, decision: "approve" | "reject") {
     try {
@@ -1507,11 +1573,16 @@ export function SessionRoute({
   }
 }
 
-/** The embedding page's per-message context, as a send extra. */
-function withHostMessageContext(messageContext: (() => string | undefined) | undefined): {
+/** The embedding page's and the host view's per-message context, as a send extra. */
+function withHostMessageContext(
+  ...sources: ReadonlyArray<(() => string | undefined) | undefined>
+): {
   modelContext?: string;
 } {
-  const value = messageContext?.();
+  const value = sources
+    .map((source) => source?.())
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
   return value ? { modelContext: value } : {};
 }
 
@@ -1969,6 +2040,12 @@ function useSessionEditableArtifactSummaries(input: {
 
 function SessionChatPane(props: {
   session: Session;
+  /** A narrow panel beside another view gets narrower gutters. */
+  placement: SessionRoutePlacement;
+  /** The host view's per-message model context, beside the embedding host's. */
+  messageContext: (() => string | undefined) | undefined;
+  /** What the person typed while the host view created this chat. */
+  initialDraft: InitialComposerDraft | undefined;
   /** Keep the raw detail snapshot: the general route projection prefers queue control. */
   admissionSessionControl: Session["effectiveControl"];
   events: SessionEvent[];
@@ -2022,7 +2099,7 @@ function SessionChatPane(props: {
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
-  onOpenSandboxFile: (path: string, line?: number) => void;
+  onOpenSandboxFile: ((path: string, line?: number) => void) | undefined;
   /** Composer + > Chat settings: open this chat's Agent tab. */
   onOpenAgentSettings: (() => void) | undefined;
   /** The usage limit notice's Change limit: open the Agent tab at Usage limit. */
@@ -2030,7 +2107,10 @@ function SessionChatPane(props: {
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
 }) {
   const findEvents = useUiEventTarget("document");
-  const findShortcutScope = usePortalContainer();
+  const portalContainer = usePortalContainer();
+  // A chat in a panel beside another view takes the find shortcut only while
+  // focus is inside it, so the view (or the browser) keeps its own find.
+  const [panelRoot, setPanelRoot] = useState<HTMLDivElement | null>(null);
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
@@ -2046,6 +2126,7 @@ function SessionChatPane(props: {
   );
   const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId, openSession);
   const hostMessageContext = useHostMessageContext();
+  const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
   const realtimeClient = useMemo(
@@ -2111,31 +2192,10 @@ function SessionChatPane(props: {
     props.searchTarget.matchOffset,
     openFind,
   ]);
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        !(event.ctrlKey || event.metaKey) ||
-        event.altKey ||
-        event.shiftKey ||
-        event.key.toLowerCase() !== "f"
-      )
-        return;
-      const target = event.target;
-      // Dialogs and embedded editors own their own keyboard search behavior.
-      if (
-        target instanceof Element &&
-        target.closest('[role="dialog"], .cm-editor, .xterm, [data-native-find]')
-      )
-        return;
-      event.preventDefault();
-      openFind();
-    };
-    // An embedded app takes the shortcut only while focus is inside it, so
-    // the host page keeps its own find.
-    const scope = findShortcutScope ?? window;
-    scope.addEventListener("keydown", onKeyDown as EventListener);
-    return () => scope.removeEventListener("keydown", onKeyDown as EventListener);
-  }, [findShortcutScope, openFind]);
+  useFindShortcut(
+    props.placement === "panel" ? { scope: panelRoot } : { scope: portalContainer ?? window },
+    openFind,
+  );
   const fundingRevision = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index]!;
@@ -2736,7 +2796,7 @@ function SessionChatPane(props: {
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
-      ...withHostMessageContext(hostMessageContext),
+      ...withHostMessageContext(hostMessageContext, props.messageContext),
       resources: [...attachments.readyResources, ...repositories.pendingResources],
       connectionAccounts: [
         ...connectionAccounts.selections,
@@ -2758,6 +2818,7 @@ function SessionChatPane(props: {
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
     busySend: resolveWorkspaceBusySend(workspace?.settings),
+    ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
     offerQueue: true,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
@@ -2907,7 +2968,7 @@ function SessionChatPane(props: {
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
-    <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
+    <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
       {
         failedSessionCopy(
           props.failure,
@@ -3591,6 +3652,7 @@ function SessionChatPane(props: {
               client={context.client}
               workspaceId={props.session.workspaceId}
               item={{ ...item, humanInputDelegation: item.humanInputDelegation }}
+              viewerSubjectId={context.accessContext.subjectId}
             />
           );
         }
@@ -3619,6 +3681,7 @@ function SessionChatPane(props: {
       );
     },
     [
+      context.accessContext.subjectId,
       context.client,
       props.onOpenSandboxFile,
       props.session.id,
@@ -3813,7 +3876,11 @@ function SessionChatPane(props: {
     creditTopupPrompt,
     createElement(
       "div",
-      { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
+      {
+        className: reviewDetails ? "hidden" : "contents",
+        ...inertProps(Boolean(reviewDetails)),
+        ...(props.placement === "panel" ? { ref: setPanelRoot } : {}),
+      },
       createElement(
         LightboxProvider,
         null,
@@ -3838,12 +3905,12 @@ function SessionChatPane(props: {
             </LazyPart>
           ) : null}
           {cancelled ? (
-            <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+            <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
               <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
             </div>
           ) : readOnlyArchive ? (
-            <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+            <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <ReadOnlySessionNotice
                 session={props.session}
                 idleDays={context.clientConfig.sessionArchive?.idleDays}
@@ -4050,7 +4117,7 @@ function SessionChatPane(props: {
 
           {/* One slim status row above the composer: the agent's wait, queue,
           goal and activity. Hides entirely when there are no signals. */}
-          <div className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6">
+          <div className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}>
             <div className="mx-auto w-full max-w-3xl">
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
@@ -4172,7 +4239,12 @@ function SessionChatPane(props: {
           <div
             ref={composerRegionRef}
             data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
-            className={`shrink-0 px-4 pb-4 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+            className={cn(
+              "shrink-0",
+              props.placement === "panel" ? "pb-3" : "pb-4",
+              gutter,
+              readOnlyArchive && "hidden",
+            )}
           >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface

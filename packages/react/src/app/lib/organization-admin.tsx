@@ -48,6 +48,7 @@ export type OrganizationAdminResource =
   | "overview"
   | "private-sessions"
   | "privacy"
+  | "inference-residency"
   | "agent-admin-access"
   | "members"
   | "admin-invitations"

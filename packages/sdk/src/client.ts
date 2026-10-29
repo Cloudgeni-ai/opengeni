@@ -407,6 +407,8 @@ import type {
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
   UpdateOrganizationPrivacySettingsRequest,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
@@ -640,6 +642,10 @@ import type {
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
   SessionVisibility,
+  SessionShareLink,
+  SessionShareLinkList,
+  SessionShareLinkState,
+  SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
   SessionEvent,
@@ -745,6 +751,8 @@ import type {
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  MemberDefaultExecutionTarget,
+  WorkspaceDefaultExecutionTarget,
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   Channel,
@@ -1717,6 +1725,60 @@ export class OpenGeniClient {
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/visibility`,
       request,
+    );
+  }
+
+  /**
+   * Whether the person can share a chat with a read-only link here, and their
+   * live link for it (`link: null` when they haven't shared it).
+   */
+  async getSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionShareLinkState> {
+    return await this.requestJson<SessionShareLinkState>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /**
+   * Share a chat the person started with a read-only link: anyone holding it
+   * reads the conversation as it is now (the person's messages and the
+   * replies, never tool details or files), without signing in. Calling it
+   * again refreshes the same link with the newest messages.
+   */
+  async createSessionShareLink(workspaceId: string, sessionId: string): Promise<SessionShareLink> {
+    return await this.requestJson<SessionShareLink>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** Stop sharing a chat: its link stops working at once. */
+  async revokeSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{ revoked: boolean }> {
+    return await this.requestJson<{ revoked: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** The person's live share links in a workspace, newest first. */
+  async listSessionShareLinks(workspaceId: string): Promise<SessionShareLinkList> {
+    return await this.requestJson<SessionShareLinkList>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/share-links`,
+    );
+  }
+
+  /** Read a shared chat by its share id, as anyone holding the link does. */
+  async getSharedSession(shareId: string): Promise<SharedSession> {
+    return await this.requestJson<SharedSession>(
+      "GET",
+      `/v1/shared-sessions/${encodeURIComponent(shareId)}`,
     );
   }
 
@@ -6247,6 +6309,31 @@ export class OpenGeniClient {
     );
   }
 
+  /** The organization's EU-only inference setting. Any member. */
+  async getOrganizationInferenceResidency(
+    organizationId: string,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "GET",
+      `/v1/organizations/${organizationId}/inference-residency`,
+    );
+  }
+
+  /**
+   * Turn EU-only inference on (an owner or admin) or off (an owner or admin in
+   * the app in a browser, never an agent or API key).
+   */
+  async updateOrganizationInferenceResidency(
+    organizationId: string,
+    request: UpdateOrganizationInferenceResidencyRequest,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/inference-residency`,
+      request,
+    );
+  }
+
   /** Fully replace the workspace's hard provider/model allowlist. */
   async updateWorkspaceModelAccessPolicy(
     workspaceId: string,
@@ -8656,6 +8743,26 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/settings`,
       request,
+    );
+  }
+
+  /** The caller's own default placement for new chats ("Your default machine"). */
+  async getMyDefaultExecutionTarget(workspaceId: string): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+    );
+  }
+
+  /** Saves the caller's own default placement; null follows the workspace default. */
+  async setMyDefaultExecutionTarget(
+    workspaceId: string,
+    target: WorkspaceDefaultExecutionTarget | null,
+  ): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+      { target },
     );
   }
 
@@ -11344,14 +11451,21 @@ export class OpenGeniClient {
     );
   }
 
-  /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
-  async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
-    // A JSON body even though the route reads none: signed-in browsers are
-    // admitted to subscription mutations only as same-origin JSON requests.
+  /**
+   * Begin device-code login: show `userCode` at `verificationUri`, then poll
+   * with `state`. `scope: "user"` connects the person's own subscription from
+   * this workspace; it is kept in their own Personal workspace.
+   */
+  async codexConnectStart(
+    workspaceId: string,
+    options: { scope?: "user" } = {},
+  ): Promise<CodexConnectStart> {
+    // Always a JSON body: signed-in browsers are admitted to subscription
+    // mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
-      {},
+      options.scope ? { scope: options.scope } : {},
     );
   }
 

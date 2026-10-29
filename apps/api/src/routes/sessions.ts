@@ -25,7 +25,11 @@ import {
   marketplacePluginCapabilityItem,
   PLUGIN_CAPABILITY_ID_PREFIX,
 } from "../integrations/marketplace-plugin-catalog";
-import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import {
+  SITE_FRAME_HEADER,
+  siteFrameBodyRefusal,
+  withoutFileResources,
+} from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
   sessionScheduleTargets,
@@ -322,6 +326,7 @@ import {
   SelfhostedSession,
   usesAgentTransport,
 } from "@opengeni/runtime/sandbox";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -372,6 +377,7 @@ import {
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
+  resolveMemberExecutionDefault,
   getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
   forkManagedHumanSession,
@@ -514,6 +520,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
     if (error instanceof TranscriptionBillingRefusedError) {
       return transcriptionBillingRefusal(c, error);
+    }
+    if (error instanceof InferenceRegionRestrictedError) {
+      return c.json(
+        {
+          error: {
+            status: 422,
+            code: error.code,
+            message: error.message,
+            retryable: false,
+          },
+        },
+        422,
+      );
     }
     if (error instanceof RealtimeVoiceUnavailableError) {
       return c.json(
@@ -827,7 +846,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // capabilities. Ordinary session creation resolves the viewer's settings.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
       if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
-        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        // The console's own Site view (this request names the Site's id and
+        // version without a frame marker; Site code is always marked)
+        // attaches the person's files to the first message, as it does to
+        // every later one. Site code still may not, and neither does an
+        // origin carried over from elsewhere in the request.
+        const consoleSiteView =
+          Boolean(origin?.siteId) && c.req.header(SITE_FRAME_HEADER) === undefined;
+        const refused = siteFrameBodyRefusal(
+          "sessions.create",
+          "/sessions",
+          consoleSiteView ? withoutFileResources(payload) : payload,
+        );
         if (refused)
           return c.json(
             {
@@ -942,13 +972,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
     });
-    return c.json(
-      await getActorNewSessionDraft(
+    const [draft, memberDefault] = await Promise.all([
+      getActorNewSessionDraft(
         { settings: catalog.settings, db },
         grant,
         workspaceId,
         authorization,
       ),
+      resolveMemberExecutionDefault(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+    ]);
+    // A fresh form starts on the caller's own default when it is usable now.
+    // Without one the draft keeps its usual shape and the form follows the
+    // workspace default.
+    return c.json(
+      memberDefault.usable && memberDefault.target
+        ? { ...draft, memberDefaultExecutionTarget: memberDefault.target }
+        : draft,
     );
   });
 
@@ -1941,7 +1984,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               connectionId: claim.connection.id,
               operationId,
               connectionEpoch: claim.connection.connectionEpoch,
-              failureCode: "billing_refused",
+              failureCode:
+                error instanceof InferenceRegionRestrictedError ? error.code : "billing_refused",
             }),
           ),
         ).catch(() => undefined);
@@ -2189,10 +2233,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               failureCode:
                 error instanceof RealtimeWebsocketBrokerError
                   ? error.code
-                  : error instanceof TranscriptionBillingRefusedError ||
-                      error instanceof RealtimeVoiceUnavailableError
-                    ? "billing_refused"
-                    : `${provider?.id ?? "websocket"}_error`,
+                  : error instanceof InferenceRegionRestrictedError
+                    ? error.code
+                    : error instanceof TranscriptionBillingRefusedError ||
+                        error instanceof RealtimeVoiceUnavailableError
+                      ? "billing_refused"
+                      : `${provider?.id ?? "websocket"}_error`,
             }),
           ),
         ).catch(() => undefined);
@@ -5790,6 +5836,13 @@ export function sessionAuthorizationOperationForHttp(
   // Owner-only preview of the same change: identical authority to making it.
   if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
+  // A read-only link anyone holding it can open: reading the state is a read,
+  // creating, refreshing or stopping it is its own operation.
+  if (suffix === "/share-link") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT" || verb === "DELETE") return "session.share_link.write";
+    return null;
+  }
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.

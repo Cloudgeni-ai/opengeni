@@ -923,6 +923,7 @@ export function CodexConnectPage({
   footerStart,
   fields,
   blockedReason,
+  scope,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
@@ -932,6 +933,8 @@ export function CodexConnectPage({
   fields?: ReactNode;
   /** Why the sign-in can't start yet (a choice above is incomplete). */
   blockedReason?: string | null;
+  /** "user": the person's own account, kept in their Personal workspace. */
+  scope?: "user" | undefined;
 }) {
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
@@ -945,6 +948,7 @@ export function CodexConnectPage({
 
   return (
     <ModelsFormPage
+      connectStep
       title="Connect Codex"
       description="Sign in with the ChatGPT account whose plan should pay for new work."
       onClose={onClose}
@@ -962,6 +966,7 @@ export function CodexConnectPage({
       onSubmit={async () => {
         if (signingIn) return false;
         await codex.connect({
+          scope,
           onConnected: (accountId) => {
             if (!active.current) return;
             setConnected(true);

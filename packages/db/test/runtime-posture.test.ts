@@ -1586,6 +1586,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 1092 adds the workspace-isolated chat share links with full runtime DML.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0981-0982: two read-only funding projections and append-only machine proof.
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 3
@@ -1796,6 +1802,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1090 personal default machines: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1946,7 +1958,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
-        1; // 1071 shared Site project placements: full-DML, FORCE-RLS.
+        1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
+        1; // 1090 personal default machines: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1960,6 +1973,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_tool_allowances");
       expect(FORCE_RLS_TABLES).toContain("site_project_placements");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_project_placements");
+      expect(FORCE_RLS_TABLES).toContain("workspace_member_execution_defaults");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("workspace_member_execution_defaults");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
@@ -2030,6 +2045,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
@@ -2045,6 +2061,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // 1092 chat share links.
           1 + // 0998 managed-auth passkeys: runtime DML withheld for a release.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
@@ -3922,7 +3939,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's and 1060's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's and 1091's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3966,6 +3983,18 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "browser_session_associations",
     "organization_inference_residency",
     "organization_inference_residency_events",
+    "task_notes",
+    "host_export_outbox",
+    "session_history_items_repair_audit",
+    "session_goals",
+    "session_goal_revisions",
+    "session_message_search_texts",
+    "session_content_blobs",
+    "session_events",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_system_updates",
+    "task_note_write_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4018,6 +4047,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "summarize_queued_turns_by_hold()",
       "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+      "redact_session_secret_cells_v1(uuid, text, jsonb)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4025,6 +4056,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "summarize_queued_turns_by_hold()",
       "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+      "redact_session_secret_cells_v1(uuid, text, jsonb)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4078,6 +4111,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "summarize_queued_turns_by_hold()",
       "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+      "redact_session_secret_cells_v1(uuid, text, jsonb)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

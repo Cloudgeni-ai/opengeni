@@ -20,6 +20,14 @@ export {
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
+export * from "./side-feature-residency";
+import {
+  parseSideFeatureResidencyJson,
+  sideFeatureResidencyDeclarationWarnings,
+  sideFeatureRouteAllowed,
+  type SideFeatureResidencySettings,
+  type SideFeatureTarget,
+} from "./side-feature-residency";
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
@@ -720,6 +728,10 @@ const SettingsSchema = z.object({
   privacyOnlyMeAllowed: EnvBoolean.default(true),
   privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
   privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
+  // Read-only chat share links: a person can create a link to a chat that
+  // anyone holding it can read without signing in. Off, nobody can create
+  // one and existing links stop opening.
+  privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -1191,6 +1203,11 @@ const SettingsSchema = z.object({
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
+  // Where operator-run side-feature routes (self-hosted search, the
+  // deployment's Azure voice, speech and embedding resources, an
+  // OpenAI-compatible decision model) process data: route id to residency
+  // declaration. Other side-feature routes use code-owned rules.
+  sideFeatureResidencyJson: z.string().optional(),
   // Per-run only, never read from the environment: set by the execution
   // overlay when the workspace is EU-only. Every model route the run resolves
   // must then have an EU residency record. See docs/eu-only-inference.md.
@@ -2557,12 +2574,57 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
 export type DecisionModelSettings = Pick<
   Settings,
   "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
->;
-/** Explicit deployment credentials only. Compatibility is code-search-only. */
+> &
+  SideFeatureResidencySettings;
+/**
+ * Explicit deployment credentials only. Compatibility is code-search-only.
+ * Under EU-only inference a decision model whose route is not EU is not
+ * configured at all, so code search and model tool routing are off.
+ */
 export function decisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch = false,
+):
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | undefined {
+  const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
+  return config && sideFeatureRouteAllowed(settings, decisionModelTarget(config))
+    ? config
+    : undefined;
+}
+
+/**
+ * The route a decision model sends over. An OpenAI-compatible model is
+ * resolved with the endpoint it calls (api.openai.com without a base URL),
+ * so a declaration covers only the endpoint it names.
+ */
+export function decisionModelTarget(config: {
+  provider: "jev" | "openai" | "openrouter";
+  baseUrl?: string | undefined;
+}): SideFeatureTarget {
+  return config.provider === "openai"
+    ? { route: "decision_model.openai", endpoint: config.baseUrl ?? "https://api.openai.com/v1" }
+    : `decision_model.${config.provider}`;
+}
+
+/**
+ * The side-feature route (with its endpoint) the configured decision model
+ * sends over, whether or not it may run under the residency requirement.
+ */
+export function decisionModelRoute(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch = false,
+): SideFeatureTarget | null {
+  const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
+  return config ? decisionModelTarget(config) : null;
+}
+
+function unrestrictedDecisionModelConfiguration(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch: boolean,
 ):
   | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
   | undefined {
@@ -4790,7 +4852,7 @@ export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
     upstreamModelId: "aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     aliases: [],
     capabilities: opperCapabilities({
@@ -5620,6 +5682,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     privacyAdminScheduleSummariesRequired: optional(
       "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
     ),
+    privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
@@ -5773,6 +5836,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     builtinModelResidencyJson: optional("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON"),
+    sideFeatureResidencyJson: optional("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
@@ -6292,6 +6356,8 @@ const RETIRED_DEPLOYMENT_SWITCHES: ReadonlyArray<{ name: string; reason: string 
 ];
 
 const warnedRetiredDeploymentSwitches = new Set<string>();
+
+const warnedSideFeatureResidency = new Set<string>();
 
 function warnRetiredDeploymentSwitches(source: NodeJS.ProcessEnv): void {
   for (const { name, reason } of RETIRED_DEPLOYMENT_SWITCHES) {
@@ -12146,6 +12212,17 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       console.warn(
         `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declares models that are not configured built-in models: ${unmatched.join(", ")}`,
       );
+    }
+  }
+  if (settings.sideFeatureResidencyJson?.trim()) {
+    parseSideFeatureResidencyJson(settings.sideFeatureResidencyJson);
+    // Logged once per process: settings are read many times.
+    for (const warning of sideFeatureResidencyDeclarationWarnings(
+      settings.sideFeatureResidencyJson,
+    )) {
+      if (warnedSideFeatureResidency.has(warning)) continue;
+      warnedSideFeatureResidency.add(warning);
+      console.warn(`[config] OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: ${warning}`);
     }
   }
   if (

@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "5155dfbccbf44b02874235b318dd7ab7bc1e5df365e55f69fe0c27b6a249fc4c"
+      "sha256": "59e7c47bfccf4827c79ac88c56f8b26873add1ea85727e975a7cf59ab83a5cd4"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -667,6 +667,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "batch-receipt",
+      "step": "Classify this main push",
+      "sha256": "5ed236c5cf2860a870d2efa2e72fce973455bd44cc24104a5f08cfa1ecd5dfdd"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "browser-acceptance",
       "step": "Capabilities control-center browser acceptance",
       "sha256": "fa2d16a4ad98e618faf02d3a01621110009be34290ccaa3488e224f6027bb937"
@@ -789,7 +795,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "full-green",
       "step": "Publish exact-SHA full CI evidence",
-      "sha256": "15a3e340925b8e1cfca75586fd6d43f7d12c191e5d81eb59bdaee7ed999b1351"
+      "sha256": "d44d4cdd9748522598221439ce1d4627bcbb7c2d6255a6240ab9e628f88c158d"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -932,8 +938,14 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
+      "step": "Bind the batch receipt",
+      "sha256": "b645026dd6f1245e3c0b4f3844e66826dfb43d18d06dec7d5867f0eb7e4dabed"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "2462fe7e0fc9bcf3fdec68b6f5755a56116f6574f92b3f2fcd0a36df7aeb8f7c"
+      "sha256": "53096579de0c2091f7c2c7ce6a508e42244c9a6ff2288bab63e22699839bde7c"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -945,7 +957,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "release-image-validation",
       "step": "Require every non-image CI lane",
-      "sha256": "8923598067fd947eb7285944861701e054227ed53f559c11925ddcbdb79ff40e"
+      "sha256": "b0cc0dbc591f57b81c04a923b0a62ab12e59283acbe22e6c75c97000a4052e22"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -987,7 +999,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "test",
       "step": "Require every split CI lane",
-      "sha256": "cb812b0481fbf00831a18bae0a6e678eb7f357b9496c2ed05561beb6d781af19"
+      "sha256": "aed0b05bb1764cf3c4a20e9b056211f13f3772b254f059b7a69ed2a594f1716d"
     },
     {
       "workflow": ".github/workflows/ci.yml",

@@ -472,7 +472,7 @@ managed-provider slice of a catalog document:
   "opperModels": [
     {
       "upstreamModelId": "aws/claude-opus-5-5",
-      "label": "Claude Opus 5.5 (EU)",
+      "label": "Claude Opus 5.5",
       "shortLabel": "Opus 5.5",
       "capabilities": { "...": "complete V1 capabilities" },
       "contextWindowTokens": 1000000,
@@ -1095,11 +1095,13 @@ Reviewed 2026-10-05 against Opper's catalogue
 (`GET https://api.opper.ai/v3/compat/models`; each entry's `opper.reasoning`
 lists supported efforts and `opper.capabilities` its inputs) and probed live end
 to end. The starter pins an EU-resident route so Opper never pools it onto a
-non-EU provider:
+non-EU provider. Its label doesn't say EU: EU status comes from the route's
+residency record (see [eu-only-inference.md](eu-only-inference.md)), never from
+a name.
 
 | Product              | Upstream route (Opper id) | Served by / inference                           | Context / max output | Opper list price (per 1M): input / cached input / cache write / output | Opengeni debit |
 | -------------------- | ------------------------- | ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------- | -------------- |
-| Claude Opus 5.5 (EU) | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
+| Claude Opus 5.5      | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
 
 Product ids are `opper/aws/claude-opus-5-5` and `workspace-opper/aws/claude-opus-5-5`.
 Effective context is the raw window minus Opper's max output (872,000);

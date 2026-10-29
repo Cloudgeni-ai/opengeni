@@ -11,6 +11,8 @@ export * from "./domain/mcp-account-bindings";
 export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
+export * from "./domain/session-secret-redaction";
+export * from "./domain/session-secret-redaction-matchers";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
@@ -87,6 +89,8 @@ export * from "./xai-operation-availability";
 export * from "./recording-transcription-azure";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
+export * from "./side-feature-availability";
+export * from "./side-feature-routes";
 export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
@@ -137,6 +141,10 @@ export * from "./rigs";
 export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
+export {
+  listApiIntegrationsWithPersonalExtension,
+  type PersonalWorkspaceExtensionApiIntegration,
+} from "./domain/personal-workspace-connectors";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
@@ -163,6 +171,7 @@ export * from "./domain/slack-bot";
 export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";
 export * from "./domain/workspace-members";
+export * from "./domain/member-execution-defaults";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
@@ -173,6 +182,7 @@ export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";
+export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";

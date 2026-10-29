@@ -24,6 +24,7 @@ export const electronStub = {
   screen: {},
   shell: { openExternal: async (_url: string): Promise<void> => {} },
   Menu: { buildFromTemplate: (template: unknown) => template },
+  Tray: EventEmitter,
   dialog: { showMessageBox: async () => ({ response: 0 }) },
   Notification: FakeNotification,
 };

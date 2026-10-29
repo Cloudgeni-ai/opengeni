@@ -160,6 +160,12 @@ export interface ModelsWorkspace {
   personal: boolean;
   /** The viewer can change its default model and Allowed models. */
   canManage: boolean;
+  /**
+   * The viewer can't change its models but connects and manages their own
+   * subscriptions ("Only me") on its page: a member who can manage
+   * connections there.
+   */
+  connectOwn?: boolean | undefined;
   /** Its saved default model, if any (from the workspace's settings). */
   savedDefaultModel: string | null;
 }
@@ -1224,6 +1230,17 @@ function WorkspaceRow({
   ) : (
     <LogoTile name={workspace.name} />
   );
+  if (!workspace.canManage && workspace.connectOwn) {
+    return (
+      <ListRow
+        leading={leading}
+        title={title}
+        meta={["Your own subscriptions"]}
+        indicator="open"
+        onOpen={onOpen}
+      />
+    );
+  }
   if (!workspace.canManage) {
     return (
       <ListRow

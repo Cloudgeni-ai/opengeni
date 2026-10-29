@@ -237,6 +237,7 @@ import {
   type AccessGrantAuthorization,
 } from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
+import { resolveMemberExecutionDefault } from "./member-execution-defaults";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
 
@@ -2928,16 +2929,27 @@ async function createSessionForRequestInFileScope(
       throw error;
     }
   }
-  // A workspace default applies only to a new root's own box. Explicit targets,
-  // explicit backends, children, and shared groups retain their chosen placement.
-  // A keyed shell already froze its route in the insert transaction: recovery
-  // must keep that route even when the workspace default has since changed.
+  // A default applies only to a new root's own box. Explicit targets, explicit
+  // backends, children, and shared groups retain their chosen placement. A
+  // keyed shell already froze its route in the insert transaction: recovery
+  // must keep that route even when a default has since changed. A person's own
+  // default ("Your default machine") places the chats they start themselves
+  // ahead of the workspace default; automations and agent-created chats follow
+  // the workspace default, and an unusable personal choice falls back to it.
   if (
     !parentSession &&
     !payload.targetSandboxId &&
     payload.sandboxBackend === undefined &&
     (payload.sandbox === undefined || payload.sandbox === "new")
   ) {
+    const memberDefault =
+      !retainedKeyedShellExecution && !creationInitiator.actor && replayManagedHumanSubjectId
+        ? await resolveMemberExecutionDefault(db, unresolvedDeps.settings, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: replayManagedHumanSubjectId,
+          })
+        : null;
     if (retainedKeyedShellExecution) {
       payload.sandboxBackend = retainedKeyedShellExecution.sandboxBackend;
       if (retainedKeyedShellExecution.activeSandboxId) {
@@ -2945,6 +2957,14 @@ async function createSessionForRequestInFileScope(
         if (retainedKeyedShellExecution.workingDir) {
           payload.workingDir = retainedKeyedShellExecution.workingDir;
         }
+      }
+    } else if (memberDefault?.usable && memberDefault.target) {
+      if (memberDefault.target.kind === "machine") {
+        payload.targetSandboxId = memberDefault.target.targetSandboxId;
+        // A machine brings its own environment; see the workspace default below.
+        if (payload.rigId === undefined) payload.rigId = null;
+      } else {
+        payload.sandboxBackend = unresolvedDeps.settings.sandboxBackend;
       }
     } else {
       let target: ReturnType<typeof resolveWorkspaceDefaultExecutionTarget>;

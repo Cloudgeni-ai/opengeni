@@ -85,8 +85,9 @@ export function useEmbedded(): boolean {
 }
 
 /** Tells the host the open chat's state each time it changes. */
-export function useReportSessionState(state: SessionViewState): void {
-  const report = useAppHost().onSessionState;
+export function useReportSessionState(state: SessionViewState, enabled = true): void {
+  const hostReport = useAppHost().onSessionState;
+  const report = enabled ? hostReport : undefined;
   const { sessionId, status, events, initialLoading } = state;
   useEffect(() => {
     report?.({ sessionId, status, events, initialLoading });

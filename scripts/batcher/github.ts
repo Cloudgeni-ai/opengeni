@@ -27,6 +27,14 @@ export interface PullSummary {
   autoMergeAt: number | null;
 }
 
+export interface PullFile {
+  path: string;
+  /** GitHub's file status: added, modified, removed, renamed, copied, changed. */
+  status: string;
+  /** The old path of a renamed file. */
+  previous?: string;
+}
+
 export interface CheckSummary {
   conclusion: string | null;
   status: string;
@@ -58,7 +66,10 @@ export interface GitHub {
   mainSha(): Promise<string>;
   queuedPulls(queueLabel: string): Promise<PullSummary[]>;
   check(headSha: string, name: string): Promise<CheckSummary | null>;
-  pullFiles(number: number): Promise<string[] | null>;
+  /** Null when the PR changes too many files to list. */
+  pullFiles(number: number): Promise<PullFile[] | null>;
+  /** Paths of the files directly in a directory at a commit. */
+  listDirectory(path: string, ref: string): Promise<string[]>;
   compareFiles(base: string, head: string): Promise<{ files: string[]; mergeBase: string } | null>;
   branches(prefix: string): Promise<{ name: string; sha: string }[]>;
   commit(sha: string): Promise<CommitSummary>;
@@ -248,18 +259,27 @@ export class RestGitHub implements GitHub {
   }
 
   async pullFiles(number: number) {
-    const files: string[] = [];
+    const files: PullFile[] = [];
     for (let page = 1; page <= 30; page++) {
-      const batch = await this.get<{ filename: string; previous_filename?: string }[]>(
-        `pulls/${number}/files?per_page=100&page=${page}`,
-      );
-      for (const file of batch) {
-        files.push(file.filename);
-        if (file.previous_filename) files.push(file.previous_filename);
-      }
+      const batch = await this.get<
+        { filename: string; status: string; previous_filename?: string }[]
+      >(`pulls/${number}/files?per_page=100&page=${page}`);
+      for (const file of batch)
+        files.push({
+          path: file.filename,
+          status: file.status,
+          ...(file.previous_filename ? { previous: file.previous_filename } : {}),
+        });
       if (batch.length < 100) return files;
     }
     return null;
+  }
+
+  async listDirectory(path: string, ref: string) {
+    // The contents API lists up to 1,000 entries, far more than the numbered
+    // directories hold.
+    const entries = await this.get<{ path: string; type: string }[]>(`contents/${path}?ref=${ref}`);
+    return entries.filter((entry) => entry.type === "file").map((entry) => entry.path);
   }
 
   async compareFiles(base: string, head: string) {

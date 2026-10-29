@@ -505,6 +505,8 @@ export const englishMessages = {
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",
   "automations.run.error.chatBusy": "Skipped because the chat was still busy with earlier work.",
+  "automations.run.error.chatWaitingForAccount":
+    "Skipped because the chat is waiting for a model account. Pick another model in the chat.",
   "automations.run.error.chatChanged":
     "The chat's tools or settings changed after the automation was set up.",
   "automations.run.error.chatEnded": "Its chat has ended, so the run couldn't start there.",
@@ -1861,6 +1863,8 @@ export const englishMessages = {
     "Unknown transcription adapter failure.",
   "hooks.useTurnQueue.thatQueuedPromptChangedBefore":
     "That queued prompt changed before Steer could be sent.",
+  "humanInputDelegation.message": "Let the agent decide: {question}",
+  "humanInputDelegation.messageWithMore": "Let the agent decide: {question} (+{more} more)",
   "humanInputForm.back": "Back",
   "humanInputForm.loadingTheExactSkillFiles": "Loading the exact Skill files…",
   "humanInputForm.loadTheExactSkillFiles": "Load the exact Skill files before saving.",
@@ -1975,6 +1979,8 @@ export const englishMessages = {
   "identityLinkConsent.youCanCloseThisPage": "You can close this page without granting access.",
   "identityLinkConsent.yourCurrentPermissionsStillApply": "Your current permissions still apply.",
   "identityLinkConsent.yourOpengeniIdentity": "Your {product} identity",
+  /** A model or feature the server switched off because the workspace is EU-only. */
+  "inferenceRegion.notSupportedInEu": "Not supported in EU",
   "interactionInterventionBanner.actionNeeded": "Action needed",
   "interactionInterventionBanner.agentNeedsYourHelp": "Agent needs your help",
   "interactionInterventionBanner.cancelRequest": "Cancel request",
@@ -3021,8 +3027,11 @@ export const englishMessages = {
   "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
+  "messageTimeline.agentDecided": "Agent decided",
+  "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
   "messageTimeline.answered": "Answered",
+  "messageTimeline.answeredSummary": "Answered: {summary}",
   "messageTimeline.asked": "Asked",
   "messageTimeline.auto": "Auto",
   "messageTimeline.backToYourMessage": "Back to your message",

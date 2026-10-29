@@ -42,6 +42,7 @@ export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
+export * from "./session-share-links";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
 import {
@@ -63,6 +64,7 @@ export * from "./first-party-tool-authorization";
 export * from "./model-availability";
 export * from "./model-residency";
 import { ClientModelResidencyV1 } from "./model-residency";
+import { InferenceFeatureAvailability } from "./inference-residency";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
   AgentConfigRequest,
@@ -906,7 +908,7 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
-    /** Content from an EU-only workspace may only reach other EU-only workspaces (HTTP 422). */
+    /** EU-only refusal (HTTP 422): content from an EU-only workspace may only reach other EU-only workspaces, and EU-only inference refuses a model-backed feature with no EU route (details.code "region_restricted"). */
     "region_restricted",
     /** The resource or route no longer exists (HTTP 410). */
     "gone",
@@ -2229,6 +2231,8 @@ export const TranscriptionErrorCode = /* @__PURE__ */ defineSchema(() =>
     "insufficient_credits",
     "allowance_exhausted",
     "monthly_model_cost_limit",
+    /** The workspace is EU-only and no speech-to-text route here is EU. */
+    "region_restricted",
   ]),
 );
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
@@ -3203,6 +3207,30 @@ export function machineCanBeWorkspaceDefault(
 ): boolean {
   return machine.scope !== "user" || workspace?.kind === "personal";
 }
+
+/**
+ * `GET /v1/workspaces/:workspaceId/my-default-execution-target`: the caller's
+ * own placement for the new chats they start in this workspace ("Your default
+ * machine"). Null follows the workspace default. Any active machine the caller
+ * can use qualifies, including their own Only me machine. `usable` is false
+ * when the saved machine was removed or is no longer available to them; their
+ * new chats then follow the workspace default until they choose again.
+ */
+export const MemberDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    target: WorkspaceDefaultExecutionTarget.nullable(),
+    usable: primitives.boolean,
+  }),
+);
+export type MemberDefaultExecutionTarget = z.infer<typeof MemberDefaultExecutionTarget>;
+
+/** `PUT /v1/workspaces/:workspaceId/my-default-execution-target`; null clears it. */
+export const UpdateMemberDefaultExecutionTargetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ target: WorkspaceDefaultExecutionTarget.nullable() }).strict(),
+);
+export type UpdateMemberDefaultExecutionTargetRequest = z.infer<
+  typeof UpdateMemberDefaultExecutionTargetRequest
+>;
 
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
@@ -9384,6 +9412,8 @@ export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
     "session.visibility.write",
     "session.fork.create",
     "session.personal_resource.grant",
+    /** Create, refresh or stop a read-only share link anyone holding it can open. */
+    "session.share_link.write",
   ]),
 );
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
@@ -10310,6 +10340,12 @@ export const NewSessionDraft = /* @__PURE__ */ defineSchema(() =>
     selectedProjectChannelId: z.string().uuid().nullable().optional(),
     options: NewSessionDraftOptions,
     selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
+    /**
+     * Read-only: the caller's own default placement for new chats here ("Your
+     * default machine") when it is usable now. A fresh form starts on it ahead
+     * of the workspace default. Never saved with the draft.
+     */
+    memberDefaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
     updatedAt: primitives.nullableString,
   }),
 );
@@ -15237,6 +15273,18 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       approvalRequiredToolCount: primitives.nonnegativeInteger,
       revisionId: primitives.nonEmptyString,
       contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+      /**
+       * Set on an instance a Personal workspace carries for its owner from
+       * another workspace where they connected it "Only me". It is managed in
+       * that workspace, not here.
+       */
+      personalExtension: z
+        .object({
+          originWorkspaceId: primitives.uuid,
+          originWorkspaceName: primitives.nonEmptyString,
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );
@@ -21962,6 +22010,8 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
         "unsupported",
         // The workspace turned Opengeni credits off and this model spends them.
         "credits_disabled",
+        // The workspace is EU-only and this model's route is not EU.
+        "region_restricted",
       ])
       .nullable(),
     checkedAt: z.string().datetime().nullable(),
@@ -22166,6 +22216,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     codeSearch: z
       .object({ available: primitives.boolean, workspaceDefault: z.enum(["off", "on", "split"]) })
       .default({ available: false, workspaceDefault: "off" }),
+    // EU-only inference: each model-backed side feature's region availability
+    // for the caller's workspace. `unavailableReason: "region_restricted"`
+    // means the workspace is EU-only and the feature has no EU route here;
+    // show "Not supported in EU". Absent on older servers.
+    inferenceFeatures: z.array(InferenceFeatureAvailability).optional(),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
@@ -22344,6 +22399,7 @@ export * from "./governed-learning-evaluator";
 export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
+export * from "./session-secret-redaction";
 export * from "./canonical-human-identities";
 export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";

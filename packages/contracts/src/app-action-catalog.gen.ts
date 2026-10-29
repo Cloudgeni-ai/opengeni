@@ -1307,6 +1307,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createSessionShareLink",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/share-link",
+    "request": [],
+    "response": [
+      "SessionShareLink"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "createSiteAuthConnection",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections",
@@ -2339,13 +2349,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/organizations/:organizationId/codex/accounts/:accountId/overview",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/overview",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/organizations/:organizationId/inference-residency",
-    "method": "GET",
-    "path": "/v1/organizations/:organizationId/inference-residency",
     "request": [],
     "response": []
   },
@@ -3485,6 +3488,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getMyDefaultExecutionTarget",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
+  },
+  {
     "id": "getMyUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/usage/me",
@@ -3576,6 +3589,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GetOrganizationCredentialProviderResponse"
+    ]
+  },
+  {
+    "id": "getOrganizationInferenceResidency",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/inference-residency",
+    "request": [],
+    "response": [
+      "OrganizationInferenceResidency"
     ]
   },
   {
@@ -3958,6 +3980,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "files:read"
+  },
+  {
+    "id": "getSessionShareLink",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/share-link",
+    "request": [],
+    "response": [
+      "SessionShareLinkState"
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionTenancyCreateCapabilities",
@@ -5764,6 +5796,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:read"
   },
   {
+    "id": "listSessionShareLinks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/share-links",
+    "request": [],
+    "response": [
+      "SessionShareLinkList"
+    ],
+    "permission": "sessions:read"
+  },
+  {
     "id": "listSiteAuthConnections",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections",
@@ -6352,15 +6394,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "PATCH /v1/organizations/:organizationId/inference-residency",
-    "method": "PATCH",
-    "path": "/v1/organizations/:organizationId/inference-residency",
-    "request": [
-      "UpdateOrganizationInferenceResidencyRequest"
-    ],
-    "response": []
-  },
-  {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
@@ -6760,6 +6793,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/rigs/:rigId/versions",
     "request": [
       "RigDefinitionEditPayload"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/secret-redactions",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/secret-redactions",
+    "request": [
+      "SecretRedactionRequest"
     ],
     "response": []
   },
@@ -8095,6 +8137,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "revokeSessionShareLink",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/share-link",
+    "request": [],
+    "response": [],
+    "permission": "sessions:control"
+  },
+  {
     "id": "revokeUserResourceGrant",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/user-resource-authorities/grants/:grantId",
@@ -8481,6 +8531,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MemberAllowance"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setMyDefaultExecutionTarget",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [
+      "UpdateMemberDefaultExecutionTargetRequest"
+    ],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "setOpenGeniSlackBotOrganizationAccess",
@@ -9369,6 +9431,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "updateOrganizationInferenceResidency",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/inference-residency",
+    "request": [
+      "UpdateOrganizationInferenceResidencyRequest"
+    ],
+    "response": [
+      "OrganizationInferenceResidency"
     ]
   },
   {
