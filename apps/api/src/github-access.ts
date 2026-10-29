@@ -25,6 +25,10 @@ import {
   setGitHubAppWebhookUrl,
 } from "@opengeni/github";
 import type { ApiRouteDeps, GitHubAppWebhookPort } from "@opengeni/core";
+import {
+  createGitHubRepositoryCatalog,
+  type GitHubRepositoryCatalog,
+} from "./github-repository-catalog";
 
 /**
  * The GitHub App's webhook settings for GitHub event sources: the host's App
@@ -190,9 +194,29 @@ export function githubInstallationBindingLifecycle(
   return "active";
 }
 
+/** One repository catalog per GitHub App source (host App or this deployment's). */
+const repositoryCatalogs = new WeakMap<object, GitHubRepositoryCatalog>();
+
+function repositoryCatalogFor(deps: ApiRouteDeps): GitHubRepositoryCatalog {
+  const source: object = deps.githubAppApi ?? deps.settings;
+  let catalog = repositoryCatalogs.get(source);
+  if (!catalog) {
+    catalog = createGitHubRepositoryCatalog();
+    repositoryCatalogs.set(source, catalog);
+  }
+  return catalog;
+}
+
+/**
+ * The GitHub repositories this workspace may use. Bindings and the workspace's
+ * repository allowlist are read live every time; GitHub's own repository list
+ * comes from a short-lived per-process catalog unless `fresh` is set (an
+ * explicit sync), so passive reads survive a brief GitHub failure.
+ */
 export async function listWorkspaceGitHubRepositories(
   deps: ApiRouteDeps,
   workspaceId: string,
+  options: { fresh?: boolean } = {},
 ): Promise<GitHubRepository[]> {
   const bindings = await listWorkspaceGitHubInstallationBindings(deps, workspaceId);
   const activeInstallationIds = new Set(
@@ -213,9 +237,15 @@ export async function listWorkspaceGitHubRepositories(
     return [];
   }
   const installationIds = authorizedAccess.map((installation) => installation.installationId);
-  const repositories = deps.githubAppApi?.listRepositories
-    ? await deps.githubAppApi.listRepositories({ installationIds })
-    : await listGitHubAppRepositories(deps.settings, { installationIds });
+  const host = deps.githubAppApi;
+  const repositories = await repositoryCatalogFor(deps).read(
+    installationIds,
+    () =>
+      host?.listRepositories
+        ? host.listRepositories({ installationIds })
+        : listGitHubAppRepositories(deps.settings, { installationIds }),
+    options,
+  );
   const accessByInstallation = new Map(
     authorizedAccess.map((installation) => [installation.installationId, installation]),
   );

@@ -65,7 +65,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const completeConnect = useCallback(() => {
     setConnectRequest(null);
-    void context.refreshGitHub(workspaceId);
+    void context.refreshGitHub(workspaceId, undefined, { userInitiated: true });
   }, [context, workspaceId]);
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "github:manage");
   const canManagePersonal = hasWorkspacePermission(

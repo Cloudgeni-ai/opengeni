@@ -9,6 +9,7 @@ import {
   createSessionEventFeedStore,
   useLatestCallback,
   type AppContextValue,
+  type GitHubRefreshOptions,
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
@@ -223,6 +224,9 @@ export type AppStateOptions = Readonly<{
 export type AppState = ReturnType<typeof useAppState>;
 
 type StartSessionOptions = Parameters<AppContextValue["startSession"]>[2];
+
+/** The one "GitHub status unavailable" toast; a newer failure replaces it. */
+export const GITHUB_STATUS_TOAST_ID = "opengeni-github-status";
 
 export type SlackLinkPrepareController<Request> = ReturnType<
   typeof createSlackLinkPrepareController<Request>
@@ -1455,7 +1459,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   const refreshGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean | undefined }) => {
+    async (workspaceId: string, signal?: AbortSignal, options?: GitHubRefreshOptions) => {
       const acceptedTransition = workspaceTransitionIdentity.current;
       if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) {
         return;
@@ -1489,8 +1493,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setGithubAppOpen(status.status !== "bound");
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
-          // so installations changed after connect show up; passive loads read
-          // Opengeni's cached rows.
+          // so installations changed after connect show up; passive loads may
+          // get the API's briefly cached GitHub list.
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);
@@ -1518,9 +1522,15 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         // first-load failure must not look like an empty catalog, or draft
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
-        // Someone without GitHub access in this workspace has nothing to fix.
-        if (isWorkspacePermissionDenied(error)) return;
+        // Load and focus refreshes run in the background: a transient failure
+        // there is shown where GitHub is used (the GitHub card and the GitHub
+        // integration keep a retry), not as a toast for something the person
+        // didn't do. Someone without GitHub access has nothing to fix.
+        if (!options?.userInitiated || isWorkspacePermissionDenied(error)) return;
+        // One toast for the GitHub status, replaced rather than stacked when
+        // refreshes fail again.
         toast.error("GitHub status unavailable", {
+          id: GITHUB_STATUS_TOAST_ID,
           description: userErrorText(error),
         });
       } finally {
@@ -2091,7 +2101,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       ) {
         return false;
       }
-      await refreshGitHub(workspaceId, undefined, { sync: true });
+      await refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
       if (
         !ownsWorkspaceOperation(
           activeGitHubDisconnectOperation.current,

@@ -79,6 +79,7 @@ export function useRepositoryCatalogRefresh(
           ? [
               context.refreshGitHub(workspaceId, undefined, {
                 sync: explicit && canManageGitHub,
+                userInitiated: explicit,
               }),
             ]
           : []),

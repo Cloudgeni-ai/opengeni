@@ -367,7 +367,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
+      return c.json({
+        repositories: await listWorkspaceGitHubRepositories(deps, workspaceId, { fresh: true }),
+      });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
         throw new HTTPException(409, {

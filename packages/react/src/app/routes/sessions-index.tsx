@@ -2529,7 +2529,7 @@ function workspaceRepositoryPickerProps(
     githubAppBusy: context.githubAppBusy,
     onRefresh: async () => {
       await Promise.all([
-        context.refreshGitHub(workspaceId, undefined, { sync: true }),
+        context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true }),
         context.refreshPersonalGitHub(workspaceId),
       ]);
     },
