@@ -173,11 +173,12 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: true,
     },
   });
-  expect(required).toContain("needs a Microsoft 365 admin to approve");
-  expect(required).toContain("Admin approval link");
-  expect(required).toContain(`href="${link.replaceAll("&", "&amp;")}"`);
-  expect(required).toContain("Copy admin approval link");
+  expect(required).toContain("Send this link to your Microsoft 365 admin");
+  expect(required).toContain("Copy approval link");
   expect(required).not.toContain("Connection setup could not continue");
+  expect(required).not.toContain("Personal connection");
+  expect(required).not.toContain("<ol>");
+  expect(required).not.toContain("Check status");
   const declined = await render({ type: "none" }, "cancelled", {
     providerId: "microsoft-outlook-mail",
     error: {
@@ -186,7 +187,7 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: true,
     },
   });
-  expect(declined).toContain("If it said your organization needs an admin");
+  expect(declined).toContain("If it asked for admin approval");
   const other = await render({ type: "none" }, "cancelled", {
     error: {
       code: "provider_denied",

@@ -29,7 +29,7 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::fleet::{Admission, Freezes, LeaseGate};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
-use crate::layout::{Images, Paths};
+use crate::layout::{self, Images, Paths};
 use crate::net::{NetworkConfig, Networks};
 use crate::observe::{Observer, TraceContext};
 use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
@@ -839,10 +839,7 @@ fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
 fn host_images(config: &HostConfig) -> Images {
     Images {
         kernel: config.kernel.clone(),
-        boot_args: match &config.network {
-            Some(_) => format!("{} {}", config.boot_args, NetworkConfig::boot_args()),
-            None => config.boot_args.clone(),
-        },
+        boot_args: layout::command_line(&config.boot_args, config.network.is_some()),
         first_uid: config.first_uid,
         network: config.network.clone(),
     }

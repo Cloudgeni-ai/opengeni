@@ -18,7 +18,15 @@ import {
   XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { forwardRef, useEffect, useState, type MouseEvent, type ReactElement } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactElement,
+} from "react";
 import { cn } from "../lib/cn";
 import { useComposerFooterSignal } from "../lib/composer-footer-signals";
 import { useVoiceInput, type VoiceInputRecordingsClient } from "../hooks/use-voice-input";
@@ -82,7 +90,7 @@ export type ComposerTranscriptionMessages = {
 const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
   start: t("composerTranscriptionControl.startVoiceInput"),
   stop: t("composerTranscriptionControl.stopAndTranscribe"),
-  cancel: t("composerTranscriptionControl.stopWithoutTranscribing"),
+  cancel: t("composerTranscriptionControl.discardDictation"),
   retry: t("composerTranscriptionControl.retryVoiceInput"),
   transcribeSaved: t("composerTranscriptionControl.transcribeSavedRecording"),
   timeRemaining: t("composerTranscriptionControl.stopsAndTranscribesInSeconds", {
@@ -90,7 +98,7 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
   }),
   pauseRetrying: t("composerTranscriptionControl.pauseAutomaticRetry"),
   requestingPermission: t("composerTranscriptionControl.requestingMicrophone"),
-  recording: t("composerTranscriptionControl.recordingPressEscapeToStop"),
+  recording: t("composerTranscriptionControl.recordingPressEscapeToDiscard"),
   saving: t("composerTranscriptionControl.savingAudioLocally"),
   transcribing: t("composerTranscriptionControl.transcribing"),
   retrying: t("composerTranscriptionControl.savedRetryingTranscription"),
@@ -127,6 +135,13 @@ export type ComposerTranscriptionControlProps = {
   workspaceId?: string | undefined;
   capability?: ClientVoiceInputConfig | null | undefined;
   workspaceEnabled?: boolean | undefined;
+  /** The language spoken ("nb", "en"); omitted or null detects it. */
+  language?: string | null | undefined;
+  /**
+   * Asked before each new dictation takes the microphone, such as a host's
+   * consent prompt. Resolving false keeps the microphone off.
+   */
+  beforeStart?: (() => boolean | Promise<boolean>) | undefined;
   /** @deprecated Native MediaRecorder input no longer uses host adapters. */
   adapter?: TranscriptionAdapter | null | undefined;
   /** @deprecated Native MediaRecorder input no longer uses host policies. */
@@ -146,6 +161,12 @@ export type ComposerTranscriptionControlProps = {
 };
 
 const WAVEFORM_BARS = 18;
+
+/** What a host can set on the stock composer microphone. */
+export type ComposerVoiceInputOptions = Pick<
+  ComposerTranscriptionControlProps,
+  "language" | "beforeStart"
+>;
 const WAVEFORM_BAR_KEYS = Array.from(
   { length: WAVEFORM_BARS },
   (_, index) => `voice-waveform-bar-${index + 1}`,
@@ -157,6 +178,8 @@ export function ComposerTranscriptionControl({
   workspaceId = "",
   capability = null,
   workspaceEnabled = false,
+  language = null,
+  beforeStart,
   messages: overrides,
   className,
   recordings,
@@ -166,6 +189,16 @@ export function ComposerTranscriptionControl({
   const t = useOpenGeniText();
   const composer = useChatComposer();
   const messages = { ...defaultMessages(t), ...overrides };
+  // Where the click that started this dictation happened: other voice
+  // controls there let go of the microphone once the dictation may start.
+  const startScope = useRef<EventTarget | null>(null);
+  const hostGate = useRef(beforeStart);
+  hostGate.current = beforeStart;
+  const gate = useCallback(async () => {
+    if (hostGate.current && !(await hostGate.current())) return false;
+    startScope.current?.dispatchEvent(new Event(COMPOSER_VOICE_INPUT_START_EVENT));
+    return true;
+  }, []);
   const transcription = useVoiceInput({
     client,
     workspaceId,
@@ -175,6 +208,8 @@ export function ComposerTranscriptionControl({
     setValue: composer.setValue,
     focusInput: composer.focusInput,
     disabled: composer.disabled,
+    language,
+    beforeStart: gate,
     recordings,
     platform,
   });
@@ -182,19 +217,20 @@ export function ComposerTranscriptionControl({
   const retrying = status === "retrying";
   const capturing = status === "requesting-permission" || status === "recording";
 
-  const cancelTranscription = transcription.cancel;
+  const setAsideTranscription = transcription.setAside;
   const discardTranscription = transcription.discard;
   const hasRecoverableRecording = transcription.hasRecoverableRecording;
   useEffect(() => {
     if (!suppressed) return;
     if (status === "recording" || status === "requesting-permission") {
-      cancelTranscription();
+      // Live voice took over: what was said so far stays saved to insert later.
+      setAsideTranscription();
     } else if (status === "error" && !hasRecoverableRecording) {
       // Live voice took over: a stale start error (nothing saved) would only
       // duplicate whatever live voice reports next to it.
       void discardTranscription();
     }
-  }, [cancelTranscription, discardTranscription, hasRecoverableRecording, status, suppressed]);
+  }, [setAsideTranscription, discardTranscription, hasRecoverableRecording, status, suppressed]);
   const active = capturing || status === "saving" || status === "transcribing";
   const recoverable =
     transcription.hasRecoverableRecording &&
@@ -243,9 +279,7 @@ export function ComposerTranscriptionControl({
       event.preventDefault();
       return;
     }
-    composerVoiceEventScope(event.currentTarget)?.dispatchEvent(
-      new Event(COMPOSER_VOICE_INPUT_START_EVENT),
-    );
+    startScope.current = composerVoiceEventScope(event.currentTarget) ?? null;
     void transcription.start();
   }
 
@@ -311,7 +345,7 @@ export function ComposerTranscriptionControl({
                         savedTranscript
                           ? void transcription.insertSavedTranscript()
                           : retrying
-                            ? transcription.cancel()
+                            ? transcription.setAside()
                             : transcription.retry()
                       }
                       aria-label={

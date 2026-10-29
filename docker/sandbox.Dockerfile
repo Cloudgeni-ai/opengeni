@@ -577,6 +577,14 @@ RUN set -eux; \
       test -f /opt/opengeni/artifact-runtime/.unavailable; \
     fi
 
+# A commit identity for a box nobody configured one for. Commands run as the
+# host's uid, which has no passwd entry here, so Git can find neither a name nor
+# an email and `git commit` fails. The system level is Git's lowest: `GIT_*`
+# variables (OPENGENI_GIT_* or the GitHub App bot), ~/.gitconfig and
+# repository config all win over it.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
+
 ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"

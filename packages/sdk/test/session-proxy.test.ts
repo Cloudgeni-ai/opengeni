@@ -1753,6 +1753,36 @@ describe("createSessionProxyHandler pass-through", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
+  test("the tools the browser's context is for travel only with that context", async () => {
+    let browserContext: string | null | undefined;
+    const { upstream, browser } = setup({
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+      beforeForwardMessage: () => (browserContext === undefined ? undefined : { browserContext }),
+    });
+    const body = {
+      initialMessage: "Sum column B",
+      idempotencyKey: "k1",
+      modelContext: "Workbook: Budget",
+      modelContextTools: ["excel_run"],
+    };
+    await browser.createSession(WORKSPACE_ID, body);
+    expect(upstream.requests[0]!.body).toMatchObject({
+      modelContext: "Workbook: Budget",
+      modelContextTools: ["excel_run"],
+    });
+    // The host replaced or dropped the browser's context: its tools go too.
+    for (const decided of ["Verified workbook: Budget", null]) {
+      browserContext = decided;
+      upstream.requests.length = 0;
+      await browser.createSession(WORKSPACE_ID, { ...body, idempotencyKey: `k-${decided}` });
+      expect(upstream.requests[0]!.body).not.toHaveProperty("modelContextTools");
+    }
+    const invalid = await rejection(
+      browser.createSession(WORKSPACE_ID, { ...body, modelContextTools: [1] } as never),
+    );
+    expect(invalid.code).toBe("invalid_model_context_tools");
+  });
+
   test("creates a chat from the session app's own create body", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({
@@ -2071,7 +2101,6 @@ describe("createSessionProxyHandler pass-through", () => {
       ["PUT", `${chat}/agent`],
       ["PUT", `${chat}/tool-policy`],
       ["PUT", `${chat}/skills`],
-      ["PUT", `${chat}/variable-sets`],
       ["PUT", `${chat}/usage-limit`],
       ["PUT", `${chat}/visibility`],
       ["POST", `${chat}/active-sandbox`],
@@ -2182,6 +2211,7 @@ describe("createSessionProxyHandler pass-through", () => {
       initialMessage: "Hello",
       visibility: "private",
       modelContext: "Browser context.",
+      modelContextTools: ["excel_run"],
       skills: ["s1"],
     } as never);
     expect(upstream.requests[0]!.body).toEqual({
@@ -2189,9 +2219,16 @@ describe("createSessionProxyHandler pass-through", () => {
       visibility: "private",
       agentAccess: "workspace",
       memoryScope: "workspace",
+      modelContextTools: ["excel_run"],
       skills: ["s1"],
       modelContext: "Server context.\n\nBrowser context.",
     });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Hello",
+      modelContextTools: ["excel_run"],
+    } as never);
+    // Without the browser's context, its tools are not forwarded.
+    expect(upstream.requests[1]!.body).not.toHaveProperty("modelContextTools");
     const smuggled = await rejection(
       browser.createSession(WORKSPACE_ID, {
         initialMessage: "Hello",
@@ -2199,7 +2236,7 @@ describe("createSessionProxyHandler pass-through", () => {
       } as never),
     );
     expect(smuggled.code).toBe("credential_update_not_allowed");
-    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests).toHaveLength(2);
   });
 
   test("the default mutation policy refuses cross-site requests and form encodings", async () => {

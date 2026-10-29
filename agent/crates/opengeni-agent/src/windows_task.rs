@@ -62,7 +62,6 @@ pub fn install(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let host = service::current_windows_task_host().map_err(|error| error.to_string())?;
     let xml = service::render_windows_task_xml(spec, &host).map_err(|error| error.to_string())?;
     let dir = config::config_dir().map_err(|error| error.to_string())?;
-    remove_legacy_service();
     let running = agent_running(&dir);
     if running && restart {
         stop_agent(&dir)?;
@@ -121,7 +120,6 @@ pub fn uninstall() -> Result<(), String> {
     } else {
         stop_agent(&dir)?;
     }
-    remove_legacy_service();
     println!("removed the Opengeni Runner background task.");
     Ok(())
 }
@@ -259,30 +257,6 @@ fn register(xml: &str) -> Result<(), String> {
     ]);
     let _ = std::fs::remove_file(&path);
     registered.map(|_| ())
-}
-
-/// Removes the Windows Service earlier releases registered. It never started,
-/// but its automatic start fails at every boot. Deleting it needs elevation; say
-/// how when this run cannot.
-fn remove_legacy_service() {
-    let legacy = service::ids::LEGACY_WINDOWS_SERVICE;
-    let present = Command::new("sc.exe")
-        .args(["query", legacy])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !present {
-        return;
-    }
-    let deleted = Command::new("sc.exe")
-        .args(["delete", legacy])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !deleted {
-        eprintln!(
-            "note: the old {legacy} Windows service from an earlier release is still registered; \
-             it does nothing, and an administrator can remove it with: sc.exe delete {legacy}"
-        );
-    }
 }
 
 /// Runs `schtasks` quietly; a failure carries its message.

@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import type { Agent, AgentInputItem, CallModelInputFilter } from "@openai/agents";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
@@ -104,14 +104,18 @@ export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ mod
 };
 
 /**
- * Canonical Codex-style tool-result bound at the final model-input seam. The
- * identical pure normalizer also runs before conversation rows are persisted,
- * so this is a live-turn defense rather than a request-only alternate history.
+ * Canonical history form at the final model-input seam: output-only fields
+ * such as `status` removed and tool results bounded. It is the same pure
+ * normalizer that runs before conversation rows are persisted, so an item is
+ * sent byte for byte the same in the step that produced it and in every later
+ * request that replays it from stored history. Without it, a call and its
+ * result went out with `"status":"completed"` within their own turn and
+ * without it from the next turn on.
  */
 export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
   return memoizedInputItemProjectionFilter(
     (item) =>
-      boundModelToolOutputItem(
+      canonicalizePersistedHistoryItem(
         item as unknown as Record<string, unknown>,
         settings.modelToolOutputTruncationTokens,
       ) as unknown as AgentInputItem,

@@ -88,8 +88,8 @@ pub use exec_handover::{
     discard_inherited_fd, keep_inherited_fd_private, ExecHandover, OpCgroupHandover, ProcHandover,
 };
 pub use native::{
-    adopt_workspace_working_directory, assemble_git_response, resolve_workspace_root,
-    spawn_contained, ContainedExec, NativePlatform,
+    adopt_workspace_working_directory, resolve_workspace_root, spawn_contained, ContainedExec,
+    NativePlatform,
 };
 pub use pty::{spawn_pty, PtyProcess};
 
@@ -328,50 +328,6 @@ pub trait Platform: Send + Sync {
         ContainedExec::adopt(handover, None)
     }
 
-    /// Spawns the git invocation described by a `GitRequest` inside the shared
-    /// containment primitive WITHOUT waiting or assembling a reply — the
-    /// engine-job path for git. Same argv construction and cwd resolution as
-    /// [`Platform::git`] (which is implemented over this on the native
-    /// platform), so git children get the process-group kill AND the per-op
-    /// OOM cgroup leaf (#351's flagged git-boundary follow-up: a clone's page
-    /// cache bills to the op, not the runner).
-    ///
-    /// # Errors
-    ///
-    /// The spawn IO failure mapped to a typed [`PlatformError`], or
-    /// `Unsupported` from the default impl.
-    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
-        let _ = req;
-        Err(PlatformError::Unsupported(
-            "streaming git is not supported by this platform".to_string(),
-        ))
-    }
-
-    /// Policy-aware git spawn. As with exec, an explicit policy is never silently
-    /// dropped by a platform implementation that has not opted into enforcement.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PlatformError::Unsupported`] when a non-empty policy is supplied
-    /// to the default implementation; otherwise forwards [`Platform::spawn_git`]
-    /// errors.
-    fn spawn_git_with_policy(
-        &self,
-        req: &v1::GitRequest,
-        policy: Option<&v1::OperationResourcePolicy>,
-    ) -> PlatformResult<ContainedExec> {
-        if policy.is_some_and(|policy| {
-            policy.memory_max_bytes.is_some()
-                || policy.memory_high_bytes.is_some()
-                || policy.cpu_max_millicores.is_some()
-        }) {
-            return Err(PlatformError::Unsupported(
-                "operation resource policy is not supported by this platform".to_string(),
-            ));
-        }
-        self.spawn_git(req)
-    }
-
     // --- Channel-A: filesystem -------------------------------------------
 
     /// Reads a file, optionally a byte range. Returns the read bytes plus the
@@ -422,13 +378,6 @@ pub trait Platform: Send + Sync {
 
     /// Removes a path (optionally recursively for directories).
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse>;
-
-    // --- Channel-A: git ---------------------------------------------------
-
-    /// Runs a git operation against the repo rooted at the request's `cwd` (or
-    /// the workspace root). Returns structured status for `GIT_OP_STATUS`,
-    /// otherwise raw stdout/stderr.
-    async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse>;
 
     // --- M8: terminal + desktop streams -----------------------------------
     //
@@ -784,6 +733,109 @@ fn host_arch() -> v1::Arch {
     }
 }
 
+/// The commit email Git falls back to for commands this agent runs when
+/// nothing else names one (the same address the sandbox and desktop images
+/// configure at Git's system level).
+pub const DEFAULT_GIT_EMAIL: &str = "agent@opengeni.invalid";
+
+/// The `EMAIL` a child process receives: [`DEFAULT_GIT_EMAIL`] only when
+/// neither the request nor the agent's own environment sets `EMAIL` and Git
+/// cannot guess an address on this machine. Git reads `EMAIL` after
+/// `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` and every `user.email` setting
+/// (system, global, repository), so an identity the machine, its user or a
+/// repository configures always wins, and a machine whose hostname gives Git a
+/// usable address (a typical laptop) keeps committing with it. Without it,
+/// `git commit` fails in a container whose hostname has no domain.
+#[must_use]
+pub(crate) fn default_git_email<'a>(
+    request_env: impl IntoIterator<Item = &'a String>,
+) -> Option<&'static str> {
+    default_git_email_with(
+        request_env.into_iter().any(|name| names_email(name)),
+        std::env::var_os("EMAIL").as_deref(),
+        git_guesses_email,
+    )
+}
+
+/// Environment names are case-insensitive on Windows.
+fn names_email(name: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case("EMAIL")
+    } else {
+        name == "EMAIL"
+    }
+}
+
+fn default_git_email_with(
+    request_sets_email: bool,
+    ambient: Option<&std::ffi::OsStr>,
+    git_guesses_email: impl FnOnce() -> Option<bool>,
+) -> Option<&'static str> {
+    if request_sets_email || ambient.is_some() {
+        return None;
+    }
+    (git_guesses_email() == Some(false)).then_some(DEFAULT_GIT_EMAIL)
+}
+
+/// Whether Git, with no identity configured anywhere, derives a usable commit
+/// email on this machine: `git var GIT_COMMITTER_IDENT` with a name supplied
+/// and every email source removed fails exactly when the hostname guess is
+/// unusable. Asked once per process; `None` (Git is not installed) is not
+/// remembered, so a Git installed later is still asked. On macOS without the
+/// command-line developer tools Git is never run (see below).
+pub(crate) fn git_guesses_email() -> Option<bool> {
+    static GUESSES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(guesses) = GUESSES.get() {
+        return Some(*guesses);
+    }
+    // Without the developer tools, macOS's `/usr/bin/git` is a placeholder that
+    // opens an install dialog; `xcode-select -p` only reports. With no working
+    // Git there is nothing to commit with, so `EMAIL` stays unset.
+    #[cfg(target_os = "macos")]
+    {
+        static DEVELOPER_TOOLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let installed = *DEVELOPER_TOOLS.get_or_init(|| {
+            std::process::Command::new("xcode-select")
+                .arg("-p")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if !installed {
+            return None;
+        }
+    }
+    let unconfigured = std::env::temp_dir().join("opengeni-git-identity-probe-unconfigured");
+    let mut probe = std::process::Command::new("git");
+    probe
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .current_dir(std::env::temp_dir())
+        .env("GIT_COMMITTER_NAME", "Opengeni identity probe")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &unconfigured)
+        .env("HOME", &unconfigured)
+        .env("XDG_CONFIG_HOME", &unconfigured)
+        .env("USERPROFILE", &unconfigured)
+        .env_remove("EMAIL")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        probe.creation_flags(CREATE_NO_WINDOW);
+    }
+    let guesses = probe.status().ok()?.success();
+    Some(*GUESSES.get_or_init(|| guesses))
+}
+
 /// The platform's default login-shell argv (used when a PTY open names no
 /// command): `$SHELL` (or `/bin/sh`) on unix, `cmd.exe` on Windows.
 #[must_use]
@@ -826,5 +878,32 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(parts.join(" "));
         cmd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn default_git_email_fills_only_an_unset_email_git_cannot_guess() {
+        let unguessable = || Some(false);
+        assert_eq!(
+            default_git_email_with(false, None, unguessable),
+            Some(DEFAULT_GIT_EMAIL)
+        );
+        assert_eq!(default_git_email_with(true, None, unguessable), None);
+        assert_eq!(
+            default_git_email_with(false, Some(OsStr::new("me@example.com")), unguessable),
+            None
+        );
+        // A machine whose hostname gives Git an address keeps it.
+        assert_eq!(default_git_email_with(false, None, || Some(true)), None);
+        // Without Git there is nothing to commit with.
+        assert_eq!(default_git_email_with(false, None, || None), None);
+        assert!(names_email("EMAIL"));
+        assert_eq!(names_email("Email"), cfg!(windows));
+        assert_eq!(DEFAULT_GIT_EMAIL, "agent@opengeni.invalid");
     }
 }

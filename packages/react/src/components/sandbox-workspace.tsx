@@ -1321,7 +1321,7 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
       role="status"
       aria-label={t("sandboxWorkspace.machineLabel", { label: chip.label })}
       title={chip.label}
-      className="inline-flex min-h-7 min-w-0 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
+      className="inline-flex min-h-7 min-w-0 max-w-full items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       <span
         className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}

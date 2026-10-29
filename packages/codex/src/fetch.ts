@@ -35,6 +35,7 @@ import {
   type CodexProviderRequestSettlement,
   type CodexRequestPreparationPhase,
   type CodexRequestContext,
+  type CodexReportedUsage,
   type CodexResponseTimeoutPolicy,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
@@ -250,6 +251,32 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
     secondaryResetAt: firstIsFiveHour ? secondaryResetAt : primaryResetAt,
     checkedAt: new Date(nowMs),
   };
+}
+
+/**
+ * Every usage window the response headers report, whether or not a duration
+ * identifies it. Unlike `parseCodexUsageHeaders`, which caches only fully
+ * identified windows, this serves request-boundary credit admission, which needs
+ * only whether a reported window is used up. A weekly-only account reports one
+ * identified window, so it never yields a `CodexUsageHeaderSnapshot`.
+ */
+export function parseCodexReportedUsage(headers: Headers): CodexReportedUsage | null {
+  const nowMs = Date.now();
+  const windows: CodexReportedUsage["windows"] = [];
+  for (const slot of ["primary", "secondary"] as const) {
+    const usedPercent = parseIntHeader(headers.get(`x-codex-${slot}-used-percent`));
+    if (usedPercent === null) continue;
+    windows.push({
+      usedPercent,
+      resetAt: resolveResetAt(
+        headers,
+        `x-codex-${slot}-reset-at`,
+        `x-codex-${slot}-reset-after-seconds`,
+        nowMs,
+      ),
+    });
+  }
+  return windows.length ? { windows, checkedAt: new Date(nowMs) } : null;
 }
 
 type RequestAudit = {
@@ -1082,6 +1109,8 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       // the optional durable observer is awaited independently of that cache.
       // `if (usage)` makes an absent/malformed header set a safe no-op. We read
       // res.headers only — the SSE body is never touched here.
+      const reported = parseCodexReportedUsage(res.headers);
+      if (reported) ctx.onReportedUsage?.(reported);
       const usage = parseCodexUsageHeaders(res.headers);
       if (usage) {
         ctx.onUsageHeaders?.(usage);

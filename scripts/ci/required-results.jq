@@ -2,11 +2,12 @@
 # it must not see image results and checks every other lane exactly as the
 # final aggregate does.
 #
-# $attested (optional, default false): a main push whose exact tree already
-# passed a trusted Batch CI attempt (docs/merge-batcher.md "Main-push Batch CI
-# attestation"). Every test lane must be skipped, never partially run, and
-# only full-mode pushes that build workload images qualify; deployment,
-# artifact runtime and images keep their ordinary requirements.
+# $attested (optional, default false): a main push whose exact tree is the tip
+# of a batch whose ci.yml run passed in full, workload images included
+# (docs/merge-batcher.md "Main CI records the batch result"). Every test lane
+# must be skipped, never partially run, and only full-mode pushes that build
+# workload images qualify; deployment, artifact runtime and images keep their
+# ordinary requirements.
 ($ARGS.named.attested // false) as $attested |
 if $attested then
 .plan.result == "success" and

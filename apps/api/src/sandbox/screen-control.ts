@@ -102,11 +102,7 @@ const pending = (
 const ACTIVE = { status: "active", reason: null, message: null } as const;
 
 /** Agent failure codes that no retry fixes: the connection must be redone. */
-const PERMANENT_RENEW_FAILURES = new Set([
-  "connection_missing",
-  "legacy_origin",
-  "local_state_unavailable",
-]);
+const PERMANENT_RENEW_FAILURES = new Set(["connection_missing", "local_state_unavailable"]);
 
 /** The enrollment was revoked or removed between lookup and update. */
 export class MachineNotActiveError extends Error {

@@ -111,7 +111,6 @@ async function validateAnalyticsJourney() {
     // Pages that used to be reported as "other".
     for (const [path, page_] of [
       ["agents", "agents"],
-      ["variable-sets", "variable-sets"],
       ["rigs", "rigs"],
       ["plugins", "plugins"],
     ] as const) {

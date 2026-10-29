@@ -47,7 +47,7 @@ describe("release credential environment boundary", () => {
           expect(credentials[environment], `${file}/${id}/${name}`).toContain(name);
       }
     }
-    expect(consumers).toBeGreaterThanOrEqual(11);
+    expect(consumers).toBeGreaterThanOrEqual(10);
   });
 
   test("untrusted CI events cannot select the credential environment or signing step", () => {

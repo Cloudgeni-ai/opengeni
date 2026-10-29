@@ -562,16 +562,38 @@ export const CompleteSelfServiceOrganizationSetupRequest = /* @__PURE__ */ defin
     organizationName: primitives.string.trim().min(1).max(120),
     operationId: primitives.uuid,
     /**
-     * The signup answer to "How do you want to use Opengeni?": add AI agents to
-     * a product (`embed`) or run agents in the cloud (`cloud`). Stored once per
-     * person and organization; the first answer wins.
+     * The signup answer to "How do you want to use Opengeni?": get help with
+     * everyday things (`everyday`), add AI agents to a product (`embed`) or run
+     * agents in the cloud (`cloud`). Stored per person and organization: the
+     * first answer is kept for analytics, and a later change goes through
+     * `ChangeSignupUseCaseRequest`.
      */
-    useCase: z.enum(["embed", "cloud"]).optional(),
+    useCase: z.enum(["everyday", "embed", "cloud"]).optional(),
   }),
 );
 export type CompleteSelfServiceOrganizationSetupRequest = z.infer<
   typeof CompleteSelfServiceOrganizationSetupRequest
 >;
+
+/**
+ * The person went Back after their organization exists and answered "How do
+ * you want to use Opengeni?" again. Their current answer follows them to every
+ * device; the first answer stays as recorded.
+ */
+export const ChangeSignupUseCaseRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      organizationId: primitives.uuid,
+      useCase: z.enum(["everyday", "embed", "cloud"]),
+    })
+    .strict(),
+);
+export type ChangeSignupUseCaseRequest = z.infer<typeof ChangeSignupUseCaseRequest>;
+
+export const ChangeSignupUseCaseResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ useCase: z.enum(["everyday", "embed", "cloud"]) }),
+);
+export type ChangeSignupUseCaseResponse = z.infer<typeof ChangeSignupUseCaseResponse>;
 
 export const CompleteSelfServiceOrganizationSetupResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({

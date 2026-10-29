@@ -4595,7 +4595,7 @@ async function workspaceFromPage(
 // A fixture chat keeps its queued first turn (no worker runs it), so archiving
 // it as someone who can pause asks to pause its active work first.
 async function confirmPauseAndArchive(page: Page) {
-  const dialog = page.getByRole("dialog", { name: "Pause and archive this chat?" });
+  const dialog = page.getByRole("dialog", { name: /^Pause and archive “.+”\?$/ });
   await dialog.getByRole("button", { name: "Pause and archive", exact: true }).click();
 }
 

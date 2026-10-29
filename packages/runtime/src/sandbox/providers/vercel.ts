@@ -26,6 +26,7 @@ export const vercelProvider: ProviderRegistration = {
     }
   },
   descriptor: CAPABILITY_DESCRIPTORS.vercel,
+  sessionSupportsPty: false,
   validateCredentials(settings) {
     // Vercel needs the access token + the project/team it scopes to.
     if (!settings.vercelToken) {

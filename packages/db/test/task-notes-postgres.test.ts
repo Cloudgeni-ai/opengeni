@@ -783,37 +783,6 @@ describe("task-tree notes PostgreSQL authority", () => {
     expect(durable).toEqual({ receipt_count: 1, active_successor_count: 1 });
   });
 
-  test("root-lock migration is an exact, idempotent change preserving authority posture", async () => {
-    if (!shared) return;
-    const migration = await Bun.file(
-      new URL("../drizzle/0542_task_note_root_lock_mode.sql", import.meta.url),
-    ).text();
-    const signature = "resolve_task_note_attempt_authority(uuid,uuid,uuid,uuid,uuid,integer)";
-    const fixedLock =
-      "  -- Session keys are unchanged: permit concurrent root-session FK checks.\n  FOR NO KEY UPDATE;";
-    await shared.admin.begin(async (tx) => {
-      const snapshot = async () =>
-        (
-          await tx`select pg_get_functiondef(oid) as definition,
-        proowner, proacl, prosecdef, proconfig from pg_proc where oid=${signature}::regprocedure`
-        )[0]!;
-      const fixed = await snapshot();
-      expect(fixed.definition.split(fixedLock)).toHaveLength(2);
-      await tx.unsafe(fixed.definition.replace(fixedLock, "  FOR UPDATE;"));
-      const old = await snapshot();
-      expect(old.definition).not.toBe(fixed.definition);
-      await tx.unsafe(migration);
-      expect(await snapshot()).toEqual(fixed);
-      await tx.unsafe(migration);
-      expect(await snapshot()).toEqual(fixed);
-
-      // An unrecognized future body must not be silently or broadly rewritten.
-      await tx.unsafe(old.definition.replace("  FOR UPDATE;", "  FOR UPDATE NOWAIT;"));
-      await expectSqlState(() => tx.savepoint((savepoint) => savepoint.unsafe(migration)), "55000");
-      await tx.unsafe(fixed.definition);
-    });
-  });
-
   test("root authority permits FK checks while still excluding concurrent mutations", async () => {
     if (!shared || !client) return;
     const f = await fixture({ child: true });

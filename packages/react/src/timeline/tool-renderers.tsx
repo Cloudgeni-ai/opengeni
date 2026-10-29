@@ -4,7 +4,6 @@ import { SecretRefText } from "../components/secret-ref-chip";
 import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { paymentPageOf } from "./payment-page";
-import { PaymentPageCard } from "./payment-page-card";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import { parseSandboxFileArtifactReceipt, type RetainedArtifactReference } from "@opengeni/sdk";
@@ -24,7 +23,7 @@ import {
   PanelsTopLeftIcon,
   VideoIcon,
 } from "lucide-react";
-import { useContext, useState, type ReactNode } from "react";
+import { lazy, useContext, useState, type ReactNode } from "react";
 import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import { useToolDetails } from "./tool-details";
@@ -89,6 +88,7 @@ import {
 import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
+import { LazyPart } from "../components/lazy-part";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
@@ -2047,10 +2047,22 @@ function ReviewedGenericRenderer(props: ToolRendererProps) {
 
 /* ---- the default registry -------------------------------------------------- */
 
+// Few chats ever show a payment page, so its card and payment glyphs load
+// only when one does instead of with every conversation.
+const LazyPaymentPageCard = lazy(() =>
+  import("./payment-page-card").then((module) => ({ default: module.PaymentPageCard })),
+);
+
 /** An app action that opened a payment page shows it as a button; every other one reads as usual. */
 function AppActionCallRenderer(props: ToolRendererProps) {
   const page = paymentPageOf(props.item);
-  return page ? <PaymentPageCard page={page} /> : <GenericRenderer {...props} />;
+  return page ? (
+    <LazyPart>
+      <LazyPaymentPageCard page={page} />
+    </LazyPart>
+  ) : (
+    <GenericRenderer {...props} />
+  );
 }
 
 function KnowledgeSaveRenderer({ item }: ToolRendererProps) {

@@ -5,6 +5,16 @@ import { withSessionActivityRlsContext } from "./database";
 import { lockSessionEventWriteRows } from "./session-control";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
+import { maskToolOutputForStorage } from "./secret-value-masking";
+
+/** Whether stored text holds what masking writes (a reference or a marker). */
+function hasMaskLabel(text: string): boolean {
+  return (
+    text.includes("\u007B\u007Bsecret:") ||
+    text.includes("[masked ") ||
+    text.includes("[opengeni credential: ")
+  );
+}
 
 export type SessionCommandOutputInput = {
   accountId: string;
@@ -57,6 +67,13 @@ export async function appendSessionCommandOutput(
   if (!input.chunkId || input.chunkId.length > 200)
     throw new Error("Invalid command output chunk ID");
   if (!input.chunk) return [];
+  // Secret backstop before the retry comparison below (docs/secrets.md, Masking).
+  const masked = maskToolOutputForStorage(input.chunk, "command_output");
+  // What replaces a value can change between a write and its retry (a marker
+  // becomes a reference once capture lands), so a retry of masked output
+  // keeps what was stored instead of failing.
+  const maskingMayDiffer = masked !== input.chunk;
+  input = { ...input, chunk: masked };
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const events: SessionEvent[] = [];
     const locks = await lockSessionEventWriteRows(tx, {
@@ -127,19 +144,28 @@ export async function appendSessionCommandOutput(
           )
       ).map((row) => [row.clientEventId, row]),
     );
+    let retriedMaskedOutput = false;
     const missing = parts.filter((part) => {
       const row = existing.get(part.clientEventId);
       if (!row) return true;
       const payload = fromPostgresLosslessJson(row.payload, row.version) as Record<string, unknown>;
-      if (
-        payload.chunk !== part.chunk ||
-        payload.commandId !== input.commandId ||
-        payload.stream !== input.stream
-      ) {
+      if (payload.commandId !== input.commandId || payload.stream !== input.stream) {
+        throw new Error("Command output retry changed the captured chunk");
+      }
+      if (payload.chunk !== part.chunk) {
+        if (
+          maskingMayDiffer ||
+          (typeof payload.chunk === "string" && hasMaskLabel(payload.chunk))
+        ) {
+          retriedMaskedOutput = true;
+          return false;
+        }
         throw new Error("Command output retry changed the captured chunk");
       }
       return false;
     });
+    // A retry of masked output is already stored, possibly split differently.
+    if (retriedMaskedOutput) return events;
     let sequence = session.lastSequence;
     const inserted = missing.length
       ? await tx

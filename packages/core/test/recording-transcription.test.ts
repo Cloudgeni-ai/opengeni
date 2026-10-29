@@ -11,6 +11,7 @@ import {
   planRecordingTracks,
   recordingDiarizationKind,
   RecordingTranscriptionError,
+  transcriptLanguages,
   withoutMicrophoneEchoes,
   type RecordingTranscribedWord,
   type RecordingTrackWords,
@@ -78,6 +79,24 @@ describe("labelWordsFromTurns", () => {
 
   test("no turns leaves words unlabelled", () => {
     expect(labelWordsFromTurns([word("a", 0, 1, "x")], [])[0]!.speaker).toBeNull();
+  });
+});
+
+describe("transcriptLanguages", () => {
+  test("a transcript asked for in one language is in that language", () => {
+    // A model that labels a few Norwegian phrases as Danish.
+    expect(transcriptLanguages("nb", new Set(["nb", "da"]))).toEqual(["nb"]);
+    // Norwegian's written forms are one language; the model's name is kept.
+    expect(transcriptLanguages("no", ["nb"])).toEqual(["nb"]);
+    expect(transcriptLanguages("en", ["en-US", "en-GB", "de"])).toEqual(["en-US", "en-GB"]);
+    // Nothing heard in it: the language asked for.
+    expect(transcriptLanguages("nb", ["da"])).toEqual(["nb"]);
+    expect(transcriptLanguages("nob", [])).toEqual(["nb"]);
+  });
+
+  test("without a language asked for, every language heard counts", () => {
+    expect(transcriptLanguages(undefined, ["nb", "en", "nb"])).toEqual(["nb", "en"]);
+    expect(transcriptLanguages(null, [])).toEqual([]);
   });
 });
 

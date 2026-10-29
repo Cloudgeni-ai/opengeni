@@ -23,10 +23,8 @@ import {
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
   loadWorkspaceModelCatalogInputs,
-  readSubscriptionCoreRouteReadiness,
-  readSubscriptionCoreProviderRouteForWorkspace,
+  readSubscriptionCoreReadiness,
   readSubscriptionCoreClaudeCatalogReadiness,
-  SUBSCRIPTION_CORE_CLAUDE_NOT_READY,
   type SubscriptionCoreClaudeCatalogReadiness,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
@@ -328,11 +326,9 @@ export type WorkspaceModelSelectionContext = {
 
 /**
  * SuperGrok readiness and its `supergrok/` model restriction on the shared
- * core once its provider route is `core` (design 5.3, SuperGrok track X1a,
- * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
- * (shared pools; their own personal connection only in their own Personal
- * workspace). Null when the route is not `core` (maintenance, or no receipt,
- * which this binary's readiness check refuses) and when the deployment
+ * core (design 5.3, SuperGrok track X1a, EP-T18/EP-S25/EP-N26): the core
+ * eligibility projection for the subject (shared pools; their own personal
+ * connection only in their own Personal workspace). Null when the deployment
  * disables SuperGrok (no read): the caller then treats SuperGrok as not ready
  * with no selectable model.
  */
@@ -342,8 +338,7 @@ export async function loadCoreRoutedXaiCatalogReadiness(
   context: { accountId: string; workspaceId: string; subjectId: string | null },
 ): Promise<{ ready: boolean; allowedModelIds: string[] | null } | null> {
   if (!settings.supergrokSubscriptionEnabled) return null;
-  const answer = await readSubscriptionCoreRouteReadiness(db, { provider: "xai", ...context });
-  return answer.route === "core" ? answer.value : null;
+  return await readSubscriptionCoreReadiness(db, { provider: "xai", ...context });
 }
 
 /** The connection restrictions with SuperGrok's replaced by the core's answer. */
@@ -355,16 +350,13 @@ export function withCoreRoutedXaiRestriction(
 }
 
 /**
- * Claude readiness and its two model restrictions on the shared core once
- * Claude's provider route is `core` (design 5.3, Claude track C2a,
+ * Claude readiness and its two model restrictions on the shared core (design 5.3, Claude track C2a,
  * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
  * split by the legacy prefixes (`organization-claude-subscription/` from the
  * organization inference pool; `workspace-claude-subscription/` from the
  * workspace pool or the subject's own personal connection in their own
- * Personal workspace). Not ready under maintenance. Null on the legacy route
- * (one receipt read) and when the deployment disables Claude subscriptions
- * (no read), so the caller keeps its legacy answer. Frozen v1 Claude
- * snapshots are not read on the core route.
+ * Personal workspace). Null when the deployment disables Claude subscriptions
+ * (no read). Frozen v1 Claude snapshots are not read.
  */
 export async function loadCoreRoutedClaudeCatalogReadiness(
   db: Database,
@@ -372,12 +364,6 @@ export async function loadCoreRoutedClaudeCatalogReadiness(
   context: { accountId: string; workspaceId: string; subjectId: string | null },
 ): Promise<SubscriptionCoreClaudeCatalogReadiness | null> {
   if (!settings.claudeSubscriptionEnabled) return null;
-  const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    provider: "claude",
-  });
-  if (route !== "core") return SUBSCRIPTION_CORE_CLAUDE_NOT_READY;
   return await readSubscriptionCoreClaudeCatalogReadiness(db, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,

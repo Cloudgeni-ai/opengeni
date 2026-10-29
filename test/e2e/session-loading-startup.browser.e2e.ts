@@ -539,7 +539,11 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
     }
     if (path.endsWith("/events")) {
       await state.gates.history.wait();
-      if (state.failHistory) return json({ message: "Initial history unavailable" }, 503);
+      // A definitive failure, so the error and Retry appear at once. A 502-504
+      // or retryable read is ridden out quietly for about 20 seconds first;
+      // packages/react/test/transient-read-retry.test.tsx covers that.
+      if (state.failHistory)
+        return json({ message: "Initial history unavailable", retryable: false }, 500);
       if (state.paginatedHistory) {
         const params = new URL(request.url()).searchParams;
         const limit = Number(params.get("limit") ?? 200);

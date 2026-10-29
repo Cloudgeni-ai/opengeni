@@ -7,11 +7,10 @@
  * rename, allocator, activate, rotation, reconnect, disconnect, the access
  * policy).
  *
- * X3 ships SuperGrok's registry entry; this historical fixture withholds its
- * migration and then inserts the receipt explicitly. Run this file in
+ * The migrations register SuperGrok and record its receipt. Run this file in
  * its own process: the registration replaces module bindings process-wide.
  */
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -110,12 +109,7 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
-    withheldMigrations: [
-      "0747_subscription_core_xai_cutover.sql",
-      "0751_subscription_core_legacy_retirement.sql",
-    ],
-  });
+  shared = await acquireSharedTestDatabase("api-supergrok-core-routes");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);
   // An organization administrator in a shared workspace: on the core only
@@ -432,24 +426,6 @@ function shapeOf(body: Awaited<ReturnType<typeof listed>>) {
   };
 }
 
-const FAIL_CLOSED_ROUTES = [
-  ["/supergrok/accounts", "GET", undefined],
-  ["/supergrok/connect/start", "POST", {}],
-  ["/supergrok/settings", "PATCH", { rotationEnabled: false }],
-  [`/supergrok/accounts/${crypto.randomUUID()}`, "DELETE", undefined],
-] as const;
-
-async function expectEveryRouteFailsClosed(): Promise<void> {
-  for (const [path, method, body] of FAIL_CLOSED_ROUTES) {
-    const response = await request(path, { method, ...(body ? { body } : {}) });
-    expect({ path, status: response.status, body: await response.json() }).toMatchObject({
-      path,
-      status: 503,
-      body: { reason: "subscription_core_cutover_disabled" },
-    });
-  }
-}
-
 describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
   test("runs as the non-superuser, non-bypass application role", async () => {
     const roles = await client!.db.execute<{
@@ -462,24 +438,6 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect([...roles]).toEqual([
       { currentUser: "opengeni_app", superuser: false, bypassRls: false },
     ]);
-  });
-
-  test("without the receipt every route fails closed exactly as maintenance does", async () => {
-    // A binary without SuperGrok's receipt is refused by readiness; the
-    // routes still never fall back to the deleted legacy runtime.
-    const route = spyOn(
-      opengeniDb,
-      "readSubscriptionCoreProviderRouteForRequest",
-    ).mockResolvedValue("legacy");
-    try {
-      await expectEveryRouteFailsClosed();
-      expect(route).toHaveBeenCalled();
-    } finally {
-      route.mockRestore();
-    }
-    const [core] = await shared!.admin<{ count: number }[]>`
-      select count(*)::int as count from subscription_connections where provider = 'xai'`;
-    expect(core!.count).toBe(0);
   });
 
   async function expectRetryableConnectPollDatabaseFailure() {
@@ -501,26 +459,7 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     }
   }
 
-  test("after the receipt, without an enabled switch row, every route fails closed", async () => {
-    // A fresh install ships SuperGrok's registry row and cutover receipt.
-    await shared!.admin`
-      insert into opengeni_private.subscription_core_providers (provider, extra_credits,
-        primary_setting_column)
-      values ('xai', false, 'xai_primary_connection_id') on conflict do nothing`;
-    await shared!.admin`
-      insert into opengeni_private.subscription_provider_cutover_receipts (
-        provider, migration, committed_at, seed_rotation
-      ) values ('xai', '0721_subscription_core_xai_cutover.sql', clock_timestamp(),
-        '{"mode":"spread"}') on conflict do nothing`;
-    // The organization's switch row is disabled: the maintenance state.
-    await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'xai', false)
-      on conflict (account_id, provider) do update set enabled = false`;
-    await expectEveryRouteFailsClosed();
-  });
-
-  test("with the switch row the same routes answer from core connections", async () => {
+  test("the workspace routes answer from core connections", async () => {
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
       values (${accountId}::uuid, 'xai', true)
@@ -719,31 +658,11 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expectRetryableConnectPollDatabaseFailure,
   );
 
-  test("organization routes: maintenance fails closed, then they answer from core connections", async () => {
-    // The receipt exists (above); this organization has no switch row.
-    const someId = crypto.randomUUID();
-    for (const [path, method, body] of [
-      ["/accounts", "GET", undefined],
-      ["/settings", "PATCH", { rotationEnabled: false }],
-      ["/connect/start", "POST", {}],
-      ["/connect/poll", "POST", { state: "x" }],
-      [`/accounts/${someId}/activate`, "POST", {}],
-      [`/accounts/${someId}`, "PATCH", { label: "x" }],
-      [`/accounts/${someId}/allocator`, "PATCH", { enabled: false, expectedVersion: 1 }],
-      [`/accounts/${someId}`, "DELETE", undefined],
-    ] as const) {
-      const response = await organizationRequest(path, method, body);
-      expect({ path, method, status: response.status, body: await response.json() }).toMatchObject({
-        path,
-        method,
-        status: 503,
-        body: { reason: "subscription_core_cutover_disabled" },
-      });
-    }
-
+  test("organization routes answer from core connections", async () => {
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, 'xai', true)`;
+      values (${organizationId}::uuid, 'xai', true)
+      on conflict (account_id, provider) do update set enabled = true`;
     const first = await connectOrganizationAccount("xai-core-org-first");
     const second = await connectOrganizationAccount("xai-core-org-second");
     expect(first).not.toBe(second);
@@ -790,7 +709,11 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       status: 409,
       body: { message: "Choose an active, enabled SuperGrok subscription" },
     });
-    const unknown = await organizationRequest(`/accounts/${someId}/activate`, "POST", {});
+    const unknown = await organizationRequest(
+      `/accounts/${crypto.randomUUID()}/activate`,
+      "POST",
+      {},
+    );
     expect(unknown.status).toBe(404);
     const activated = await organizationRequest(`/accounts/${first}/activate`, "POST", {});
     expect({ status: activated.status, body: await activated.json() }).toEqual({
@@ -822,10 +745,11 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(remaining.accounts[0]).toMatchObject({ label: "Organization Grok", active: true });
   });
 
-  test("private accounts: only from the owner's Personal workspace, managed there", async () => {
+  test("private accounts: connected from any workspace, kept and managed in Personal", async () => {
     // This organization's switch row is enabled (above). A private connect
-    // from a shared workspace the person belongs to is refused at start,
-    // before any xAI sign-in.
+    // from a shared workspace the person belongs to starts in place; the
+    // account is kept in their own Personal workspace (see
+    // subscription-own-in-place-postgres.test.ts for the full flow).
     const before = deviceSequence;
     const elsewhere = await browserWorkspaceRequest(
       managedSharedWorkspaceId,
@@ -834,13 +758,10 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       { scope: "user" },
     );
     expect({ status: elsewhere.status, body: await elsewhere.json() }).toMatchObject({
-      status: 409,
-      body: {
-        message:
-          "Private SuperGrok accounts are connected and managed from your Personal workspace",
-      },
+      status: 200,
+      body: { scope: "user" },
     });
-    expect(deviceSequence).toBe(before);
+    expect(deviceSequence).toBe(before + 1);
 
     // In the Personal workspace the person connects a personal connection.
     providerSubject = "xai-core-personal";

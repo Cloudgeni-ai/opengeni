@@ -35,7 +35,6 @@ describe("knowledge-source scheduled task contracts", () => {
     expect(parsed).toMatchObject({
       runMode: "new_session_per_run",
       targetSessionId: null,
-      variableSetId: null,
       rigId: null,
       action: { kind: "agent_turn" },
       agentConfig: {
@@ -63,8 +62,6 @@ describe("knowledge-source scheduled task contracts", () => {
       executionDigest: "a".repeat(64),
       reusableSessionId: null,
       targetSessionId: null,
-      variableSetId: null,
-      environmentId: null,
       rigId: null,
       metadata: {},
       createdAt: new Date(0).toISOString(),

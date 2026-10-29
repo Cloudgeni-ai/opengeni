@@ -105,12 +105,13 @@ test.each([
   ["queued", "added"],
   ["running", "session_not_idle"],
   ["requires_action", "session_not_idle"],
-  ["waiting_capacity", "session_not_idle"],
+  // A chat parked on a model account is told apart, so the schedule can say so.
+  ["waiting_capacity", "session_waiting_capacity"],
 ])("a reusable session that is %s admits the next occurrence: %s", async (status, expected) => {
   const target = await reusableSession(status);
   const occurrence = await nextOccurrence(target);
   expect(occurrence.reason as string).toBe(expected);
-  expect(occurrence.rejections).toEqual([expected === "added" ? null : "session_not_idle"]);
+  expect(occurrence.rejections).toEqual([expected === "added" ? null : expected]);
 });
 
 test("an uninitialized session has no executable queue projection", async () => {

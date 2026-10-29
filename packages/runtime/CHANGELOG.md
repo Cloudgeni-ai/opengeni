@@ -1,5 +1,87 @@
 # @opengeni/runtime
 
+## 5.5.1
+
+### Patch Changes
+
+- a6b3a97: A browser session in the person's own Chrome that ended because that Chrome reconnected (Chrome or its extension restarted) no longer answers every later call with "Only a suspended BrowserSession can be resumed". Such a session has no saved working copy, so the tools no longer try to resume it. `browser_observe`, `browser_act` and `browser_tabs` say it ended and that `browser_open` with its ID continues, and `browser_open` with its ID continues in the same Chrome profile: it reuses the chat's live session there or opens one, and its result names the new session ID.
+
+  In the person's Chrome, the empty tab a session opened now closes as soon as the session moves to another tab, instead of staying until the session is released or ends. Tabs the session did not open, tabs showing a page and tabs another session uses are never closed.
+
+- fa7516a: A full-page browser screenshot no longer changes the page's layout. Chromium hides classic scrollbars for a capture beyond the viewport, so content used to widen by the scrollbar's width while it was captured, right-aligned elements moved, and the change stayed after the capture; the image was also narrower than the tab's viewport. The capture now keeps each scrollbar's space with a temporary inspector stylesheet that page scripts cannot see, re-evaluates scrollbars afterwards, and is as wide as the tab's viewport. Screenshot scale now comes from the emulated device scale factor instead of the image width, which excluded the scrollbar. When some scrollbars cannot be kept (horizontal ones, ones inside shadow trees), the browser_screenshot result and Code Mode screenshot metadata carry a short `note` saying so, and the SDK frame has `inexactScrollbars: true`.
+- 23fb6ef: A BrowserSession now reports how its headed managed browser was actually shown on its machine: the new optional `display` field is `window` for a native window or `offscreen` for a browser with no window (a managed browser on macOS, or on a Linux host without a display). It comes from the browser controller at create, resume and recovery, never from the requested mode, and is absent for headless, remote and attached browsers and for older controllers. The agent's session line for such a browser now reads "headed, offscreen with no window," instead of only "headed", and the create that launches it adds one short line naming what to use for a step a person must do at the machine.
+- f23588a: A browser tab resized with the `viewport` action can now be returned to its window's own size and scale with the new `viewport_reset` action. It ends the tab's device-metrics and touch emulation, so later observations and screenshots show the window's real size and device scale factor again, and tabs that open afterwards are no longer given the size set before. Tabs that already took that size keep it until they are reset themselves. Setting a tab's observed size back with `viewport` is not the same on a display whose own scale is fractional: the window is then a fractional CSS size, observed rounded, and Chromium lays an emulated size out in whole display pixels at an emulated scale of 1, so it can come out a pixel off; `viewport_reset` restores it exactly. In a person's own Chrome, which never admitted viewport emulation, both actions are refused plainly as unsupported without sending anything to the tab.
+
+  `viewport` and `viewport_reset` also take, and stay, while someone watches the tab live. The live view samples the tab with clipped screenshots, and Chromium changes the page's emulation for each capture and then puts back what it saw when the capture began, so a change that landed during a capture was undone a moment later, and a reset could leave the tab stuck at the old emulated size even after the view closed. Both actions now hold that tab's frame sampling off while they apply, waiting for a capture already running, and then check what the page reports: the set screen size after `viewport`, and the tab's own size and scale after `viewport_reset`. A change that still did not take is sent once more and otherwise reported as an unknown outcome that asks the agent to observe the tab, never as a success.
+
+  The same holds for a capture that is still running after the live view has closed, and for background tabs, which is where agents open their tabs. A background tab reports no window size of its own, which used to make the check skip itself and report success, and it did not lay out again after a reset until it was shown, so it stayed at the emulated layout size. The check now reads the window size from the browser, and a reset has the background tab draw itself once at its own size without showing it or taking focus. The page's size is read where page scripts cannot change it, and a page that cannot be read does not count as confirmation.
+
+- 1600e2d: A managed browser, or an attached Chrome's debugger connection, is no longer stopped as idle while the agent session that created or is using it is still working (a turn queued, running, recovering, waiting for capacity or waiting on a person) or deliberately waits (`wait_for_input`). Every two minutes the API lists the browsers held this way (`listAgentHeldBrowserSessions`, migration `1002_browser_wait_hold`) and renews a short hold on each running browser's controller (`POST /v1/browser-sessions/:id/wait-hold`, `BrowserControlClient.holdForWait`): keep it at least five more minutes. A hold only ever extends, so overlapping renewals from several API processes are harmless and nothing needs to end one; once the session neither works nor waits the renewals stop, the hold lapses and the normal idle time counts from its end. The idle release keeps the browser, tabs and page state, but never longer than `BROWSER_WAIT_HOLD_MAX_MS` (60 minutes) after the browser's last use, so a long turn or repeated waits cannot keep a browser nobody uses. Renewals reach a Connected Machine or attached Chrome as the person who most recently started a turn of the holding session, through the explicit `browser.hold` operation with no request grant; a browser held only by sessions no person started is renewed only through a sandbox's cached controller endpoint. A browser held at controller shutdown is handed off and kept by the successor, and a renewal after a restart keeps a handed-off browser the new controller has not adopted yet. A sandbox box holding such a browser is not released as idle under the same rule. A renewal never launches, recovers or counts as a use of a browser and never starts a sandbox; a controller that predates it keeps its plain idle release. Browsers that only observed, and browsers no working or waiting session holds, are released as before.
+
+  `list_agent_held_browser_sessions` ships with its runtime `EXECUTE` withheld for one release (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`), because the previous release's readiness rejects a runtime grant on a SECURITY DEFINER routine it does not know. Until a later migration grants it, the API lists nothing and renews no controller holds; the sandbox box release applies the rule from this release on.
+
+- e555018: On macOS, a window named by its id (`cua:window:<pid>:<window>`) is a computer-use target while its app lists it on any window level, so a dialog an app raises above its working windows can be observed as well as read, and a target missing from the last listing is looked up again before it is reported gone. An element invoke the driver cannot confirm, with nothing changed after it, now gets the same "may not have taken effect" line as an unconfirmed click: some toolbar buttons that open a flyout ignore an accessibility press while their app is in the background.
+
+  A failed read of a window still on screen (a tree read or capture CUA answers with text only) is tried once more, and a second failure is refused as unavailable with what to do next, instead of an internal error; a window that closed meanwhile is reported gone. On macOS, computer listings and observations say when someone other than Opengeni used the keyboard, mouse or trackpad within the last minute (`personInputSecondsAgo`), from timers that input agents send to apps in the background does not reset; input Opengeni sent in the foreground through this computer is told apart and not reported. An accessibility action macOS answers with "cannot complete" (-25204) is checked against the windows afterwards, as -25205 already was.
+
+  Pins CUA 24a0726f: an accessibility press the app answers with "cannot complete" counts as done when its window closes within a second.
+
+- 22b129b: On macOS, the controls of a web page in Chrome or another Chromium app can be invoked again: Chrome lists no press action on page elements in the accessibility mode Opengeni enables, so buttons, links, checkboxes and similar page controls showed no actions and invoking them was refused. Selects still take set_value. A pointer click on Chrome's own window controls, such as a background tab, is now sent as a pixel click instead of being reported as done while nothing happened. A keyboard shortcut whose menu item macOS keeps disabled while the app is in the background (Terminal's Close Window) reports that it most likely did nothing, instead of completing.
+
+  Computer action receipts gain an optional `unconfirmedInput` field: the action's click or key press was delivered without any confirmation that the app acted on it. Controllers return it only to callers that ask with the `receiptUnconfirmedInput` query parameter. When it is set and no element changed, the agent's result says the input may not have taken effect.
+
+- 5729b13: An approval-gated tool on an in-process (local) MCP server that the host registered with its own connection identity now pauses for approval instead of failing the turn. Servers without a connector connection are always approved under their synthetic `session-mcp:` identity, the same one the attempt gateway and saved tool permission rules use; the host's identity stays with its adapter. Reported by Ali Ozaltin (Botel AI) in #2537.
+- 83bd1e4: Closes several trust-boundary gaps reported by Vasu Bansal (#2664). The stream relay now enforces the viewer token's mode: a watch-only token can no longer type into or close a terminal, or send desktop input, and every input or close must name the viewer's own stream. Dropped messages are counted in `opengeni_relay_unauthorized_drops_total`. A connection replaced by a reconnect can no longer act on its successor. Terminal tokens for viewers with terminal access carry input authority, independent of desktop control. Approving a tool call that needs a person's approval now requires a person: an organization API key acting as itself gets 403 and must approve on behalf of a verified external actor (`x-opengeni-external-actor`), after the host shows its own approval UI. Managed sign-in no longer fails when the API host's clock runs ahead of the database, and the device-enrollment rate limiter no longer grows without bound.
+- 45eec8d: The machine agent no longer serves the request/reply Git operation (`ControlRequest.git`). No current Opengeni server sends it: Git runs as an ordinary command. The wire protocol reserves the field numbers, and `GitRequest`, `GitResponse`, `GitOp`, `GitStatus` and `GitFileStatus` are gone from the generated types.
+- fbcc3cd: Modal commands now use only the byte-offset task-router locator. The batch-index `modal-control-v1` reader, its `ModalLegacyProviderCommand` schema and the append-then-acknowledge output path that only it used are removed.
+- 18c7cfa: Opengeni's own tools that store text or pass it to other work (creating sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, artifacts, notifications, built-in Slack and social posts, and any first-party tool added later) now keep secret references as text and never receive a resolved value. The session, scheduled run or goal continuation that gets the text resolves the reference when it runs something, under its own vault policy. Escaped references still arrive as plain reference text, and a missing or malformed reference no longer fails these calls. Connectors, Codex apps, shell commands, `run_on`, browser and desktop typing and `excel_run` still receive values. An `admin_action_call` gets a value only in a request field its action marks as a credential (and in a vault item it creates or updates); the rest of its body keeps reference text. Before, a reference written into a new session's first message was resolved and the value was stored in that session.
+- b1673ab: When a setting blocks what the person asked for, the agent now offers to change it in the chat instead of describing where the setting is. The modular system prompt's blocked-tool rule names `admin_actions_search` and `admin_action_call` whenever those tools may be available; a change still waits for the person's confirmation in the chat unless the session has full access. Tool approval actions (`getConnectorToolPermissions`, `updateConnectorToolPermissions` and the chat MCP server equivalents) gain plain-language descriptions, and their confirmation reads, for example, "Let send_message run without asking in this workspace?" instead of "Update connector tool permissions in this workspace?". The `sites` Skill says a tool set to Ask can't run from a Site's own tool calls, so the agent offers to set it to Allow in the chat.
+- 5eb6eb8: The bundled Sites Skill now describes Site agent authority consistently: workspace members' Site conversations are their ordinary private chats, while people outside the workspace get only the Site's viewer-bound data tools, no sandbox and funded usage limits.
+- 22fa944: A turn's first `tool_search` no longer reports a connected integration's tools as unavailable. Integration servers list their tools in the background while the model answers its first request. When they finished before the answer arrived, the search result was decided from the tools that first request carried, which include no deferred server, so an exact-name load of a tool that exists came back as `unavailable` and a ranked search missed it. The same call made a moment later worked. A search result is now decided only after the prepared catalog is loaded.
+- 9c8a5d5: Asking for a video in a workspace where video generation is off now gets a plain answer instead of a hunt for a tool that isn't there. `get_video_generation_capabilities` and `generate_video` stay attached wherever the deployment has object storage and a sandbox, and each call reads the workspace's live video policy and credential, so a chat can turn video on and generate in the same turn. While video can't run, both return a new `unavailable` result (`VideoGenerationUnavailableResult`, now part of `VideoGenerationToolResult`): when Opengeni credits can pay and the chat can change the workspace's settings, it states the price of a 5-second clip and carries `turnOn`, the exact `updateVideoGenerationPolicy` app action call built from the live policy revision; otherwise it says how a workspace admin can turn it on (without pointing someone who uses Opengeni through another product to Settings), or that this deployment can't make videos. A credit refusal, too many videos in progress, or full video storage (new code `video_storage_full`) at admission is the same plain result rather than a tool error. The `videoGeneration` adapter's `capabilities()` may now return that result. Workspace settings routes (including `updateVideoGenerationPolicy`) carry `workspace:admin` in the action catalog, so they aren't offered to people acting through another product without it.
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [b2e3119]
+- Updated dependencies [c09ae08]
+- Updated dependencies [729329e]
+- Updated dependencies [cc59c02]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [45eec8d]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [f980186]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/codemode@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/observability@5.5.0
+  - @opengeni/interaction@5.5.0
+  - @opengeni/config@5.5.0
+  - @opengeni/agent-proto@5.5.0
+  - @opengeni/tool-gateway@5.5.0
+  - @opengeni/capabilities@5.5.0
+  - @opengeni/codex@5.5.0
+  - @opengeni/vaults@5.5.0
+  - @opengeni/decisions@5.5.0
+  - @opengeni/network@5.5.0
+  - @opengeni/xai-subscription@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

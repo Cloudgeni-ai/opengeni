@@ -13,7 +13,9 @@
 //   - swap back to the group box routes there again (heterogeneous, single-active).
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Tool } from "@openai/agents";
+import { Agent, run as runAgent, type Tool } from "@openai/agents";
+import { shell } from "@openai/agents/sandbox";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { wrapChannelABoxWithRouting } from "@opengeni/core";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -2124,6 +2126,74 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     expect(provisions).toBe(1);
     expect((await proxy.exec({ cmd: "echo again" })).stdout).toBe("lazy-real");
     expect(provisions).toBe(1);
+  });
+
+  test("a lazy box sends the same shell tools whether or not it was resolved before binding", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-lazy-tools') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy-tools') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId: a!.id,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "compute",
+    });
+    const environment = { HOME: "/workspace" };
+    const manifest = buildManifest(settings, [], environment);
+    // The compute box, like every Connected Machine session, runs commands
+    // without stdin: its live session answers supportsPty() false.
+    const box = fakeGroupBox("compute-real");
+    Object.assign(box.session as object, {
+      supportsPty: () => false,
+      execCommand: async () => "ok",
+    });
+    const turnBox = () =>
+      wrapLazyTurnBoxWithRouting(
+        { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
+        { workspaceId, sessionId: session.id, environment },
+        {
+          client: { backendId: "compute" },
+          backendId: "compute",
+          agentDefaultManifest: manifest,
+          provisioner: { get: async () => ({ established: { ...box, backendId: "compute" } }) },
+        },
+      ).session as { exec: (args: unknown) => Promise<unknown> };
+    // Capture the tool block the provider request carries for one turn.
+    const requestTools = async (proxy: object) => {
+      const model = new ScriptedModel("done");
+      await runAgent(
+        new Agent({
+          name: "turn",
+          model,
+          tools: shell()
+            .bind(proxy as never)
+            .tools(),
+        }),
+        "hi",
+      );
+      return JSON.stringify(model.requests[0]!.tools);
+    };
+
+    // A plain turn binds before anything touches the box.
+    const lazyTools = await requestTools(turnBox());
+    // A turn with an attached file (or a resumed box) resolves the box first.
+    const resolved = turnBox();
+    await resolved.exec({ cmd: "true" });
+    const resolvedTools = await requestTools(resolved);
+
+    expect(resolvedTools).toBe(lazyTools);
+    expect(lazyTools).not.toContain("write_stdin");
   });
 });
 

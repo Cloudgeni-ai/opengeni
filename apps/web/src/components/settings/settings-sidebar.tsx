@@ -26,7 +26,7 @@ import {
   SheetTrigger,
 } from "@opengeni/react/ui/sheet";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { desktopBridge, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
+import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
@@ -54,7 +54,7 @@ import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from 
 export const SETTINGS_SHELL_CLASS =
   "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[18rem_minmax(0,1fr)] desktop-wide:grid-rows-1";
 
-const NARROW_QUERY = desktopBridge ? "(max-width: 639px)" : "(max-width: 1023px)";
+const NARROW_QUERY = desktopPlatform ? "(max-width: 639px)" : "(max-width: 1023px)";
 
 export interface SettingsRailItem {
   id: string;
@@ -112,12 +112,12 @@ export interface SettingsShellProps {
   currentScope?: string;
   /**
    * The page header of a settings page. `null` when the page brings its own: a
-   * sub-page (an account, a key, a form) or a full page (Agents, Variable sets).
+   * sub-page (an account, a key, a form) or a full page (Agents, Secrets).
    */
   page: SettingsShellPage | null;
   /**
    * `settings`: the shell draws the standard-width scroller around the page.
-   * `page`: the page brings its own `ContentPage` (Agents, Variable sets).
+   * `page`: the page brings its own `ContentPage` (Agents, Secrets).
    */
   layout?: "settings" | "page";
   /** Workspace-wide state above the page (the paused banner). */
@@ -294,19 +294,14 @@ function SettingsRail({
       }}
       header={
         <div className="flex min-w-0 flex-col gap-3">
-          {windowControlsInPage ? (
-            // The macOS window controls take this row; it still moves the window.
-            <div data-window-drag aria-hidden="true" className="h-8 shrink-0" />
-          ) : (
-            <LinkShell
-              link={home}
-              aria-label="Opengeni home"
-              className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
-            >
-              <BrandMark className="w-5" />
-              <Wordmark className="text-[18px]" />
-            </LinkShell>
-          )}
+          <LinkShell
+            link={home}
+            aria-label="Opengeni home"
+            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+          >
+            <BrandMark className="w-5" />
+            <Wordmark className="text-[18px]" />
+          </LinkShell>
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}
           </NavItem>

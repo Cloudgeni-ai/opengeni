@@ -1,17 +1,13 @@
 /**
  * SuperGrok on the shared subscription core (design 5.3, SuperGrok track
  * X1a): the provider-neutral chat placement and request custody bound to
- * SuperGrok. SuperGrok runs only on the core (the legacy path was deleted in
- * X4): the route is `core` after the SuperGrok drained cutover commits its
- * receipt (X3), which this binary requires; any other route fails closed.
+ * SuperGrok.
  */
 import {
-  readSubscriptionCoreProviderRoute,
   SUBSCRIPTION_CORE_XAI,
   SubscriptionCoreError,
   subscriptionCoreRequests,
   subscriptionCoreTurns,
-  withRlsContext,
   buildSubscriptionCoreXaiTokenResolver,
   XAI_CREDENTIAL_LEASE_TTL_MS,
   type Database,
@@ -20,7 +16,6 @@ import {
 import type { Settings } from "@opengeni/config";
 import type { XaiSubscriptionRequestContext } from "@opengeni/xai-subscription";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
-import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 import type { XaiTurnLease } from "./credential-leases";
 import { classifyXaiProviderError } from "./errors";
 import {
@@ -95,23 +90,12 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   isAttemptFenced: () => false,
 };
 
-/**
- * The SuperGrok capacity phase by the organization's SuperGrok route: `core`
- * places on the shared core; `maintenance` and a missing receipt (`legacy`,
- * which this binary's readiness check already refuses) fail closed.
- */
-export async function selectXaiTurnCapacityByRoute(
+/** The SuperGrok capacity phase: SuperGrok-billed turns are placed on the shared core. */
+export async function selectXaiTurnCapacity(
   deps: CapacityPhaseDeps,
 ): Promise<CapacityPhaseOutcome> {
   if (!deps.billingState.isXaiTurn) return { ok: true };
   const { input } = deps;
-  const route = await withRlsContext(
-    deps.db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    (scoped) =>
-      readSubscriptionCoreProviderRoute(scoped, { accountId: input.accountId, provider: "xai" }),
-  );
-  if (route !== "core") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
   const turnId = deps.attempt.turnId;
   if (!turnId) throw new Error("Turn id was not initialized");
   deps.leases.xai.holderId ??= subscriptionTurnLeaseHolderId("xai", DISPLAY_NAME, input, turnId);

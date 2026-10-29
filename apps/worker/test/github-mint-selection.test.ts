@@ -87,12 +87,12 @@ describe("gitHubTokenMintSelection", () => {
     ).toEqual([{ installationId: 123, repositoryIds: [456] }]);
   });
 
-  test("preserves an explicit PR Review credential binding for authorization", () => {
+  test("preserves an explicit credential binding for authorization", () => {
     expect(
       gitHubTokenAuthorizationSelections([
         repo({
           provider: "github",
-          credentialBindingId: "pr-review:11111111-1111-4111-8111-111111111111",
+          credentialBindingId: "binding:11111111-1111-4111-8111-111111111111",
           installationId: "123",
           repositoryId: "456",
           expectedCommitSha: "a".repeat(40),
@@ -100,7 +100,7 @@ describe("gitHubTokenMintSelection", () => {
       ]),
     ).toEqual([
       {
-        credentialBindingId: "pr-review:11111111-1111-4111-8111-111111111111",
+        credentialBindingId: "binding:11111111-1111-4111-8111-111111111111",
         installationId: 123,
         repositoryIds: [456],
         repositoryRefs: [
@@ -108,7 +108,7 @@ describe("gitHubTokenMintSelection", () => {
             uri: "https://github.com/acme/repo",
             ref: "main",
             provider: "github",
-            credentialBindingId: "pr-review:11111111-1111-4111-8111-111111111111",
+            credentialBindingId: "binding:11111111-1111-4111-8111-111111111111",
             expectedCommitSha: "a".repeat(40),
             repositoryId: "456",
             installationId: "123",

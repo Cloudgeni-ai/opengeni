@@ -1,8 +1,8 @@
 # Subscription accounts: entry-point inventory and Codex audit
 
 > Historical inventory: M3 PR4 removes the executable Codex allocator and fleet
-> shadow producer. Their references below now point to test-only historical
-> fixtures; they are not current runtime authority. Current deployment requires
+> shadow producer. References to that removed code below are historical (see
+> git history); they are not current runtime authority. Current deployment requires
 > the drained, codec-aware 0689 receipt/readiness gate.
 >
 > M4: the Codex turn-time and operation entry points on the shared core
@@ -27,6 +27,13 @@
 > deleted after both providers migrate. Their
 > references are historical. See
 > [design X4](design/subscription-core-2026-10-07.md#x4-supergrok-legacy-deletion-and-the-provider-neutral-guard).
+>
+> The Codex remote_v2 model lock cited below (`assertSessionAllowsProductModel`,
+> `CodexCompactionV2ProviderLockedError`, the goal-admission Codex check and
+> the picker's `codexOnly` for sessions) is removed and historical. A
+> remote_v2 session switches to any model in place: its next turn on another
+> provider rebuilds a portable checkpoint from the stored transcript and the
+> session becomes portable ([context compaction](context-compaction.md)).
 
 > C3 provider-keyed candidate: Claude pin migration now preserves every
 > eligible effective-pool pin beside existing Codex and SuperGrok bindings,
@@ -210,7 +217,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - **xAI/Claude lease**: `subscription-account-repository.ts:1359` `acquireSubscriptionCredentialLease` (5-minute TTL `:100`). Used only by the chat-turn path; no non-chat consumer below calls it.
 - **xAI/Claude materialize + refresh**: `:1074` `materializeSubscriptionCredentialForRun` (revalidates authority via SQL `revalidate_<provider>_subscription_authority`, `:1021` `withAuthorizedSubscriptionCredential`), `:1187` `refreshSubscriptionCredentialSerialized`. The serialized refresh writes `status: "active"` on success only; it never stamps `needs_relogin` on failure (`:1187-1330`).
 - **Session pins (xAI/Claude)**: `:2153` `setSubscriptionSessionAccountPin` / `:2227` `getSubscriptionSessionAccountPin`, keyed by (session, authority scope, owner membership).
-- **Codex pool**: `packages/db/src/index.ts:24009` `effectiveCodexCredentialPoolCondition` (workspace source `workspace` → rows with `workspace_id = ws` and scope `workspace|user`; source `organization` → org rows, which have `workspace_id` null per `packages/db/drizzle/0381_organization_codex_subscription_inheritance.sql:716`; `disabled` → nothing).
+- **Codex pool**: `packages/db/src/index.ts:24009` `effectiveCodexCredentialPoolCondition` (workspace source `workspace` → rows with `workspace_id = ws` and scope `workspace|user`; source `organization` → org rows, which have `workspace_id` null per the column comment on `codex_subscription_credentials.organization_id`; `disabled` → nothing).
 - **Codex token resolver**: `packages/db/src/index.ts:88423` `buildCodexTokenResolver` (wraps `packages/db/src/codex-token-resolver.ts:259`). Without an `authority` argument it loads through `index.ts:25079` `codexCredentialUseCondition` → the *effective model pool condition*. Missing row → `CodexReloginRequired("No Codex subscription is connected for this workspace.")` (`codex-token-resolver.ts:404`). A refresh that hits `CodexReloginRequired` stamps `needs_relogin` on the shared credential (`codex-token-resolver.ts:345`).
 - **Session HTTP access**: every `/v1/workspaces/:workspaceId/sessions/:sessionId/*` route passes `apps/api/src/routes/sessions.ts:581` `authorizeSessionHttp`, which enforces private-session rules before the handler runs.
 
@@ -248,18 +255,18 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Durable wait: none. User sees: fallback to another provider or `unavailable`.
 - Gaps: per-request shard means no stickiness; a dead credential stays `active` and keeps being selected. Uses shared selection but **bypasses the lease**.
 
-##### EP-N04 — Transcription HTTP routes (one-shot and resumable recordings)
-- Refs: `apps/api/src/routes/transcriptions.ts:20` POST `/transcriptions` (grant `sessions:create`, `requestId` from `x-opengeni-correlation-id` `:59`); `apps/api/src/routes/transcription-recordings.ts:431-511` segment processing (provider pinned per segment via `claim.segment.providerId`, `requestId = attemptId` `:475-486`), `:513-531` fallback provider chosen with `selectProvider` and persisted by `failTranscriptionRecordingSegment`.
+##### EP-N04 — Transcription HTTP routes (one-shot)
+- Refs: `apps/api/src/routes/transcriptions.ts:20` POST `/transcriptions` (grant `sessions:create`, `requestId` from `x-opengeni-correlation-id` `:59`). Dictation recordings are transcribed by the recordings worker (`apps/worker/src/activities/recordings.ts`).
 - Authority: request grant (`grant.subjectId`); recordings carry a durable `authority` (subject, attribution).
 - Pin: the **provider** (not account) is durably pinned per recording segment; the account is reselected on every attempt.
-- Durable wait/recovery: recording segments are durable (start fence `startTranscriptionRecordingSegmentProviderCall`), retries re-run selection.
+- Durable wait/recovery: dictation recordings are durable recordings; retries re-run selection.
 - User sees: per-segment error codes; billing refusal 402-shaped body (`apps/api/src/transcription/billing-refusal.ts:9`), irrelevant for subscriptions.
 
 #### Realtime voice
 
 ##### EP-N05 — Realtime model catalog, begin, billing
 - Refs: `apps/api/src/routes/workspaces.ts:1101` GET `/realtime-model-catalog` (availability via `workspaceCodexSubscriptionActive` and `workspaceXaiSubscriptionActive(..., grant.subjectId)` `:1104-1106`); `apps/api/src/routes/sessions.ts:1370` POST `/realtime` (begin; `freezeSessionRealtimeConnectionAccounts` freezes MCP connection accounts only, `packages/core/src/domain/session-connection-accounts.ts:18`); voice billing `packages/core/src/domain/realtime-voice-billing.ts:66` `deploymentRealtimeVoice` returns null for `gpt-live-1-boulder-alpha` and `supergrok/grok-voice-think-fast-2.0`, so subscription voice is never charged (`:256` `admit`).
-- Model setting: ids are constants `CODEX_REALTIME_MODEL_ID` / `SUPERGROK_REALTIME_MODEL_ID` (`packages/config/src/index.ts:3510-3511`); the chosen model is stored per session realtime mode (DB check `packages/db/drizzle/0238_supergrok_realtime_model.sql`). The upstream xAI model is hard-coded `grok-voice-think-fast-2.0` (`apps/api/src/realtime-websocket.ts:256`). Client transport is picked by model id (`packages/sdk/src/realtime.ts:58` `sessionRealtimeTransportKind`); the SDK never touches credentials.
+- Model setting: ids are constants `CODEX_REALTIME_MODEL_ID` / `SUPERGROK_REALTIME_MODEL_ID` (`packages/config/src/index.ts:3510-3511`); the chosen model is stored per session realtime mode (DB check `session_realtime_modes_model_check`). The upstream xAI model is hard-coded `grok-voice-think-fast-2.0` (`apps/api/src/realtime-websocket.ts:256`). Client transport is picked by model id (`packages/sdk/src/realtime.ts:58` `sessionRealtimeTransportKind`); the SDK never touches credentials.
 - Gaps: catalog availability is computed for the *viewer* (xAI: their live pool; Codex: workspace), not for the session's accepted authority. No Claude realtime model exists.
 
 ##### EP-N06 — Codex realtime WebRTC broker
@@ -391,7 +398,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Asymmetry: no frozen Codex authority on schedules (Codex follows the live workspace source). There is **no scheduled token-refresh or quota-polling job** for any provider (no subscription references in `apps/worker/src/workflows/*` except Codex capacity wait).
 
 ##### EP-N28 — Codex fleet shadow telemetry
-- Refs: `apps/worker/test/fixtures/legacy-codex/fleet-shadow.ts:102` `publishCodexFleetShadowDecisionV1`, `:146` `buildCodexFleetShadowPayloadV1`. Shadow comparison of allocator decisions; no credential use. Codex only.
+- Refs: removed `publishCodexFleetShadowDecisionV1` and `buildCodexFleetShadowPayloadV1`. Shadow comparison of allocator decisions; no credential use. Codex only.
 
 ### 1.3 API, SDK, React and web surfaces (EP-S)
 
@@ -455,7 +462,7 @@ Note: `subscription-pool-access.ts` registers **no routes**; it only holds the h
 | GET `/v1/workspaces/:id/codex/status` | `codex.ts:1349` | `workspace:read` | workspace RLS; live `/codex/models` call with the **active** account's token |
 | GET `/v1/workspaces/:id/codex/accounts` | `codex.ts:1423` | `workspace:read` | workspace RLS |
 
-- Authority/pool: live lookup of the effective pool. `listCodexAccountStatuses` (`packages/db/src/index.ts:29783`) returns only the effective source's rows (workspace **or** organization, never both), via `effectiveCodexCredentialPoolCondition`. Effective source comes from SQL `resolve_workspace_codex_subscription_source` (`packages/db/drizzle/0422_personal_workspace_organization_codex_inheritance.sql:198`): a non-automatic mode wins; `automatic` returns `workspace` when any workspace/user credential exists, else organization.
+- Authority/pool: live lookup of the effective pool. `listCodexAccountStatuses` (`packages/db/src/index.ts:29783`) returns only the effective source's rows (workspace **or** organization, never both), via `effectiveCodexCredentialPoolCondition`. Effective source comes from SQL `resolve_workspace_codex_subscription_source`: a non-automatic mode wins; `automatic` returns `workspace` when any workspace/user credential exists, else organization.
 - Emails: yes, `codexAccountJson` (`codex.ts:93`) returns `email`, `label`, `plan`, cached `fiveHour`/`weekly`, plan exclusions, allocator fields, `source`.
 - Status surfaced: `/status` returns `connected, valid, activeAccountValid, poolReady, workerRoutable, models, activeAccount{id,label,chatgptAccountId}, accountCount, source`.
 - Divergences: Codex automatic precedence is workspace > organization; Claude/SuperGrok precedence is user > workspace > organization (EP-S10). Both conflict with "organization preferred". `/status` does a live provider call on a read route.
@@ -630,7 +637,7 @@ Background facts:
 - Minor: `subscriptionAuthorityForAgentActor` returns a subject for any scope, while `subscriptionExecutionAuthorityFromTurn` only for `user`; the lineage therefore carries a subject id even for workspace scope.
 
 ##### EP-S22 — Batched internal updates → one turn (claim)
-- Planning: `planInboxBatch` (`packages/db/src/index.ts:71269`) loads the receiving session's execution context (`loadInboxExecutionContext`, `packages/db/src/inbox-execution-context.ts:58`). `sessions.execution_context_turn_id` is the latest started `user`/`api` turn (trigger `advance_session_execution_context`, `packages/db/drizzle/0608_receiver_execution_context.sql:92`).
+- Planning: `planInboxBatch` (`packages/db/src/index.ts:71269`) loads the receiving session's execution context (`loadInboxExecutionContext`, `packages/db/src/inbox-execution-context.ts:58`). `sessions.execution_context_turn_id` is the latest started `user`/`api` turn (trigger `advance_session_execution_context`).
 - Two modes:
   - **Receiver-owned** (`index.ts:71332`): the new turn takes `personalConnectionDelegations`, MCP bindings **and both provider snapshots from the receiving context turn** (`index.ts:74225-74238`, inserted at `:74745-74746`). Eligibility for informational agent updates (`agent_message`, `child_*`) checks only same causal human, no external link, no credential restriction (`inbox-execution-context.ts:105-127`) — it does **not** compare the update's frozen xAI/Claude snapshot with the receiver's. Other updates must have an equal authority key (`index.ts:71316-71330`).
   - **Not receiver-owned**: snapshot from `delivered.updates[0]` (`frozenSubscriptionExecutionAuthority`, `index.ts:70972`); coalescing requires equal `systemUpdateExecutionAuthorityKey` (`:71001`, `:71106-71117`).
@@ -832,11 +839,11 @@ Provider-specific facts that should become capability flags rather than conditio
 Sources compared:
 
 - Docs: `docs/codex-subscription-rotation.md` (cited as `rot.md:<line>` plus section), `docs/codex-provider-account-authority.md` (`auth.md:<line>`), `AGENTS.md` Codex bullets (`AGENTS.md:<line>`).
-- Code: `apps/worker/test/fixtures/legacy-codex/rotation.ts`, `apps/worker/src/activities/codex-capacity.ts`, `apps/worker/src/activities/agent-turn/{codex-capacity,credential-leases,subscription-lease,failure-settlement}.ts`, Codex accessors in `packages/db/src/index.ts`, `packages/db/src/codex-*.ts`, `packages/contracts/src/codex-provider-account-authority.ts`, `packages/config/src/subscription-account-selection.ts`, plus the helpers and migrations they call (`packages/db/src/database.ts`, migrations 0225, 0304, 0345, 0422 and 0492 in `packages/db/drizzle/`, `apps/worker/src/workflows/session.ts`, `apps/worker/src/activities/agent-turn/run.ts`, `apps/api/src/routes/codex.ts`).
+- Code: the removed legacy rotation module (`rot.ts`), `apps/worker/src/activities/codex-capacity.ts`, `apps/worker/src/activities/agent-turn/{codex-capacity,credential-leases,subscription-lease,failure-settlement}.ts`, Codex accessors in `packages/db/src/index.ts`, `packages/db/src/codex-*.ts`, `packages/contracts/src/codex-provider-account-authority.ts`, `packages/config/src/subscription-account-selection.ts`, plus the helpers and migrations they call (`packages/db/src/database.ts`, migrations 0225, 0304, 0345, 0422 and 0492 in `packages/db/drizzle/`, `apps/worker/src/workflows/session.ts`, `apps/worker/src/activities/agent-turn/run.ts`, `apps/api/src/routes/codex.ts`).
 
 Flags: **CONTRADICTION** = the doc says one thing and the code does another. **TARGET-CONFLICT** = current behaviour conflicts with the agreed target model. **uncertain** = not fully confirmed; reason given.
 
-Abbreviations: `db` = `packages/db/src/index.ts`; `rot.ts` = `apps/worker/test/fixtures/legacy-codex/rotation.ts`; `cap.ts` = `apps/worker/src/activities/codex-capacity.ts`; `turncap.ts` = `apps/worker/src/activities/agent-turn/codex-capacity.ts`; `fs.ts` = `apps/worker/src/activities/agent-turn/failure-settlement.ts`.
+Abbreviations: `db` = `packages/db/src/index.ts`; `rot.ts` = the removed legacy Codex rotation module; `cap.ts` = `apps/worker/src/activities/codex-capacity.ts`; `turncap.ts` = `apps/worker/src/activities/agent-turn/codex-capacity.ts`; `fs.ts` = `apps/worker/src/activities/agent-turn/failure-settlement.ts`.
 
 ---
 
@@ -1162,9 +1169,9 @@ What it is: a default-off observer (`OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED`
 Where the code is:
 
 - Call site: `turncap.ts:479-532`, once per `selectCodexTurnCapacity` (proactive admission only), after the lease is acquired and the selection receipt written.
-- Payload builder and publisher: `apps/worker/test/fixtures/legacy-codex/fleet-shadow.ts:102-245` (`publishCodexFleetShadowDecisionV1`, `buildCodexFleetShadowPayloadV1`; `compareDecision` at `247-267`).
+- Payload builder and publisher: removed (`publishCodexFleetShadowDecisionV1`, `buildCodexFleetShadowPayloadV1`, `compareDecision`).
 - Pure policy, record and replay: `packages/contracts/src/codex-fleet-policy.ts` (`createCodexFleetReplayRecordV1` `277`, `replayCodexFleetDecisionV1` `298`, `readCodexFleetReplayRecordV1` `338`, `evaluateCodexFleetDecisionV1` `391`, `DEFAULT_CODEX_FLEET_POLICY_V1` `161`).
-- Persistence: the attempt-fenced `eventing.publish` (session event, workspace RLS); SDK type at `packages/sdk/src/types.ts:2217`; a React timeline projection. Tests: `apps/worker/test/codex-fleet-shadow.test.ts`, `packages/contracts/test/codex-fleet-policy.test.ts`, `packages/db/test/codex-fleet-shadow-events.test.ts`. The repo has no offline replay script or job; `replayCodexFleetDecisionV1` is only called from tests.
+- Persistence: the attempt-fenced `eventing.publish` (session event, workspace RLS); SDK type at `packages/sdk/src/types.ts:2217`; a React timeline projection. Tests: `packages/contracts/test/codex-fleet-policy.test.ts`, `packages/db/test/codex-fleet-shadow-events.test.ts`. The repo has no offline replay script or job; `replayCodexFleetDecisionV1` is only called from tests.
 
 What it records (`CodexFleetShadowPayloadV1`):
 

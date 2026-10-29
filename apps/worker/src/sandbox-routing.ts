@@ -20,7 +20,11 @@ import {
   sandboxProviderMaxRemainingLifetimeMs,
   type Settings,
 } from "@opengeni/config";
-import { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
+import {
+  agentBackgroundCommandDeps,
+  backgroundCommandWakeSender,
+  captureConnectedCommandOutput,
+} from "@opengeni/core";
 export { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
 import {
   createProviderCommandRetainer,
@@ -39,6 +43,7 @@ import {
   retainedProcessSettlementIdentity,
   settleConnectedMachineSessionBackgroundCommand,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
@@ -69,6 +74,7 @@ import {
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
+  PROVIDER_REGISTRY,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingMutationOutputRejectedError,
@@ -76,7 +82,6 @@ import {
   resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxBackendForSdkBackendId,
-  selectBackend,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -99,6 +104,7 @@ import {
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 
 const retainWorkspaceProviderCommand = createProviderCommandRetainer(
   retainWorkspaceMutationProcess,
@@ -150,6 +156,9 @@ export type RoutingWiringServices = {
   }) => void | Promise<void>;
   /** Cancel bounded capture waits with the owning turn activity. */
   waitSignal?: AbortSignal;
+  /** Wakes a session waiting on a background command this routing settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
 };
 
 /** Worker-turn routing may final-ack streamed command output, so it must always
@@ -430,6 +439,10 @@ async function resolveCurrentHomeBackend(
         instanceId: lease.instanceId,
         leaseEpoch: marked.lease.leaseEpoch,
       });
+      await signalBackgroundCommandWakes(
+        marked.backgroundCommandWakes,
+        backgroundCommandWakeSender(services.wakeSessionWorkflow),
+      );
     }
     throw new RoutingBackendRecoveryRequiredError(
       "resolve_home_backend",
@@ -833,6 +846,10 @@ function settleRetainedProcessForTurn(
         .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
         .catch(() => undefined);
     }
+    await signalBackgroundCommandWakes(
+      settlement.backgroundCommandWakes,
+      backgroundCommandWakeSender(services.wakeSessionWorkflow),
+    );
   };
 }
 
@@ -1114,6 +1131,12 @@ export function wrapTurnBoxWithRouting(
                 .publish(ids.workspaceId, ids.sessionId, settlement.events)
                 .catch(() => undefined);
             }
+            if (settlement) {
+              await signalBackgroundCommandWakes(
+                settlement.wakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
+            }
           },
           selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
             db,
@@ -1275,6 +1298,10 @@ export function wrapTurnBoxWithRouting(
                 instanceId: expectedInstanceId,
                 leaseEpoch: marked.lease.leaseEpoch,
               });
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;
@@ -1338,14 +1365,17 @@ export function wrapLazyTurnBoxWithRouting(
     ? findSessionProcessForTurn(services, ids, args.backendId)
     : undefined;
   const defaultSupportsPty = defaultBackend
-    ? selectBackend(defaultBackend).capabilities.Terminal.pty
+    ? PROVIDER_REGISTRY[defaultBackend].sessionSupportsPty
     : false;
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
-    // The SDK binds shell tools synchronously before lazy provisioning. Preserve
-    // the authoritative descriptor's PTY shape so a Modal home exposes
-    // write_stdin on its first turn operation; the async cancellation transport
-    // below still resolves the exact live route before executing a command.
+    // The SDK binds shell tools synchronously before lazy provisioning, so this
+    // answer decides whether the turn offers write_stdin. It is the provider's
+    // own live-session answer: a turn whose box was resolved before binding (an
+    // attached file, a resumed box) must offer exactly the same tools as one
+    // that binds first, or the tool list flips and the prompt cache misses. The
+    // async cancellation transport below still resolves the exact live route
+    // before executing a command.
     supportsPty: () => defaultSupportsPty,
   };
   const routedResolver = makeActiveBackendResolver({
@@ -1434,6 +1464,12 @@ export function wrapLazyTurnBoxWithRouting(
               await bus
                 .publish(ids.workspaceId, ids.sessionId, settlement.events)
                 .catch(() => undefined);
+            }
+            if (settlement) {
+              await signalBackgroundCommandWakes(
+                settlement.wakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
           },
           selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
@@ -1566,6 +1602,10 @@ export function wrapLazyTurnBoxWithRouting(
                 instanceId: backend.providerInstanceId,
                 leaseEpoch: marked.lease.leaseEpoch,
               });
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;
@@ -1836,6 +1876,7 @@ export async function establishSelfhostedTurnSession(
       accountId: args.accountId,
       workspaceId: args.workspaceId,
       sessionId: args.sessionId,
+      wake: backgroundCommandWakeSender(services.wakeSessionWorkflow),
       ...(args.backgroundCommandAttempt
         ? { backgroundCommandAttempt: args.backgroundCommandAttempt }
         : {}),

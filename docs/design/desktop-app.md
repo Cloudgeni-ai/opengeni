@@ -487,6 +487,61 @@ Considered and not chosen: capturing through the hosted agent's computer
 driver. The agent is optional, downloaded on first Connect and released on
 its own schedule; app-shots should work for anyone with the app.
 
+## Dictation from anywhere
+
+Added 2026-10-27. The person presses a shortcut in any app, speaks, and the
+text is typed where their cursor is, without switching to Opengeni. It
+replaces standalone dictation tools: same shortcut habits, but transcribed
+with the workspace's voice input and kept like any dictation.
+
+- **Off by default.** Settings → Computer use → Dictation turns it on. On
+  macOS the default shortcut is Control and Fn held together and let go
+  (press again to finish); "Hold while speaking" makes it push-to-talk. A
+  release after another key was pressed is a key combination, not the
+  shortcut. Elsewhere the default is Control+Shift+Space. Each shortcut can
+  have its own language; one that detects the language suits most people.
+- **The app owns the shortcut and the text; a page records.**
+  `packages/desktop/src/main/dictation/` watches the shortcut (a small
+  `osascript` poller of the modifier flags for modifier-only shortcuts, as
+  app-shots does, otherwise Electron's global shortcuts), shows a
+  non-focusable pill window at the bottom of the screen, and asks the signed-in
+  page to start, stop, cancel or retry. The page records with
+  `DesktopDictationHost` (`useVoiceInput`), so a dictation is an ordinary
+  dictation recording: uploaded as it is spoken, heard by the server, and
+  deleted once its text is taken. No page open: the app opens its window in
+  the background and starts when the page listens. Escape cancels while a
+  dictation runs and only then.
+- **Typing.** The text goes on the clipboard and is pasted into the app in
+  front, then the person's clipboard (all its formats) is put back unless
+  they copied something meanwhile. The paste helper starts while the speech
+  is transcribed, so the text arrives without a second's delay. macOS needs
+  Accessibility to post Command-V; without it the text is copied and the
+  window offers to allow it. Windows uses PowerShell `SendKeys`; Linux uses
+  xdotool on X11 and wtype or ydotool on Wayland, and only copies without
+  them.
+- **Failures keep the speech.** A failed transcription shows Retry; Dismiss
+  or Escape keeps anything longer than a few seconds as a saved dictation
+  that the composer offers later.
+- **History, replay and transcribing again.** The last 50 dictations are kept
+  on the computer with their speech (`dictation.json` and
+  `dictation-audio/`, readable only by the person, up to 32 MB each). The
+  page hands the app each dictation's microphone audio with its text. From
+  the settings page the person copies a text, plays the speech, or
+  transcribes it again, which uploads the kept speech as a new dictation and
+  replaces the text. An optional retry shortcut does that for the last
+  dictation and types the new text; an optional cancel shortcut works like
+  Escape. Cancel deletes the dictation; its speech, after the first few
+  seconds, stays only here, marked cancelled, to play or transcribe again.
+- **Vocabulary.** Names and terms the person lists (up to 100) go with every
+  dictation as the recording's `keyterms`, and reach the voice input model
+  when it takes them.
+- **Opens at login.** While dictation is on, the app registers itself to open
+  without a window at login, so the shortcut works after a restart.
+
+Not built yet: dictation on phones (the system keyboard is the only way to
+type into other apps there), and inserting text through Accessibility
+instead of the clipboard.
+
 ## Packaging, signing and updates
 
 | Platform | Package | Signing | Update |
@@ -520,10 +575,11 @@ People get the app four ways, all from the same releases:
   version-less file name (`Opengeni-mac.dmg`, `Opengeni-windows.exe`,
   `Opengeni-linux-amd64.deb`, `SHA256SUMS`, ...) to that file on the current
   release, and `GET /desktop/latest` to the release page. The current release
-  is the newest stable `desktop-v` tag, looked up on GitHub and cached for ten
-  minutes, unless the operator pins `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's
-  own "latest release" can't be used: agent and package releases share the
-  repository.
+  is the newest stable `desktop-v` tag, listed over Git's smart HTTP protocol
+  (the REST API's unauthenticated limit is shared by every caller behind the
+  same outbound address) and cached for ten minutes, unless the operator pins
+  `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's own "latest release" can't be
+  used: agent and package releases share the repository.
 - **With one command.** `curl -fsSL https://<server>/desktop/install.sh | sh`
   installs or updates the app on macOS (into `/Applications`, after checking
   the checksum, signature and notarization) and Linux (deb through apt, rpm

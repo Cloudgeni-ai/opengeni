@@ -6,28 +6,12 @@ release keeps working against the new schema. Use
 `-- deployment-mode: maintenance` only when no expand/contract sequence works,
 and say why in the file.
 
-## Historical server compatibility
+## Immutable migration files
 
-Published migration files remain byte-for-byte immutable. PostgreSQL 18 added
-column NOT NULL entries to `pg_constraint`, so the migration runner adapts only
-the exact deployed 0345/0598 sources through
-`packages/db/src/migration-postgres-compatibility.ts` on PostgreSQL 18 or newer.
-The adapter verifies the source SHA-256 before excluding `contype = 'n'` from
-three registry/capability comparisons and the pool constraint-copy loop.
-0345 still checks `pg_attribute.attnotnull`; 0598's `CREATE TABLE ... LIKE`
-already copies NOT NULL. Ownership, ACL, RLS and all other constraints remain
-unchanged. Older servers use the original SQL, and already-applied migrations
-are not rerun. Release-schema contracts hash the original files, not adapted
-execution text. A new forward migration cannot repair an earlier fresh-install
-failure, and changing the historical files would invalidate deployed hashes.
-
-The same closed adapter stabilizes 0807's policy deparsing on all supported
-servers. Dedicated-schema deployments put `opengeni_private` on `search_path`,
-which causes `pg_get_expr` to omit the schema that 0807's exact helper matcher
-requires. Only that hash-pinned source temporarily uses the quoted data schema
-and `pg_catalog` while deparsing and rewriting policies, then restores the
-caller's path. The strict matcher, row-account fence, administrator check and
-transaction boundaries remain unchanged; failure rolls back the local setting.
+Published migration files remain byte-for-byte immutable: the
+`migration-immutability` guard (`scripts/check-migration-immutability.ts`)
+fails any change to an existing file under `packages/db/drizzle/` other than
+adding a new one. Fix a shipped migration with a new forward migration.
 
 ## Why rolling is the default
 
@@ -262,7 +246,11 @@ recording retention inventory withheld, and 0950 granted it. 0978 created the
 personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
-withheld the same way, with the same caller check.
+withheld the same way, with the same caller check. 1060 created the EU-only
+inference change function withheld the same way; until it is granted the
+setting stays off. 1091 created the secret history scrub's reader and cell
+writer withheld; the scrub checks the grant once per run and reports the
+cells only they reach as pending until then.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects
@@ -307,9 +295,8 @@ migration owner; see [force-rls-migration-backfills.md](force-rls-migration-back
 `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` holds an `ACCESS EXCLUSIVE` lock
 until commit, so use that window only for small tables. For large or hot tables,
 add a GUC-gated owner policy arm in the expand migration, run the backfill with
-`-- opengeni:batched-backfill` and register its GUC in
-`packages/db/src/migration-runner-settings.ts`, then validate in a separate
-migration (0409-0412 are the reference sequence).
+`-- opengeni:batched-backfill` and give it a closed, per-file transaction-local setting in the batched-backfill
+path of `packages/db/src/migrate.ts`, then validate in a separate migration.
 
 ## When maintenance is justified
 
@@ -356,9 +343,8 @@ The test also adds safe unknown objects and deliberately weakens RLS, adds
 unsafe grants/definers and revokes known EXECUTE privileges. Both the current
 and pinned binary must reject the negative controls. Missing PostgreSQL, pin
 objects or extraction dependencies fail the dedicated job; there is no green
-fallback to current code. Existing per-feature old-reader harnesses (for
-example `fixtures/site-limits-2fef1581b.ts`) remain necessary for non-readiness
-compatibility. The release-schema hash tests and historical maintenance notes
+fallback to current code. Per-feature old-reader harnesses remain necessary
+for non-readiness compatibility. The release-schema hash tests and historical maintenance notes
 are complementary, not evidence that an old readiness probe passes.
 
 The historical production source `bcc60cd80f2fd557e9f64beee38c1562d629de8c`

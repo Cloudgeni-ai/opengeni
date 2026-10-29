@@ -20,7 +20,7 @@ const ToolReviewSelectionLabel = /* @__PURE__ */ defineSchema(() =>
 export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      kind: z.enum(["generic", "gmail"]).default("generic"),
+      kind: z.enum(["generic", "gmail", "api"]).default("generic"),
       title: z.string().max(256).optional(),
       accountLabel: z.string().max(256).optional(),
       fieldLabels: z.record(primitives.string, z.string().max(256)).optional(),

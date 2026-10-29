@@ -48,6 +48,7 @@ import { cn } from "../app/lib/utils";
 
 import { defaultMeetingTitle, formatClock, ownerLiveLaneName } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
+import { canStartRecording } from "./recorder-state";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 import { MeetingsOverlayScope } from "./overlay-scope";
@@ -658,15 +659,19 @@ function RecorderPanelContent({
           : { language: language === DETECT_LANGUAGE ? null : language },
     });
   };
-  const autoStartReady = Boolean(autoStart?.pending && recorder?.supported && state === "idle");
+  // After an earlier recording stopped or failed too, as a click on Start would.
+  const autoStartReady = Boolean(
+    autoStart?.pending && recorder?.supported && canStartRecording(state),
+  );
   const startRef = useRef(start);
   startRef.current = start;
   useEffect(() => {
     if (!autoStartReady) return;
     const request = autoStart?.take();
     if (!request) return;
-    setTitle(request.title);
-    void startRef.current(request.title);
+    // A start without a title (the Start recording key) keeps one already typed, as the button does.
+    if (request.title) setTitle(request.title);
+    void startRef.current(request.title || undefined);
   }, [autoStart, autoStartReady]);
 
   if (recorder && !recorder.supported) {

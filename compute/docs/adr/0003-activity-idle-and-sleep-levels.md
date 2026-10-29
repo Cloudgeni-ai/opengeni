@@ -55,3 +55,11 @@ it; a later wake cancels it.
   after a save; it took about 0.1 s) and later ones fire on time. That test
   uses one-shot sleeps; periodic timers and programs that catch up on
   missed work were not tested.
+- Except on a host whose KVM keeps no realtime clock in its images: a
+  nested host whose hypervisor gives it no invariant TSC runs on
+  `kvm-clock`, and Firecracker refuses to move the guest's clock on from
+  such an image. The engine then restores it with its clocks as saved. The
+  restore notice still sets the wall clock, but the monotonic clock leaves
+  the sleep out, so a timer that came due during it waits for the time it
+  had left. Nested hosts should get an invariant TSC (for libvirt, the
+  `invtsc` CPU feature) to keep the behavior above.

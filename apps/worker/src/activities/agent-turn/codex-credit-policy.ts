@@ -1,4 +1,4 @@
-import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
+import type { CodexReportedUsage } from "@opengeni/codex";
 
 /** Local admission decision, never a synthetic provider/transport error. */
 export class CodexIncludedUsageExhaustedError extends Error {
@@ -25,10 +25,11 @@ export function findCodexCreditPolicyError(
 /**
  * Protects purchased Codex credits without delaying model requests. Admission
  * reads no usage endpoint: it refuses a dispatch only when usage this turn
- * already observed (the usage headers every Codex response carries) shows an
- * included window fully used and not yet reset, unless credit spending is
+ * already observed (the usage windows every Codex response reports, whether or
+ * not their durations are identified, so weekly-only accounts count too) shows
+ * an included window fully used and not yet reset, unless credit spending is
  * explicitly allowed. Unknown usage admits the request. A single request may
- * therefore cross the limit before its own headers report it; the next one is
+ * therefore cross the limit before its own response reports it; the next one is
  * refused. Connections the shared core already knows are exhausted are not
  * leased to a turn in the first place.
  */
@@ -42,15 +43,12 @@ export function createCodexCreditGuard(input: {
   type Observation = { windows: Array<{ used: number; reset: Date | null }>; checkedAt: Date };
   let snapshot: Observation | null = null;
   let retainedExhaustionUntil: number | null = 0;
-  const observe = (next: CodexUsageHeaderSnapshot) => {
+  const observe = (next: CodexReportedUsage) => {
     // Out-of-order responses cannot replace newer evidence with older.
     if (snapshot && next.checkedAt.getTime() < snapshot.checkedAt.getTime()) return;
     snapshot = {
       checkedAt: next.checkedAt,
-      windows: [
-        { used: next.primaryUsedPercent, reset: next.primaryResetAt },
-        { used: next.secondaryUsedPercent, reset: next.secondaryResetAt },
-      ],
+      windows: next.windows.map((window) => ({ used: window.usedPercent, reset: window.resetAt })),
     };
   };
   /** The refusal the latest observation proves, or null when none is known. */

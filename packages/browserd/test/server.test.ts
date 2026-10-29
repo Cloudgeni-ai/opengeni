@@ -996,6 +996,7 @@ describe("BrowserControlServer", () => {
       );
       expect(screenshot.status).toBe(200);
       expect(screenshot.headers.get("content-type")).toBe("image/png");
+      expect(screenshot.headers.get("x-opengeni-browser-frame-note")).toBeNull();
       expect(
         decodeBrowserFrameMetadataHeader(screenshot.headers.get("x-opengeni-browser-frame")!),
       ).toMatchObject({

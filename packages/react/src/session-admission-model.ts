@@ -83,6 +83,130 @@ export function savedMessageMachineChoices(machines: readonly MachineView[]): Ma
   );
 }
 
+/**
+ * The saved message is the machine owner's own and was approved for other
+ * machines, not the one the chat runs on now (for example, the chat moved
+ * after it was sent). No recheck can start it here: it runs once the chat is
+ * back on a machine it was approved for, or after it is removed and sent again.
+ */
+export function sessionAdmissionApprovedElsewhere(
+  reason: SessionAdmissionReason | null,
+  access: SessionMachineAccess | null | undefined,
+): boolean {
+  return (
+    reason?.reason === "personal_resource_grant_required" &&
+    access?.queuedTurnNotApprovedHere === true
+  );
+}
+
+export type ApprovedMachineChoice = {
+  sandboxId: string;
+  /** The machine's name as the server reported it for the saved message. */
+  name: string;
+  /** The same machine in the person's machine list, when it is there. */
+  machine: MachineView | null;
+  /** The chat can move there now. */
+  available: boolean;
+};
+
+/**
+ * The machines the saved message was approved for, matched to the person's
+ * machine list, the ones the chat can move to now first. Only the message's
+ * sender gets names from the server; everyone else gets an empty list.
+ */
+export function savedMessageApprovedMachines(
+  access: SessionMachineAccess | null | undefined,
+  machines: readonly MachineView[],
+): ApprovedMachineChoice[] {
+  const choices = (access?.queuedTurnApprovedMachines ?? [])
+    .filter((approved) => approved.sandboxId !== access?.sandboxId)
+    .map((approved) => {
+      const machine = machines.find((candidate) => candidate.sandboxId === approved.sandboxId);
+      return {
+        sandboxId: approved.sandboxId,
+        name: approved.machineName,
+        machine: machine ?? null,
+        available: machine !== undefined && isMachineComputeSelectable(machine.state),
+      };
+    });
+  return [
+    ...choices.filter((choice) => choice.available),
+    ...choices.filter((choice) => !choice.available),
+  ];
+}
+
+export type ApprovedElsewhereCopy = {
+  title: string;
+  body: string;
+  next: string;
+  /** "Run it on …" for the machine the chat can move to now; null when there is none. */
+  action: string | null;
+};
+
+/**
+ * Words for a saved message that was approved for another machine. The
+ * sender learns which machine and gets the one action that starts it there;
+ * everyone else learns who can. Never offers a recheck: one can't pass here.
+ */
+export function sessionAdmissionApprovedElsewhereCopy(
+  t: OpenGeniText,
+  access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner">,
+  target: ApprovedMachineChoice | null,
+): ApprovedElsewhereCopy {
+  const machine = access.machineName;
+  if (!access.isOwner) {
+    const owner = access.ownerName?.trim() || t("sessionAdmission.theMachineOwner");
+    return {
+      title: t("sessionAdmission.othersApprovedElsewhereTitle"),
+      body: t("sessionAdmission.othersApprovedElsewhereBody", { owner, machine }),
+      next: t("sessionAdmission.othersApprovedElsewhereNext", { owner }),
+      action: null,
+    };
+  }
+  if (!target) {
+    return {
+      title: t("sessionAdmission.notApprovedHereTitle", { machine }),
+      body: t("sessionAdmission.notApprovedHereBody", { machine }),
+      next: t("sessionAdmission.notApprovedHereNext", { machine }),
+      action: null,
+    };
+  }
+  const approved = target.name;
+  return {
+    title: t("sessionAdmission.approvedElsewhereTitle", { approved }),
+    body: t("sessionAdmission.approvedElsewhereBody", { approved, machine }),
+    next: target.available
+      ? t("sessionAdmission.approvedElsewhereNext", { approved, machine })
+      : target.machine
+        ? t("sessionAdmission.approvedElsewhereOfflineNext", { approved, machine })
+        : t("sessionAdmission.approvedElsewhereUnavailableNext", { approved, machine }),
+    action: target.available ? t("sessionAdmission.runOnApprovedMachine", { approved }) : null,
+  };
+}
+
+/**
+ * Start the saved message on a machine it was approved for: move the chat
+ * there, then one fenced recheck. The control fence does not depend on the
+ * machine, so the move cannot make the recheck run anything twice. Resolves
+ * to an error to show, or null once it moved and was rechecked; a failed
+ * recheck throws (see `recheckSessionAdmission`).
+ */
+export async function runSavedMessageOnMachine({
+  sandboxId,
+  attach,
+  recheck,
+  failedMove,
+}: {
+  sandboxId: string;
+  attach: (sandboxId: string) => Promise<boolean>;
+  recheck: () => Promise<void>;
+  failedMove: string;
+}): Promise<string | null> {
+  if (!(await attach(sandboxId))) return failedMove;
+  await recheck();
+  return null;
+}
+
 export type SessionAdmissionCopy = {
   title: string;
   body: string;

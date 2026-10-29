@@ -3,43 +3,122 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { toast } from "./toast";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import type { AppContextValue } from "../app-context";
+// Type only. Callers pass the chat's sidebar title: importing title code here
+// changes the web build's chunk graph (eager-page and chunk-cycle checks).
 import type { SessionListRow } from "../../session-list-model";
+import { useAppHost } from "./app-host";
+import { useRouterState } from "./navigation";
 
-type Confirmation = { title: string; description: string; confirmLabel: string };
-type Confirm = (input: Confirmation) => Promise<boolean>;
-const ArchiveConfirmationContext = createContext<Confirm>(async () => false);
+type Confirmation = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  /**
+   * The page the archive was asked on. An answer that arrives after the
+   * person has moved to another page asks with `late` instead of a dialog.
+   */
+  page?: number | undefined;
+  late?: { title: string; description: string } | undefined;
+};
+
+export type ArchiveConfirmation = {
+  /** The page shown now; it changes each time the person moves to another one. */
+  page(): number;
+  confirm(input: Confirmation): Promise<boolean>;
+};
+
+const ArchiveConfirmationContext = createContext<ArchiveConfirmation>({
+  page: () => 0,
+  confirm: async () => false,
+});
+
+/** Counts the pages the person visits, where the app has navigation. */
+function PageWatcher({ onPage }: { onPage: (pathname: string) => void }) {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  useEffect(() => onPage(pathname), [onPage, pathname]);
+  return null;
+}
 
 /** One dialog for mouse, keyboard, header and command-menu archive actions. */
 export function ArchiveConfirmationProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<Confirmation | null>(null);
   const resolve = useRef<((confirmed: boolean) => void) | null>(null);
+  const navigable = Boolean(useAppHost().navigation);
+  const pathname = useRef<string | null>(null);
+  const page = useRef(0);
   const finish = useCallback((confirmed: boolean) => {
     resolve.current?.(confirmed);
     resolve.current = null;
     setPending(null);
   }, []);
+  const onPage = useCallback(
+    (next: string) => {
+      if (pathname.current === next) return;
+      const moved = pathname.current !== null;
+      pathname.current = next;
+      if (!moved) return;
+      page.current += 1;
+      // A question about a chat belongs to the page it was asked on.
+      if (resolve.current) finish(false);
+    },
+    [finish],
+  );
   useEffect(
     () => () => {
       resolve.current?.(false);
     },
     [],
   );
-  const confirm = useCallback<Confirm>((input) => {
+  const confirm = useCallback((input: Confirmation): Promise<boolean> => {
+    if (input.page !== undefined && input.page !== page.current) {
+      // The person has moved on: a dialog here would be about a chat they
+      // asked for on another page, so ask in a notice they can leave.
+      return new Promise((done) => {
+        let settled = false;
+        // Settles even if no toaster is mounted to show the notice, so a
+        // missing toaster can never leave archiving stuck.
+        const fallback = setTimeout(() => {
+          settle(false);
+          toast.dismiss(notice);
+        }, LATE_NOTICE_MS * 3);
+        const settle = (confirmed: boolean) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(fallback);
+          done(confirmed);
+        };
+        const late = input.late ?? input;
+        const notice = toast(late.title, {
+          description: late.description,
+          duration: LATE_NOTICE_MS,
+          action: { label: input.confirmLabel, onClick: () => settle(true) },
+          onDismiss: () => settle(false),
+          onAutoClose: () => settle(false),
+        });
+      });
+    }
     resolve.current?.(false);
     setPending(input);
     return new Promise((done) => {
       resolve.current = done;
     });
   }, []);
+  const value = useMemo<ArchiveConfirmation>(
+    () => ({ page: () => page.current, confirm }),
+    [confirm],
+  );
   return (
-    <ArchiveConfirmationContext.Provider value={confirm}>
+    <ArchiveConfirmationContext.Provider value={value}>
+      {navigable ? <PageWatcher onPage={onPage} /> : null}
       {children}
       <ConfirmDialog
         open={pending !== null}
@@ -86,17 +165,21 @@ export function archiveActionLabel(
 
 export async function requestSessionArchive(
   context: AppContextValue,
-  chat: Pick<SessionListRow, "id" | "workspaceId" | "archiveVersion">,
+  chat: SessionListRow,
   archived: boolean,
-  confirm: Confirm,
+  confirmation: ArchiveConfirmation,
+  /** The chat's sidebar title (sessionDisplayTitle), named in the dialog. */
+  chatTitle: string,
 ) {
   const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
   if (!accepted) return null;
+  // Where the archive was asked: a late answer must not open a dialog elsewhere.
+  const page = confirmation.page();
   const pause = canPauseArchivedChat(context, chat.workspaceId);
   if (
     archived &&
     !pause &&
-    !(await confirm({
+    !(await confirmation.confirm({
       title: "Hide this chat for you?",
       description:
         "You cannot pause this chat. Hiding it only removes it from your sidebar; its work and automations can keep running.",
@@ -124,15 +207,39 @@ export async function requestSessionArchive(
     )
       throw error;
     if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
+    const name = quotedChatName(chatTitle);
     if (
-      !(await confirm({
-        title: "Pause and archive this chat?",
+      !(await confirmation.confirm({
+        title: `Pause and archive ${name}?`,
         description:
           "This chat has active work. Pause stops it and its sub-chats for everyone with access, removes their one-time waits, and blocks automations from starting work in them. Only your sidebar hides the chat. Restoring it will not resume it.",
         confirmLabel: "Pause and archive",
+        page,
+        late: {
+          title: `${name} wasn't archived`,
+          description: "It has active work.",
+        },
       }))
     )
       return null;
     return await request(true);
   }
+}
+
+const CHAT_NAME_MAX = 60;
+const LATE_NOTICE_MS = 10_000;
+
+/** A chat's sidebar title in quotes, shortened to fit a dialog title. */
+export function quotedChatName(sidebarTitle: string): string {
+  const title = sidebarTitle.trim();
+  if (!title) return "this chat";
+  const characters = Array.from(title);
+  const short =
+    characters.length > CHAT_NAME_MAX
+      ? `${characters
+          .slice(0, CHAT_NAME_MAX - 1)
+          .join("")
+          .trimEnd()}…`
+      : title;
+  return `“${short}”`;
 }

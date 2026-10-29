@@ -289,10 +289,7 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
 
   // NOTE: `acquireSharedTestDatabase` hands out the container SUPERUSER, for whom
   // `FORCE ROW LEVEL SECURITY` never engages. This file therefore covers the
-  // domain contract, not the production FORCE-RLS boundary: the personal
-  // authority activation asserted below is exercised against a
-  // NOSUPERUSER/NOBYPASSRLS owner in
-  // `packages/db/test/migration-0339-document-authority-reclassification.test.ts`.
+  // domain contract, not the production FORCE-RLS boundary.
   test("reclassification preserves portable personal get, search, and browse isolation", async () => {
     if (!available) return;
     const subjectId = `human:${crypto.randomUUID()}`;

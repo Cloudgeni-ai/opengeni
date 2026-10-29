@@ -2,8 +2,10 @@ import { AlertTriangleIcon, ArrowLeftIcon, AudioLinesIcon, TerminalIcon } from "
 import { UserMessageBody as CollapsibleUserMessageBody } from "../../../components/user-message-body";
 import type { UserMessageItem } from "../../../timeline";
 import type { TimelineSearchTarget } from "../../../components/timeline-search";
-import { lazy, Suspense } from "react";
+import { lazy } from "react";
 
+import { LazyPart } from "../../../components/lazy-part";
+import { LoadFailureNotice } from "../../../components/load-failure-notice";
 import { MarkdownText } from "../markdown";
 import { Button } from "../../../ui/button";
 import { formatTimestamp } from "../../lib/format";
@@ -88,10 +90,19 @@ export function UserMessageBody({
         </div>
       ) : null}
       {hasFiles ? (
-        <Suspense
+        // If the attachments' code fails to download, the message, its text
+        // and its repository chips stay; only the files give way to a Reload.
+        <LazyPart
           fallback={
             <>
               <MessageFileSkeletons resources={item.resources} />
+              {repositoryChips}
+            </>
+          }
+          failed={
+            <>
+              {/* Flush with the message text below it. */}
+              <LoadFailureNotice className="mb-1 px-0" />
               {repositoryChips}
             </>
           }
@@ -101,7 +112,7 @@ export function UserMessageBody({
             workspaceId={workspaceId}
             resources={item.resources}
           />
-        </Suspense>
+        </LazyPart>
       ) : (
         repositoryChips
       )}

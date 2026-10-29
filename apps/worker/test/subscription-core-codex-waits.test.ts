@@ -190,7 +190,7 @@ describe("core Codex blocked-turn evaluation", () => {
   };
   const turn = { ...scope, sessionId: "session-1", turnId: "turn-1" };
 
-  test("maps placement to run, wait, revoked authority and a paused cutover", async () => {
+  test("maps placement to run, wait and revoked authority", async () => {
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "readSubscriptionCoreCodexTurnModel").mockResolvedValue({
       productModelId: "codex/gpt-5.5",
@@ -221,8 +221,6 @@ describe("core Codex blocked-turn evaluation", () => {
     });
     evaluate.mockResolvedValue({ kind: "not_visible" });
     expect(await evaluateCoreCodexBlockedTurn(services, turn)).toEqual({ kind: "revoked" });
-    evaluate.mockResolvedValue({ kind: "cutover_not_enabled" });
-    expect(await evaluateCoreCodexBlockedTurn(services, turn)).toEqual({ kind: "paused" });
   });
 
   test("a turn whose accepted identity is gone is revoked without placement", async () => {

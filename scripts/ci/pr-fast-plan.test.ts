@@ -69,7 +69,8 @@ test("docs and non-package paths select no units without treating missing tests 
 test("product plus release note selects units, but changeset cannot mask another broad fence", () => {
   const paths = [".changeset/example.md", "packages/runtime/src/index.ts"];
   const product = createImpactPlan(paths);
-  expect(product.mode).toBe("full");
+  // A changeset note no longer fences; the product change selects its own plan.
+  expect(product.mode).toBe("focused");
   expect(selectPrFastPlan(product, ["packages/runtime"]).unitTests).toHaveLength(PR_UNIT_FILE_CAP);
   for (const fence of ["package.json", ".github/workflows/pr-ci.yml"]) {
     const broad = createImpactPlan([...paths, fence]);
@@ -121,7 +122,7 @@ test("inventory tests run whenever their area changes, beyond the cap and broad 
     },
     dirs,
   );
-  expect(migration.unitTests).toEqual(["scripts/release-schema-contract.test.ts"]);
+  expect(migration.unitTests).toEqual(["scripts/check-migration-immutability.test.ts"]);
   // Inventory tests need not be in the impact plan's list, only exist; docs
   // plans never run units.
   const web = selectPrFastPlan(

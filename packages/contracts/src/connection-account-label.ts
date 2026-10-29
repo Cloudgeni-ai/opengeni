@@ -19,6 +19,8 @@ export function connectionAccountIdentityLabel(
       metadata.googleEmail,
       metadata.gmailEmail,
       metadata.googleCalendarEmail,
+      metadata.googleDriveEmail,
+      metadata.atlassianEmail,
       metadata.accountLabel,
       metadata.displayName,
       metadata.providerDisplayName,
@@ -26,6 +28,7 @@ export function connectionAccountIdentityLabel(
       metadata.accountName,
       metadata.name,
       metadata.slackUserName,
+      metadata.atlassianName,
       metadata.username,
     ]
       .map(text)

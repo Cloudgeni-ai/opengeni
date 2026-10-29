@@ -7,7 +7,6 @@ import {
   createDb,
   connectSubscriptionCoreXaiConnection,
   deleteWorkspace,
-  SUBSCRIPTION_RETIREMENT_MIGRATION,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -24,12 +23,7 @@ let client: DbClient;
 let app: Hono;
 
 beforeAll(async () => {
-  // The SuperGrok funding check still reads the legacy SuperGrok pool, whose
-  // routines the drained retirement migration drops, so the database
-  // withholds it until X4 moves this route onto the shared core.
-  shared = await acquireSharedTestDatabase("video-generation-routes", {
-    withheldMigrations: [SUBSCRIPTION_RETIREMENT_MIGRATION],
-  });
+  shared = await acquireSharedTestDatabase("video-generation-routes");
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   client = createDb(shared.appUrl, { max: 2 });
   app = new Hono();

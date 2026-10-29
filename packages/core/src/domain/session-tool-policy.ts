@@ -4,6 +4,7 @@ import {
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
   webSearchToolPlan,
+  hostedWebSearchAllowed,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -35,12 +36,14 @@ import {
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 import {
   getSandbox,
+  isWorkspaceEuOnly,
   hasWorkspaceManagedSkill,
   requireWorkspace,
   sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
+import { inferenceFeatureRegionAllowed } from "../side-feature-availability";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 
 const MANDATORY_SESSION_MCP_SERVER_IDS = ["opengeni"] as const;
@@ -352,44 +355,47 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory] = await Promise.all([
-    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
-    resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
-      accountId: configured[0]!.accountId,
-      workspaceId,
-      retainedProductModelIds: configured.map((session) => session.model),
-    }),
-    configured.some((session) => session.agent?.capabilities.skills === "read")
-      ? hasWorkspaceManagedSkill(deps.db, {
-          accountId: configured[0]!.accountId,
-          workspaceId,
-          subjectId,
-        })
-      : Promise.resolve(false),
-    deps.settings.sandboxSelfhostedEnabled
-      ? Promise.all(
-          sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
-            async (id) =>
-              [
-                id,
-                await getSandbox(
-                  deps.db,
-                  { accountId: configured[0]!.accountId, workspaceId, subjectId },
+  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly] =
+    await Promise.all([
+      workspaceRead ?? requireWorkspace(deps.db, workspaceId),
+      resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: configured[0]!.accountId,
+        workspaceId,
+        retainedProductModelIds: configured.map((session) => session.model),
+      }),
+      configured.some((session) => session.agent?.capabilities.skills === "read")
+        ? hasWorkspaceManagedSkill(deps.db, {
+            accountId: configured[0]!.accountId,
+            workspaceId,
+            subjectId,
+          })
+        : Promise.resolve(false),
+      deps.settings.sandboxSelfhostedEnabled
+        ? Promise.all(
+            sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
+              async (id) =>
+                [
                   id,
-                ),
-              ] as const,
-          ),
-        )
-      : Promise.resolve([]),
-    sessionsWithToolRouterHistory(deps.db, {
-      accountId: configured[0]!.accountId,
-      workspaceId,
-      sessionIds: [...new Set(configured.map((session) => session.id))],
-    }),
-  ]);
+                  await getSandbox(
+                    deps.db,
+                    { accountId: configured[0]!.accountId, workspaceId, subjectId },
+                    id,
+                  ),
+                ] as const,
+            ),
+          )
+        : Promise.resolve([]),
+      sessionsWithToolRouterHistory(deps.db, {
+        accountId: configured[0]!.accountId,
+        workspaceId,
+        sessionIds: [...new Set(configured.map((session) => session.id))],
+      }),
+      // EU-only: the projection lists only tools the worker would attach.
+      isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
+    ]);
   return {
     ...baseline,
-    settings: catalog.settings,
+    settings: euOnly ? { ...catalog.settings, requiredModelGeography: "eu" } : catalog.settings,
     workspaceSettings: workspace.settings,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
     hasWorkspaceSkills,
@@ -469,14 +475,27 @@ export function sessionEffectiveToolProjectionInput(
       })
     : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {
-    if (context?.settings.webSearchEnabled) hostedToolNames.push("web_search", "x_search");
+    if (context?.settings.webSearchEnabled && hostedWebSearchAllowed(context.settings))
+      hostedToolNames.push("web_search", "x_search");
   } else if (model?.model.hostedWebSearch && webSearchPlan.hostedWebSearch)
     hostedToolNames.push("web_search");
-  const mediaAttachment =
+  const attachment =
     context?.mediaAttachments?.get(session.id) ??
     (context?.objectStorageAvailable === false
       ? ({ image: null, video: false } as const)
       : undefined);
+  // EU-only: a media tool with no EU route is never attached.
+  const imageRestricted =
+    context !== undefined && !inferenceFeatureRegionAllowed(context.settings, "image_generation");
+  const videoRestricted =
+    context !== undefined && !inferenceFeatureRegionAllowed(context.settings, "video_generation");
+  const mediaAttachment =
+    imageRestricted || videoRestricted
+      ? ({
+          image: imageRestricted ? null : (attachment?.image ?? null),
+          video: !videoRestricted && attachment?.video === true,
+        } as const)
+      : attachment;
   const media = resolveAgentMediaToolSurface(session.agent, mediaAttachment);
   hostedToolNames.push(...media.hosted);
   const runtimeToolNames: AgentFunctionToolName[] = context

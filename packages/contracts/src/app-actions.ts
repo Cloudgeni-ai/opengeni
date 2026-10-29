@@ -43,15 +43,13 @@ export function findAppAction(id: string): ActionCatalogEntry | undefined {
 }
 
 /**
- * Whether running the action can change anything. Only GET, HEAD, the
- * read-only POSTs and retired actions can't: a retired action runs nothing and
- * only names its replacement, so it never needs a confirmation.
+ * Whether running the action can change anything. Only GET, HEAD and the
+ * read-only POSTs can't.
  */
 export function appActionChangesState(entry: ActionCatalogEntry): boolean {
   return !(
     entry.method === "GET" ||
     entry.method === "HEAD" ||
-    entry.retired !== undefined ||
     READ_ONLY_POST_ACTIONS.has(entry.path)
   );
 }
@@ -138,6 +136,77 @@ export function appActionCallHandlesSecrets(args: unknown): boolean {
   const call = callArguments(args);
   const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
   return entry !== undefined && appActionCallCarriesSecrets(entry, call?.body);
+}
+
+/**
+ * Whether this admin_action_call creates or updates a vault item. Its body is
+ * kept in the vault itself, so secret references in it may become values.
+ */
+export function appActionCallStoresVaultItem(args: unknown): boolean {
+  const call = record(args);
+  const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
+  return (
+    entry !== undefined &&
+    (entry.secretFields ?? []).some((field) => field.startsWith("route:")) &&
+    ((entry.method === "POST" && /\/vaults\/:vaultId\/items$/.test(entry.path)) ||
+      (entry.method === "PATCH" && /\/vaults\/:vaultId\/items\/:itemId$/.test(entry.path)))
+  );
+}
+
+/**
+ * Calls `visit` on each filled request field of this admin_action_call's body
+ * that its action marks as secret (a provider API key, an MCP server's
+ * headers), in catalog order, and returns the arguments with each field
+ * replaced by what `visit` returned. Only these fields take a secret from the
+ * caller; response and route fields don't. Arguments that are not an object,
+ * an unknown action, or a call without such fields come back unchanged.
+ */
+export function mapAppActionCallSecretInputs(
+  args: unknown,
+  visit: (value: unknown) => unknown,
+): unknown {
+  const call = record(args);
+  const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
+  if (!call || !entry || !Object.hasOwn(call, "body")) return args;
+  let body = call.body;
+  for (const field of entry.secretFields ?? []) {
+    if (!field.startsWith("request.") && !field.startsWith("request[]")) continue;
+    body = mapFilledAt(body, field.slice("request".length), visit);
+  }
+  return body === call.body ? args : { ...call, body };
+}
+
+/** The values `mapAppActionCallSecretInputs` visits, in order. */
+export function appActionCallSecretInputs(args: unknown): unknown[] {
+  const inputs: unknown[] = [];
+  mapAppActionCallSecretInputs(args, (value) => {
+    inputs.push(value);
+    return value;
+  });
+  return inputs;
+}
+
+function mapFilledAt(value: unknown, path: string, visit: (value: unknown) => unknown): unknown {
+  if (path === "") return filled(value) ? visit(value) : value;
+  if (path.startsWith("[]")) {
+    const rest = path.slice(2);
+    if (Array.isArray(value)) {
+      const next = value.map((item) => mapFilledAt(item, rest, visit));
+      return next.every((item, index) => item === value[index]) ? value : next;
+    }
+    const object = record(value);
+    if (!object) return value;
+    const next = Object.fromEntries(
+      Object.entries(object).map(([key, item]) => [key, mapFilledAt(item, rest, visit)]),
+    );
+    return Object.keys(object).every((key) => next[key] === object[key]) ? value : next;
+  }
+  const match = /^\.([^.[]+)/.exec(path);
+  const object = record(value);
+  if (!match || !object || !Object.hasOwn(object, match[1]!)) return value;
+  const key = match[1]!;
+  const next = mapFilledAt(object[key], path.slice(match[0].length), visit);
+  return next === object[key] ? value : { ...object, [key]: next };
 }
 
 /** Whether a body has a non-empty value at a catalog field path such as ".mcpServers[].headers". */

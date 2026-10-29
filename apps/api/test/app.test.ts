@@ -557,6 +557,8 @@ describe("API helpers", () => {
       "Content-Range",
     );
     for (const eventHeader of [
+      "X-OpenGeni-Browser-Frame",
+      "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",

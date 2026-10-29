@@ -55,66 +55,84 @@ html[data-desktop] [data-window-drag] :is(a, button, input, select, textarea, la
   app-region: no-drag;
 }
 
-/* On macOS and Windows the page runs under the title bar: a strip along the
-   top of every page drags the window, including pages without a header of
-   their own. Linux keeps the system title bar. */
-html:is([data-desktop="macos"], [data-desktop="windows"]) body::before {
+/* On macOS and Windows the page runs under the system title bar, where the
+   window's own controls are drawn: the macOS traffic lights (or, while the
+   window is shared or recorded, the wider purple badge macOS swaps in, about
+   15px to 80px across and 13px to 32px down), and the Windows caption
+   buttons. A thin bar across the top of the window holds them, in the app's
+   colour, and moves the window; the whole page, its dialogs and panels start
+   below it, so nothing shares a row with the controls. Linux keeps the
+   system title bar.
+
+   macOS: as tall as the badge with even space above and below it.
+   Windows: as tall as the caption buttons, which the browser reports (the
+   window controls overlay); in full screen there are none, and no bar. */
+html[data-desktop="macos"] {
+  --og-window-bar-height: 44px;
+}
+
+html[data-desktop="windows"] {
+  --og-window-bar-height: env(titlebar-area-height, 0px);
+}
+
+html:is([data-desktop="macos"], [data-desktop="windows"])::before {
   content: "";
   position: fixed;
   inset: 0 0 auto;
-  z-index: 2147483000;
-  height: 10px;
+  /* Above the page, below full-window layers and dialogs (z-index 50), whose
+     backdrops dim it like the rest of the window. */
+  z-index: 45;
+  height: var(--og-window-bar-height);
+  background-color: var(--og-color-bg);
   -webkit-app-region: drag;
   app-region: drag;
 }
 
-/* Windows draws its caption buttons (minimize, maximize, close) over the
-   top-right corner of the page, in a row as tall as the page's title bar. The
-   browser reports the free part of that row (the window controls overlay), so
-   the corner follows the system's button size and text scaling, and is empty
-   in full screen. */
-html[data-desktop="windows"] {
-  --og-caption-buttons-width: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
-  --og-caption-row-height: env(titlebar-area-height, 56px);
+/* On macOS it is the rail's material: the window's sidebar glass through the
+   app's background. */
+html[data-desktop="macos"]::before {
+  background-color: color-mix(in srgb, var(--og-color-bg) 62%, transparent);
 }
 
-/* Whatever reaches the corner makes room for the buttons: the session's title
-   bar, or the tab row of a full-window workspace panel (maximized, or the
-   overlay in a narrow window). */
-html[data-desktop="windows"] [data-titlebar],
-html[data-desktop="windows"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
-  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
+/* In a short window a tall dialog or a menu can reach over the bar; it stays
+   clickable there instead of moving the window. A modal <dialog> is left out:
+   it starts below the bar, and Chromium would extend its no-drag to the
+   full-window backdrop, so the bar would stop moving the window. */
+html:is([data-desktop="macos"], [data-desktop="windows"]) :is(dialog:not(:modal), [role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
-/* A page without a title bar of its own (a content page, or the new-session
-   page) keeps the caption row clear: the row moves the window like a native
-   title bar, and the page's content and scrollbar fade out beneath the
-   buttons. */
-html[data-desktop="windows"] main :is([data-slot="content-page"], [data-window-top-page]):not([data-slot="content-page"] *, [role="dialog"] *) {
-  mask-image: linear-gradient(to bottom, transparent calc(var(--og-caption-row-height) / 2), #000 var(--og-caption-row-height));
+/* The page is laid out below the bar, and shells sized to the window fill the
+   space below it instead. */
+html:is([data-desktop="macos"], [data-desktop="windows"]) body {
+  box-sizing: border-box;
+  padding-top: var(--og-window-bar-height);
 }
 
-html[data-desktop="windows"] main :is([data-slot="content-page"], [data-window-top-page]):not([data-slot="content-page"] *, [role="dialog"] *)::before {
-  content: "";
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  flex-shrink: 0;
-  height: var(--og-caption-row-height);
-  margin-bottom: calc(-1 * var(--og-caption-row-height));
-  -webkit-app-region: drag;
-  app-region: drag;
+html:is([data-desktop="macos"], [data-desktop="windows"]) #root {
+  height: 100%;
 }
 
-html[data-desktop="windows"] main [data-slot="content-page"]:not([data-slot="content-page"] *, [role="dialog"] *) > [data-slot="content-page-inner"] {
-  padding-top: var(--og-caption-row-height);
+html:is([data-desktop="macos"], [data-desktop="windows"]) :is(.h-dvh, .h-screen) {
+  height: 100%;
 }
 
-/* The image viewer's close and download buttons sit in the top-right corner,
-   where Windows draws its caption buttons over the page. They move left of
-   them, so the viewer's own close is never under the window's close. */
-html[data-desktop="windows"] [data-lightbox-controls] {
-  right: max(1.5rem, calc(var(--og-caption-buttons-width) + 0.75rem));
+html:is([data-desktop="macos"], [data-desktop="windows"]) .max-h-dvh {
+  max-height: 100%;
+}
+
+html:is([data-desktop="macos"], [data-desktop="windows"]) :is(.min-h-dvh, .min-h-screen) {
+  min-height: 100%;
+}
+
+/* Layers that fill the window (a full-window Site or panel, the image viewer,
+   side sheets) start below the bar too. Their backdrops still cover it. */
+html:is([data-desktop="macos"], [data-desktop="windows"]) [data-window-layer] {
+  top: var(--og-window-bar-height);
+  bottom: 0;
+  height: auto;
+  max-height: none;
 }
 
 html[data-desktop="macos"],
@@ -131,54 +149,8 @@ html[data-desktop="macos"] body {
   }
 }
 
-/* macOS draws the traffic lights over the rail's top-left corner (they end
-   about 72px in, centred on the 56px title row). A collapsed rail is narrower
-   than they are: its toggle moves below them, and the page's title bar starts
-   after them. */
-html[data-desktop="macos"] nav[data-collapsed="true"] [data-rail-header] {
-  padding-top: 44px;
-}
-
-/* The shell carries the collapsed state itself. An `html:has(...)` selector
-   here made every DOM change anywhere in the page (each keystroke in the
-   composer, each streamed token) restyle the whole document. */
-html[data-desktop="macos"] [data-rail-collapsed="true"] [data-titlebar] {
-  padding-left: 32px;
-}
-
-/* The Site view has no title bar of its own: the Site's toolbar is its top
-   row, so beside a collapsed rail it starts after the window controls too.
-   While the window is being shared or recorded, macOS swaps the controls for
-   a wider purple sharing badge (about 80px in); 32px past the rail clears
-   both. */
-html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] dialog:not([data-artifact-fullscreen]) > [data-artifact-toolbar] {
-  padding-left: 32px;
-}
-
-/* A full-window workspace panel (maximized, or the overlay in a narrow
-   window) puts its tab row under the traffic lights. */
-html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
-  padding-left: 84px;
-}
-
-/* Expanded Sites escape the rail into the modal top layer. Their own header
-   must reserve the native controls, independently of the rail underneath.
-   Inline previews and browser/embedded viewers keep their normal spacing. */
-html:is([data-desktop="macos"], [data-desktop="windows"]) [data-artifact-fullscreen] > [data-window-drag] {
-  min-height: 56px;
-}
-
-html[data-desktop="macos"] [data-artifact-fullscreen] > [data-window-drag] {
-  padding-left: 84px;
-}
-
-html[data-desktop="windows"] [data-artifact-fullscreen] > [data-window-drag] {
-  min-height: var(--og-caption-row-height);
-  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
-}
-
 /* The update notice (apps/web/src/api.ts) is plain DOM, so it can show before
-   React renders. `:where` keeps these defaults below the desktop rules. */
+   React renders. `:where` keeps these defaults easy to override. */
 :where(#opengeni-api-update-notice) {
   display: flex;
   flex-wrap: wrap;
@@ -207,51 +179,4 @@ html[data-desktop="windows"] [data-artifact-fullscreen] > [data-window-drag] {
 
 :where(#opengeni-api-update-notice) button:hover {
   background: var(--og-color-surface-3);
-}
-
-/* Notices across the top of the app sit in the window's top row, where the
-   desktop app draws its window controls: the macOS traffic lights (or the
-   wider purple badge macOS swaps in while the window is shared), and the
-   Windows caption buttons. They keep clear of them.
-
-   Above every page (the update notice, sign-in and connection notices): they
-   start after the macOS controls and end before the Windows buttons. The
-   update bar is as tall as the title row, so its text lines up with the
-   controls. */
-html[data-desktop="macos"] [data-app-notice] {
-  padding-left: 84px;
-}
-
-html[data-desktop="windows"] [data-app-notice] {
-  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
-}
-
-/* The sign-in notice is a centred box (48rem with 1rem inset): it moves only
-   as far as it must to clear the controls, so wide windows keep it centred. */
-html[data-desktop="macos"] [data-app-notice="centered"] {
-  padding-left: clamp(0px, calc(904px - 100%), 68px);
-}
-
-html[data-desktop="windows"] [data-app-notice="centered"] {
-  padding-right: clamp(
-    0px,
-    calc(2 * var(--og-caption-buttons-width) + 752px - 100%),
-    calc(var(--og-caption-buttons-width) - 0.5rem)
-  );
-}
-
-html:is([data-desktop="macos"], [data-desktop="windows"]) #opengeni-api-update-notice {
-  min-height: var(--og-caption-row-height, 56px);
-}
-
-/* A banner across the top of a page beside the rail (agent work paused, on a
-   page with no session title bar above it): beside a collapsed rail it starts
-   after the macOS controls, like the title bar, and it ends before the
-   Windows buttons. */
-html[data-desktop="macos"] [data-rail-collapsed="true"] [data-canvas] > [data-slot="notice"]:first-child {
-  padding-left: 32px;
-}
-
-html[data-desktop="windows"] [data-canvas] > [data-slot="notice"]:first-child {
-  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }

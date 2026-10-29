@@ -4,465 +4,345 @@
   "units": "milliseconds",
   "evidence": {
     "repository": "Cloudgeni-ai/opengeni",
-    "targetSha": "45c8987fc2861ecb186f05a18877f64f0e5f7e57",
+    "targetSha": "e35ec52bfb8c4fb8c497710609776e7d3cce1e97",
     "measurement": "Elapsed log timestamps between successive file starts or the shard pass marker; includes every browser engine and runner overhead. Only files in successful shard jobs that completed every file are used; killed or failed files are never used.",
-    "selection": "Every successful Impacted E2E shard job on main since the Bun 1.4.4 pin whose source has this file's exact content and the same bun.lock, .bun-version and browser runner. Each weight is the lower-median observed interval for that file; fileSources names the job that observed it.",
+    "selection": "Every successful Impacted E2E shard job on main or a merge-batcher batch since the current bun.lock and browser runner (7400009bdd, Oct 27) whose source has this file's exact content and the same bun.lock, .bun-version and browser runner. Each weight is the lower-median observed interval for that file; fileSources names the job that observed it.",
     "sources": [
       {
-        "runId": 39776793283,
+        "runId": 40601787830,
         "attempt": 1,
-        "sourceSha": "23dfcb289439d8fb5f41a2575e0b955e42e14d97",
-        "jobIds": [119820895126]
+        "sourceSha": "48e825df923d4ff8f77891ae0515eb6258ef0269",
+        "jobIds": [122532367051, 122532367067, 122532367107, 122532367150]
       },
       {
-        "runId": 39780234511,
+        "runId": 40622580233,
         "attempt": 1,
-        "sourceSha": "d2ee9c1de30663d34e42f55f734f90bb46419c72",
-        "jobIds": [119831708514, 119831708597, 119831708619, 119831708970]
+        "sourceSha": "c87022bc4b0facd6c6d3486ae88c4242de295197",
+        "jobIds": [122600622319, 122600622325, 122600622422]
       },
       {
-        "runId": 39780807332,
+        "runId": 40634782900,
         "attempt": 1,
-        "sourceSha": "d2ee9c1de30663d34e42f55f734f90bb46419c72",
-        "jobIds": [119832706810, 119832706839, 119832706846, 119832707393]
+        "sourceSha": "cf0ab33c4cd704e85b6bd54d1671b21f939a3504",
+        "jobIds": [122639851414, 122639851459, 122639851524]
       },
       {
-        "runId": 39784297041,
+        "runId": 40640531559,
         "attempt": 1,
-        "sourceSha": "e77e35c335f992e988eabaadcceed49ff3857cab",
-        "jobIds": [119846824486, 119846824534, 119846824696, 119846824741]
+        "sourceSha": "389a9dd011d4baa7049ac8e1cb464fb0de50da40",
+        "jobIds": [122658023117, 122658023160, 122658023212]
       },
       {
-        "runId": 39785911296,
+        "runId": 40647313338,
         "attempt": 1,
-        "sourceSha": "92e227c66927e4ae366db99a148a770eb9a70ab6",
-        "jobIds": [119849992930, 119849993038, 119849993043, 119849993127]
+        "sourceSha": "a639211c54bc65169db242b3458c293102436676",
+        "jobIds": [122680295853, 122680295858, 122680295895, 122680295975]
       },
       {
-        "runId": 39788163000,
+        "runId": 40649224426,
         "attempt": 1,
-        "sourceSha": "59e01817af5a1ae5202608ad5cedd360b501db62",
-        "jobIds": [119867394256, 119867394321, 119867394405, 119867394467]
+        "sourceSha": "e307c4930b3b5efabea8b9b3d6090491ee879ee8",
+        "jobIds": [122685941403, 122685941429, 122685941455, 122685941592]
       },
       {
-        "runId": 39790016873,
+        "runId": 40682434818,
         "attempt": 1,
-        "sourceSha": "c3c97b492a3a823c57d2847506219eb97548d695",
-        "jobIds": [119863976144, 119863976170, 119863976287, 119863976299]
+        "sourceSha": "c882e3b7b24c93c2922025ae56543bd5d5cf4a6b",
+        "jobIds": [122797254007, 122797254020, 122797254121, 122797254275]
       },
       {
-        "runId": 39805286090,
+        "runId": 40747935590,
         "attempt": 1,
-        "sourceSha": "86016dbfec5c4f6a42b72282c4f1af63ce5ae7b6",
-        "jobIds": [119925254508, 119925254633, 119925254778]
+        "sourceSha": "e35ec52bfb8c4fb8c497710609776e7d3cce1e97",
+        "jobIds": [123028491732, 123028491739, 123028491817]
       },
       {
-        "runId": 39805829615,
+        "runId": 40749825092,
+        "attempt": 1,
+        "sourceSha": "87b41006271dda99abbe27d9702e2625f4a3e40c",
+        "jobIds": [123034311179, 123034311226, 123034311261]
+      },
+      {
+        "runId": 40749825092,
         "attempt": 2,
-        "sourceSha": "86016dbfec5c4f6a42b72282c4f1af63ce5ae7b6",
-        "jobIds": [119927081553, 119927081865]
+        "sourceSha": "87b41006271dda99abbe27d9702e2625f4a3e40c",
+        "jobIds": [123042759601, 123042786912, 123042790168]
       },
       {
-        "runId": 39809995282,
+        "runId": 40753412807,
         "attempt": 1,
-        "sourceSha": "68c39072705f323ad6910c336f5472d1150065ad",
-        "jobIds": [119936307889, 119936307908, 119936308416]
-      },
-      {
-        "runId": 39812486360,
-        "attempt": 1,
-        "sourceSha": "cc478d222d42452d3779b4c5333339896009b709",
-        "jobIds": [119947065138, 119947065187, 119947065447, 119947066167]
-      },
-      {
-        "runId": 39814229508,
-        "attempt": 1,
-        "sourceSha": "3b7a7dd2be8ca57526778fff42f300e81a93fea2",
-        "jobIds": [119949972569, 119949972603, 119949972662, 119949972894]
-      },
-      {
-        "runId": 39818003915,
-        "attempt": 1,
-        "sourceSha": "c169afc3767c4d36d2b1627a8db59669484fedad",
-        "jobIds": [119963015107, 119963015193, 119963015205, 119963106501]
-      },
-      {
-        "runId": 39821405743,
-        "attempt": 1,
-        "sourceSha": "1b8ca50a110d9be46fa680c62156b15b80ad2b6d",
-        "jobIds": [119977975927, 119977975948, 119977975965, 119977976007]
-      },
-      {
-        "runId": 39823658211,
-        "attempt": 1,
-        "sourceSha": "3939bd19477c2f77daf96c692e5a5d74fad3a0d7",
-        "jobIds": [119982667433, 119982667457, 119982667700, 119982667766]
-      },
-      {
-        "runId": 39825130331,
-        "attempt": 1,
-        "sourceSha": "45ed7ef1a0154ca2872251a0780655cd3a9fd050",
-        "jobIds": [119986958302, 119986958317, 119986958409, 119986958477]
-      },
-      {
-        "runId": 39825403247,
-        "attempt": 1,
-        "sourceSha": "18c146b578c1a6c0dd60db4fe52d531a60400c53",
-        "jobIds": [119993283516, 119993283799]
-      },
-      {
-        "runId": 39833923499,
-        "attempt": 1,
-        "sourceSha": "d0eb91cbe32834ad1102eae98bc822cc28b8aac5",
-        "jobIds": [120018009434, 120018009575, 120018009769]
-      },
-      {
-        "runId": 39835367427,
-        "attempt": 1,
-        "sourceSha": "e7ca55f5d5849da9672f42ded016b1175761b795",
-        "jobIds": [120023661689, 120023661724]
-      },
-      {
-        "runId": 39835638830,
-        "attempt": 1,
-        "sourceSha": "382476ed5dfafa388f79099d462eab2daf64baa9",
-        "jobIds": [120023982138, 120023982145]
-      },
-      {
-        "runId": 39837480222,
-        "attempt": 1,
-        "sourceSha": "3f2d52a2c6cd8afe109ee63be354a22e5cba066d",
-        "jobIds": [120032107651]
-      },
-      {
-        "runId": 39841373262,
-        "attempt": 1,
-        "sourceSha": "d864d442965d4396a0dde566acea406446ccf04d",
-        "jobIds": [120045173701, 120045173716, 120045173790, 120045173821]
-      },
-      {
-        "runId": 39845269646,
-        "attempt": 1,
-        "sourceSha": "57de2f36d6320d060c281d6580ea433f5da67e64",
-        "jobIds": [120064633811, 120064633830, 120064633910, 120064633947]
-      },
-      {
-        "runId": 39851056016,
-        "attempt": 1,
-        "sourceSha": "e5e305ea7205906e59a0beaed71920e576d6c2f5",
-        "jobIds": [120080332524, 120080332773, 120080332978]
-      },
-      {
-        "runId": 39854158103,
-        "attempt": 1,
-        "sourceSha": "b8452ee451d6b5f38ba83799d5d9061ba14a7b6f",
-        "jobIds": [120094495196, 120094495229, 120094495252, 120094495514]
-      },
-      {
-        "runId": 39858342903,
-        "attempt": 1,
-        "sourceSha": "6063fe342bd581791e742e09cf6aa7877a03df11",
-        "jobIds": [120103063724, 120103063752, 120103063800]
-      },
-      {
-        "runId": 39959099140,
-        "attempt": 1,
-        "sourceSha": "f8fb5f5f2ef2728a5cee83b26d67b92c3907f58b",
-        "jobIds": [120434445608, 120434445617, 120434446027]
-      },
-      {
-        "runId": 39962261253,
-        "attempt": 1,
-        "sourceSha": "ca3f9312d6aea4069851e53d6a6f5cfd754f669f",
-        "jobIds": [120444268614, 120444268669, 120444268868]
-      },
-      {
-        "runId": 39964425514,
-        "attempt": 2,
-        "sourceSha": "0bcef4673c7c6e5b46d3b7665afe11925c8df304",
-        "jobIds": [120465254449, 120465254516]
-      },
-      {
-        "runId": 39964464343,
-        "attempt": 1,
-        "sourceSha": "487bd43d3076abc126b462f71c4517ff209d99db",
-        "jobIds": [120451809296, 120451809314, 120451809498]
-      },
-      {
-        "runId": 39966953600,
-        "attempt": 1,
-        "sourceSha": "2a2be773d7dcfe6e8796da00784c0071248a8789",
-        "jobIds": [120460111593, 120460111703, 120460111707]
-      },
-      {
-        "runId": 39967018299,
-        "attempt": 1,
-        "sourceSha": "1320d6caac27d6a83d830da26cb7b54b7e75daaf",
-        "jobIds": [120460142713]
-      },
-      {
-        "runId": 39967473461,
-        "attempt": 1,
-        "sourceSha": "45c8987fc2861ecb186f05a18877f64f0e5f7e57",
-        "jobIds": [120465271388, 120465271408]
+        "sourceSha": "ab42e67d5bd0fff26f896d8ce7a6e59c40837a59",
+        "jobIds": [123047345318, 123047345494]
       }
     ],
     "fileSources": {
       "packages/react/test/timeline-search.browser.e2e.ts": {
-        "jobId": 120023661689,
-        "observations": 24
+        "jobId": 122639851414,
+        "observations": 10
       },
       "test/e2e/ai-gateway-connection.browser.e2e.ts": {
-        "jobId": 120103063752,
-        "observations": 20
+        "jobId": 123028491817,
+        "observations": 11
       },
       "test/e2e/annotation-scroll.browser.e2e.ts": {
-        "jobId": 119863976287,
-        "observations": 20
+        "jobId": 123028491739,
+        "observations": 10
       },
       "test/e2e/appearance.browser.e2e.ts": {
-        "jobId": 120094495229,
-        "observations": 19
+        "jobId": 123047345318,
+        "observations": 10
       },
       "test/e2e/artifact-desktop.browser.e2e.ts": {
-        "jobId": 119832706839,
-        "observations": 24
-      },
-      "test/e2e/artifact-library.browser.e2e.ts": {
-        "jobId": 120094495252,
-        "observations": 17
-      },
-      "test/e2e/capability-catalog.browser.e2e.ts": {
-        "jobId": 119982667700,
-        "observations": 21
-      },
-      "test/e2e/capability-details.browser.e2e.ts": {
-        "jobId": 119831708514,
-        "observations": 24
-      },
-      "test/e2e/chat-media-entry.browser.e2e.ts": {
-        "jobId": 119949972569,
-        "observations": 21
-      },
-      "test/e2e/claude-subscription.browser.e2e.ts": {
-        "jobId": 120045173716,
-        "observations": 3
-      },
-      "test/e2e/code-editor.browser.e2e.ts": {
-        "jobId": 119949972569,
-        "observations": 20
-      },
-      "test/e2e/codex-account.browser.e2e.ts": {
-        "jobId": 119982667700,
-        "observations": 22
-      },
-      "test/e2e/compact-session-view.browser.e2e.ts": {
-        "jobId": 120451809498,
+        "jobId": 122685941429,
         "observations": 6
       },
+      "test/e2e/artifact-library.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/capability-catalog.browser.e2e.ts": {
+        "jobId": 122532367107,
+        "observations": 11
+      },
+      "test/e2e/capability-details.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 11
+      },
+      "test/e2e/chat-media-entry.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/claude-subscription.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 11
+      },
+      "test/e2e/code-editor.browser.e2e.ts": {
+        "jobId": 122532367107,
+        "observations": 10
+      },
+      "test/e2e/codex-account.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 11
+      },
+      "test/e2e/compact-session-view.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 11
+      },
       "test/e2e/composer-focus-handoff.browser.e2e.ts": {
-        "jobId": 120103063752,
-        "observations": 21
-      },
-      "test/e2e/composer-keyboard.browser.e2e.ts": {
-        "jobId": 120094495229,
-        "observations": 20
-      },
-      "test/e2e/composer-menus.browser.e2e.ts": {
-        "jobId": 120094495514,
-        "observations": 24
-      },
-      "test/e2e/composer-pane.browser.e2e.ts": {
-        "jobId": 119986958302,
-        "observations": 24
-      },
-      "test/e2e/composer-responsive.browser.e2e.ts": {
-        "jobId": 119949972569,
-        "observations": 24
-      },
-      "test/e2e/connected-machine-removal.browser.e2e.ts": {
-        "jobId": 120094495229,
-        "observations": 16
-      },
-      "test/e2e/connector-accounts.browser.e2e.ts": {
-        "jobId": 119867394405,
-        "observations": 16
-      },
-      "test/e2e/crypto-random-uuid.browser.e2e.ts": {
-        "jobId": 119831708970,
-        "observations": 23
-      },
-      "test/e2e/desktop-rail.browser.e2e.ts": {
-        "jobId": 119963015107,
-        "observations": 20
-      },
-      "test/e2e/developer-settings.browser.e2e.ts": {
-        "jobId": 119982667700,
-        "observations": 16
-      },
-      "test/e2e/embedded-artifact-viewer.browser.e2e.ts": {
-        "jobId": 119977976007,
-        "observations": 25
-      },
-      "test/e2e/error-branding.browser.e2e.ts": {
-        "jobId": 120434446027,
-        "observations": 4
-      },
-      "test/e2e/external-vaults.e2e.ts": {
-        "jobId": 119986958409,
-        "observations": 18
-      },
-      "test/e2e/failed-session-recovery.browser.e2e.ts": {
-        "jobId": 119936307908,
-        "observations": 24
-      },
-      "test/e2e/lossless-message.browser.e2e.ts": {
-        "jobId": 119846824534,
-        "observations": 23
-      },
-      "test/e2e/managed-actor-response.browser.e2e.ts": {
-        "jobId": 119846824486,
-        "observations": 20
-      },
-      "test/e2e/member-connection-access.browser.e2e.ts": {
-        "jobId": 119867394405,
-        "observations": 20
-      },
-      "test/e2e/new-conversation.browser.e2e.ts": {
-        "jobId": 120032107651,
-        "observations": 22
-      },
-      "test/e2e/onepassword-catalog.browser.e2e.ts": {
-        "jobId": 119936307908,
-        "observations": 20
-      },
-      "test/e2e/organization-recovery.browser.e2e.ts": {
-        "jobId": 119986958477,
-        "observations": 20
-      },
-      "test/e2e/organization-workspace-administration.browser.e2e.ts": {
-        "jobId": 120094495514,
-        "observations": 24
-      },
-      "test/e2e/personal-github-identity.browser.e2e.ts": {
-        "jobId": 120094495252,
-        "observations": 25
-      },
-      "test/e2e/personal-resource-attachments.browser.e2e.ts": {
-        "jobId": 120064633811,
-        "observations": 19
-      },
-      "test/e2e/personal-workspace-accessibility.browser.e2e.ts": {
-        "jobId": 120094495196,
-        "observations": 19
-      },
-      "test/e2e/plugin-discovery.browser.e2e.ts": {
-        "jobId": 120032107651,
-        "observations": 25
-      },
-      "test/e2e/plugin-removal.browser.e2e.ts": {
-        "jobId": 120094495229,
-        "observations": 16
-      },
-      "test/e2e/preview-loading.browser.e2e.ts": {
-        "jobId": 120094495514,
-        "observations": 24
-      },
-      "test/e2e/project-rename.browser.e2e.ts": {
-        "jobId": 119947065187,
-        "observations": 24
-      },
-      "test/e2e/react-compiled-css.browser.e2e.ts": {
-        "jobId": 119982667766,
-        "observations": 24
-      },
-      "test/e2e/restored-attachment-preview.browser.e2e.ts": {
-        "jobId": 119867394321,
-        "observations": 24
-      },
-      "test/e2e/secrets-fake-login-suite.browser.e2e.ts": {
-        "jobId": 119831708514,
-        "observations": 17
-      },
-      "test/e2e/secrets-fake-login.browser.e2e.ts": {
-        "jobId": 119986958477,
-        "observations": 21
-      },
-      "test/e2e/session-artifact-navigation.browser.e2e.ts": {
-        "jobId": 120094495252,
-        "observations": 26
-      },
-      "test/e2e/session-capability-cards.browser.e2e.ts": {
-        "jobId": 120094495229,
-        "observations": 16
-      },
-      "test/e2e/session-conversation-controller.browser.e2e.ts": {
-        "jobId": 119936307908,
-        "observations": 20
-      },
-      "test/e2e/session-lazy-panels.browser.e2e.ts": {
-        "jobId": 119832706810,
-        "observations": 20
-      },
-      "test/e2e/session-loading-startup.browser.e2e.ts": {
-        "jobId": 119863976170,
-        "observations": 16
-      },
-      "test/e2e/session-rail-row-metadata.browser.e2e.ts": {
-        "jobId": 119949972569,
-        "observations": 24
-      },
-      "test/e2e/session-sidebar.browser.e2e.ts": {
-        "jobId": 120465271388,
+        "jobId": 122600622325,
         "observations": 7
       },
-      "test/e2e/session-skill-review.browser.e2e.ts": {
-        "jobId": 119982667700,
-        "observations": 21
+      "test/e2e/composer-keyboard.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
       },
-      "test/e2e/session-usage-limit.browser.e2e.ts": {
-        "jobId": 119832706839,
-        "observations": 25
+      "test/e2e/composer-menus.browser.e2e.ts": {
+        "jobId": 122685941429,
+        "observations": 4
       },
-      "test/e2e/setup-account-token.browser.e2e.ts": {
-        "jobId": 119947065187,
-        "observations": 20
+      "test/e2e/composer-pane.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
       },
-      "test/e2e/signed-out-page.browser.e2e.ts": {
-        "jobId": 119863976299,
-        "observations": 22
+      "test/e2e/composer-responsive.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
       },
-      "test/e2e/site-conversations.browser.e2e.ts": {
-        "jobId": 119977975948,
+      "test/e2e/connected-machine-removal.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/connector-accounts.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/crypto-random-uuid.browser.e2e.ts": {
+        "jobId": 123028491739,
+        "observations": 8
+      },
+      "test/e2e/desktop-corner.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 3
+      },
+      "test/e2e/desktop-rail.browser.e2e.ts": {
+        "jobId": 122797254020,
         "observations": 9
       },
+      "test/e2e/developer-settings.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 11
+      },
+      "test/e2e/embedded-artifact-viewer.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/error-branding.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/external-vaults.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 9
+      },
+      "test/e2e/failed-session-recovery.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/lossless-message.browser.e2e.ts": {
+        "jobId": 122658023117,
+        "observations": 10
+      },
+      "test/e2e/managed-actor-response.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 9
+      },
+      "test/e2e/member-connection-access.browser.e2e.ts": {
+        "jobId": 122680295975,
+        "observations": 6
+      },
+      "test/e2e/new-conversation.browser.e2e.ts": {
+        "jobId": 123034311179,
+        "observations": 10
+      },
+      "test/e2e/onepassword-catalog.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 9
+      },
+      "test/e2e/organization-recovery.browser.e2e.ts": {
+        "jobId": 122680295895,
+        "observations": 10
+      },
+      "test/e2e/organization-workspace-administration.browser.e2e.ts": {
+        "jobId": 122680295975,
+        "observations": 11
+      },
+      "test/e2e/personal-github-identity.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/personal-resource-attachments.browser.e2e.ts": {
+        "jobId": 122532367067,
+        "observations": 10
+      },
+      "test/e2e/personal-workspace-accessibility.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 8
+      },
+      "test/e2e/plugin-discovery.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/plugin-removal.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/preview-loading.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/project-rename.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/react-compiled-css.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 9
+      },
+      "test/e2e/restored-attachment-preview.browser.e2e.ts": {
+        "jobId": 122532367107,
+        "observations": 5
+      },
+      "test/e2e/secrets-fake-login-suite.browser.e2e.ts": {
+        "jobId": 122532367067,
+        "observations": 7
+      },
+      "test/e2e/secrets-fake-login.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 11
+      },
+      "test/e2e/session-artifact-navigation.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/session-capability-cards.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 5
+      },
+      "test/e2e/session-conversation-controller.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 9
+      },
+      "test/e2e/session-lazy-panels.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 10
+      },
+      "test/e2e/session-loading-startup.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/session-rail-row-metadata.browser.e2e.ts": {
+        "jobId": 122685941429,
+        "observations": 4
+      },
+      "test/e2e/session-sidebar.browser.e2e.ts": {
+        "jobId": 123034311179,
+        "observations": 8
+      },
+      "test/e2e/session-skill-review.browser.e2e.ts": {
+        "jobId": 122532367150,
+        "observations": 7
+      },
+      "test/e2e/session-usage-limit.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/setup-account-token.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 10
+      },
+      "test/e2e/signed-out-page.browser.e2e.ts": {
+        "jobId": 123034311179,
+        "observations": 8
+      },
+      "test/e2e/site-conversations.browser.e2e.ts": {
+        "jobId": 122658023212,
+        "observations": 11
+      },
+      "test/e2e/site-navigation.browser.e2e.ts": {
+        "jobId": 122797254121,
+        "observations": 4
+      },
       "test/e2e/skill-review.browser.e2e.ts": {
-        "jobId": 119849992930,
-        "observations": 20
+        "jobId": 122680295975,
+        "observations": 10
       },
       "test/e2e/slack-access-link.browser.e2e.ts": {
-        "jobId": 119963015107,
-        "observations": 24
+        "jobId": 123042790168,
+        "observations": 10
       },
       "test/e2e/slack-installation-binding.browser.e2e.ts": {
-        "jobId": 119867394405,
-        "observations": 25
+        "jobId": 123028491732,
+        "observations": 11
       },
       "test/e2e/slack-settings.browser.e2e.ts": {
-        "jobId": 120094495252,
-        "observations": 24
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/teams-approval.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 5
       },
       "test/e2e/usage-allowances.browser.e2e.ts": {
-        "jobId": 119977975927,
-        "observations": 23
+        "jobId": 122532367051,
+        "observations": 7
       },
       "test/e2e/workspace-pause-timers.browser.e2e.ts": {
-        "jobId": 119831708597,
-        "observations": 19
+        "jobId": 122680295858,
+        "observations": 4
       },
       "test/e2e/workspace-switcher-trigger.browser.e2e.ts": {
-        "jobId": 120032107651,
-        "observations": 26
+        "jobId": 122600622325,
+        "observations": 7
       }
     }
   },
@@ -471,265 +351,277 @@
     "architecture": "x64",
     "bunVersion": "1.4.4",
     "bunVersionFileSha256": "d03d8b268b4171328ac2458ce8ca82d69a1fde38469d4e4faae4f8fa8d8a5e35",
-    "dependencyLockSha256": "d52ff449d3378e0b6b1e0e57ae87673a99bb1befcc1c0dbaf13c359a3a4bd7a4",
-    "browserRunnerSha256": "bbe44519f0c197f0617b26401ba0cdfceeec5efe789715ec8b9df1ae8df30f0b"
+    "dependencyLockSha256": "d2c3cf396abb764b81b61d6d854e34ff1f5e1e4f6d269c92c9facc231750626f",
+    "browserRunnerSha256": "fa23a85fd82fe71098a3248ffd8986ec6900d369d2784d1067e762312bbac67e"
   },
   "entries": {
     "packages/react/test/timeline-search.browser.e2e.ts": {
       "sha256": "860e21875ef397d16a6f93b57e7961e033ea468747f9291d0aa7250113c12ca8",
-      "planningWeight": 14221
+      "planningWeight": 14826
     },
     "test/e2e/ai-gateway-connection.browser.e2e.ts": {
       "sha256": "45cd2a9e1a68cf1b86796e8fc600233bd9fbcdd55226ea03b3a55af194ac0b3b",
-      "planningWeight": 45013
+      "planningWeight": 42646
     },
     "test/e2e/annotation-scroll.browser.e2e.ts": {
       "sha256": "42eb2cfed4e51d3895127db55f82e3c79a1e1454daa334402b140b4e4d881bfd",
-      "planningWeight": 54583
+      "planningWeight": 48870
     },
     "test/e2e/appearance.browser.e2e.ts": {
       "sha256": "484f670b072df1740541ead379c64c38b987540392e4952ba7041053b2a71098",
-      "planningWeight": 12633
+      "planningWeight": 14226
     },
     "test/e2e/artifact-desktop.browser.e2e.ts": {
-      "sha256": "f93b79046223953c4ea3248031ee8346e15a413c0f7170e2a8931472a59a4c41",
-      "planningWeight": 9870
+      "sha256": "00a7683e00c22173a70fb432babe4f6ae1978e6cb564d33da8faa60318d4dd39",
+      "planningWeight": 46730
     },
     "test/e2e/artifact-library.browser.e2e.ts": {
       "sha256": "637783d55e8f0ab99c4e66c5bad9cf30469c6b305bfe4161962deb49e5f2bd87",
-      "planningWeight": 102389
+      "planningWeight": 91431
     },
     "test/e2e/capability-catalog.browser.e2e.ts": {
       "sha256": "ee27b243f609080b775ade67117ea4c8c9c9e60e3c7f0f1756c7000dba93ba16",
-      "planningWeight": 10737
+      "planningWeight": 12185
     },
     "test/e2e/capability-details.browser.e2e.ts": {
       "sha256": "59667d180ff8b79b328bef5fa376492593c1b47f88daae6218cc1deaae05a644",
-      "planningWeight": 19866
+      "planningWeight": 22611
     },
     "test/e2e/chat-media-entry.browser.e2e.ts": {
-      "sha256": "63fcf3b290a7818b97d0c80b94ea65ddf655e4279ab0d6bf2dc1231bf4392b86",
-      "planningWeight": 15318
+      "sha256": "a48ee85739acb57327734ca067c96269e6d5ff49f52637dd08b57b49371b6fcb",
+      "planningWeight": 13399
     },
     "test/e2e/claude-subscription.browser.e2e.ts": {
       "sha256": "47cbdb252845fc2bda8170ec22605e6b170d2a48d8c2ac706bdecbb3dd059ddc",
-      "planningWeight": 62327
+      "planningWeight": 75419
     },
     "test/e2e/code-editor.browser.e2e.ts": {
       "sha256": "4d14a79ccd7512120a9b91da9a9fc1635cfd6948b4315d85c9c42c4ab60ec7fa",
-      "planningWeight": 5902
+      "planningWeight": 6088
     },
     "test/e2e/codex-account.browser.e2e.ts": {
       "sha256": "0a239fe00d340d9733ae3fdec47cee89b9d44b8529f7b819e878fb6429bbea1b",
-      "planningWeight": 11988
+      "planningWeight": 10717
     },
     "test/e2e/compact-session-view.browser.e2e.ts": {
-      "sha256": "d5539964e2f97a9d81bb4601fa8985f912a79357bea3f54ac63f1b15cb876279",
-      "planningWeight": 144989
+      "sha256": "6cc0a580b09709b1c472249600b556aec9a8c07a17f655428d8818d5eaec6975",
+      "planningWeight": 186490
     },
     "test/e2e/composer-focus-handoff.browser.e2e.ts": {
       "sha256": "0d92661c153cc97b847eb75406fb63d4279f12e465392bafb2fe066ec5f44b2b",
-      "planningWeight": 10600
+      "planningWeight": 10959
     },
     "test/e2e/composer-keyboard.browser.e2e.ts": {
       "sha256": "2f902803dd77fa4c5cceee934ecbb632bc11c6bbfc356f249df82ca14a0dff1d",
-      "planningWeight": 41783
+      "planningWeight": 39148
     },
     "test/e2e/composer-menus.browser.e2e.ts": {
-      "sha256": "d5e5a65b8d00a76e85000a6c1f68e8b34eff9f38d4b1e6178db10966bc281424",
-      "planningWeight": 20920
+      "sha256": "e91eadddaa437da05b474fc986a5caa0f0d125f7bb348f2c781fd7019c61b061",
+      "planningWeight": 18084
     },
     "test/e2e/composer-pane.browser.e2e.ts": {
-      "sha256": "388c0fe8f40ec8bbda6ddeaa3e1ce95765707d0c80b01b6c682c82e03729f161",
-      "planningWeight": 14346
+      "sha256": "491f86ab25208ac4b584f25a00329f20c7273c89bde181f8f5b370cf013bbc40",
+      "planningWeight": 12374
     },
     "test/e2e/composer-responsive.browser.e2e.ts": {
-      "sha256": "e294469b8b51223427bc9ce7e32b8663215be79bd55e72f52e3e2c86a6d49b3c",
-      "planningWeight": 46986
+      "sha256": "c614378cc5ab4d269dfc086449987eb7ef05f9aadae15d95f1370a42711a422b",
+      "planningWeight": 100547
     },
     "test/e2e/connected-machine-removal.browser.e2e.ts": {
       "sha256": "a7902f1bcbefc004e6c07fe52dd2c2b85139416a64ff5ea9d30092201aa549c9",
-      "planningWeight": 33693
+      "planningWeight": 33348
     },
     "test/e2e/connector-accounts.browser.e2e.ts": {
       "sha256": "25c68216a436530abc5ef55e4d27ab15b9b8750727f8cc1e51a6cbcca2153a53",
-      "planningWeight": 15767
+      "planningWeight": 13777
     },
     "test/e2e/crypto-random-uuid.browser.e2e.ts": {
       "sha256": "6f35470f9ee8ed6ac6343cf10d0d91388be9f16338c246c9b8c2927e64474d1d",
-      "planningWeight": 1879
+      "planningWeight": 2016
+    },
+    "test/e2e/desktop-corner.browser.e2e.ts": {
+      "sha256": "0ba726291adc28e5faed2ab33adcf495c52d660cee592f6f0f356d7513ea60d6",
+      "planningWeight": 36914
     },
     "test/e2e/desktop-rail.browser.e2e.ts": {
-      "sha256": "8bfe9e5ae9ef28018dca910f43801f41d3e4116adccd2dcc2418c5580feaeddc",
-      "planningWeight": 20640
+      "sha256": "2e139aa3b1bdcf89dab48e6206a7789832482a94d60824c1018cb79185313052",
+      "planningWeight": 22681
     },
     "test/e2e/developer-settings.browser.e2e.ts": {
       "sha256": "b28380f8082c134d41a0d5b14b63dab16220e0fcb9adcc82e948da8bba658eab",
-      "planningWeight": 19303
+      "planningWeight": 19966
     },
     "test/e2e/embedded-artifact-viewer.browser.e2e.ts": {
       "sha256": "7d98cac024242e5a7f6cfb6eed1f195f68f1062bc67dd38a5c1f04c4952d2d80",
-      "planningWeight": 19515
+      "planningWeight": 21962
     },
     "test/e2e/error-branding.browser.e2e.ts": {
       "sha256": "28d8ca874d00a970cc87a9253b4d702172257af30f928612ec1de2a4c669fdab",
-      "planningWeight": 20464
+      "planningWeight": 39623
     },
     "test/e2e/external-vaults.e2e.ts": {
       "sha256": "1dada50fe35ced1dd8fa918a3904a4c6a06683fc88648750cf20cb77f7c4db64",
-      "planningWeight": 1453
+      "planningWeight": 1271
     },
     "test/e2e/failed-session-recovery.browser.e2e.ts": {
-      "sha256": "eac3d5741d0c371f2282ffd09868ea217bdde7c07596179a52725d345e46e4ed",
-      "planningWeight": 57540
+      "sha256": "62d644991cff3cbf01bd6410c20849a360c664dc84e804ec6943493cd391d552",
+      "planningWeight": 64480
     },
     "test/e2e/lossless-message.browser.e2e.ts": {
       "sha256": "18e842d955b0b2ea42a4400656e008507c6da9a92e8f33860424d15aa59e5f24",
-      "planningWeight": 5785
+      "planningWeight": 7728
     },
     "test/e2e/managed-actor-response.browser.e2e.ts": {
       "sha256": "4b95d278da5998f937342b551346902fc09f82ffde4b3ce4ce4a13d045f848d3",
-      "planningWeight": 4025
+      "planningWeight": 4203
     },
     "test/e2e/member-connection-access.browser.e2e.ts": {
       "sha256": "3ea75a03e3c7054283a4f90df5499e07576e2c3d244e8d4506bd330906751f04",
-      "planningWeight": 4215
+      "planningWeight": 6164
     },
     "test/e2e/new-conversation.browser.e2e.ts": {
       "sha256": "c2246fba4276304ed8a87b633ee4c6ce192f0548c7ee26906e4b1c23ac256aa8",
-      "planningWeight": 7383
+      "planningWeight": 7742
     },
     "test/e2e/onepassword-catalog.browser.e2e.ts": {
       "sha256": "2c3c4266aeb5c1d1b5acc62f7c0faf43e5fad749e2a8132dd5392675796ef8d2",
-      "planningWeight": 9788
+      "planningWeight": 8584
     },
     "test/e2e/organization-recovery.browser.e2e.ts": {
       "sha256": "e25a3f06781259dce7c88136d5f438415019e34bbcb9714c64fafa3e242bebe2",
-      "planningWeight": 96340
+      "planningWeight": 88680
     },
     "test/e2e/organization-workspace-administration.browser.e2e.ts": {
       "sha256": "79f5882a4e26e284fc96db9cc91241edfd478a720749b966112cd42cff2dffa8",
-      "planningWeight": 16685
+      "planningWeight": 18136
     },
     "test/e2e/personal-github-identity.browser.e2e.ts": {
       "sha256": "73c64b5ff730deb770fa01292b6a7d54834c332754b6fbdd7d9370a36e6e7db2",
-      "planningWeight": 4610
+      "planningWeight": 4947
     },
     "test/e2e/personal-resource-attachments.browser.e2e.ts": {
       "sha256": "f188155bd82a82ef6b18dba6da1cd57b74309c0dc8e2b82c2b68b39226c370ec",
-      "planningWeight": 9825
+      "planningWeight": 11368
     },
     "test/e2e/personal-workspace-accessibility.browser.e2e.ts": {
-      "sha256": "59c1c124e22d8711207281d7edcd0f0308148508f4ce089c2ba1f30828c72b6f",
-      "planningWeight": 5445
+      "sha256": "24517ac0c056cbc139960e45604cc3a29965410531633573424200417339de97",
+      "planningWeight": 5712
     },
     "test/e2e/plugin-discovery.browser.e2e.ts": {
       "sha256": "c68f2922a6de77482623b63c3ea633dd16bbe066d481412d87306215a5d83326",
-      "planningWeight": 29564
+      "planningWeight": 23243
     },
     "test/e2e/plugin-removal.browser.e2e.ts": {
       "sha256": "557e96aa3aa0398284edd2ababd43ab27c66aa0067cf7c502937325fa24f2902",
-      "planningWeight": 77105
+      "planningWeight": 107735
     },
     "test/e2e/preview-loading.browser.e2e.ts": {
-      "sha256": "6831ef6cc5072dc1481717c709b8b05d6f2b960dfcb592ffe44bf1db8fb26faa",
-      "planningWeight": 4001
+      "sha256": "25621b08f91efd7dd8f28647f01aa98f6895236e14f7255b92c3fe0fd73734d4",
+      "planningWeight": 6290
     },
     "test/e2e/project-rename.browser.e2e.ts": {
       "sha256": "af958df00c5b541da0252ee0a35edb44b9422322eca1c0ea53b7616a6d705b5e",
-      "planningWeight": 22824
+      "planningWeight": 37439
     },
     "test/e2e/react-compiled-css.browser.e2e.ts": {
-      "sha256": "a5a132787762f3d23d9500412fcabd5bf8880667d2f4a4f23a53b6f0b8a91ead",
-      "planningWeight": 479
+      "sha256": "066988a198296ca90e74435f2b97ad7d850d620651467ee159faaa7ff6cd0712",
+      "planningWeight": 685
     },
     "test/e2e/restored-attachment-preview.browser.e2e.ts": {
       "sha256": "1f48370e89b3291112ca64fd396583b1d14ef52a52a2b6957b69784d86331eaa",
-      "planningWeight": 5223
+      "planningWeight": 5522
     },
     "test/e2e/secrets-fake-login-suite.browser.e2e.ts": {
       "sha256": "3e1993b61f16a68460bda295bb32747ce00bc2f048390e242003162021809bb8",
-      "planningWeight": 3643
+      "planningWeight": 3946
     },
     "test/e2e/secrets-fake-login.browser.e2e.ts": {
       "sha256": "db734e512da5fd0fcf340c25e91f98028cc44f29d5946d18ce37fa84aa1781ef",
-      "planningWeight": 13820
+      "planningWeight": 12619
     },
     "test/e2e/session-artifact-navigation.browser.e2e.ts": {
       "sha256": "70ee1d9cd4aa29c4f7fb0827f6c05c5f41741acfe053fd462167e0c67ab9ad49",
-      "planningWeight": 37564
+      "planningWeight": 58357
     },
     "test/e2e/session-capability-cards.browser.e2e.ts": {
-      "sha256": "c2d833ce8bc000b33556d28c8e8774649f20eacca00424b317df4dca652d6d5e",
-      "planningWeight": 29991
+      "sha256": "ff2d86f6606c5f1d282db285804f54c0fcd0d5483e4dfd0751f0b9edc13b224f",
+      "planningWeight": 34350
     },
     "test/e2e/session-conversation-controller.browser.e2e.ts": {
       "sha256": "320d130049b79a1f20b1b6dfeb5d3c4aeb77ced8dafac36766848bfbdeabaeeb",
-      "planningWeight": 5950
+      "planningWeight": 6249
     },
     "test/e2e/session-lazy-panels.browser.e2e.ts": {
-      "sha256": "dd66824713d950bd267abfc7bc1b412fa88b81d15a6053e3358aaff61d2843e4",
-      "planningWeight": 28069
+      "sha256": "7181ceb5dcb6408e734308cb726a22281b12b671ab4da785bc1622773c139077",
+      "planningWeight": 25737
     },
     "test/e2e/session-loading-startup.browser.e2e.ts": {
       "sha256": "e9908830851c0e77f0d91177c865668e1a08845196c7bb27272a04023bae7655",
-      "planningWeight": 213905
+      "planningWeight": 313939
     },
     "test/e2e/session-rail-row-metadata.browser.e2e.ts": {
-      "sha256": "1db56ddb941ccde22f01081e49eca6e51cd587b99b567c02d6bd7f759d8326a9",
-      "planningWeight": 16020
+      "sha256": "0b97b31d00c1ed3b0a7da4ce1f13f6cef22dbb24d854703b7aedb1cdd049ed16",
+      "planningWeight": 15840
     },
     "test/e2e/session-sidebar.browser.e2e.ts": {
-      "sha256": "758cc294499438e3edece651ca06fed981d39e2c98e4b55ced61499a728ed5b0",
-      "planningWeight": 88340
+      "sha256": "39e9c8679eb561e5531e058cd10bff45536d8293469a21f0be927cdf3cd60212",
+      "planningWeight": 110301
     },
     "test/e2e/session-skill-review.browser.e2e.ts": {
       "sha256": "a39771fe1257a867eca281d3bf454bdca6050aa5df9b535bf6f5fafe6209fdbb",
-      "planningWeight": 5822
+      "planningWeight": 4632
     },
     "test/e2e/session-usage-limit.browser.e2e.ts": {
       "sha256": "d0b17022993314963b0eb086bbb5ddf56b0650e991434da9e445f8dac6bf43aa",
-      "planningWeight": 41305
+      "planningWeight": 49864
     },
     "test/e2e/setup-account-token.browser.e2e.ts": {
       "sha256": "24c368a435ba8d8f26809bf1533388e4dad62f6bce7f2a49483f2462946324f4",
-      "planningWeight": 6719
+      "planningWeight": 6820
     },
     "test/e2e/signed-out-page.browser.e2e.ts": {
-      "sha256": "185173f7c875751388380477a67e79bff800f3222342fd3070a04c39dc4e3d5f",
-      "planningWeight": 16898
+      "sha256": "45f2bb2a559e8870119d1299ea66c85472a78a0ddecc7e01c4cc550bc5eebc53",
+      "planningWeight": 24594
     },
     "test/e2e/site-conversations.browser.e2e.ts": {
       "sha256": "c79a706b79c298dd3ebcc0bd6418fa07a29152dbb083fd5e07629c221eb571ca",
-      "planningWeight": 4753
+      "planningWeight": 6722
+    },
+    "test/e2e/site-navigation.browser.e2e.ts": {
+      "sha256": "6230efa6cb97d121bb89344a9f39f8d8e8b33f9baaa9e9f3401fa60d2d3a1aed",
+      "planningWeight": 9015
     },
     "test/e2e/skill-review.browser.e2e.ts": {
-      "sha256": "74117dc4f1cb93e1c96526887f0c590b02b55a3cdde7e30dcff444e6251395ec",
-      "planningWeight": 6847
+      "sha256": "c5f824997642a1a13bbb5ee8d9878eb3239f7bcc496c7a5ada98d7db1f59fd0c",
+      "planningWeight": 11349
     },
     "test/e2e/slack-access-link.browser.e2e.ts": {
       "sha256": "97bfea077797dcd0575d89f6dd487b5d075ac7d6f0ce120292a9156611636348",
-      "planningWeight": 27966
+      "planningWeight": 30411
     },
     "test/e2e/slack-installation-binding.browser.e2e.ts": {
       "sha256": "f20eca82da4c18018c87af09564a85aa9787b01a1e044b761915c3a2c4c84f31",
-      "planningWeight": 14878
+      "planningWeight": 17635
     },
     "test/e2e/slack-settings.browser.e2e.ts": {
-      "sha256": "29375ab8c20c90539883cd56a478365ac16bd2b3443fe457cd2ee9c36f49b1b3",
-      "planningWeight": 49160
+      "sha256": "7e8afe7e0c74f1dfe98e4c82363466a43ad0e56df67610c14cd2155b98583157",
+      "planningWeight": 53295
+    },
+    "test/e2e/teams-approval.browser.e2e.ts": {
+      "sha256": "9e82e257f2d0ff235c8034c59ce8132b677ac8e820be168e92aa9935e2cba4b7",
+      "planningWeight": 4058
     },
     "test/e2e/usage-allowances.browser.e2e.ts": {
       "sha256": "86e39b1619d010e0b63c80d4978c70b89df9a7ab2c504b09904556be33bc021d",
-      "planningWeight": 8003
+      "planningWeight": 9066
     },
     "test/e2e/workspace-pause-timers.browser.e2e.ts": {
-      "sha256": "34fb2d7bc1b7d8230deb08826e3b6d216436361ccb461658e50b48c1a94ce9f9",
-      "planningWeight": 40280
+      "sha256": "c02603da0ebdd83406c00d491e7f3580fa092c5fe43fc192f6d1931e37ac9c93",
+      "planningWeight": 42467
     },
     "test/e2e/workspace-switcher-trigger.browser.e2e.ts": {
       "sha256": "302b5f1368bf60f289edd45e728d02eb2ae1fda74057065d9618afd74bb837e4",
-      "planningWeight": 8594
+      "planningWeight": 8306
     }
   }
 }
