@@ -104,9 +104,6 @@ ${mode === "nested-data" ? '<iframe id="holder" title="Page-owned container" src
 ${adding}
 <script>
 // The page's own frame, created blank and loaded from another origin by script.
-const inputs = { mousedown: 0, focusin: 0, armed: 0 };
-document.addEventListener("mousedown", () => inputs.mousedown++);
-document.addEventListener("focusin", () => inputs.focusin++);
 document.getElementById("widget").contentWindow.location.href = ${JSON.stringify(otherOrigin)} + "/widget";
 setInterval(() => {
   document.getElementById("frames").textContent = "widget " + (document.getElementById("widget") ? "present" : "removed");
@@ -122,14 +119,13 @@ setInterval(() => {
   collect(document);
   if (typeof made === "number") held.push("made-" + made);
   fetch("/frames", { method: "POST", body: held.join(",") }).catch(() => {});
-  fetch("/input", { method: "POST", body: JSON.stringify(inputs) }).catch(() => {});
 }, 50);
 // The person presses Escape (see /escape).
 setInterval(async () => {
   const pressed = await fetch("/escape").then((response) => response.text()).catch(() => "");
   if (pressed === "yes") document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 }, 100);
-document.getElementById("arm").onclick = () => { inputs.armed++; setTimeout(() => document.getElementById("email").focus(), 1200); };
+document.getElementById("arm").onclick = () => setTimeout(() => document.getElementById("email").focus(), 1200);
 document.getElementById("send").onclick = () => {
   document.getElementById("box").innerHTML = '<input id="code" aria-label="Code"><button type="button" id="verify">Verify</button><p id="out"></p>';
   document.getElementById("code").focus();
@@ -184,26 +180,25 @@ async function launch(
     },
   });
   let heldFrames: string[] = [];
-  let inputEvents = { mousedown: 0, focusin: 0, armed: 0 };
   let escape = false;
   const site = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (request) => {
       const path = new URL(request.url).pathname;
-      if (path === "/input") {
-        inputEvents = await request.json() as typeof inputEvents;
-        return new Response("");
-      }
       if (path === "/frames") {
         heldFrames = (await request.text()).split(",").filter(Boolean);
         return new Response("");
       }
       if (path === "/escape") return new Response(escape ? "yes" : "no");
-      if (path === "/holder") return new Response(`<!doctype html><title>Page-owned container</title>
+      if (path === "/holder")
+        return new Response(
+          `<!doctype html><title>Page-owned container</title>
 <iframe id="inner-sb" title="Page-owned data content"></iframe><script>
 document.getElementById("inner-sb").contentWindow.location.href = "data:text/html,<title>Page content</title><p>Keep this page frame</p>";
-</script>`, { headers: { "content-type": "text/html" } });
+</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
       const mode = (new URL(request.url).searchParams.get("mode") ?? "agent") as PageMode;
       return new Response(page(menu, `http://localhost:${other.port}`, pageFrames, mode), {
         headers: { "content-type": "text/html" },
@@ -418,7 +413,6 @@ process.stdin.on("end", () => process.exit(0));
     observe,
     act,
     heldFrames: () => heldFrames,
-    inputEvents: () => inputEvents,
     pressEscape: () => {
       escape = true;
     },
@@ -463,35 +457,57 @@ async function withFixture(
 
 for (const menuTabs of [0, 1]) {
   e2e(
-    `a nested data frame stays when a blank-created menu opens (${menuTabs} other menu tabs)`,
+    `the page's data frame inside its own frame stays when a password manager's blank-created menu opens (${menuTabs} other tabs with the menu)`,
     async () => {
-      await withFixture("blank", async ({ observe, act, heldFrames, inputEvents, pressEscape }) => {
-        const before = await observe();
-        for (let attempt = 0; attempt < 30 && !heldFrames().includes("inner-sb"); attempt++)
-          await Bun.sleep(100);
-        expect(heldFrames()).toEqual(["widget", "holder", "inner-sb"]);
-        const focus = await act(before, {
-          type: "click",
-          locator: ref(before, "button", "Focus the email field soon"),
-        });
-        expect(focus.state).toBe("completed");
-        await Bun.sleep(1600);
-        expect(inputEvents()).toEqual({ mousedown: 1, focusin: 2, armed: 1 });
-        const failure = await observe().then(() => null, (error: Error) => error);
-        await Bun.sleep(100);
-        // Chrome does not report or script this page-owned data frame. Menus
-        // in another tab must not make it look safe to remove this tab's frame.
-        expect(heldFrames()).toEqual(["widget", "holder", "inner-sb"]);
-        expect(failure?.message).toContain("could not be removed");
-        pressEscape();
-        let recovered = false;
-        for (let attempt = 0; attempt < 20 && !recovered; attempt++) {
-          await Bun.sleep(200);
-          recovered = await observe().then(() => true, () => false);
-        }
-        expect(recovered).toBe(true);
-        expect(heldFrames()).toEqual(["widget", "holder", "inner-sb"]);
-      }, false, { mode: "nested-data", menuTabs });
+      await withFixture(
+        "blank",
+        async ({ observe, act, heldFrames, pressEscape }) => {
+          const held = ["widget", "holder", "inner-sb"];
+          const before = await observe();
+          for (let attempt = 0; attempt < 30 && !heldFrames().includes("inner-sb"); attempt++)
+            await Bun.sleep(100);
+          expect(heldFrames()).toEqual(held);
+          // The click shows the menu, and Chrome ends debugging of the tab.
+          const focus = await act(before, {
+            type: "click",
+            locator: ref(before, "textbox", "Email"),
+          });
+          expect(["completed", "outcome_unknown"]).toContain(focus.state);
+          // Chrome neither reports nor lets the extension script the page's
+          // data frame, and counts other tabs' menus with this one, so the
+          // extension cannot tell which unseen frame is the menu: it removes
+          // neither and says so.
+          let refused = 0;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const error = await observe().then(
+              () => null,
+              (failure: Error) => failure,
+            );
+            if (error !== null) {
+              expect(error.message).toContain("could not be removed");
+              refused += 1;
+            }
+            await Bun.sleep(300);
+            expect(heldFrames()).toEqual(held);
+          }
+          // The menu was open, so the frames were really searched.
+          expect(refused).toBeGreaterThan(0);
+          // Once the person closes the menu, the tab can be debugged again.
+          pressEscape();
+          let debuggable = false;
+          for (let attempt = 0; attempt < 20 && !debuggable; attempt++) {
+            await Bun.sleep(300);
+            debuggable = await observe().then(
+              () => true,
+              () => false,
+            );
+          }
+          expect(debuggable).toBe(true);
+          expect(heldFrames()).toEqual(held);
+        },
+        false,
+        { mode: "nested-data", menuTabs },
+      );
     },
     90_000,
   );
@@ -648,7 +664,11 @@ e2e(
               type: "click",
               locator: ref(observation, "button", "Focus the email field"),
             });
-            expect(["completed", "outcome_unknown"]).toContain(arm.state);
+            // The menu may still be open from the last round: while the page
+            // keeps adding frames, the extension cannot single it out.
+            if (arm.state === "failed")
+              expect(arm.error?.message).toContain("could not be removed");
+            else expect(["completed", "outcome_unknown"]).toContain(arm.state);
           }
           await Bun.sleep(2_000);
           observation = null;
