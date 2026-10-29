@@ -25,6 +25,11 @@ them here: never send them to a settings page or ask for a screenshot of one.
   change shows them a short confirmation in the chat and runs only if they
   allow it, unless they gave the session full access. Ask in one step; if they
   decline, accept it.
+- If `admin_actions_search` is not among your tools (a chat started through
+  the API, an SDK or another product's embed), don't search or browse for it.
+  Answer from this guide right away, and say in one sentence where the change
+  is made instead: in the Opengeni app's settings, or by whoever runs the
+  product they are using.
 - Sharing with someone: the person must be in the workspace. Invite them to
   the organization (with this workspace), or add an existing member to the
   workspace, then share the chat with the workspace. Say what you did in plain
