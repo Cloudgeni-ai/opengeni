@@ -11588,7 +11588,9 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.apiDebtMicros": "integer?",
         "$.balanceMicros": "integer!",
+        "$.creditsMicros": "integer?",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
         "$.heldCreditMicros": "integer?",
