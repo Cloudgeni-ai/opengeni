@@ -19350,12 +19350,14 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // Standard timeline rendering omits it, while full event/audit reads retain
         // it. This is ordinary user-role content, not secret or privileged input.
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
-        // First-party tools the opening context is for, such as the tool that
-        // reaches the open document or record it names. The first turn loads
-        // them before its first model request, as a search by name would, so it
-        // can use them without searching; the session's tool block is unchanged.
-        // Decided once at creation. Names outside the session's tool selection
-        // are ignored; this grants no tool or permission.
+        // Tools the opening context is for, such as the tool that reaches the
+        // open document or record it names: first-party names, or the names an
+        // application's MCP server publishes for its tools. The first turn
+        // loads them before its first model request, as a search by name
+        // would, so it can use them without searching; the session's tool
+        // block is unchanged. Decided once at creation. Names outside the
+        // session's tool selection are ignored; this grants no tool or
+        // permission.
         modelContextTools: z.array(z.string().min(1).max(200)).max(OPENING_TOOLS_MAX).optional(),
         // The IANA time zone of the person sending the initial message, so the
         // model sees its local time. Ignored without an initial message.
