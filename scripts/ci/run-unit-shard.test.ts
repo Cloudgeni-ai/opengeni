@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import {
+  describeUnitTestRun,
   explicitUnitTestPaths,
   planUnitTestProcesses,
   runBoundedTestProcesses,
+  runUnitTestPhases,
   resolveUnitTestSelection,
   sanitizedTestEnvironment,
   sourceMutatesSharedPostgresRole,
@@ -119,7 +121,12 @@ describe("native PostgreSQL unit environment", () => {
 describe("local unit selection", () => {
   test("uses the same complete unit inventory as CI without admitting prepared runtime tests", () => {
     const selection = resolveUnitTestSelection(process.cwd(), ["--all"]);
-    expect(selection).toEqual({ selected: discoverTestFiles().unit, index: 0, count: 1 });
+    expect(selection).toEqual({
+      selected: discoverTestFiles().unit,
+      index: 0,
+      count: 1,
+      keepGoing: false,
+    });
     expect(selection.selected).toContain("packages/db/test/connections.test.ts");
     expect(selection.selected).toContain(
       "apps/web/src/routes/workspace-settings-deletion.test.tsx",
@@ -129,10 +136,31 @@ describe("local unit selection", () => {
     expect(manifest.scripts["test:unit"]).toBe("bun scripts/ci/run-unit-shard.ts --all");
   });
 
+  test("keep-going is opt-in and selects the same complete inventory", () => {
+    const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+    expect(manifest.scripts["test:unit:all"]).toBe(
+      "bun scripts/ci/run-unit-shard.ts --all --keep-going",
+    );
+    for (const args of [
+      ["--all", "--keep-going"],
+      ["--keep-going", "--all"],
+    ]) {
+      expect(resolveUnitTestSelection(process.cwd(), args)).toEqual({
+        selected: discoverTestFiles().unit,
+        index: 0,
+        count: 1,
+        keepGoing: true,
+      });
+    }
+  });
+
   test("rejects ambiguous full and shard selection", () => {
     expect(() => resolveUnitTestSelection(process.cwd(), ["--all", "--shard", "0"])).toThrow(
       "--all cannot be combined",
     );
+    expect(() =>
+      resolveUnitTestSelection(process.cwd(), ["--all", "--keep-going", "--shard", "0"]),
+    ).toThrow("--all cannot be combined");
   });
 });
 
@@ -259,6 +287,97 @@ describe("bounded unit process execution", () => {
   test("rejects an invalid process bound", async () => {
     await expect(runBoundedTestProcesses([1], 0, async () => 0)).rejects.toThrow(
       "positive integer",
+    );
+  });
+
+  test("keep-going admits every task after a failure and returns the first failing status", async () => {
+    const started: number[] = [];
+    const status = await runBoundedTestProcesses(
+      [0, 1, 2, 3, 4],
+      2,
+      async (task) => {
+        started.push(task);
+        await Bun.sleep(1);
+        return task === 1 ? 3 : task === 3 ? 9 : 0;
+      },
+      { keepGoing: true },
+    );
+
+    expect(status).toBe(3);
+    expect([...started].sort()).toEqual([0, 1, 2, 3, 4]);
+  });
+});
+
+describe("unit phase accounting", () => {
+  const phases = (failing: ReadonlySet<string>, executed: string[]) => {
+    const execute = async (task: { files: string[] }): Promise<number> => {
+      executed.push(...task.files);
+      return task.files.some((path) => failing.has(path)) ? 1 : 0;
+    };
+    return [
+      {
+        name: "parallel",
+        processes: [
+          { files: ["a.test.ts"], isolated: false },
+          { files: ["b.test.ts"], isolated: false },
+          { files: ["c.test.ts"], isolated: false },
+        ],
+        concurrency: 1,
+        execute,
+      },
+      {
+        name: "serial",
+        processes: [{ files: ["d.test.ts"], isolated: true }],
+        concurrency: 1,
+        execute,
+      },
+    ];
+  };
+
+  test("fail-fast stops at the first failure and reports every skipped file loudly", async () => {
+    const executed: string[] = [];
+    const result = await runUnitTestPhases(phases(new Set(["a.test.ts"]), executed));
+
+    expect(executed).toEqual(["a.test.ts"]);
+    expect(result).toEqual({
+      status: 1,
+      plannedFiles: 4,
+      ranFiles: 1,
+      failedFiles: ["a.test.ts"],
+    });
+    const summary = describeUnitTestRun(result, { keepGoing: false, shard: "1/1" });
+    expect(summary).toContain("ran 1 of 4 planned files");
+    expect(summary).toContain("INCOMPLETE RUN: 3 of 4 planned files were SKIPPED");
+    expect(summary).toContain("bun run test:unit:all");
+    expect(summary).toContain("failed: a.test.ts");
+  });
+
+  test("keep-going runs every file in every phase and lists all failures", async () => {
+    const executed: string[] = [];
+    const result = await runUnitTestPhases(phases(new Set(["a.test.ts", "d.test.ts"]), executed), {
+      keepGoing: true,
+    });
+
+    expect(executed).toEqual(["a.test.ts", "b.test.ts", "c.test.ts", "d.test.ts"]);
+    expect(result).toEqual({
+      status: 1,
+      plannedFiles: 4,
+      ranFiles: 4,
+      failedFiles: ["a.test.ts", "d.test.ts"],
+    });
+    const summary = describeUnitTestRun(result, { keepGoing: true, shard: "1/1" });
+    expect(summary).toContain("FAILED: 2 failing file(s); ran 4 of 4 planned files.");
+    expect(summary).toContain("failed: a.test.ts");
+    expect(summary).toContain("failed: d.test.ts");
+    expect(summary).not.toContain("SKIPPED");
+  });
+
+  test("a passing run reports the planned file count", async () => {
+    const result = await runUnitTestPhases(phases(new Set(), []), { keepGoing: true });
+
+    expect(result).toEqual({ status: 0, plannedFiles: 4, ranFiles: 4, failedFiles: [] });
+    expect(describeUnitTestRun(result, { keepGoing: false, shard: "2/3" })).toBe(
+      "[unit-shard] shard 2/3 passed (4 files)\n",
     );
   });
 });
