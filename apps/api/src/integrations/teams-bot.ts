@@ -126,6 +126,44 @@ async function send(
   if (!response.id) throw new Error("teams_delivery_missing_receipt");
   return response.id;
 }
+/** Identity proofs stay in a personal chat and only in the button destination. */
+export async function sendTeamsOnboarding(
+  app: App,
+  m: TeamsMessage,
+  purpose: "setup" | "link",
+  url: string,
+): Promise<string> {
+  if (!m.personal) throw new Error("teams_onboarding_requires_personal_chat");
+  const text =
+    purpose === "setup"
+      ? "Connect Teams to your Opengeni workspace."
+      : "Link your Opengeni account to use this bot.";
+  const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
+  const response = await client.conversations.createActivity(m.conversationId, {
+    type: "message",
+    text,
+    textFormat: "plain",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.2",
+          actions: [
+            {
+              type: "Action.OpenUrl",
+              title: purpose === "setup" ? "Connect Teams" : "Link account",
+              url,
+            },
+          ],
+        },
+      },
+    ],
+  });
+  if (!response.id) throw new Error("teams_delivery_missing_receipt");
+  return response.id;
+}
 /** Only stored, cryptographically linked actors reach this grant resolver. */
 async function actorGrant(
   deps: ApiRouteDeps,
@@ -286,7 +324,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
             m.personal &&
             deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)
           ) {
-            await send(app, m, `Connect Teams to Opengeni: ${proofLink(deps, m, null)}`);
+            await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
             observed("setup_link_sent");
           } else observed("setup_not_permitted");
           return { status: 200 };
@@ -294,12 +332,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
         const grant = await actorGrant(deps, i, m.actorId);
         if (!grant) {
           // Identity bearers are never sent to channels or shared conversations.
-          if (m.personal)
-            await send(
-              app,
-              m,
-              `Link your Opengeni account to use this bot: ${proofLink(deps, m, i)}`,
-            );
+          if (m.personal) await sendTeamsOnboarding(app, m, "link", proofLink(deps, m, i));
           else
             await send(
               app,
