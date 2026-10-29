@@ -308,6 +308,115 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test.each([
+    { operation: "listTargets" as const, label: "target inventory", suffix: "" },
+    { operation: "observe" as const, label: "observation", suffix: "/observation" },
+    { operation: "targetState" as const, label: "observation", suffix: "/state" },
+    { operation: "readDom" as const, label: "observation", suffix: "/dom-read" },
+    { operation: "captureScreenshot" as const, label: "screenshot", suffix: "/screenshot" },
+  ])(
+    "tries an unclassified $operation failure once more, then reports it as retryable",
+    async ({ operation, label, suffix }) => {
+      let failures = 0;
+      let attempts = 0;
+      const reported: Array<{ error: unknown; context: ControllerFailureContext }> = [];
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/targets${suffix ? `/target-${reference.browserSessionId}${suffix}` : ""}`;
+          const read = () =>
+            operation === "readDom"
+              ? request(server, path, {
+                  method: "POST",
+                  token: viewToken,
+                  body: {
+                    kind: "count",
+                    selector: "button",
+                    expectedTargetGeneration: "target-1",
+                    expectedDocumentGeneration: "document-1",
+                    expectedFrameId: "frame-1",
+                  },
+                })
+              : request(server, path, { token: viewToken });
+
+          // A failure that is gone a moment later never reaches the caller.
+          failures = 1;
+          attempts = 0;
+          const recovered = await read();
+          expect(recovered.status).toBe(200);
+          expect(attempts).toBe(2);
+          expect(reported).toHaveLength(1);
+          expect(reported[0]?.context).toEqual({
+            method: operation === "readDom" ? "POST" : "GET",
+            pathname: path,
+            kind: "driver_failed",
+          });
+          expect(reported[0]?.error).toMatchObject({ message: "frames still changing" });
+
+          // One that persists is retryable, not a final driver failure.
+          failures = Number.POSITIVE_INFINITY;
+          attempts = 0;
+          reported.length = 0;
+          const failed = await read();
+          expect(failed.status).toBe(503);
+          expect(((await failed.json()) as { error: unknown }).error).toEqual({
+            code: "resource_unavailable",
+            message: `browser ${label} unavailable`,
+            retryable: true,
+          });
+          expect(attempts).toBe(2);
+          expect(reported).toHaveLength(2);
+        },
+        {
+          beforeDriverOperation(name) {
+            if (name !== operation) return;
+            attempts++;
+            if (attempts <= failures) throw new Error("frames still changing");
+          },
+          onUnexpectedError: (error, context) => reported.push({ error, context }),
+        },
+      );
+    },
+  );
+
+  test("never repeats a mutation whose failure is unclassified", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: { url: "https://example.test" } },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (name === "openTarget") {
+            attempts++;
+            throw new Error("frames still changing");
+          }
+        },
+      },
+    );
+  });
+
   test("metadata-only opening keeps exact control authority and the default observation response", async () => {
     const calls: string[] = [];
     await withServer(
@@ -1697,7 +1806,8 @@ async function withServer(
         | "readDom"
         | "openTarget"
         | "openTargetWithInventory"
-        | "dispatch",
+        | "dispatch"
+        | "captureScreenshot",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1779,7 +1889,8 @@ function fakeDriver(
         | "readDom"
         | "openTarget"
         | "openTargetWithInventory"
-        | "dispatch",
+        | "dispatch"
+        | "captureScreenshot",
     ) => void;
   },
 ): BrowserSupervisorDriver {
@@ -1911,6 +2022,7 @@ function fakeDriver(
       };
     },
     async captureScreenshot() {
+      options.beforeDriverOperation?.("captureScreenshot");
       if (options.screenshotError) throw options.screenshotError;
       return frame(context, target);
     },

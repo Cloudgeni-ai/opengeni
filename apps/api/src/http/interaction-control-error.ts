@@ -14,6 +14,21 @@ import { ApiHttpError } from "./api-error";
 
 export type InteractionControlSurface = "browser" | "computer";
 
+/**
+ * What the failed Connected Machine request was for: opening the live view a
+ * person watches, running an action, or any other request (reads, opening or
+ * resuming the session). Failures are worded for it, since a click that
+ * timed out has nothing to do with a live view.
+ */
+export type InteractionControlRequest = "live_view" | "action" | "request";
+
+/** The request kind of a browser or computer route's channel operation. */
+export function interactionControlRequestFor(operation: string): InteractionControlRequest {
+  if (operation === "browser.action" || operation === "computer.action") return "action";
+  if (operation === "browser.attach" || operation === "computer.attach") return "live_view";
+  return "request";
+}
+
 /** `details.code` of the 504 for an action that outlived its own deadline. */
 export const INTERACTION_ACTION_DEADLINE_ERROR_DETAIL_CODE = "INTERACTION_ACTION_DEADLINE_EXCEEDED";
 
@@ -93,6 +108,7 @@ export function legacyInteractionCapacityError(
 export function interactionControlApiError(
   error: unknown,
   surface: InteractionControlSurface,
+  request: InteractionControlRequest,
 ): ApiHttpError | null {
   const controlError =
     error instanceof SelfhostedControlError
@@ -110,7 +126,10 @@ export function interactionControlApiError(
       ? { controlRequestId: controlError.controlRequestId }
       : {}),
   });
-  const ruling = publicControlFailureRuling(controlError, surface, controlFailureCode);
+  const ruling =
+    request === "live_view"
+      ? publicControlFailureRuling(controlError, surface, controlFailureCode)
+      : requestControlFailureRuling(controlError, surface, request, controlFailureCode);
   return new ApiHttpError(ruling.status, {
     code: ruling.code,
     message: ruling.message,
@@ -234,4 +253,94 @@ function publicControlFailureRuling(
 
 function safeControlRequestId(value: string | null): value is string {
   return value !== null && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value);
+}
+
+/** The ruling for a failed action or other request: it names that request,
+ * and an action that may have reached the machine says its outcome is unknown. */
+function requestControlFailureRuling(
+  error: SelfhostedControlError,
+  surface: InteractionControlSurface,
+  request: "action" | "request",
+  code: InteractionControlFailureCode,
+): { status: number; code: ErrorCode; message: string } {
+  const what = `this ${surface} ${request}`;
+  switch (code) {
+    case "consent_required":
+      return {
+        status: 403,
+        code: "forbidden",
+        message: `Screen access is not enabled on this connected machine, so ${what} could not run.`,
+      };
+    case "unsupported":
+      return {
+        status: 409,
+        code: "conflict",
+        message: `This connected machine does not support ${what}.`,
+      };
+    case "not_found":
+      return {
+        status: 404,
+        code: "not_found",
+        message: `The connected machine no longer has what ${what} needs.`,
+      };
+    case "fenced":
+      return {
+        status: 409,
+        code: "conflict",
+        message: `The ${surface} session on the connected machine changed while ${what} was running.`,
+      };
+    case "agent_offline":
+      return {
+        status: 503,
+        code: "upstream_unavailable",
+        message: `The connected machine is offline, so ${what} did not complete.`,
+      };
+    case "draining":
+      return {
+        status: 503,
+        code: "upstream_unavailable",
+        message: `The connected machine is busy and could not run ${what}.`,
+      };
+    case "timeout":
+      return {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          request === "request"
+            ? `The connected machine did not answer ${what} in time.`
+            : error.neverSent
+              ? `The connected machine did not answer in time, so ${what} was not sent.`
+              : `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "page" : "window"} before doing anything again; do not repeat the action automatically.`,
+      };
+    case "payload_too_large":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine's reply to ${what} was larger than its transport allows.`,
+      };
+    case "stream":
+      return {
+        status: error.retryable ? 503 : 502,
+        code: "upstream_unavailable",
+        message: `The connection to the connected machine failed during ${what}.`,
+      };
+    case "protocol":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine returned an invalid reply to ${what}.`,
+      };
+    case "os":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine's operating system could not run ${what}.`,
+      };
+    case "unknown":
+      return {
+        status: 502,
+        code: "upstream_unavailable",
+        message: `The connected machine could not complete ${what}.`,
+      };
+  }
 }

@@ -337,7 +337,24 @@ const LAYOUT_READ_EXPRESSION =
   "document.documentElement ? document.documentElement.getBoundingClientRect().width : null";
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
-const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+/**
+ * An accessibility read is consistent only if no frame committed a new
+ * document while it ran. A page that is still loading (as every tab is right
+ * after the browser reopens) adds and navigates frames for a while, so a read
+ * that saw the frames change waits before the next, a little longer each time
+ * (50 + 100 + 200 + 400 ms at most), rather than spending its attempts within
+ * the same few milliseconds of loading.
+ */
+const ACCESSIBILITY_SETTLE_PAUSES_MS = [50, 100, 200, 400] as const;
+const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = ACCESSIBILITY_SETTLE_PAUSES_MS.length + 1;
+
+/** The page's frames kept changing through every accessibility read attempt. */
+export class CdpFrameTreeUnsettledError extends Error {
+  constructor() {
+    super("browser frame tree did not settle for a bounded accessibility observation");
+    this.name = "CdpFrameTreeUnsettledError";
+  }
+}
 /**
  * A page whose whole accessibility tree is too large for one observation
  * (or for one CDP message) is read node by node within this budget instead,
@@ -5167,7 +5184,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
     let rebuildPending = rebuilding;
     let switchedToBounded = false;
+    let framesChanged = false;
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      if (framesChanged) {
+        framesChanged = false;
+        await delay(ACCESSIBILITY_SETTLE_PAUSES_MS[attempt - 1] ?? 0);
+      }
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
       // The snapshot carries the current document's generation, so it must be
       // read from that document: a commit since the frame was last read makes
@@ -5176,6 +5198,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (main && (main.loaderId !== state.frame.loaderId || main.id !== state.frame.id)) {
         this.assertCurrentTargetState(state);
         this.adoptMainFrame(state, main);
+        framesChanged = true;
         continue;
       }
       if (rebuildPending) await this.rebuildAccessibility(state.sessionId);
@@ -5218,6 +5241,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       const after = flattenFrameTree(await this.frameTree(state.sessionId));
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
+        framesChanged = true;
         continue;
       }
       let accessibility: CdpAccessibilitySnapshot;
@@ -5244,7 +5268,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
     }
-    throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+    throw new CdpFrameTreeUnsettledError();
   }
 
   /**
@@ -11803,23 +11827,30 @@ const SCROLL_PANELS_EXPRESSION = `(() => {
   return [kept.map((entry) => entry[2]).join("|"), ...kept.map((entry) => entry[1])];
 })()`;
 
+const PRIVATE_SELECTOR = "[data-private], [data-sensitive], [data-opengeni-private]";
+/** Every element SENSITIVE_REASON_FUNCTION can find a reason for. */
+const SENSITIVE_CANDIDATE_SELECTOR = `[id], [name], [autocomplete], input, ${PRIVATE_SELECTOR}`;
+
+/** Why one element is a password, one-time code, payment, hidden or
+ * explicitly private field, or null. */
+const SENSITIVE_REASON_FUNCTION = `function(node) {
+  const nodeTag = String(node.tagName || "").toLowerCase();
+  const type = nodeTag === "input" ? String(node.getAttribute("type") || "text").toLowerCase() : "";
+  const autocomplete = String(node.getAttribute("autocomplete") || "").toLowerCase();
+  const fieldName = String(node.getAttribute("name") || "") + " " + String(node.getAttribute("id") || "");
+  if (type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)) return "password";
+  if (/(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)) return "payment";
+  if (type === "hidden" || node.matches(${JSON.stringify(PRIVATE_SELECTOR)})) return "private";
+  return null;
+}`;
+
 /** Why an element's text or value must not leave the page: it is, sits in, or
  * (as a container) holds a password, one-time code, payment, hidden or
  * explicitly private field. With a range, only the descendants that range
  * touches count, for a copy of selected text. Shared by DOM reads and
  * clipboard copies, so neither can return what the other withholds. */
 const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
-  const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
-  const sensitiveReason = (node) => {
-    const nodeTag = String(node.tagName || "").toLowerCase();
-    const type = nodeTag === "input" ? String(node.getAttribute("type") || "text").toLowerCase() : "";
-    const autocomplete = String(node.getAttribute("autocomplete") || "").toLowerCase();
-    const fieldName = String(node.getAttribute("name") || "") + " " + String(node.getAttribute("id") || "");
-    if (type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)) return "password";
-    if (/(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)) return "payment";
-    if (type === "hidden" || node.matches(privateSelector)) return "private";
-    return null;
-  };
+  const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
   let reason = sensitiveReason(element);
   for (let ancestor = element.parentElement; !reason && ancestor; ancestor = ancestor.parentElement) {
     reason = sensitiveReason(ancestor);
@@ -11827,12 +11858,88 @@ const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
   if (reason) return reason;
   // A container's text includes its sensitive descendants. Refuse the whole
   // container rather than returning their protected text through an ancestor.
-  for (const node of element.querySelectorAll("[id], [name], [autocomplete], input, " + privateSelector)) {
+  for (const node of element.querySelectorAll(${JSON.stringify(SENSITIVE_CANDIDATE_SELECTOR)})) {
     if (range && !range.intersectsNode(node)) continue;
     const found = sensitiveReason(node);
     if (found) return found;
   }
   return null;
+}`;
+
+/**
+ * The text a container shows without its protected descendants, for a DOM
+ * read of a container that holds some (a page's body nearly always holds a
+ * hidden field). Subtrees that hold none are read whole as innerText; only
+ * the elements on the way to a protected one are walked, and a protected
+ * element contributes nothing. Form fields (`input`, `textarea`) are skipped
+ * as innerText skips their values. Returns the text and the reason of the
+ * first element withheld (null when none showed text), or null when the
+ * container is not rendered, so innerText would be its raw source text and
+ * the read refuses it whole instead. Call it only for an element that is
+ * neither protected itself nor inside a protected element.
+ */
+const PUBLIC_TEXT_FUNCTION = `function(element) {
+  const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
+  const view = element.ownerDocument.defaultView;
+  if (!view || element.getClientRects().length === 0) return null;
+  const withheld = [];
+  let reason = null;
+  for (const node of element.querySelectorAll(${JSON.stringify(SENSITIVE_CANDIDATE_SELECTOR)})) {
+    const found = sensitiveReason(node);
+    if (!found || withheld.some((root) => root.contains(node))) continue;
+    const tag = String(node.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") continue;
+    withheld.push(node);
+    reason ??= found;
+  }
+  if (withheld.length === 0) return { text: String(element.innerText ?? ""), reason: null };
+  const holds = (node) => withheld.some((root) => node.contains(root));
+  const blockLike = (display) =>
+    display !== "none" && display !== "contents" && !display.startsWith("inline");
+  const parts = [];
+  const walk = (parent) => {
+    const parentStyle = view.getComputedStyle(parent);
+    for (const child of parent.childNodes) {
+      if (child.nodeType === 3) {
+        if (parentStyle.visibility !== "visible") continue;
+        const space = parentStyle.whiteSpace;
+        if (space.startsWith("pre") || space === "break-spaces") {
+          parts.push(child.data);
+          continue;
+        }
+        // Collapsed as rendered: a space after a space or line start shows none.
+        let collapsed = child.data.replace(/\\s+/g, " ");
+        if (collapsed.startsWith(" ") && (parts.length === 0 || /\\s$/.test(parts[parts.length - 1])))
+          collapsed = collapsed.slice(1);
+        parts.push(collapsed);
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const style = view.getComputedStyle(child);
+      if (style.display === "none") continue;
+      const block = blockLike(style.display);
+      if (block) parts.push("\\n");
+      if (withheld.includes(child)) {
+        // Withheld: nothing of it is read.
+      } else if (String(child.tagName).toLowerCase() === "br") {
+        parts.push("\\n");
+      } else if (holds(child) || child.getClientRects().length === 0) {
+        // Without a box of its own (display: contents), innerText would be
+        // its source text, hidden parts included; its children are walked.
+        walk(child);
+      } else {
+        parts.push(String(child.innerText ?? ""));
+      }
+      if (block) parts.push("\\n");
+    }
+  };
+  walk(element);
+  const text = parts
+    .join("")
+    .replace(/[ \\t]*\\n[ \\t]*/g, "\\n")
+    .replace(/\\n{3,}/g, "\\n\\n")
+    .trim();
+  return { text, reason };
 }`;
 
 /** Fixed browser-side projection. Every field shares one character budget, so
@@ -11841,8 +11948,23 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
   const tag = String(element.tagName || "").toLowerCase();
-  const redacted = (${PROTECTED_CONTENT_FUNCTION})(element, null);
-  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
+  const field = tag === "input" || tag === "textarea" || tag === "select";
+  const protectedReason = (${PROTECTED_CONTENT_FUNCTION})(element, null);
+  // A container that only holds protected elements is read around them; a
+  // field, or anything that is or sits in a protected element, is refused.
+  let shownText = null;
+  let redacted = null;
+  if (protectedReason) {
+    const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
+    let inside = false;
+    for (let node = element; !inside && node; node = node.parentElement) inside = Boolean(sensitiveReason(node));
+    const partial = field || inside ? null : (${PUBLIC_TEXT_FUNCTION})(element);
+    if (!partial) {
+      return { ok: true, text: null, value: null, attributes: {}, redacted: protectedReason, truncated: false };
+    }
+    shownText = partial.text;
+    redacted = partial.reason;
+  }
   const allowed = new Set(["href", "src", "alt", "title", "role", "aria-label", "aria-expanded",
     "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
   let remaining = maxChars;
@@ -11865,7 +11987,7 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
     return kept;
   };
   const skip = Number(offset) || 0;
-  const text = bounded(element.innerText ?? element.textContent ?? "", skip);
+  const text = bounded(shownText ?? element.innerText ?? element.textContent ?? "", skip);
   const value = tag === "input" || tag === "textarea" || tag === "select"
     ? bounded(element.value ?? "", skip) : null;
   const attributes = {};
@@ -11880,7 +12002,7 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
         disabled: option.disabled || Boolean(option.closest("optgroup[disabled]"))
       })) };
   }
-  return { ok: true, text, value, attributes, redacted: null, truncated, select };
+  return { ok: true, text, value, attributes, redacted, truncated, select };
 }`;
 
 /** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */

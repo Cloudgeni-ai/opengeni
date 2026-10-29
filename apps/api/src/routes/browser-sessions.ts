@@ -266,6 +266,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
 } from "../http/interaction-control-error";
@@ -4763,7 +4765,7 @@ export function registerBrowserSessionRoutes(
         browserSessionStorageMode(record.session) !== "ephemeral_context",
       );
     } catch (error) {
-      throw browserRouteError(error);
+      throw browserRouteError(error, interactionControlRequestFor(channelOperation));
     }
   }
 
@@ -7187,12 +7189,15 @@ type PreservedWorkingCopyCallback<T> = (input: {
   authority: PlacementBrowserWorkingCopyAuthority;
 }) => Promise<T>;
 
-export function browserRouteError(error: unknown): HTTPException {
+export function browserRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
-  const connectedMachineError = interactionControlApiError(error, "browser");
+  const connectedMachineError = interactionControlApiError(error, "browser", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;

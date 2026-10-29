@@ -1530,10 +1530,10 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
+      // A container is read around what it protects, never through it.
       expect(privateContainer).toMatchObject({
-        text: null,
+        text: "Public intro",
         value: null,
-        attributes: {},
         redacted: "private",
       });
       expect(JSON.stringify(privateContainer)).not.toContain("fixture-private-secret");
@@ -1544,7 +1544,7 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
-      expect(paymentContainer).toMatchObject({ text: null, redacted: "payment" });
+      expect(paymentContainer).toMatchObject({ text: "Public intro", redacted: "payment" });
       expect(JSON.stringify(paymentContainer)).not.toContain("fixture-card-text-secret");
       const paymentChild = await driver.readDom(authPage.target.id, {
         kind: "element",
@@ -1584,7 +1584,7 @@ e2e(
         locator: { kind: "css", selector: "#spoofed-container" },
         ...spoofedFences,
       });
-      expect(spoofedContainer).toMatchObject({ text: null, redacted: "private" });
+      expect(spoofedContainer).toMatchObject({ text: "", redacted: "private" });
       expect(JSON.stringify(spoofedContainer)).not.toContain("fixture-spoofed-private");
       await driver.closeTarget(spoofedPage.target.id);
       await expect(
