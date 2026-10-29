@@ -57,7 +57,11 @@ mock.module("../../ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
     open ? <div>{children}</div> : null,
   DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  DialogDescription: ({ children, className }: { children: ReactNode; className?: string }) => (
+    <p data-description className={className}>
+      {children}
+    </p>
+  ),
   DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
@@ -227,6 +231,27 @@ describe("credit required prompt", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
     };
+    // Add credits beside an own-key refusal opens the top-up with no coupon either.
+    await act(async () =>
+      root!.render(
+        <CreditRequiredPromptView
+          client={client as never}
+          purpose="topup"
+          refusalCode="byok_paid_credit_required"
+          open
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          onOpenChange={() => undefined}
+        />,
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.textContent).toContain("Add Opengeni credits");
+    expect(container.textContent).not.toContain("coupon");
+    expect(container.textContent).not.toContain("Have a code?");
     // A coupon's credit can't pay the own-key fee: checkout is the one fix.
     await render("byok_paid_credit_required");
     expect(container.textContent).toContain("Choose an amount and pay in Stripe Checkout.");
@@ -238,6 +263,10 @@ describe("credit required prompt", () => {
     expect(container.textContent!.split("Ask an organization owner to add credits.").length).toBe(
       2,
     );
+    // Shown once, and visibly: the description is the dialog's only body text.
+    const description = container.querySelector<HTMLElement>("[data-description]")!;
+    expect(description.textContent).toBe("Ask an organization owner to add credits.");
+    expect(description.className ?? "").not.toContain("sr-only");
     expect(container.querySelectorAll("a, button")).toHaveLength(0);
   });
 

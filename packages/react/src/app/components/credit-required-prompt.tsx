@@ -159,6 +159,7 @@ export function CreditRequiredPromptView({
                   params={{ workspaceId }}
                   search={{ section: "billing" }}
                   onClick={() => onOpenChange(false)}
+                  {...analyticsAction("upgrade_plan")}
                 >
                   Upgrade to Pro
                 </Link>
@@ -193,7 +194,9 @@ export function CreditRequiredPromptView({
             }
           >
             {purpose === "topup"
-              ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
+              ? refusalCode === "byok_paid_credit_required"
+                ? "Choose an amount and pay in Stripe Checkout."
+                : "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
               : refusalCode
                 ? canBuyCredits && stripeEnabled
                   ? "Choose an amount and pay in Stripe Checkout."

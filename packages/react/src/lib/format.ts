@@ -228,6 +228,12 @@ const COMPOSER_CREDIT_REFUSAL_KEYS = {
   api_credits_required: "lib.format.composerApiCreditsRequired",
 } as const;
 
+const COMPOSER_CREDIT_REFUSAL_ASK_OWNER_KEYS = {
+  byok_upgrade_required: "lib.format.composerByokUpgradeRequiredAskOwner",
+  byok_paid_credit_required: "lib.format.composerByokPaidCreditRequiredAskOwner",
+  api_credits_required: "lib.format.composerApiCreditsRequiredAskOwner",
+} as const;
+
 /** Trusted, composer-owned guidance; unlike remote diagnostic prose, this is UI copy. */
 export class ComposerStateError extends Error {}
 
@@ -337,7 +343,16 @@ export function siteRefusalCode(error: Error): string | null {
   return typeof code === "string" && SITE_REFUSAL_CODES.has(code) ? code : null;
 }
 
-export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): string {
+/**
+ * The composer's message for a refused or failed send. `canFix` is whether the
+ * viewer can buy credits or upgrade; otherwise a credit refusal says to ask an
+ * organization owner.
+ */
+export function composerSubmissionErrorMessage(
+  t: OpenGeniText,
+  error: Error,
+  canFix = true,
+): string {
   if (error instanceof ComposerReconciliationRequiredError) {
     return t("lib.format.reconcileBeforeRetry");
   }
@@ -366,7 +381,9 @@ export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): s
   return composerErrorReference(
     t,
     error,
-    kind ? t(COMPOSER_CREDIT_REFUSAL_KEYS[kind]) : COMPOSER_PAYMENT_REQUIRED_MESSAGE(t),
+    kind
+      ? t((canFix ? COMPOSER_CREDIT_REFUSAL_KEYS : COMPOSER_CREDIT_REFUSAL_ASK_OWNER_KEYS)[kind])
+      : COMPOSER_PAYMENT_REQUIRED_MESSAGE(t),
   );
 }
 

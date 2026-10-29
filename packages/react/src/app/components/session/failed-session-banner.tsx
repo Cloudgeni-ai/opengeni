@@ -318,6 +318,7 @@ function UpgradeLink({ workspaceId }: { workspaceId: string }) {
         params={{ workspaceId }}
         search={{ section: "billing" }}
         onClick={() => noteTurnFailureAction("upgrade_plan")}
+        {...analyticsAction("upgrade_plan")}
       >
         Upgrade to Pro
       </Link>

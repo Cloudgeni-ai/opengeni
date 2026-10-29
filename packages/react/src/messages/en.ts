@@ -2078,10 +2078,16 @@ export const englishMessages = {
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.composerApiCreditsRequired":
     "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+  "lib.format.composerApiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
   "lib.format.composerByokPaidCreditRequired":
     "Add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
   "lib.format.composerByokUpgradeRequired":
     "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",

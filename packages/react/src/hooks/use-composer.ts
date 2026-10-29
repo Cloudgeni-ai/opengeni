@@ -65,6 +65,11 @@ export type ComposerBusySend = "queue" | "steer";
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
+    /**
+     * Whether the viewer can buy credits or upgrade the plan. When false, a
+     * credit refusal tells them to ask an organization owner. Defaults to true.
+     */
+    canBuyCredits?: boolean | undefined;
     /** Called synchronously after local submission. Observer errors never change delivery. */
     onSubmitted?: ((text: string, input: SendMessageInput) => void) | undefined;
     /** Called with the accepted wire input. Observer errors never turn acceptance into failure. */
@@ -226,6 +231,7 @@ function optimisticSendStorageKey(key: string): string {
 function restoreOptimisticSendOperations(
   t: OpenGeniText,
   key: string | null,
+  canBuyCredits = true,
 ): OptimisticSendOperation[] {
   if (!key) return [];
   let stored = optimisticSendOperations.get(key);
@@ -274,7 +280,7 @@ function restoreOptimisticSendOperations(
           : operation.outcomeUnknown
             ? t("hooks.useComposer.theRequestCouldNotBe")
             : operation.error
-              ? composerSubmissionErrorMessage(t, new Error(operation.error))
+              ? composerSubmissionErrorMessage(t, new Error(operation.error), canBuyCredits)
               : undefined,
     ),
     retryable:
@@ -825,7 +831,11 @@ export function useComposer(
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
-  const initialOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
+  const initialOptimisticSends = restoreOptimisticSendOperations(
+    t,
+    pendingOperationKey,
+    options.canBuyCredits ?? true,
+  );
   const initialShadow =
     initialPendingOperation?.newerShadow ??
     initialOptimisticSends.at(-1)?.newerShadow ??
@@ -949,6 +959,9 @@ export function useComposer(
   const singleSend = busySend === "steer" && options.offerQueue !== true;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
+  // Who is viewing decides a credit refusal's fix, without invalidating `send`.
+  const canBuyCreditsRef = useRef(options.canBuyCredits ?? true);
+  canBuyCreditsRef.current = options.canBuyCredits ?? true;
   const effectiveControlRef = useRef<EffectiveSessionControl | null>(
     acceptedControl ?? options.effectiveControl ?? null,
   );
@@ -970,7 +983,11 @@ export function useComposer(
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
-    const restoredOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
+    const restoredOptimisticSends = restoreOptimisticSendOperations(
+      t,
+      pendingOperationKey,
+      canBuyCreditsRef.current,
+    );
     optimisticSendsRef.current = restoredOptimisticSends;
     optimisticProcessorBusyRef.current = false;
     serviceWaitRef.current = new Map();
@@ -1763,7 +1780,7 @@ export function useComposer(
                             reference: problem.correlationId,
                           })
                         : t("hooks.useComposer.notConfirmedCheckStatus")
-                      : composerSubmissionErrorMessage(t, problem),
+                      : composerSubmissionErrorMessage(t, problem, canBuyCreditsRef.current),
                   ),
                   retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
