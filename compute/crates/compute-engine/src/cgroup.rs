@@ -263,6 +263,33 @@ impl Cgroup {
         }
     }
 
+    /// Drops up to `bytes` of the group's page cache now, and nothing else
+    /// (`memory.reclaim` with `swappiness=0`): no anonymous page is
+    /// compressed for it. `None` on a kernel that cannot be asked for
+    /// cache alone (before 6.9). Blocks while it works; call it from a
+    /// blocking thread.
+    pub fn drop_cache(&self, bytes: u64) -> io::Result<Option<()>> {
+        let asked = format!("{} swappiness=0", bytes.max(1));
+        match fs::write(self.path.join("memory.reclaim"), asked) {
+            Ok(()) => Ok(Some(())),
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) => {
+                Ok(Some(()))
+            }
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Bytes of page cache charged to the group that are clean and mapped
+    /// by no process, its children's and what ended children left it
+    /// included: what [`Cgroup::drop_cache`] can drop at once.
+    pub fn droppable_cache(&self) -> io::Result<u64> {
+        let stat = fs::read_to_string(self.path.join("memory.stat"))?;
+        Ok(Cache::of(&stat).droppable())
+    }
+
     /// Sets the memory the group is protected from reclaim for others
     /// (`memory.low`): the kernel takes it only when nothing unprotected is
     /// left to take. Updates the parent's too; see

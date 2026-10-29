@@ -162,6 +162,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     available
                 }
             });
+        // That counts the VMs' droppable cache as available: the reserve
+        // the levels keep for sandboxes growing within their request is
+        // made free memory, so none of them waits to drop it.
+        if let Some(memory) = &self.memory_policy {
+            match self.engine.keep_memory_room(memory.low_watermark) {
+                compute_engine::RoomKept::Free => {}
+                compute_engine::RoomKept::Dropping(bytes) => tracing::debug!(
+                    mib = bytes >> 20,
+                    "dropping the VMs' page cache to keep their reserve free"
+                ),
+                compute_engine::RoomKept::Unsupported => tracing::warn!(
+                    "this kernel cannot drop page cache alone (memory.reclaim swappiness=0 needs \
+                     Linux 6.9): a sandbox growing within its request into the VMs' reserve may \
+                     wait while the kernel drops their cache at their limit"
+                ),
+            }
+        }
         #[cfg(target_os = "linux")]
         if let Some(fetcher) = &self.fetcher {
             fetcher.forget_old();

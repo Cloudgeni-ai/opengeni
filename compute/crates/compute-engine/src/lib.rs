@@ -48,6 +48,19 @@ pub enum Found {
     Paused,
 }
 
+/// What [`Engine::keep_memory_room`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKept {
+    /// Nothing: the reserve is free, nothing limits the VMs together, or a
+    /// drop asked earlier is under way.
+    Free,
+    /// It is dropping this many bytes of the VMs' page cache.
+    Dropping(u64),
+    /// It cannot: the kernel cannot be asked for page cache alone (Linux
+    /// 6.9 and later can). Said once; every later call is `Free`.
+    Unsupported,
+}
+
 /// Whether an engine can load memory images made under some runtime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Readable {
@@ -230,6 +243,17 @@ pub trait Engine: Send + Sync + 'static {
     /// that is available. `None` where nothing limits them together.
     fn memory_room(&self) -> Result<Option<u64>, EngineError> {
         Ok(None)
+    }
+
+    /// Drops page cache charged to the VMs together, and only cache, while
+    /// less than `reserve` is free under the limit on what they hold
+    /// together, in the background: [`Engine::memory_room`] counts that
+    /// cache as available, so the reserve the host keeps for sandboxes
+    /// growing within their request has to be free memory, not cache the
+    /// first of them to grow would wait to drop. Nothing where nothing
+    /// limits them together.
+    fn keep_memory_room(&self, _reserve: u64) -> RoomKept {
+        RoomKept::Free
     }
 
     /// Bytes of host memory the VM holds right now; with huge-page guest

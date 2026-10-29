@@ -328,8 +328,24 @@ impl Drop for Host {
                 );
             }
             if let Ok(vms) = std::fs::read_dir(CGROUP) {
-                for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
-                    let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
+                let vms: Vec<PathBuf> = vms
+                    .flatten()
+                    .map(|vm| vm.path())
+                    .filter(|vm| vm.is_dir())
+                    .collect();
+                for vm in &vms {
+                    let _ = std::fs::write(vm.join("cgroup.kill"), "1");
+                }
+                // The next test's VMs take the same names and taps, which
+                // are busy until these processes are gone.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while std::time::Instant::now() < deadline
+                    && vms.iter().any(|vm| {
+                        std::fs::read_to_string(vm.join("cgroup.events"))
+                            .is_ok_and(|events| events.contains("populated 1"))
+                    })
+                {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
             }
             let _ = std::fs::remove_dir_all(&self.root);

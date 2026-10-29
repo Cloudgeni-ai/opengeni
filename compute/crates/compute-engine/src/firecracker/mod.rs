@@ -16,6 +16,7 @@ mod jail;
 mod logs;
 mod pager;
 mod process;
+mod room;
 mod run_state;
 mod runtime;
 mod snapshot;
@@ -193,6 +194,8 @@ pub struct Firecracker {
     /// the VMs' group reaches its `memory.max`: that limit and the swap
     /// the group may use. `None` without such a limit.
     oom_total: Option<u64>,
+    /// Keeps the reserve under the VMs' limit free of page cache.
+    room: Arc<room::Room>,
 }
 
 impl Firecracker {
@@ -244,6 +247,7 @@ impl Firecracker {
             memory: MemoryProfile::bare_metal(),
             compress_running: false,
             oom_total: None,
+            room: Arc::default(),
         })
     }
 
@@ -1116,6 +1120,10 @@ impl Engine for Firecracker {
             .memory_held()
             .map_err(|error| EngineError::io("memory_room", error))?;
         Ok(Some(high.saturating_sub(held)))
+    }
+
+    fn keep_memory_room(&self, reserve: u64) -> crate::RoomKept {
+        self.room.keep(&self.cgroups, reserve)
     }
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {

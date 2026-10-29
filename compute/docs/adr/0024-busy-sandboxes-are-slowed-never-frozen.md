@@ -68,6 +68,19 @@ samples once a second.
   so no sandbox in use is compressed for memory an idle one is about to
   give back, and a sandbox being put to sleep is left out of what running
   ones hold. Ready spares wait while the levels hold anyone back.
+- **The reserve is free memory, not cache.** The levels count page cache
+  charged to the VMs' group as available, since the kernel can drop it at
+  once. But the kernel holds the group to its `memory.high` by all it
+  charges, cache included, and that cache builds up whatever the VMs do
+  now: what their disks read and wrote, and what VMs that ended left to
+  the group. On a bare-metal lab host it filled 900 MiB of a 1 GiB
+  reserve after a few sandboxes had come and gone, and a neighbour
+  growing 1 GiB within its request waited 1% of the time while it dropped
+  that cache and compressed the borrower beside it at the shared high. So
+  whenever less than the low watermark is free under the VMs' high, the
+  agent drops the group's cache, and only cache (`memory.reclaim` with
+  `swappiness=0`, Linux 6.9 and later), by the difference, in the
+  background.
 - **What the kernel cannot hold costs the borrower too.** A `memory.high`
   only bounds what the kernel can compress: pages that do not compress
   (random or compressed data), a full pool or swap device leave a VM above
@@ -202,6 +215,12 @@ samples once a second.
   growing at once between readings can take a little more than the room
   left. The low watermark absorbs that, the kernel reclaims at the shared
   `memory.high`, and the wall stops the rest.
+- A sandbox within its request grows at once into the free reserve. Past
+  it, growing into memory borrowers hold, it waits on their compression,
+  which ran at about 200 to 250 MB/s for one borrower of partly random
+  data on the lab's bare-metal host (zstd): a neighbour taking 1 GiB in a
+  second beyond the reserve waits a few seconds. The reserve is the price
+  of not waiting, and per-sandbox stall time shows who waited.
 - A borrower's file cache is compressed with the rest of what it holds:
   its guest drops cache only when asked, in a shrink.
 - On kernels whose `memory.high` writes cannot be non-blocking (before
