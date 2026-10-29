@@ -824,6 +824,20 @@ function apiEnvelopeReviewFields(
 const APP_ACTION_UNREADABLE_KEY =
   /^(id|operationId|idempotencyKey|expiresAt|expectedVersion|expectedRevision|expectedEtag)$|Ids?$/;
 
+/** Request fields whose values are codes: the card says them in words. */
+const APP_ACTION_CODED_FIELDS: Readonly<
+  Record<string, { label: string; values: Readonly<Record<string, string>> }>
+> = {
+  fundingSource: {
+    label: "Paid with",
+    values: {
+      opengeni_credits: "Opengeni credits",
+      workspace_gateway: "The workspace's Vercel AI Gateway",
+      supergrok_subscription: "A connected SuperGrok account",
+    },
+  },
+};
+
 /**
  * One short readable line of an app action's key values, for example
  * "Email: anna@example.com · Role: admin", taken from its body and query.
@@ -840,6 +854,13 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
     if (parts.length >= 4 || APP_ACTION_UNREADABLE_KEY.test(key)) return;
     if (secretFieldName(key)) {
       parts.push(`${toolReviewFieldLabel(key)}: [Protected value]`);
+      return;
+    }
+    const coded = Object.hasOwn(APP_ACTION_CODED_FIELDS, key)
+      ? APP_ACTION_CODED_FIELDS[key]!
+      : undefined;
+    if (coded && typeof value === "string" && Object.hasOwn(coded.values, value)) {
+      parts.push(`${coded.label}: ${coded.values[value]}`);
       return;
     }
     if (value && typeof value === "object" && !Array.isArray(value)) {

@@ -7,6 +7,7 @@ import {
   AgentBrowserDriver,
   BrowserSupervisor,
   CdpConnection,
+  CdpProtocolError,
   type BrowserCommandRunner,
 } from "../src";
 
@@ -1015,6 +1016,77 @@ test("a stalled screenshot leaves other targets available and releases its own q
   }
 });
 
+// A relaunched browser restores its tabs, and Chromium refuses a capture of
+// one that has not drawn yet instead of waiting for it.
+test("a tab that has not drawn yet is captured once Chromium draws it", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.refuseCaptures(3);
+    expect(await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).toMatchObject({
+      targetId: "target-1",
+      width: 3,
+      height: 2,
+    });
+    expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
+      4,
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a tab that never draws fails as a plain timeout and leaves the queue usable", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.refuseCaptures(Number.POSITIVE_INFINITY);
+    jest.useFakeTimers();
+    const failed = fixture.driver.captureScreenshot("target-1").catch((error: unknown) => error);
+    for (let elapsed = 0; elapsed <= 10_200; elapsed += 100) {
+      await settle();
+      jest.advanceTimersByTime(100);
+    }
+    const error = await failed;
+    expect(error).toBeInstanceOf(InteractionControllerError);
+    expect(error).toMatchObject({
+      code: "timeout",
+      retryable: true,
+      message:
+        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe",
+    });
+    expect((error as Error).cause).toBeInstanceOf(CdpProtocolError);
+    jest.useRealTimers();
+    fixture.refuseCaptures(0);
+    expect(await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).toMatchObject({
+      targetId: "target-1",
+    });
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
+test("other capture refusals are not repeated", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.refuseCaptures(1, "Not attached to an active page");
+    await expect(fixture.driver.captureScreenshot("target-1")).rejects.toMatchObject({
+      method: "Page.captureScreenshot",
+      code: -32000,
+      message: "Not attached to an active page",
+    });
+    expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
+      1,
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test.each(["Page.getFrameTree", "Page.getLayoutMetrics"])(
   "a stalled %s read identifies the screenshot stage and leaves the queue usable",
   async (stage) => {
@@ -1147,6 +1219,9 @@ async function captureFixture(
   // What the page reports from the moment a command is sent.
   const viewportOn = new Map<string, unknown>();
   let viewportFailure: string | null = null;
+  // Captures Chromium refuses, as it does while a tab has no drawn surface.
+  let captureRefusals = 0;
+  let captureRefusal = "Unable to capture screenshot";
   let stalledMethod: string | null = null;
   let stalledWhen: ((params: Record<string, any> | undefined) => boolean) | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
@@ -1244,6 +1319,20 @@ async function captureFixture(
       };
     }
     if (command.method === "Page.captureScreenshot") {
+      if (captureRefusals > 0) {
+        captureRefusals -= 1;
+        queueMicrotask(() =>
+          socket.dispatchEvent(
+            new MessageEvent("message", {
+              data: JSON.stringify({
+                id: command.id,
+                error: { code: -32000, message: captureRefusal },
+              }),
+            }),
+          ),
+        );
+        return;
+      }
       const data = Buffer.from(jpeg, "base64");
       const presented = staleRasters.shift() ?? raster;
       if (captureData && !command.params?.clip) {
@@ -1338,6 +1427,10 @@ async function captureFixture(
     },
     failViewport(message = "synthetic viewport failure") {
       viewportFailure = message;
+    },
+    refuseCaptures(count: number, message = "Unable to capture screenshot") {
+      captureRefusals = count;
+      captureRefusal = message;
     },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {

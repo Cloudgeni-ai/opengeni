@@ -7,6 +7,7 @@ import { useState } from "react";
 import { connectionServicePresentation } from "./connection-service-presentation";
 import { ConnectionDiscovery } from "./connection-discovery";
 import { useOpenGeniText } from "./messages/runtime";
+import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectPanelProps = ConnectSetupProps & {
   returnUrl: string;
@@ -39,6 +40,7 @@ export function ConnectPanel({
   const title = titleProp === undefined ? t("connectPanel.connections") : titleProp;
   const { attempt } = useConnect(setup.controller);
   const [inventoryRevision, setInventoryRevision] = useState(0);
+  const alone = useNobodyToShareWith(client, setup.controller.workspaceId);
   // Unknown/failed outcomes still need reconciliation or cancellation, not a
   // competing new acquisition. Unmounting observers never cancels controller work.
   const activeSetup =
@@ -77,6 +79,7 @@ export function ConnectPanel({
                   presentation={presentation}
                   controller={setup.controller}
                   returnUrl={returnUrl}
+                  personalOnly={alone}
                 />
               </details>
             )}
@@ -86,6 +89,7 @@ export function ConnectPanel({
             presentation={presentation}
             controller={setup.controller}
             returnUrl={returnUrl}
+            personalOnly={alone}
           />
         ))}
       {activeSetup && (
