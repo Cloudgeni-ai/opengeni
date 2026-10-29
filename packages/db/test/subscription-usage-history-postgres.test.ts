@@ -17,7 +17,12 @@ import {
   withSubscriptionUsageReading,
 } from "../src/subscription-core/usage-reading";
 import { subscriptionPlanWeight } from "../src/subscription-usage-pool";
-import { storedQuotaDocument, type SubscriptionQuota } from "@opengeni/subscriptions";
+import {
+  buildSubscriptionUsagePool,
+  storedQuotaDocument,
+  type SubscriptionQuota,
+  type SubscriptionUsagePoolInput,
+} from "@opengeni/subscriptions";
 
 const real = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
@@ -252,6 +257,184 @@ test.skipIf(!real)(
     expect(fromTarget.calls).toHaveLength(1);
     expect(fromTarget.calls[0]!.units).toBe(456);
     expect(fromTarget).toEqual(await accountHistory(otherWorkspace.id));
+  },
+  180_000,
+);
+
+type HistoryReading = {
+  connectionId: string;
+  window: string;
+  usedPercent: number | null;
+  resetsAt: number | null;
+  observedAt: number;
+};
+type HistoryCall = { connectionId: string; at: number; units: number; count?: number };
+
+test.skipIf(!real)(
+  "a dense history reads back bounded, keeps every change and call total, and forecasts the same",
+  async () => {
+    const userId = crypto.randomUUID();
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client!.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Dense history test",
+    });
+    const accountId = access.workspaceGrants[0]!.accountId;
+    const workspace = await createOrganizationSharedWorkspace(client!.db, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      name: "Dense history workspace",
+      operationId: crypto.randomUUID(),
+    });
+    const connectionId = crypto.randomUUID();
+    await shared!
+      .admin`insert into subscription_connections(id,account_id,provider,kind,credential_encrypted,credential_format,
+      provider_account_id,plan_type,ownership,scope_kind,status,allocator_enabled,allow_personal_workspaces)
+      values(${connectionId},${accountId},'codex','subscription','fixture','v1',${crypto.randomUUID()},'pro','shared','workspaces','active',true,false)`;
+    // Six hours read every ten seconds, as a busy account reports after every
+    // call: the five-hour window resets four hours ago and then rises a point
+    // every five minutes, the weekly window a point every half hour.
+    await shared!.admin`
+      with clock as (select date_trunc('second', now()) as now)
+      insert into opengeni_private.subscription_usage_readings
+        (account_id, connection_id, window_id, observed_at, used_percent, resets_at)
+      select ${accountId}::uuid, ${connectionId}::uuid, w.id, clock.now - s * interval '10 seconds',
+        case when w.id = 'secondary' then 30 + floor((2160 - s) / 180.0)
+          when s > 1440 then 50 + floor((2160 - s) / 72.0)
+          else floor((1440 - s) / 30.0) end,
+        case when w.id = 'secondary' then clock.now + interval '3 days'
+          when s > 1440 then clock.now - interval '4 hours'
+          else clock.now + interval '1 hour' end
+      from clock, generate_series(0, 2159) s, (values ('primary'), ('secondary')) w(id)`;
+    // A call every 13 seconds, of varying size.
+    await shared!.admin`
+      insert into model_call_facts(account_id,workspace_id,connection_id,session_id,turn_id,source_key,
+        provider,provider_api,model,billing_path,estimated_provider_cost_micros,pricing_source,occurred_at)
+      select ${accountId}::uuid, ${workspace.id}::uuid, ${connectionId}::uuid, gen_random_uuid(), gen_random_uuid(),
+        'dense-history-' || n, 'codex', 'responses', 'fixture', 'external', 500 + (n * 37) % 1000,
+        'configured_list_price', now() - n * interval '13 seconds'
+      from generate_series(1, 1660) n`;
+    const [raw] = await shared!.admin<
+      Array<{ readings: HistoryReading[]; calls: HistoryCall[] }>
+    >`select
+      (select jsonb_agg(jsonb_build_object('connectionId', connection_id, 'window', window_id,
+        'usedPercent', used_percent, 'resetsAt', extract(epoch from resets_at) * 1000,
+        'observedAt', extract(epoch from observed_at) * 1000) order by observed_at)
+        from opengeni_private.subscription_usage_readings where account_id = ${accountId}) as readings,
+      (select jsonb_agg(jsonb_build_object('connectionId', connection_id,
+        'at', extract(epoch from occurred_at) * 1000, 'units', units) order by occurred_at)
+        from opengeni_private.subscription_usage_calls where account_id = ${accountId}) as calls`;
+    const bounded = await withSessionRlsActorContext({ subjectId }, () =>
+      withRlsContext(client!.db, { accountId, workspaceId: workspace.id }, async (tx) => {
+        await setSubjectRlsContext(tx, subjectId);
+        const [row] = await rawRows<{
+          history: { readings: HistoryReading[]; calls: HistoryCall[]; start: number | null };
+        }>(
+          tx,
+          sql`select opengeni_private.read_subscription_usage_history(${accountId}::uuid,
+            ${workspace.id}::uuid, ${subjectId}, 'codex', ARRAY[${connectionId}::uuid]) as history`,
+        );
+        return row!.history;
+      }),
+    );
+    expect(raw!.readings).toHaveLength(4320);
+    expect(raw!.calls).toHaveLength(1660);
+    // Bounded by changes and five-minute slots, not by how often usage was read.
+    expect(bounded.readings.length).toBeLessThan(raw!.readings.length / 4);
+    const key = (reading: HistoryReading) =>
+      `${reading.window}:${reading.usedPercent}:${reading.resetsAt}`;
+    expect(new Set(bounded.readings.map(key))).toEqual(new Set(raw!.readings.map(key)));
+    for (const window of ["primary", "secondary"]) {
+      const rows = (history: { readings: HistoryReading[] }) =>
+        history.readings.filter((row) => row.window === window);
+      const all = rows(raw!);
+      // The first and last readings, every change and each five-minute slot's
+      // first reading stay; nothing else does.
+      const slot = (at: number) => Math.floor(at / 300_000);
+      const expected = all.filter(
+        (row, index) =>
+          index === 0 ||
+          index === all.length - 1 ||
+          key(row) !== key(all[index - 1]!) ||
+          slot(row.observedAt) !== slot(all[index - 1]!.observedAt),
+      );
+      expect(rows(bounded)).toEqual(expected);
+    }
+    // Call totals keep every call's units and count.
+    const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+    expect(bounded.calls.length).toBeLessThan(raw!.calls.length / 2);
+    expect(sum(bounded.calls.map((call) => call.count ?? 1))).toBe(1660);
+    expect(sum(bounded.calls.map((call) => call.units))).toBe(
+      sum(raw!.calls.map((call) => call.units)),
+    );
+    expect(bounded.start).toBe(
+      Math.min(raw!.readings[0]!.observedAt, ...raw!.calls.map((call) => call.at)),
+    );
+    // Every total sits between the same two readings and in the same hour as its calls.
+    const boundaries = [...new Set(bounded.readings.map((row) => row.observedAt))].sort(
+      (a, b) => a - b,
+    );
+    const place = (at: number) =>
+      `${boundaries.filter((boundary) => boundary < at).length}:${Math.floor(at / 3_600_000)}`;
+    const expected = new Map<string, { units: number; count: number; at: number }>();
+    for (const call of raw!.calls) {
+      const total = expected.get(place(call.at)) ?? { units: 0, count: 0, at: -Infinity };
+      expected.set(place(call.at), {
+        units: total.units + call.units,
+        count: total.count + 1,
+        at: Math.max(total.at, call.at),
+      });
+    }
+    expect(
+      new Map(
+        bounded.calls.map((call) => [
+          place(call.at),
+          { units: call.units, count: call.count ?? 1, at: call.at },
+        ]),
+      ),
+    ).toEqual(expected);
+
+    // The pool forecast from the bounded history is the one from every row.
+    const now = Math.max(...raw!.readings.map((row) => row.observedAt));
+    const pool = (history: { readings: HistoryReading[]; calls: HistoryCall[] }) => {
+      const window = (id: string) => (id === "primary" ? "five_hour" : "weekly");
+      const input: SubscriptionUsagePoolInput = {
+        provider: "codex",
+        now,
+        accounts: [
+          {
+            id: connectionId,
+            label: "Dense",
+            plan: "pro",
+            planWeight: 10,
+            windows: history.readings.map((row) => ({
+              id: window(row.window),
+              usedPercent: row.usedPercent,
+              resetsAt: row.resetsAt,
+              observedAt: row.observedAt,
+            })),
+          },
+        ],
+        readings: history.readings.map((row) => ({
+          connectionId: row.connectionId,
+          window: window(row.window),
+          usedPercent: row.usedPercent!,
+          resetsAt: row.resetsAt,
+          observedAt: row.observedAt,
+        })),
+        calls: history.calls,
+        historyStart: null,
+      };
+      return buildSubscriptionUsagePool(input);
+    };
+    const all = pool(raw!);
+    expect(all.windows.map((window) => window.accounts[0]!.weightBasis)).toEqual([
+      "observed",
+      "observed",
+    ]);
+    expect(all.windows.map((window) => window.forecast.kind)).toEqual(["unused", "runs_out"]);
+    expect(pool(bounded)).toEqual(all);
   },
   180_000,
 );

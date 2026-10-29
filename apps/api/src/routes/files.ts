@@ -198,11 +198,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspace = await requireWorkspace(db, workspaceId);
     // A person's upload is shared unless they choose Only me. An agent's
     // follows its chat (Only me in an Only me chat) unless it chooses, on its
-    // owner's behalf; a personal workspace keeps an agent's uploads private.
-    const personal =
-      payload.scope && !(authority?.agent && workspace.kind === "personal")
-        ? payload.scope === "personal"
-        : Boolean(authority?.agent && privateOwner !== null);
+    // owner's behalf. A personal workspace follows the same rule.
+    const personal = payload.scope
+      ? payload.scope === "personal"
+      : Boolean(authority?.agent && privateOwner !== null);
     if (personal && !privateOwner)
       throw new HTTPException(403, {
         message: authority?.agent

@@ -1510,7 +1510,10 @@ export function SessionRoute({
               setReconnectRequest(null);
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
-                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
                 return;
               }
               toast.success("Connection updated", {
@@ -2420,9 +2423,7 @@ function SessionChatPane(props: {
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments({
     scope:
-      props.session.tenancy?.visibility === "private" ||
-      props.session.memoryScope === "user" ||
-      context.workspaces.find((w) => w.id === props.session.workspaceId)?.kind === "personal"
+      props.session.tenancy?.visibility === "private" || props.session.memoryScope === "user"
         ? "personal"
         : "workspace",
   });
@@ -4330,10 +4331,7 @@ function SessionChatPane(props: {
                           ? {
                               workspaceId: props.session.workspaceId,
                               sessionId: props.session.id,
-                              scope: chatLearningScope(
-                                props.session,
-                                isPersonalWorkspace(workspace, context.managedSelfContext),
-                              ),
+                              scope: chatLearningScope(props.session),
                               canEdit: workspacePermissions.includes("sessions:control"),
                               onOpen: props.onOpenAgentSettings,
                             }

@@ -14185,6 +14185,7 @@
         "$.screenCapture": "boolean!",
         "$.semanticActions": "boolean!",
         "$.semanticObservation": "boolean!",
+        "$.targetFocus": "boolean?",
         "$.windowCapture": "boolean!"
       }
     },
