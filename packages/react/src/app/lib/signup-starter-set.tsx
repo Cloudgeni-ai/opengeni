@@ -60,17 +60,19 @@ export function rememberSignupUseCase(input: {
  * Which starters the new-chat page leads with for this account and
  * organization. `serverAnswer` is the membership's `signupUseCase`: when the
  * server keeps an answer it wins; only without one does the browser copy
- * decide.
+ * decide. Only people who chose to build or run agents get the developer sets;
+ * everyone else, including people who skipped the question or signed up before
+ * it existed, gets the everyday set.
  */
 export function signupStarterSet(
   account: string | null | undefined,
   organizationId: string | null | undefined,
   serverAnswer?: OnboardingUseCase | undefined,
 ): "everyday" | "general" | "product" {
-  if (!organizationId) return "general";
   const answer =
-    serverAnswer ?? (account ? readEntries()[entryKey(account, organizationId)] : undefined);
-  return answer === "embed" ? "product" : answer === "everyday" ? "everyday" : "general";
+    serverAnswer ??
+    (account && organizationId ? readEntries()[entryKey(account, organizationId)] : undefined);
+  return answer === "embed" ? "product" : answer === "cloud" ? "general" : "everyday";
 }
 
 type NewChatWording = {

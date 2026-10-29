@@ -29,12 +29,12 @@ type Pitch = {
 export type SignedOutPitch = "general" | "excel";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
-  // Everyone who signs in on the web sees this: people who want help with
-  // everyday things first, in plain words, and developers right after.
+  // Everyone who signs in on the web sees this: one plain promise first, and
+  // developers in the supporting lines.
   general: {
-    headline: "Help with everyday things,",
-    emphasis: "and agents for your product.",
-    lead: "Ask in plain words: plan a trip, write a letter, make sense of a bill. Developers can build agents into their own apps without building the infrastructure.",
+    headline: "Get things done,",
+    emphasis: "just by asking.",
+    lead: "Plan a trip, write a letter, make sense of a bill, or hand off a long task. Developers can build the same agents into their own apps.",
     highlights: [
       { icon: MessageSquareTextIcon, text: "Ask anything, on your computer or your phone" },
       {

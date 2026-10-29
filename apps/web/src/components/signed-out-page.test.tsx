@@ -14,10 +14,10 @@ test("signed-out page speaks to everyday use first, developers second, around th
       />
     </SignedOutPage>,
   );
-  expect(html).toContain("Help with everyday things,");
-  expect(html).toContain("and agents for your product.");
+  expect(html).toContain("Get things done,");
+  expect(html).toContain("just by asking.");
   expect(html).toContain(
-    "Ask in plain words: plan a trip, write a letter, make sense of a bill. Developers can build agents into their own apps without building the infrastructure.",
+    "Plan a trip, write a letter, make sense of a bill, or hand off a long task. Developers can build the same agents into their own apps.",
   );
   expect(html).toContain("Ask anything, on your computer or your phone");
   expect(html).toContain("Keeps working on long tasks, even when you close your laptop");
@@ -56,8 +56,8 @@ test("the Excel pitch speaks to Excel users and keeps the same form and links", 
   expect(html).toContain("Builds tables, formulas and summaries in your sheets");
   expect(html).toContain("Cleans up messy data and formats sheets");
   expect(html).toContain("Explains what is in a workbook");
-  expect(html).not.toContain("Help with everyday things,");
-  expect(html).not.toContain("and agents for your product.");
+  expect(html).not.toContain("Get things done,");
+  expect(html).not.toContain("just by asking.");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
   expect(html).toContain("Continue with Google");

@@ -149,9 +149,9 @@ const STARTER_CLASS =
 
 /**
  * Six starters under the new-chat composer. The set follows the signup
- * answer: people who want help with everyday things get six everyday asks;
- * people adding agents to a product get their own agent and the playground
- * demo first; everyone else gets the general six. A host that passes its own
+ * answer: people adding agents to a product get their own agent and the
+ * playground demo first; people running agents in the cloud get the general
+ * six; everyone else gets six everyday asks. A host that passes its own
  * starters (such as the Excel add-in's workbook tasks) gets those instead.
  */
 export function NewSessionStarters({
