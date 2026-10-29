@@ -55537,7 +55537,7 @@ export type AgentHeldBrowserSession = {
  * capacity or waiting on a person) or has an armed input wait. The same rule
  * as the box release below; the API renews each one's hold on its controller.
  * Most recently used first, at most `limit`. Migration 1002 creates the
- * routine and 1092 grants it to the runtime.
+ * routine and 1093 grants it to the runtime.
  */
 export async function listAgentHeldBrowserSessions(
   db: Database,

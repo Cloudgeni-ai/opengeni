@@ -362,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947, 0950 and 1092 make",
+  "this binary requires the definer and table grants 0947, 0950 and 1093 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>

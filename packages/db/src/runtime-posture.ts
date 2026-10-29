@@ -87,7 +87,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 0984 withholds the connected-command re-arm the same way; until it is
  * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
- * 1002 withheld the held-browser inventory and 1092 granted it.
+ * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off. 1091 withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
