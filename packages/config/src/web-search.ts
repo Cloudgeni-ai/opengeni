@@ -644,27 +644,6 @@ export function webSearchCreditBillingActive(
   return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
 }
 
-/**
- * THE single check point where the paid-hosted-tool charges start. True
- * when the model of a response or turn is billed in Opengeni credits (cost
- * class `credits`) and credit billing is active. Every new charge depends on
- * it: Opengeni's billed `web_search`/`web_fetch` replacing hosted search, the
- * list-price charge for hosted searches a response reports, and the priced
- * Gateway image tool replacing OpenAI hosted image generation on the
- * deployment key. Turns on the user's own keys or subscriptions, free models
- * and billing-off deployments are false and keep their hosted tools free.
- *
- * Legacy billing accounts (the host account that must see no new charges)
- * are to be exempted here, and only here.
- */
-export function paidHostedToolsChargeCredits(
-  settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode">,
-  input: { accountId: string; chargesOpenGeniCredits: boolean },
-): boolean {
-  // Legacy billing account exemption goes here (`isLegacyBillingAccount`).
-  return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
-}
-
 /** Whether every provider of this tool would spend Opengeni credits per call. */
 export function webSearchToolSpendsCredits(
   settings: WebSearchSettings,

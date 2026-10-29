@@ -4,7 +4,7 @@ import {
   webSearchCreditBillingActive,
   type Settings,
 } from "@opengeni/config";
-import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE, type BillingOrigin } from "@opengeni/contracts";
 import {
   applyCreditDebitAfterUse,
   chargeBillingOrigin,
@@ -157,6 +157,7 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
       // as free. The workspace spends no credits; the request count stays.
       if (await workspaceCreditsDisabled(deps.db, scope.workspaceId)) return;
       const attribution = await attributionFor(scope);
+      const usageOrigin = attribution.kind === "unknown" ? undefined : attribution.billingOrigin;
       await withRlsContext(
         deps.db,
         { accountId: scope.accountId, workspaceId: scope.workspaceId },
@@ -179,6 +180,8 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
             sourceId: shared.sourceResourceId,
             idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
             ...(scope.creditUsageModelId ? { usage: scope.creditUsageModelId } : {}),
+            // The turn's frozen origin: API work pays from credits only.
+            ...(usageOrigin ? { usageOrigin } : {}),
             metadata: {
               // turnId lets the allowance trigger resolve the causal human
               // from the immutable turn receipt.
@@ -227,6 +230,8 @@ export async function settleHostedWebSearchUsage(
     /** Product model id of the response, recorded on the debit. */
     model: string;
     requests: number;
+    /** The response's funding origin; omitted uses the turn's frozen origin. */
+    billingOrigin?: BillingOrigin;
   },
 ): Promise<{ creditMicros: number }> {
   if (
@@ -257,6 +262,8 @@ export async function settleHostedWebSearchUsage(
   });
   if (charge.creditMicros <= 0) return { creditMicros: 0 };
   const attribution = await creditDebitAttributionForTurn(db, input);
+  const usageOrigin =
+    input.billingOrigin ?? (attribution.kind === "unknown" ? undefined : attribution.billingOrigin);
   await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -280,6 +287,8 @@ export async function settleHostedWebSearchUsage(
         idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
         // The plan and grants covering the response's model pay first.
         usage: input.model,
+        // API work pays from credits only, like the response's model debit.
+        ...(usageOrigin ? { usageOrigin } : {}),
         metadata: {
           ...creditDebitAttributionMetadata(attribution),
           provider: HOSTED_WEB_SEARCH_SOURCE_PREFIX,

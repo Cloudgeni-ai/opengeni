@@ -40,7 +40,9 @@ const billed = testSettings({
   sandboxBackend: "none",
 });
 
-async function fixture(options: { credits?: number; modelScopedCredits?: number } = {}) {
+async function fixture(
+  options: { credits?: number; modelScopedCredits?: number; billingOrigin?: "app" | "api" } = {},
+) {
   const human = `user:web-search:${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "web-search-billing",
@@ -85,6 +87,7 @@ async function fixture(options: { credits?: number; modelScopedCredits?: number 
       reasoningEffort: "medium",
       reasoningEffortFallback: "medium",
       source: "user",
+      ...(options.billingOrigin ? { billingOrigin: options.billingOrigin } : {}),
     }),
   );
   const attemptId = crypto.randomUUID();
@@ -401,6 +404,46 @@ describe("web search credit billing", () => {
     expect(allocated.map((row) => [Number(row.amount), Number(row.total)])).toEqual([
       [-10_500, 10_500],
       [-1_050, 1_050],
+    ]);
+  }, 180_000);
+
+  test("an API-origin turn pays its web search from credits only, never plan or grant credit", async () => {
+    const { scope } = await fixture({ modelScopedCredits: 1_000_000, billingOrigin: "api" });
+    const billing = createWebSearchBilling({ db: client.db, settings: billed });
+    const billedTurn = { ...scope, creditUsageModelId: "scripted-model" };
+    // Model-scoped credit does not admit API work.
+    const refusal = await billing.admit(billedTurn, 5_000).catch((error: unknown) => error);
+    expect((refusal as WebSearchBillingRefusedError).code).toBe("insufficient_credits");
+    // Post-use charges (a call admitted as free; hosted searches) carry the origin.
+    await billing.settle(billedTurn, {
+      operationId: crypto.randomUUID(),
+      operation: "search",
+      provider: "parallel",
+      providerMicros: 1_000,
+      creditMicros: 1_050,
+      marginBps: 500,
+      basis: "provider_reported",
+    });
+    await settleHostedWebSearchUsage(client.db, billed, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      turnAttemptId: scope.attemptId,
+      sourceId: `${scope.turnId}:resp_api`,
+      model: "scripted-model",
+      requests: 1,
+    });
+    const debits = await shared.admin<{ amount: string; origin: string; allocated: string }[]>`
+        select e.amount_micros::text as amount, e.usage_origin as origin,
+               coalesce((select sum(a.amount_micros) from credit_debit_allocations a
+                          where a.debit_entry_id = e.id), 0)::text as allocated
+          from credit_ledger_entries e
+         where e.account_id=${scope.accountId} and e.type=${WEB_SEARCH_DEBIT_TYPE}
+         order by e.amount_micros`;
+    expect(debits.map((row) => [Number(row.amount), row.origin, Number(row.allocated)])).toEqual([
+      [-10_500, "api", 0],
+      [-1_050, "api", 0],
     ]);
   }, 180_000);
 });

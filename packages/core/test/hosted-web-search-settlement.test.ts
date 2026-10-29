@@ -191,4 +191,59 @@ describe("hosted web search settlement", () => {
     expect(active.calls.filter((call) => call.fn === "model_debit")).toHaveLength(1);
     expect(searchDebits(active.calls)).toEqual([]);
   });
+
+  test("a legacy billing account (CloudGeni's host account) is not charged hosted searches", async () => {
+    const legacy = "25eacc5d-f383-4f79-910a-b3d11dbf1310";
+    active = spyWrites();
+    await settleModelUsage(billed(), db, settlement({ accountId: legacy }));
+    // The model debit is unchanged; no hosted-search usage or debit at all.
+    expect(active.calls.filter((call) => call.fn === "model_debit")).toHaveLength(1);
+    expect(searchDebits(active.calls)).toEqual([]);
+    expect(
+      active.calls.some(
+        (call) => call.fn === "usage" && call.input.sourceResourceType === "web_search",
+      ),
+    ).toBe(false);
+    active.restore();
+    // Removing it from OPENGENI_BILLING_LEGACY_ACCOUNT_IDS charges it like anyone.
+    active = spyWrites();
+    await settleModelUsage(
+      testSettings({
+        billingMode: "stripe",
+        usageLimitsMode: "none",
+        modelPricingJson: PRICED,
+        billingLegacyAccountIds: [],
+      }),
+      db,
+      settlement({ accountId: legacy }),
+    );
+    expect(searchDebits(active.calls).map((call) => call.input.amountMicros)).toEqual([21_000]);
+  });
+
+  test("the hosted-search debit uses the turn's billing origin", async () => {
+    // The response's origin, as the model debit uses it.
+    active = spyWrites();
+    await settleModelUsage(billed(), db, settlement({ billingOrigin: "api" }));
+    expect(searchDebits(active.calls)[0]!.input).toMatchObject({ usageOrigin: "api" });
+    expect(active.calls.find((call) => call.fn === "model_debit")!.input).toMatchObject({
+      usageOrigin: "api",
+    });
+    active.restore();
+    // Otherwise the turn's frozen origin from its attribution.
+    active = spyWrites();
+    spyOn(opengeniDb, "creditDebitAttributionForTurn").mockImplementation(
+      async (_db, input) =>
+        ({
+          kind: "turn",
+          turnId: input.turnId,
+          initiatingHumanSubjectId: null,
+          billingOrigin: "api",
+        }) as never,
+    );
+    await settleModelUsage(billed(), db, settlement());
+    expect(searchDebits(active.calls)[0]!.input).toMatchObject({
+      usageOrigin: "api",
+      metadata: { billingOrigin: "api" },
+    });
+  });
 });

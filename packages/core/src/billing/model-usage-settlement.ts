@@ -402,6 +402,7 @@ export async function settleModelUsage(
       sourceId: input.sourceId,
       model: input.model,
       requests,
+      ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
     });
   };
   if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {

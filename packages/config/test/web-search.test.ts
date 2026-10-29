@@ -376,6 +376,32 @@ describe("web search tool plan", () => {
       ),
     ).toBe(false);
   });
+
+  test("legacy billing accounts (CloudGeni's host account) see no new charges", () => {
+    const legacy = {
+      accountId: "25eacc5d-f383-4f79-910a-b3d11dbf1310",
+      chargesOpenGeniCredits: true,
+    };
+    // The default list exempts CloudGeni's host account.
+    expect(paidHostedToolsChargeCredits({ billingMode: "stripe" }, legacy)).toBe(false);
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "disabled", usageLimitsMode: "managed" },
+        { ...legacy, accountId: legacy.accountId.toUpperCase() },
+      ),
+    ).toBe(false);
+    // OPENGENI_BILLING_LEGACY_ACCOUNT_IDS overrides the default list.
+    const listed = "22222222-2222-4222-8222-222222222222";
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "stripe", billingLegacyAccountIds: [listed] },
+        { accountId: listed, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(false);
+    expect(
+      paidHostedToolsChargeCredits({ billingMode: "stripe", billingLegacyAccountIds: [] }, legacy),
+    ).toBe(true);
+  });
 });
 
 describe("web search pricing", () => {

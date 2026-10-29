@@ -33,6 +33,8 @@ import {
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
+  webSearchCreditBillingActive,
+  type WebSearchSettings,
 } from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
@@ -357,6 +359,30 @@ export function isLegacyBillingAccount(
       accountId.toLowerCase(),
     )
   );
+}
+
+/**
+ * THE single check point where the paid-hosted-tool charges start. True
+ * when the model of a response or turn is billed in Opengeni credits (cost
+ * class `credits`), credit billing is active and the account is not a legacy
+ * billing account. Every new charge depends on it: Opengeni's billed
+ * `web_search`/`web_fetch` replacing hosted search, the list-price charge for
+ * hosted searches a response reports, and the priced Gateway image tool
+ * replacing OpenAI hosted image generation on the deployment key. Turns on
+ * the user's own keys or subscriptions, free models, billing-off deployments
+ * and legacy accounts (CloudGeni's host account) are false and keep today's
+ * free hosted tools.
+ */
+export function paidHostedToolsChargeCredits(
+  settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode"> &
+    Partial<Pick<Settings, "billingLegacyAccountIds">>,
+  input: { accountId: string; chargesOpenGeniCredits: boolean },
+): boolean {
+  const billingLegacyAccountIds = settings.billingLegacyAccountIds ?? [
+    ...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  ];
+  if (isLegacyBillingAccount({ billingLegacyAccountIds }, input.accountId)) return false;
+  return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
 }
 
 const SettingsSchema = z.object({
