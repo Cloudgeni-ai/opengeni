@@ -103,12 +103,13 @@ function catalogItem(
   ]
     .filter(Boolean)
     .join(" and ");
+  const summary = item.description.trim().replace(/(?<![.!?])$/u, ".");
   return CapabilityCatalogItem.parse({
     id: pluginCapabilityId(item),
     kind: "plugin",
     source: "public_registry",
     name: item.displayName.replace(/-/g, " "),
-    description: `${item.description.trim().replace(/(?<![.!?])$/u, ".")} Plugin with ${contents}.`,
+    description: `${summary === "." ? "" : `${summary} `}Plugin with ${contents}.`,
     category: item.category?.toLowerCase() || "plugin",
     tags: [...new Set(["plugin", ...item.keywords, ...parts.skills, ...parts.servers])]
       .filter((tag) => tag.trim().length > 0)
