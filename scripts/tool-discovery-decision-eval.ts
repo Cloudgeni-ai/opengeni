@@ -151,30 +151,50 @@ for (const c of cases) {
       candidateScores: [],
     };
   } else if (typed) {
-    let usage: DecisionUsage | undefined;
-    let receipt: DecisionResult | undefined;
+    // A large candidate pool is judged in several requests (parallel groups and
+    // a final pass), so usage is the sum of every request.
+    const usages: DecisionUsage[] = [];
+    const receipts: DecisionResult[] = [];
     try {
       selected = await createToolSelector(typed.model, {
         onUsage: (event) => {
-          usage = event;
+          usages.push(event);
         },
         onResult: (result) => {
-          receipt = result;
+          receipts.push(result);
         },
       })(input);
     } catch (error) {
       // Without a receipt, usage is unknown: stop and resume rather than invent a
       // zero-cost failed result. Invalid scored responses retain their usage.
-      if (!usage) throw error;
+      if (!usages.length) throw error;
       invalid = true;
     }
+    const [usage] = usages;
     if (!usage) throw new Error("Decision model returned no usage receipt");
+    const total = (key: "inputTokens" | "outputTokens" | "costUsd") =>
+      usages.every((entry) => typeof entry[key] === "number")
+        ? usages.reduce((sum, entry) => sum + Number(entry[key]), 0)
+        : null;
+    const [receipt] = receipts;
     measurement = {
-      ...usage,
-      candidateScores: input.candidates.map((candidate, id) => ({
-        name: candidate.name,
-        answer: receipt?.answers[String(id)] ?? null,
-      })),
+      model: usage.model,
+      provider: usage.provider,
+      inputTokens: total("inputTokens"),
+      outputTokens: total("outputTokens"),
+      costUsd: total("costUsd"),
+      costSource: usages.every((entry) => entry.costSource === usage.costSource)
+        ? usage.costSource
+        : "unknown",
+      requests: usages.reduce((sum, entry) => sum + entry.requests, 0),
+      // Per-candidate answers only when one request judged every candidate.
+      candidateScores:
+        receipts.length === 1 && receipt
+          ? input.candidates.map((candidate, id) => ({
+              name: candidate.name,
+              answer: receipt.answers[String(id)] ?? null,
+            }))
+          : null,
     };
   } else {
     const request = toolDecisionRequest(input);

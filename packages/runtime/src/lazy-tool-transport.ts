@@ -30,7 +30,11 @@ import {
   unresolvedToolNames,
 } from "./codex-tool-search";
 import { isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
-import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
+import {
+  decisionCandidate,
+  TOOL_SELECTION_CANDIDATES_MAX,
+  type ToolSelector,
+} from "./tool-discovery-decision";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
@@ -842,6 +846,21 @@ export class LazyToolRuntime {
   }
 
   /**
+   * What a decision model judges for one query: the searchable pool, lexical
+   * matches first in rank order, then every other tool in pool order, up to
+   * TOOL_SELECTION_CANDIDATES_MAX.
+   */
+  private selectionCandidates(query: string): Tool[] {
+    const pool = this.searchableTools(this.currentTools).filter(isFunctionTool);
+    const ranked = this.searchIndex!.rank(query, TOOL_SELECTION_CANDIDATES_MAX);
+    const seen = new Set(ranked);
+    return [...ranked, ...pool.filter((tool) => !seen.has(tool))].slice(
+      0,
+      TOOL_SELECTION_CANDIDATES_MAX,
+    );
+  }
+
+  /**
    * Integrations selected for this turn whose tools could not be loaded, so a
    * search that finds nothing is not read as "this integration has no such
    * tool". Absent when every server loaded; read live, never recomputed for
@@ -1202,8 +1221,13 @@ export class LazyToolRuntime {
             tools: [],
           };
     }
+    // The decision model judges the whole searchable pool, best lexical
+    // matches first: an agent's words often miss the words a tool's own text
+    // uses (another language, a synonym, a long description of several
+    // steps), and lexical ranking would hide the right tool before any model
+    // saw it. Only a pool larger than the bound is cut, to its best matches.
     // Wider recall than the model-facing result page, not an execution quota.
-    const candidates = this.searchIndex!.rank(query, Math.max(40, limit));
+    const candidates = this.selectionCandidates(query);
     if (!candidates.length) {
       const companions = await setupFor([]);
       return companions.length

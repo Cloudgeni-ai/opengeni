@@ -13,7 +13,7 @@ import {
 } from "@openai/agents";
 import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
-import { createHttpDecisionModel } from "@opengeni/decisions";
+import { createHttpDecisionModel, type DecisionModel } from "@opengeni/decisions";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { rankToolPool } from "../src/codex-tool-search";
 import {
@@ -35,7 +35,12 @@ import { baseModelInputFilterForSettings } from "../src/model-input";
 import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
 import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
 import {
+  candidateSummary,
   createToolSelector,
+  TOOL_SELECTION_GROUP_SIZE,
+  TOOL_SELECTION_INSTRUCTIONS,
+  TOOL_SELECTION_MAX,
+  toolSelectionGroups,
   toolSelectionRequest,
   type ToolSelector,
 } from "../src/tool-discovery-decision";
@@ -472,6 +477,123 @@ describe("decision selection", () => {
     const second = toolSelectionRequest({ query: "second", candidates });
     expect(first.input.candidates).toEqual(second.input.candidates);
     expect(first.questions).toEqual(second.questions);
+  });
+  test("the decision model judges the whole pool, lexical matches first, even when no word matches", async () => {
+    const seen: string[][] = [];
+    const runtime = decisionRuntime(async (input) => {
+      seen.push(input.candidates.map((c) => c.name));
+      return ["chemicals__list"];
+    });
+    runtime.refresh([
+      candidate("tasks__get", "Get task"),
+      candidate("chemicals__list", "List the hazardous products registered for a site."),
+      candidate("tasks__list", "List tasks"),
+    ]);
+    // Another language: nothing lexical, yet the right tool exists.
+    const selected = await runtime.prepareSearch({ query: "stoffkartotek kjemikalier" });
+    expect(seen).toEqual([["tasks__get", "chemicals__list", "tasks__list"]]);
+    expect(selected.tools?.map((t) => t.name)).toEqual(["chemicals__list"]);
+    // An ambiguous query ranks its lexical matches first, then the rest.
+    await runtime.prepareSearch({ query: "task" });
+    expect(seen[1]?.slice(0, 2).sort()).toEqual(["tasks__get", "tasks__list"]);
+    expect(seen[1]?.[2]).toBe("chemicals__list");
+  });
+  test("one request per candidate group: the rubric is shared, each question names only its id", () => {
+    const candidates = Array.from({ length: TOOL_SELECTION_GROUP_SIZE * 2 + 1 }, (_, i) => ({
+      name: `tool_${i}`,
+      description: `Does thing ${i}. Long operational guidance that stays out of the request.`,
+      inputFields: ["id"],
+    }));
+    const groups = toolSelectionGroups(candidates);
+    expect(groups.map((g) => g.length)).toEqual([TOOL_SELECTION_GROUP_SIZE, TOOL_SELECTION_GROUP_SIZE, 1]);
+    const request = toolSelectionRequest({ query: "do thing", candidates: groups[2]! });
+    expect(request.input).toEqual({
+      instructions: TOOL_SELECTION_INSTRUCTIONS,
+      candidates: [{ id: 0, name: `tool_${TOOL_SELECTION_GROUP_SIZE * 2}`, description: `Does thing ${TOOL_SELECTION_GROUP_SIZE * 2}.` }],
+      query: "do thing",
+    });
+    expect(request.questions).toEqual({ 0: { type: "predicate", instructions: { candidateId: 0 } } });
+    expect(candidateSummary(`${"x".repeat(400)}.`)).toHaveLength(200);
+  });
+  test("groups are judged in parallel, then a final pass over their picks; one bad group fails the selection", async () => {
+    const candidates = Array.from({ length: TOOL_SELECTION_GROUP_SIZE + 10 }, (_, i) => ({
+      name: `tool_${i}`,
+      description: `Tool ${i}.`,
+      inputFields: [],
+    }));
+    // Probabilities by global index: 3 in the first group, 4 in the second.
+    const probability = new Map([
+      [5, 0.7],
+      [6, 0.95],
+      [7, 0.55],
+      [TOOL_SELECTION_GROUP_SIZE + 1, 0.9],
+      [TOOL_SELECTION_GROUP_SIZE + 2, 0.6],
+      [TOOL_SELECTION_GROUP_SIZE + 3, 0.8],
+      [TOOL_SELECTION_GROUP_SIZE + 4, 0.5],
+    ]);
+    // Seen next to tool_6, the second group's best pick turns out to do the same job.
+    const finalProbability = new Map([...probability, [TOOL_SELECTION_GROUP_SIZE + 1, 0.2]]);
+    let requests = 0;
+    let finalCandidates: string[] = [];
+    const model: DecisionModel = {
+      async decide(input, questions) {
+        requests++;
+        const group = (input as { candidates: { name: string }[] }).candidates;
+        const names = group.map((candidate) => candidate.name);
+        const final = names.includes("tool_6") && names.includes(`tool_${TOOL_SELECTION_GROUP_SIZE + 1}`);
+        if (final) finalCandidates = names;
+        return {
+          usage: { model: "m", provider: "p", inputTokens: 1, outputTokens: 0, requests: 1, costUsd: 0, costSource: "provider-reported" },
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => {
+              const global = Number(group[Number(id)]!.name.slice("tool_".length));
+              const p = (final ? finalProbability : probability).get(global) ?? 0.1;
+              return [id, { type: "predicate", probability: p }];
+            }),
+          ),
+        } as never;
+      },
+    };
+    const chosen = await createToolSelector(model)({ query: "q", candidates });
+    expect(requests).toBe(3);
+    // The final pass sees every group's picks together, strongest first.
+    expect(finalCandidates).toEqual([
+      "tool_6",
+      `tool_${TOOL_SELECTION_GROUP_SIZE + 1}`,
+      `tool_${TOOL_SELECTION_GROUP_SIZE + 3}`,
+      "tool_5",
+      `tool_${TOOL_SELECTION_GROUP_SIZE + 2}`,
+      "tool_7",
+    ]);
+    expect(chosen).toEqual([
+      "tool_6",
+      `tool_${TOOL_SELECTION_GROUP_SIZE + 3}`,
+      "tool_5",
+      `tool_${TOOL_SELECTION_GROUP_SIZE + 2}`,
+      "tool_7",
+    ]);
+    expect(chosen).toHaveLength(TOOL_SELECTION_MAX);
+    // One group already judged its candidates against each other: no final pass.
+    requests = 0;
+    expect(await createToolSelector(model)({ query: "q", candidates: candidates.slice(0, 10) })).toEqual([
+      "tool_6",
+      "tool_5",
+      "tool_7",
+    ]);
+    expect(requests).toBe(1);
+    let calls = 0;
+    const failing: DecisionModel = {
+      async decide(input, questions, options) {
+        calls++;
+        if (calls === 1) throw new Error("provider unavailable");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(options?.signal?.aborted).toBe(true);
+        return model.decide(input, questions);
+      },
+    };
+    await expect(createToolSelector(failing)({ query: "q", candidates })).rejects.toThrow(
+      "provider unavailable",
+    );
   });
   test("the shared typed implementation records usage even for an invalid answer", async () => {
     let usageCalls = 0;

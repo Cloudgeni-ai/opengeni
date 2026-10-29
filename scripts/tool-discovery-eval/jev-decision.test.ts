@@ -60,7 +60,13 @@ describe("Jev decision eval adapter", () => {
           candidates.map((c) => c.name),
         );
         expect(body.questions["0"].type).toBe("noul");
-        expect(body.questions["0"].instructions.candidateName).toBe("tasks__get");
+        // The rubric is shared state; each question names only its candidate id.
+        expect(body.questions["0"].instructions).toEqual({ candidateId: 0 });
+        expect(body.state.candidates[0]).toEqual({
+          id: 0,
+          name: "tasks__get",
+          description: candidates[0]!.description,
+        });
         expect(body.state).not.toHaveProperty("parameters");
         return response([0.8, 0.2, 0.9]);
       }),
@@ -196,8 +202,9 @@ describe("Jev eval command wiring (local mock endpoints, no paid calls)", () => 
                 {
                   type: "noul",
                   noul:
-                    (q as { instructions: { candidateName: string } }).instructions
-                      .candidateName === "tasks__get"
+                    body.state?.candidates?.[
+                      (q as { instructions: { candidateId: number } }).instructions.candidateId
+                    ]?.name === "tasks__get"
                       ? 0.9
                       : 0.1,
                 },
