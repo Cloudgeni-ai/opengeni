@@ -30922,7 +30922,9 @@
         "$.batch": "object?",
         "$.batch.path": "string?",
         "$.deliveryId": "ref(WebhookValueSource)?",
-        "$.eventId": "string?",
+        "$.eventId": "union?=[\"0\",\"1\"]",
+        "$.eventId|0": "string",
+        "$.eventId|1": "ref(WebhookJoinedParts)",
         "$.occurredAt": "string?",
         "$.preset": "string?",
         "$.signature": "ref(WebhookSignatureFormat)!",
@@ -30936,6 +30938,17 @@
         "$.type|2": "object",
         "$.type|2.value": "string!",
         "$.url": "string?"
+      }
+    },
+    "WebhookJoinedParts": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.parts": "array!",
+        "$.parts[]": "ref(WebhookValueSource)",
+        "$.separator": "string?"
       }
     },
     "WebhookSignatureFormat": {
