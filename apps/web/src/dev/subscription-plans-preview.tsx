@@ -70,6 +70,16 @@ export function previewPlan(key: string): BillingPlanBalance {
   };
 }
 
+// The seat view uses the switched-on limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
+const seatPreviewLimits: Record<string, number | null> = { free: 1, pro: 2, max: 10 };
+const seatPreviewPlans = previewPlans.map((plan) => ({
+  ...plan,
+  seatLimit: seatPreviewLimits[plan.key] ?? null,
+}));
+function seatPreviewPlan(key: string, seatsUsed: number): BillingPlanBalance {
+  return { ...previewPlan(key), seatsUsed, seatLimit: seatPreviewLimits[key] ?? null };
+}
+
 export function SubscriptionPlansPreview() {
   const view = new URLSearchParams(window.location.search).get("plan") ?? "free";
   const [plan, setPlan] = useState(() => previewPlan(view));
@@ -144,18 +154,19 @@ export function SubscriptionPlansPreview() {
           <SectionStack>
             {view === "seats" ? (
               <>
-                <PlanSeats plan={plan} />
+                <PlanSeats plan={seatPreviewPlan("free", 1)} />
                 <SeatLimitNotice
                   canManage
-                  upgrade={seatUpgradeFor(plan, previewPlans)}
+                  upgrade={seatUpgradeFor(seatPreviewPlan("free", 1), seatPreviewPlans)}
                   onUpgrade={() => {
                     window.location.search = "?plan=free";
                   }}
                 />
                 <p className="text-xs text-fg-muted">Without billing access:</p>
+                <PlanSeats plan={seatPreviewPlan("pro", 2)} />
                 <SeatLimitNotice
                   canManage={false}
-                  upgrade={seatUpgradeFor(plan, previewPlans)}
+                  upgrade={seatUpgradeFor(seatPreviewPlan("pro", 2), seatPreviewPlans)}
                   onUpgrade={() => undefined}
                 />
               </>
