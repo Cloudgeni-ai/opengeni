@@ -59,7 +59,7 @@ import {
 } from "@opengeni/react/app/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
-import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({
@@ -174,7 +174,11 @@ function OperationalWorkspaceSettingsRoute({
   // single-user session.
   const canManageOrganizationIntegrations =
     administersOrganization &&
-    hasAccountPermission(context.accessContext, accountId, "account:admin");
+    canAdministerOrganization({
+      accessContext: context.accessContext,
+      clientConfig: context.clientConfig,
+      accountId,
+    });
 
   return (
     <WorkspaceSettingsContent>

@@ -7,7 +7,11 @@ import {
   updateOrganizationMcpConnectionAccess,
   type OrganizationMcpConnection,
 } from "@opengeni/db";
-import { hasPermission, requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
+import {
+  holdsOrganizationAdministration,
+  requireAccessContext,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
@@ -124,7 +128,12 @@ async function requireOrganizationPerson(
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:") || !grant) {
     throw new HTTPException(404, { message: "organization not found" });
   }
-  return { context, organizationId, admin: hasPermission(grant.permissions, "account:admin") };
+  // Owners and admins of this organization manage everyone's connected agents.
+  return {
+    context,
+    organizationId,
+    admin: holdsOrganizationAdministration(context, organizationId),
+  };
 }
 
 async function requireConnection(

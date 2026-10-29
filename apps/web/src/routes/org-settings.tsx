@@ -47,7 +47,6 @@ import {
 import type { OrganizationView } from "@/lib/organization-route";
 import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { DeveloperLocation } from "@/lib/developer-route";
-import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
@@ -171,6 +170,8 @@ export function OrgSettingsRoute({
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOrganizationIntegrations,
+    canMakeServiceAccountAdmin,
     administrator,
     administeredWorkspaceIds,
     visibleSections,
@@ -300,10 +301,6 @@ export function OrgSettingsRoute({
     [accessibleWorkspaceIds, accountId, client, context, navigate, singleUser, workspaceId],
   );
 
-  const canManageOrganizationIntegrations =
-    organizationAdministratorSession &&
-    Boolean(accountId) &&
-    hasAccountPermission(context.accessContext, accountId, "account:admin");
   // A webhook or provider page, or a form, brings its own back link and title.
   // Create API key may name a service account to hold the key; that is the key
   // form, not the service account's page.
@@ -520,7 +517,7 @@ export function OrgSettingsRoute({
                 key={`${identityKey}:service-accounts`}
                 client={client}
                 organizationId={accountId}
-                canMakeAdmin={canManageOrganizationIntegrations}
+                canMakeAdmin={canMakeServiceAccountAdmin}
                 location={serviceAccountsLocation}
                 onNavigate={navigateDeveloper}
                 onCreateKey={(serviceAccount) =>
@@ -563,7 +560,7 @@ export function OrgSettingsRoute({
                     key={`${identityKey}:service-accounts`}
                     client={client}
                     organizationId={accountId}
-                    canMakeAdmin={canManageOrganizationIntegrations}
+                    canMakeAdmin={canMakeServiceAccountAdmin}
                     location={{}}
                     onNavigate={navigateDeveloper}
                     onCreateKey={(serviceAccount) =>

@@ -37,6 +37,13 @@ export type OrganizationSettingsAccess = {
   canManageOrganizationKnowledge: boolean;
   canManageCompanyProfileAgentPolicy: boolean;
   canManageOrganizationApiKeys: boolean;
+  /**
+   * Organization webhooks and the credential provider: the owner or an admin
+   * signed in as themselves (or the single local user), as the server allows.
+   */
+  canManageOrganizationIntegrations: boolean;
+  /** Only a literal `account:admin` (the owner) makes a service account an admin. */
+  canMakeServiceAccountAdmin: boolean;
   /** Pages this person can use. The rest are hidden. */
   visibleSections: ReadonlySet<OrganizationAdminSection>;
 };
@@ -73,6 +80,11 @@ export function organizationSettingsAccess(input: {
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
   const organizationAdministratorSession = managedHumanSession || singleUser;
+  const canManageOrganizationIntegrations =
+    organizationAdministratorSession && canAdministerOrganization(input);
+  const canMakeServiceAccountAdmin =
+    organizationAdministratorSession &&
+    hasAccountPermission(accessContext, accountId, "account:admin");
   // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
   const administeredWorkspaceIds = accessContext.workspaceGrants
@@ -106,7 +118,7 @@ export function organizationSettingsAccess(input: {
     visible.add("insights");
     visible.add("billing");
   }
-  if (canManageOrganizationApiKeys) visible.add("developer");
+  if (canManageOrganizationApiKeys || canManageOrganizationIntegrations) visible.add("developer");
   // Connected agents belong to the people who connect them: every signed-in
   // member of a managed organization connects and manages their own.
   if (
@@ -133,6 +145,8 @@ export function organizationSettingsAccess(input: {
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOrganizationIntegrations,
+    canMakeServiceAccountAdmin,
     visibleSections: visible,
   };
 }
