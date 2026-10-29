@@ -49,13 +49,28 @@
   Site tab of its details. The Site fills the page and a
   chat panel sits beside it with one conversation open, the newest unless
   `?conversation=<id>` chooses one. The panel doesn't list conversations (the
-  Site's sidebar row does); it shows the open one as a regular chat with the
-  model picker, narrower, titled in its header. It resizes from its left edge
-  (drag, or the arrow keys, Home and End on the focused handle; double-click
-  resets) between 320 and 720 px, leaving the Site at least 360 px where there
-  is room, and hides to a strip (Enter on the handle, or its button). Width
-  and hidden state are remembered per person in this browser; choosing a
-  conversation shows a hidden panel again. The conversation open without a
+  Site's sidebar row does); it shows the open one as the regular chat
+  (`SessionRoute` with `placement="panel"`, the session panel turned off with
+  `SessionUiFeaturesOff`), narrower, titled in its header: the same composer,
+  messages and status row as on the chat's own page, so paste and drop of
+  files, the attach button, dictation, voice, the model chip and the queue
+  and steer row all work there. Files dragged over the page cover the Site
+  (`ChatFileDropCover`), so a drop on the Site attaches to the chat rather
+  than going to the Site's frame; the cover shows only while files are
+  dragged and the chat is shown and takes files. A Site with its own file
+  drop zone still gets a drag that enters the window directly over its
+  frame, until the drag crosses the console. The chat keeps the page's state
+  to itself: it isn't the header's or sidebar's open chat, isn't remembered
+  as the last chat and isn't reported to an embedding host, and Ctrl/⌘+F
+  opens its find only while focus is inside it. It resizes from its edge
+  toward the Site (drag, or the arrow keys, Home and End on the focused
+  handle; double-click resets) between 320 and 720 px, leaving the Site at
+  least 360 px where there is room, and hides to a strip (Enter on the
+  handle, or its button). Its ⋯ menu moves it to the left or right of the
+  Site (wide screens only; narrow ones stack the chat below); right is the
+  default. Width, side and hidden state are remembered per person in this
+  browser; choosing a conversation shows a hidden panel again. The
+  conversation open without a
   choice is fixed when the Site opens, so activity in another conversation
   never swaps it out. A `?conversation=` that isn't one of this Site's own
   top-level, unarchived conversations falls back to the Site. A nested row,
@@ -64,8 +79,11 @@
   and closing the row again is respected. **New** starts a conversation the
   way the Site's own chat does, sending the Site and its current version
   (`x-opengeni-site-id`, `x-opengeni-site-version`) with only the fields a
-  Site may set, so it is private to the viewer and listed under the Site. It
-  doesn't offer voice-first start. Once open, New stays open until a
+  Site may set, so it is private to the viewer and listed under the Site,
+  with the regular composer: files attached to the first message (the API
+  accepts file resources on a create from the console's Site view, without
+  a frame marker, never from Site code) and voice-first start. Once open, New
+  stays open until a
   conversation is chosen (choosing the Site's own row again does not close
   it). The panel follows `siteSessionIds` hints, so a conversation started in
   the Site beside it becomes the newest when the Site is next opened. The

@@ -33,13 +33,26 @@ describe("site chat panel layout", () => {
 
   test("round-trips a saved layout", () => {
     const storage = memory();
-    writeSiteChatPanelLayout(id, { width: 9999, collapsed: true }, storage);
-    expect(JSON.parse(storage.values.get(id)!)).toEqual({ width: 720, collapsed: true });
-    expect(readSiteChatPanelLayout(id, storage)).toEqual({ width: 720, collapsed: true });
+    writeSiteChatPanelLayout(id, { width: 9999, collapsed: true, position: "left" }, storage);
+    const saved = { width: 720, collapsed: true, position: "left" } as const;
+    expect(JSON.parse(storage.values.get(id)!)).toEqual(saved);
+    expect(readSiteChatPanelLayout(id, storage)).toEqual(saved);
+  });
+
+  test("the chat sits on the right unless the person moved it left", () => {
+    const at = (position: unknown) =>
+      readSiteChatPanelLayout(id, memory({ [id]: JSON.stringify({ width: 500, position }) }))
+        .position;
+    expect(at("left")).toBe("left");
+    expect(at("right")).toBe("right");
+    // Saved before the choice existed, or anything else: the right.
+    expect(at(undefined)).toBe("right");
+    expect(at("top")).toBe("right");
+    expect(at(1)).toBe("right");
   });
 
   test("anything unreadable falls back to the default", () => {
-    const fallback = { width: 400, collapsed: false };
+    const fallback = { width: 400, collapsed: false, position: "right" } as const;
     expect(readSiteChatPanelLayout(id, memory())).toEqual(fallback);
     expect(readSiteChatPanelLayout(id, null)).toEqual(fallback);
     for (const raw of ["{", "null", "[]", "42", JSON.stringify({ width: "wide", collapsed: 1 })])
@@ -47,6 +60,7 @@ describe("site chat panel layout", () => {
     expect(readSiteChatPanelLayout(id, memory({ [id]: JSON.stringify({ width: 10 }) }))).toEqual({
       width: 320,
       collapsed: false,
+      position: "right",
     });
   });
 
@@ -59,9 +73,13 @@ describe("site chat panel layout", () => {
         throw new Error("QuotaExceededError");
       },
     };
-    expect(readSiteChatPanelLayout(id, blocked)).toEqual({ width: 400, collapsed: false });
+    expect(readSiteChatPanelLayout(id, blocked)).toEqual({
+      width: 400,
+      collapsed: false,
+      position: "right",
+    });
     expect(() =>
-      writeSiteChatPanelLayout(id, { width: 500, collapsed: false }, blocked),
+      writeSiteChatPanelLayout(id, { width: 500, collapsed: false, position: "left" }, blocked),
     ).not.toThrow();
   });
 });

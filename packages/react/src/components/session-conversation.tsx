@@ -28,6 +28,7 @@ import {
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
 import { useQueuedPromptRecall } from "../hooks/use-queued-prompt-recall";
+import { useLiveSessionEvents } from "../hooks/use-live-session-events";
 import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
 import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
@@ -353,37 +354,6 @@ export function SessionConversation({
   );
 }
 
-/**
- * `onEvent` for each event newer than any seen since the history first
- * loaded. The first ready read only sets where "new" starts, so loading the
- * history, an older page or a reconnect's replay calls nothing again.
- */
-function useLiveEvents(
-  sessionId: string | null,
-  events: readonly SessionEvent[],
-  ready: boolean,
-  onEvent: ((event: SessionEvent) => void) | undefined,
-) {
-  const callback = useRef(onEvent);
-  callback.current = onEvent;
-  const seen = useRef<{ sessionId: string | null; sequence: number | null }>({
-    sessionId,
-    sequence: null,
-  });
-  useEffect(() => {
-    if (seen.current.sessionId !== sessionId) seen.current = { sessionId, sequence: null };
-    if (!ready || sessionId === null) return;
-    const previous = seen.current.sequence;
-    const newest = events.reduce((max, event) => Math.max(max, event.sequence), previous ?? 0);
-    seen.current = { sessionId, sequence: newest };
-    if (previous === null) return;
-    const fresh = events
-      .filter((event) => event.sequence > previous)
-      .sort((a, b) => a.sequence - b.sequence);
-    for (const event of fresh) callback.current?.(event);
-  }, [events, ready, sessionId]);
-}
-
 function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) {
   // A failed initial load retries by remounting the whole conversation.
   const [attempt, setAttempt] = useState(0);
@@ -487,7 +457,7 @@ function ConversationView({
   // One recall drives both the composer key and the queue row's ↑ hint.
   const queuedRecall = composerProps?.queuedRecall ?? builtInQueuedRecall;
   const formatError = useErrorMessage();
-  useLiveEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
+  useLiveSessionEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
   // Read means seen: the timeline itself must be on screen (hosts may hide it
