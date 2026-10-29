@@ -797,6 +797,11 @@ test("searches read bounded windows and resume exactly across window boundaries"
   await insert(third!.id, SESSION_MESSAGE_SEARCH_WINDOW, "user.message", {
     text: "WINDOW-NEEDLE last",
   });
+  // Thousands of fresh fixture rows have no planner statistics until
+  // autovacuum gets to them. Without statistics the window statements can
+  // pick plans that exceed the request's statement timeout, so analyze now
+  // instead of depending on autovacuum timing.
+  await shared.admin`analyze sessions, session_events, session_turns, session_message_search_texts`;
   // Every candidate is visited: all of the first and third sessions, none of
   // the second.
   const total = span + 1 + SESSION_MESSAGE_SEARCH_WINDOW;
