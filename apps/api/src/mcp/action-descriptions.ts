@@ -62,6 +62,24 @@ const RULES: Rule[] = [
   },
   {
     method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/members$/,
+    text: () =>
+      "Add someone who is already in the organization to a shared workspace, so they can see its shared chats and work there. A Personal workspace can't have other members. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/organizations\/:organizationId\/invitations$/,
+    text: () =>
+      "Invite someone by email to join the organization, optionally into shared workspaces. They see only the workspaces they are added to, never anyone's Personal workspace. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead; they need no account.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/visibility$/,
+    text: () =>
+      "Choose who in this workspace can see a chat: private (only the person who started it) or workspace (every member of this workspace). It never shows the chat to anyone outside the workspace; to let someone else read it, use createSessionShareLink.",
+  },
+  {
+    method: "POST",
     pattern: /\/vault-providers\/connections$/,
     text: () =>
       "Connect Proton Pass, Keeper Secrets Manager, Bitwarden (including Vaultwarden) or an external vault. Set ownership and provider-specific credentials; Bitwarden takes the server address, the account's personal API key and its master password, which is used once and not stored. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",

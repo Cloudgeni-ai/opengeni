@@ -22,6 +22,9 @@ import {
   getWorkspace,
   getWorkspaceGrant,
   namedSubjectHasLiveWorkspaceAuthority,
+  namedSubjectPersonalWorkspaceId,
+  personalWorkspaceClosedToNewWork,
+  resolveNamedManagedPersonalWorkspaceGrant,
   getTeamsInstallation,
   invalidateTeamsGroup,
   teamsGroupRouteActive,
@@ -96,9 +99,13 @@ function proofLink(deps: ApiRouteDeps, m: TeamsMessage, i: TeamsInstallation | n
 }
 function sessionUrl(deps: ApiRouteDeps, r: TeamsRoute): string {
   return new URL(
-    `/workspaces/${r.workspace_id}/sessions/${r.session_id}`,
+    `/workspaces/${routeSessionWorkspace(r)}/sessions/${r.session_id}`,
     configuredBase(deps),
   ).toString();
+}
+/** The workspace a route's session lives in. */
+function routeSessionWorkspace(r: TeamsRoute): string {
+  return r.session_workspace_id ?? r.workspace_id;
 }
 async function send(
   app: App,
@@ -115,6 +122,44 @@ async function send(
     text,
     textFormat: "plain",
     ...(m.threadId ? { replyToId: m.threadId } : {}),
+  });
+  if (!response.id) throw new Error("teams_delivery_missing_receipt");
+  return response.id;
+}
+/** Identity proofs stay in a personal chat and only in the button destination. */
+export async function sendTeamsOnboarding(
+  app: App,
+  m: TeamsMessage,
+  purpose: "setup" | "link",
+  url: string,
+): Promise<string> {
+  if (!m.personal) throw new Error("teams_onboarding_requires_personal_chat");
+  const text =
+    purpose === "setup"
+      ? "Connect Teams to your Opengeni workspace."
+      : "Link your Opengeni account to use this bot.";
+  const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
+  const response = await client.conversations.createActivity(m.conversationId, {
+    type: "message",
+    text,
+    textFormat: "plain",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.2",
+          actions: [
+            {
+              type: "Action.OpenUrl",
+              title: purpose === "setup" ? "Connect Teams" : "Link account",
+              url,
+            },
+          ],
+        },
+      },
+    ],
   });
   if (!response.id) throw new Error("teams_delivery_missing_receipt");
   return response.id;
@@ -140,6 +185,58 @@ async function actorGrant(
   )
     return null;
   return grant;
+}
+/** The linked person's own Personal workspace grant, when they have one in
+ * this organization, may start chats there, and Personal workspaces are on.
+ * The workspace comes from their active membership pointer, never Teams. */
+async function ownPersonalWorkspaceGrant(
+  deps: ApiRouteDeps,
+  i: TeamsInstallation,
+  subjectId: string,
+  workspaceId?: string,
+): Promise<AccessGrant | null> {
+  const personal = await namedSubjectPersonalWorkspaceId(deps.db, {
+    accountId: i.account_id,
+    subjectId,
+  });
+  if (!personal || personal === i.workspace_id || (workspaceId && personal !== workspaceId))
+    return null;
+  return await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+    accountId: i.account_id,
+    workspaceId: personal,
+    subjectId,
+  });
+}
+/** Where a new 1:1 chat from this linked person lands: their own Personal
+ * workspace while they can start chats there, as a Slack bot DM does. */
+export async function teamsChatPersonalWorkspace(
+  deps: ApiRouteDeps,
+  i: TeamsInstallation,
+  subjectId: string,
+): Promise<string | null> {
+  const grant = await ownPersonalWorkspaceGrant(deps, i, subjectId);
+  if (
+    !grant ||
+    !hasPermission(grant.permissions, "sessions:create") ||
+    (await personalWorkspaceClosedToNewWork(deps.db, {
+      accountId: i.account_id,
+      workspaceId: grant.workspaceId,
+    }))
+  )
+    return null;
+  return grant.workspaceId;
+}
+/** The grant a route's session work uses: the installation workspace's, or
+ * for a 1:1 chat in the person's Personal workspace, that workspace's. */
+async function routeSessionGrant(
+  deps: ApiRouteDeps,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+  identity: AccessGrant,
+): Promise<AccessGrant | null> {
+  if (!r.session_workspace_id) return identity;
+  if (!r.personal || identity.subjectId !== r.subject_id) return null;
+  return await ownPersonalWorkspaceGrant(deps, i, identity.subjectId, r.session_workspace_id);
 }
 export type TeamsRosterReader = (m: {
   serviceUrl: string;
@@ -227,7 +324,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
             m.personal &&
             deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)
           ) {
-            await send(app, m, `Connect Teams to Opengeni: ${proofLink(deps, m, null)}`);
+            await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
             observed("setup_link_sent");
           } else observed("setup_not_permitted");
           return { status: 200 };
@@ -235,12 +332,7 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
         const grant = await actorGrant(deps, i, m.actorId);
         if (!grant) {
           // Identity bearers are never sent to channels or shared conversations.
-          if (m.personal)
-            await send(
-              app,
-              m,
-              `Link your Opengeni account to use this bot: ${proofLink(deps, m, i)}`,
-            );
+          if (m.personal) await sendTeamsOnboarding(app, m, "link", proofLink(deps, m, i));
           else
             await send(
               app,
@@ -272,11 +364,17 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
             return { status: 200 };
           }
         }
+        // A 1:1 chat lands in the sender's own Personal workspace; channels
+        // and group chats stay in the installation's workspace.
+        const sessionWorkspaceId = m.personal
+          ? await teamsChatPersonalWorkspace(deps, i, grant.subjectId)
+          : null;
         await enqueueTeamsMessage(deps.db, i, {
-          routeId: teamsRouteId(m, i.generation, grant.subjectId),
+          routeId: teamsRouteId(m, i.generation, grant.subjectId, sessionWorkspaceId),
           actorId: m.actorId,
           subjectId: grant.subjectId,
           personal: m.personal,
+          sessionWorkspaceId,
           channelId: m.channelId,
           ...(audience ? { groupAudience: audience, groupRevision: i.group_revision } : {}),
           conversationId: m.conversationId,
@@ -574,8 +672,10 @@ async function drainRoute(
   if (!(await verifyGroup())) return;
   const inbound = await getTeamsPendingMessage(deps.db, i, r);
   if (inbound) {
-    const grant = await actorGrant(deps, i, inbound.actor_id);
+    const identity = await actorGrant(deps, i, inbound.actor_id);
+    const grant = identity && (await routeSessionGrant(deps, i, r, identity));
     if (
+      !identity ||
       !grant ||
       grant.subjectId !== inbound.subject_id ||
       !hasPermission(grant.permissions, "sessions:create") ||
@@ -596,10 +696,21 @@ async function drainRoute(
       return;
     try {
       if (!r.session_bound) {
+        // Personal workspaces were turned off after this 1:1 route was made:
+        // refuse with the admission notice; the next message starts in the
+        // installation's workspace.
+        if (
+          r.session_workspace_id &&
+          (await personalWorkspaceClosedToNewWork(deps.db, {
+            accountId: i.account_id,
+            workspaceId: r.session_workspace_id,
+          }))
+        )
+          throw new HTTPException(403, { message: "personal_workspace_closed" });
         await createSessionForRequest(
           scoped,
           grant,
-          r.workspace_id,
+          routeSessionWorkspace(r),
           {
             requestedSessionId: r.session_id,
             initialMessage: text,
@@ -620,7 +731,7 @@ async function drainRoute(
           },
         );
       } else {
-        await acceptSessionUserMessage(scoped, grant, r.workspace_id, r.session_id, {
+        await acceptSessionUserMessage(scoped, grant, routeSessionWorkspace(r), r.session_id, {
           text,
           clientEventId: inbound.event_id,
           teamsConversation: {
@@ -655,7 +766,8 @@ async function drainRoute(
       } else throw error;
     }
   }
-  const owner = await actorGrant(deps, i, r.actor_id);
+  const ownerIdentity = await actorGrant(deps, i, r.actor_id);
+  const owner = ownerIdentity && (await routeSessionGrant(deps, i, r, ownerIdentity));
   if (
     !owner ||
     owner.subjectId !== r.subject_id ||
@@ -677,7 +789,7 @@ async function drainRoute(
           ? withResolvedSessionAuthorization(authorization, fn)
           : withSessionRlsActorContext({ subjectId: owner.subjectId }, fn);
       const audience = await scope(() =>
-        getSessionAuthorityProjection(deps.db, r.workspace_id, r.session_id),
+        getSessionAuthorityProjection(deps.db, routeSessionWorkspace(r), r.session_id),
       );
       if (
         !audience ||
@@ -689,7 +801,7 @@ async function drainRoute(
         return;
       }
       const page = await scope(() =>
-        listSessionEventPage(deps.db, r.workspace_id, r.session_id, {
+        listSessionEventPage(deps.db, routeSessionWorkspace(r), r.session_id, {
           after: Number(r.delivered_sequence),
           limit: 100,
           maxBytes: 256 * 1024,
@@ -717,7 +829,8 @@ async function drainRoute(
   }
   if (!output) return;
   // Recheck both sides immediately before the external side effect.
-  const liveOwner = await actorGrant(deps, i, r.actor_id);
+  const liveOwnerIdentity = await actorGrant(deps, i, r.actor_id);
+  const liveOwner = liveOwnerIdentity && (await routeSessionGrant(deps, i, r, liveOwnerIdentity));
   if (!(await currentInstallation(deps, i)) || !liveOwner || liveOwner.subjectId !== r.subject_id) {
     await settleTeamsOutput(deps.db, i, output.operation_id, {
       state: "failed",
@@ -733,10 +846,10 @@ async function drainRoute(
     });
     const deliveryAudience = await (deliveryAuthorization
       ? withResolvedSessionAuthorization(deliveryAuthorization, () =>
-          getSessionAuthorityProjection(deps.db, r.workspace_id, r.session_id),
+          getSessionAuthorityProjection(deps.db, routeSessionWorkspace(r), r.session_id),
         )
       : withSessionRlsActorContext({ subjectId: liveOwner.subjectId }, () =>
-          getSessionAuthorityProjection(deps.db, r.workspace_id, r.session_id),
+          getSessionAuthorityProjection(deps.db, routeSessionWorkspace(r), r.session_id),
         ));
     if (
       !deliveryAudience ||

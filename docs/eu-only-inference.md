@@ -348,6 +348,11 @@ session's effective tools omit them.
   window, or sign out and back in), then **Turn off** again.
 - Every model picker shows a model whose availability reason is
   `region_restricted` as **Not supported in EU** and does not let it be chosen.
+- When a deployment lists the same model under one name more than once in a
+  picker group (for example an EU route next to another route), each twin
+  whose residency record names its geography shows it in brackets
+  (**GPT-6.1 Sol (EU)**), and twins in the same place show their connection's
+  name instead. `list_models` names such twins the same way for the agent.
 - A feature reported with `region_restricted` (from `inferenceFeatures`, agent
   capabilities, live voice, transcription and live transcript models and
   errors, video funding) shows **Not supported in EU** and is switched off.
@@ -362,7 +367,8 @@ session's effective tools omit them.
 - The app reads these lists for the open workspace
   (`GET /v1/config/client?workspaceId=`), again when the workspace changes,
   when the window regains focus and after the setting changes.
-- No label says EU: names and labels never decide residency.
+- Names and labels never decide residency: a catalog label that says EU proves
+  nothing, and the picker's **(EU)** comes only from the residency record.
 
 ### Recording the region
 

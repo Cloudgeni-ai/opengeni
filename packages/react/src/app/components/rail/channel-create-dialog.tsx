@@ -19,7 +19,6 @@ export const CHANNEL_NAME_MAX_LENGTH = 80;
 
 export function ChannelCreateDialog(props: {
   open: boolean;
-  mode?: "create" | "rename" | undefined;
   name: string;
   busy: boolean;
   onNameChange: (name: string) => void;
@@ -42,7 +41,7 @@ export function ChannelCreateDialog(props: {
           }}
         >
           <DialogHeader>
-            <DialogTitle>{props.mode === "rename" ? "Rename project" : "New project"}</DialogTitle>
+            <DialogTitle>New project</DialogTitle>
             <DialogDescription>
               Projects keep related sessions together for everyone in this workspace.
             </DialogDescription>
@@ -78,7 +77,7 @@ export function ChannelCreateDialog(props: {
             </Button>
             <Button type="submit" disabled={props.busy || !props.name.trim()}>
               {props.busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
-              {props.mode === "rename" ? "Rename" : "Create project"}
+              Create project
             </Button>
           </DialogFooter>
         </form>

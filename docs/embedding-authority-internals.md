@@ -96,7 +96,17 @@ permission, workspace in scope), the keyed-grant prepare/record functions
 (identity re-validated active under the fence, Personal workspaces refused,
 receipt plus key-attributed lifecycle event), insert-on-conflict-do-nothing,
 plain external mode only, never for `opengeni-sdk:user-isolation:*`
-workspaces or a requested permission outside the defaults. External lifecycle administration
+workspaces or a requested permission outside the defaults.
+A stated membership (`membership` in the external-actor header) replaces
+first use at request entry: `applyStatedMembership` compares the grant the
+request already read, and only when it differs calls
+`applyStatedExternalWorkspaceMembership` (same fence, live key and keyed
+grant/update prepare/record, last-administrator check under row locks). It
+drops the statement when a removal (`removeWorkspaceMember`, which stamps every
+external-member removal under the fence) left a revocation marker above the
+sequence watermark read when the request authenticated. The ceiling check
+(`requireStatedMembershipCeiling`) mirrors the PATCH endpoint's refusals.
+External lifecycle administration
 reuses native settlement commands; core private/Personal admission uses a
 dedicated verified-owning-user proof. Explicit linked-native admission uses the
 separate link proof; no external request is stamped as a managed-cookie login.

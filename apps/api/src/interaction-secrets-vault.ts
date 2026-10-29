@@ -152,6 +152,10 @@ export function createVaultInteractionSecretsPort(deps: {
       userDisplayName: null,
       privateKey,
       signCount: clampSignCount(Number(row.passkeySignCount ?? 0)),
+      ...(values.has("backupEligibility")
+        ? { backupEligibility: values.get("backupEligibility") === "true" }
+        : {}),
+      ...(values.has("backupState") ? { backupState: values.get("backupState") === "true" } : {}),
     };
   }
 
@@ -219,6 +223,10 @@ export function createVaultInteractionSecretsPort(deps: {
       userDisplayName: passkey.userDisplayName,
       privateKey: passkey.privateKey,
       signCount: clampSignCount(Math.max(passkey.signCount, recorded)),
+      ...(passkey.backupEligibility !== undefined
+        ? { backupEligibility: passkey.backupEligibility }
+        : {}),
+      ...(passkey.backupState !== undefined ? { backupState: passkey.backupState } : {}),
     }));
   }
 
@@ -284,6 +292,11 @@ export function createVaultInteractionSecretsPort(deps: {
           ? [{ name: "userName", kind: "text" as const, value: credential.userName }]
           : []),
         { name: "privateKey", kind: "concealed" as const, value: credential.privateKey },
+        ...(["backupEligibility", "backupState"] as const).flatMap((name) =>
+          credential[name] === undefined
+            ? []
+            : [{ name, kind: "text" as const, value: String(credential[name]) }],
+        ),
       ];
       const base = passkeyItemName(credential);
       let saved: Awaited<ReturnType<VaultService["saveForAgent"]>> | null = null;

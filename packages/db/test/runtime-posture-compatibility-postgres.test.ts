@@ -362,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947 and 0950 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093 and 1101 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -377,6 +377,11 @@ realTest(
         "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
       );
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_agent_held_browser_sessions(integer, bigint)",
+      );
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO opengeni_app`;
       await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
       expect(await current()).toContain(
         "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
@@ -385,10 +390,16 @@ realTest(
       expect(await current()).toContain(
         "table event_ingress_routes lacks required runtime privileges: DELETE",
       );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine rearm_unanswered_connected_commands(uuid, uuid, text)",
+      );
     } finally {
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
       await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO opengeni_app`;
     }
     expect(await current()).toEqual([]);
   },

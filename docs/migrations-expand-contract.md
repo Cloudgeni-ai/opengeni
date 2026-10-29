@@ -246,7 +246,10 @@ recording retention inventory withheld, and 0950 granted it. 0978 created the
 personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
-withheld the same way, with the same caller check. 1060 created the EU-only
+withheld the same way, with the same caller check, and 1101 granted it and
+removed that check. 1002 created the
+held-browser inventory withheld, with the same caller check, and 1093 granted
+it and removed the check. 1060 created the EU-only
 inference change function withheld the same way; until it is granted the
 setting stays off. 1091 created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the

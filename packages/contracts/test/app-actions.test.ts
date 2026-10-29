@@ -304,6 +304,49 @@ test("a tool approval change asks about the tools it names and the approval it s
   ).toBe("Set this MCP server's default tool approval to Ask in this workspace?");
 });
 
+test("turning video on or off asks in plain words, and says how it's paid", () => {
+  const turnOn = {
+    id: "updateVideoGenerationPolicy",
+    pathParameters: { workspaceId: "ws-1" },
+    body: {
+      expectedRevision: 7,
+      fundingSource: "opengeni_credits",
+      enabledModelIds: ["bytedance/seedance-2.5"],
+      defaultModelId: "bytedance/seedance-2.5",
+    },
+  };
+  expect(appActionConfirmationTitle(turnOn, here)).toBe(
+    "Let every chat in this workspace make videos?",
+  );
+  expect(
+    appActionConfirmationTitle({ ...turnOn, pathParameters: { workspaceId: "ws-2" } }, here),
+  ).toBe("Let every chat in another workspace make videos?");
+  expect(
+    appActionConfirmationTitle(
+      { ...turnOn, body: { ...turnOn.body, enabledModelIds: [], defaultModelId: null } },
+      here,
+    ),
+  ).toBe("Turn off video for every chat in this workspace?");
+  // The second line names the payer in words, never the stored code.
+  expect(appActionReviewSummary(turnOn)).toBe("Paid with: Opengeni credits");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "workspace_gateway" },
+    }),
+  ).toBe("Paid with: The workspace's Vercel AI Gateway");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "supergrok_subscription" },
+    }),
+  ).toBe("Paid with: A connected SuperGrok account");
+  // An unknown code is still shown as it is.
+  expect(appActionReviewSummary({ id: "x", body: { fundingSource: "something_new" } })).toBe(
+    "Funding source: something_new",
+  );
+});
+
 test("an app action's card answers its question with Allow", () => {
   const context = {
     kind: "generic" as const,

@@ -9,7 +9,7 @@ import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
-import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
+import { callDesktop, type CuaDesktopRuntime, WINDOWS_SET_VALUE_REFUSED } from "../src/cua/wire";
 import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
@@ -1362,6 +1362,90 @@ describe("CUA desktop boundary", () => {
       retryable: false,
       message:
         "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+    });
+  });
+
+  test("Windows CUA's value-pattern refusal is a definite refusal that says to click and type", async () => {
+    const fixture = new WindowsFixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, args) => {
+      const response = await original(name, args);
+      if (name === "set_value")
+        return {
+          text: "set_value: element [1] does not implement ValuePattern or RangeValuePattern.",
+          images: [],
+          isError: true,
+          degraded: false,
+          rawJson: "{}",
+        };
+      if (name === "get_window_state") {
+        const state = JSON.parse(response.structuredJson!);
+        if (state.elements) state.elements[1].label = "Text Editor";
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "windows", { frontWindow: null });
+    try {
+      const observation = await backend.observe((await backend.targets())[0]!.id);
+      const field = observation.roots.find((node) => node.name === "Text Editor")!;
+      let unconfirmed = 0;
+      await expect(
+        backend.dispatch(
+          {
+            ...command(observation),
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: field.ref },
+              action: "set_value",
+              value: "pannekake",
+            },
+          },
+          undefined,
+          () => {
+            unconfirmed += 1;
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message:
+          "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+      });
+      expect(unconfirmed).toBe(0);
+      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+      expect(fixture.calls.some((call) => call.name === "bring_to_front")).toBe(false);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows CUA's text-only value-pattern refusal is definitely not dispatched", async () => {
+    // Windows CUA refuses set_value on Notepad's document with this text only:
+    // it disables the window for the write, and the field then refuses it.
+    const refusal =
+      "set_value: element [1] does not implement ValuePattern or RangeValuePattern. For controls with TogglePattern (CheckBox) or SelectionItemPattern (RadioButton / ComboBoxItem), use the `click` tool instead.";
+    // The refusal on its own is definite: CUA wrote nothing.
+    await expect(
+      callDesktop(
+        {
+          callTool: async () => ({
+            text: refusal,
+            images: [],
+            isError: true,
+            degraded: false,
+            rawJson: "{}",
+          }),
+          shutdown: async () => undefined,
+        },
+        "set_value",
+        {},
+        true,
+      ),
+    ).rejects.toMatchObject({
+      code: "unsupported",
+      dispatched: false,
+      cuaCode: WINDOWS_SET_VALUE_REFUSED,
     });
   });
 
@@ -3818,6 +3902,8 @@ describe("CUA desktop boundary", () => {
       reply: Record<string, unknown> | null = null;
       /** Window-change lines of the last step. */
       windowChanges: string[] = [];
+      /** The effect each step reports, by index. */
+      effects: (string | undefined)[] = [];
       opens: { pid: number; window_id: number; title: string }[] = [];
       ran = false;
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
@@ -3836,6 +3922,7 @@ describe("CUA desktop boundary", () => {
               index,
               ok: true,
               message: "done",
+              ...(this.effects[index] ? { effect: this.effects[index] } : {}),
               ...(index === steps.length - 1 && this.windowChanges.length
                 ? { window_changes: this.windowChanges }
                 : {}),
@@ -3913,6 +4000,43 @@ describe("CUA desktop boundary", () => {
         expect(steps[2]!.args).toMatchObject({ key: "return", modifiers: [] });
       } finally {
         await backend.close();
+      }
+    });
+
+    test("a batch whose key press CUA only sent is reported as unconfirmed, as one action is", async () => {
+      const fixture = new BatchFixture();
+      const { backend } = await open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const unconfirmed = async (effects: (string | undefined)[]) => {
+          fixture.effects = effects;
+          let reported = false;
+          await backend.dispatch(batch(await backend.observe(target.id)), undefined, () => {
+            reported = true;
+          });
+          return reported;
+        };
+        // The Enter after typed text, sent with nothing confirming it.
+        expect(await unconfirmed(["confirmed", "confirmed", "unverifiable"])).toBe(true);
+        // The element press CUA could only send, as for one action.
+        expect(await unconfirmed(["unverifiable", "confirmed", "confirmed"])).toBe(true);
+        expect(await unconfirmed(["confirmed", "confirmed", "confirmed"])).toBe(false);
+        // A CUA that reports no effects confirms nothing either way.
+        expect(await unconfirmed([])).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("only macOS offers window focus", async () => {
+      for (const platform of ["macos", "windows", "linux"] as const) {
+        const backend = await CuaComputerBackend.open(new BatchFixture(), platform);
+        try {
+          expect(backend.initialCapabilities.targetFocus).toBe(platform === "macos");
+          expect((await backend.capabilities()).targetFocus).toBe(platform === "macos");
+        } finally {
+          await backend.close();
+        }
       }
     });
 
@@ -4863,7 +4987,22 @@ describe("CUA desktop boundary", () => {
             code: "unsupported",
             dispatched: true,
             message:
-              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text; to open the menu itself, first bring the window to the front with the action {type:'focus',targetId:'cua:window:42:1'} (focus on the dropdown's ref only moves the keyboard focus), then invoke it again",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // An option with no text was not pressed: say how to choose one.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "popup_option_without_text",
+            message: "Not pressed: CUA's own reason, naming its own tools",
+          }),
+          expected: {
+            code: "unsupported",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
@@ -4894,6 +5033,39 @@ describe("CUA desktop boundary", () => {
         } finally {
           await backend.close();
         }
+      }
+    });
+
+    test("a dropdown refusal offers the window's focus only while focus would bring it forward", async () => {
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: true,
+        total: 3,
+        executed: 1,
+        failed_step: 0,
+        steps: [
+          {
+            index: 0,
+            ok: false,
+            phase: "action",
+            code: "select_menu_would_raise_window",
+            message: 'Open the menu with delivery_mode:"foreground" only if the user agreed',
+          },
+        ],
+      };
+      // Someone used the computer moments ago: focus would be refused, so
+      // the refusal names only the way that works.
+      const backend = await CuaComputerBackend.open(fixture, "macos", { personInput: () => 3 });
+      try {
+        const target = (await backend.targets())[0]!;
+        const failure = await backend
+          .dispatch(batch(await backend.observe(target.id)))
+          .catch((error) => error);
+        expect(failure.message).toBe(
+          "CUA stopped the batch at action 1: Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text",
+        );
+      } finally {
+        await backend.close();
       }
     });
 

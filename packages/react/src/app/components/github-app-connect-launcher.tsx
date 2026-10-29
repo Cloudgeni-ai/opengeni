@@ -35,7 +35,7 @@ export function useGitHubAppConnectLauncher(workspaceId: string): {
   const complete = useCallback(() => {
     setRequest(null);
     toast.success("GitHub connected");
-    void refreshGitHub(workspaceId, undefined, { sync: true });
+    void refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
   }, [refreshGitHub, workspaceId]);
   return {
     open,

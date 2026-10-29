@@ -74,11 +74,13 @@ function Harness({
   ownsOrganization = false,
   waiting = null,
   failed = false,
+  personal = false,
 }: {
   canManageWorkspace: boolean;
   ownsOrganization?: boolean;
   waiting?: number | null;
   failed?: boolean;
+  personal?: boolean;
 }) {
   const shared = useLearningDefaults(workspaceId, "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
@@ -87,7 +89,7 @@ function Harness({
     <LearningSettings
       workspaceName="Design preview"
       organizationName="Acme Robotics"
-      personal={false}
+      personal={personal}
       canManageWorkspace={canManageWorkspace}
       shared={shared}
       mine={mine}
@@ -134,12 +136,10 @@ test("shared and private chats are two labelled groups; a change saves at once",
     expect(container.textContent).toContain("Shared chats in Design preview");
     expect(container.textContent).toContain("Your private chats (all workspaces)");
     const groups = [...container.querySelectorAll("section")];
-    // Private instructions only apply in the Personal workspace, so there is no row for them.
+    // A private chat's own Instructions mode governs the workspace instructions it saves.
     const privateRows = [...groups[1]!.querySelectorAll("[data-slot=setting-row]")];
-    expect(privateRows.map((row) => row.textContent?.startsWith("Instructions"))).not.toContain(
-      true,
-    );
-    expect(privateRows).toHaveLength(2);
+    expect(privateRows.map((row) => row.textContent?.startsWith("Instructions"))).toContain(true);
+    expect(privateRows).toHaveLength(3);
     expect(container.textContent).not.toContain("Allow updates");
     const knowledgeReview = [...container.querySelectorAll<HTMLElement>("[role=radio]")].find(
       (radio) =>
@@ -156,6 +156,37 @@ test("shared and private chats are two labelled groups; a change saves at once",
         expectedVersion: 4,
         settings: { knowledge: "review_first", instructions: "review_first" },
       }),
+    );
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a Personal workspace shows its own Workspace layer beside your private chats", async () => {
+  saveAgentLearningSettings.mockClear();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness canManageWorkspace personal />));
+    await settle();
+    expect(container.textContent).toContain("Chats in Design preview");
+    expect(container.textContent).toContain("Only you are in this workspace.");
+    expect(container.textContent).toContain("Your private chats (all workspaces)");
+    const groups = [...container.querySelectorAll("section")];
+    expect(groups[0]!.querySelectorAll("[data-slot=setting-row]")).toHaveLength(3);
+    expect(groups[1]!.querySelectorAll("[data-slot=setting-row]")).toHaveLength(3);
+    const workspaceReview = [...groups[0]!.querySelectorAll<HTMLElement>("[role=radio]")].find(
+      (radio) =>
+        radio.textContent === "Review first" &&
+        radio.closest("[data-slot=setting-row]")?.textContent?.includes("Knowledge"),
+    );
+    await act(async () => workspaceReview!.click());
+    await settle();
+    expect(saveAgentLearningSettings).toHaveBeenCalledWith(
+      workspaceId,
+      expect.objectContaining({ scope: "workspace" }),
     );
   } finally {
     await act(async () => root.unmount());
