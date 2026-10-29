@@ -85,3 +85,56 @@ test("SUB-FAIL-08 portable request projection keeps completed tools exactly once
     provenance.mockRestore();
   }
 });
+
+test("a turn not served by Codex never sends Codex's remote compaction checkpoint", async () => {
+  const sessionId = crypto.randomUUID(),
+    turnId = crypto.randomUUID();
+  const rows = [
+    { type: "compaction", encrypted_content: "opaque-codex-checkpoint" },
+    { type: "message", role: "user", content: "Continue" },
+  ].map((item, position) => ({
+    id: crypto.randomUUID(),
+    position,
+    item,
+    providerArtifactInvalidatedAt: null,
+  }));
+  const updates = spyOn(db, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+  const envelope = spyOn(db, "getSandboxSessionEnvelope").mockResolvedValue(null);
+  const inputs: unknown[][] = [];
+  const runtime = {
+    prepareInput: async (agent, input) => {
+      const prepared = await prepareRunInput(agent, input);
+      inputs.push(prepared.input);
+      return prepared;
+    },
+  } as OpenGeniRuntime;
+  const trigger = {
+    id: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    sessionId,
+    sequence: 1,
+    type: "user.message",
+    payload: { text: "Continue" },
+    occurredAt: "2026-10-28T00:00:00.000Z",
+  };
+  try {
+    const options = {
+      turnId,
+      providerApi: "responses" as const,
+      fileAuthority: { accountId: crypto.randomUUID(), subjectId: null },
+      loadActiveHistory: async () => activeHistoryRead(rows),
+    };
+    await turnInput({} as db.Database, runtime, {}, trigger, {
+      ...options,
+      omitRemoteCompactionItems: true,
+    });
+    expect(JSON.stringify(inputs[0])).not.toContain("opaque-codex-checkpoint");
+    expect(JSON.stringify(inputs[0])).toContain("Continue");
+    // A Codex turn keeps the checkpoint it can read.
+    await turnInput({} as db.Database, runtime, {}, trigger, options);
+    expect(JSON.stringify(inputs[1])).toContain("opaque-codex-checkpoint");
+  } finally {
+    updates.mockRestore();
+    envelope.mockRestore();
+  }
+});

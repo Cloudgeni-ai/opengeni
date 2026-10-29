@@ -1,9 +1,11 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import {
+  personalWorkspaceExtensionApiIntegrations,
   personalWorkspaceExtensionMcpServers,
   personalWorkspaceExtensionSubject,
   type PersonalWorkspaceExtensionMcpServer,
 } from "./personal-workspace-connectors";
+import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
 import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
@@ -84,6 +86,7 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { listOwnConnectionMetadata } from "./personal-connection-delegations";
 import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
@@ -484,7 +487,9 @@ function assertPersonalIntegrationSetupRequest(
   payload: EnableCapabilityRequest,
 ): void {
   if (!isPersonalIntegrationSetupCandidate(item))
-    throw new HTTPException(403, { message: "Only an admin can turn on this integration" });
+    throw new HTTPException(403, {
+      message: `Only an admin can turn on ${item.name}. Ask an admin to turn it on first, then connect your account.`,
+    });
   const ref = payload.connectionRef;
   if (
     !ref ||
@@ -917,7 +922,7 @@ async function validateMcpCapabilityConnectionRef(
     return normalized;
   }
 
-  let connection = normalized.connectionId
+  let connection: ConnectionMetadata | null = normalized.connectionId
     ? await getConnectionMetadata(
         input.db,
         input.workspaceId,
@@ -944,7 +949,35 @@ async function validateMcpCapabilityConnectionRef(
           candidate.status === "active",
       ) ?? null;
   }
+  if (!connection && subjectScope === "subject") {
+    // A personal account follows its owner: it may have been connected from
+    // another of their workspaces and is still the same, usable connection.
+    const own = await listOwnConnectionMetadata(input.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.grant.subjectId,
+      includeInactive: true,
+    });
+    connection =
+      own.find((candidate) =>
+        normalized.connectionId
+          ? candidate.id === normalized.connectionId
+          : candidate.providerDomain === normalized.providerDomain &&
+            (!normalized.kind || candidate.kind === normalized.kind) &&
+            candidate.status === "active",
+      ) ?? null;
+  }
   if (!connection) {
+    // "Each person signs in": every person's own account is resolved when
+    // they use it, so turning the server on needs no account of the caller's
+    // own. Only for the server's own provider, and only a plain OAuth ref.
+    if (isPerPersonOAuthRefForItem(item, normalized))
+      // Stored as each person's sign-in records it, so their rows match.
+      return {
+        ...normalized,
+        kind: "oauth2",
+        providerDomain: canonicalDomain(normalized.providerDomain),
+      };
     throw new HTTPException(422, {
       message: "connectionRef does not reference a visible active connection",
     });
@@ -978,6 +1011,47 @@ async function validateMcpCapabilityConnectionRef(
     return genericSubjectRef;
   }
   return normalized;
+}
+
+function canonicalDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./u, "");
+}
+
+function hostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A per-person OAuth reference for this exact server: no account id, no
+ * account selection or resources, and the provider is the server itself
+ * (its catalog provider domain or its endpoint host). Each person's own
+ * account for that provider is resolved when they use it.
+ */
+function isPerPersonOAuthRefForItem(
+  item: CapabilityCatalogItem,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.accountSelection ||
+    ref.authoritySource === "host" ||
+    ref.selectedResources
+  )
+    return false;
+  const domain = canonicalDomain(ref.providerDomain);
+  return [item.providerDomain, hostOf(item.mcpUrl ?? item.endpointUrl)].some(
+    (candidate) => typeof candidate === "string" && canonicalDomain(candidate) === domain,
+  );
 }
 
 function authDeferredMcpConnectivity(): Record<string, unknown> {
@@ -1258,19 +1332,51 @@ export async function settingsWithEnabledCapabilityMcpServers(
   // scope overlaps on a caller's transaction.
   const extensionSubject = personalWorkspaceExtensionSubject(options ?? {});
   if (extensionSubject) {
-    enabled = [
-      ...enabled,
-      ...(await personalWorkspaceExtensionMcpServers(db, {
+    const accountId =
+      options?.accountId ??
+      (options?.codexApps && !(options.codexApps instanceof Promise)
+        ? options.codexApps.accountId
+        : undefined) ??
+      (await rlsContextForWorkspace(db, workspaceId)).accountId;
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId,
+      workspaceId,
+      subjectId: extensionSubject,
+    });
+    if (origins.length > 0) {
+      enabled = [
+        ...enabled,
+        ...(await personalWorkspaceExtensionMcpServers(db, {
+          workspaceId,
+          subjectId: extensionSubject,
+          accountId,
+          origins,
+          ownServers: [...settings.mcpServers, ...enabled],
+        })),
+      ];
+      const carriedApiIntegrations = await personalWorkspaceExtensionApiIntegrations(db, {
         workspaceId,
         subjectId: extensionSubject,
-        accountId:
-          options?.accountId ??
-          (options?.codexApps && !(options.codexApps instanceof Promise)
-            ? options.codexApps.accountId
-            : undefined),
-        ownServers: [...settings.mcpServers, ...enabled],
-      })),
-    ];
+        accountId,
+        origins,
+        ownIntegrations: apiIntegrations,
+        takenServerIds: [
+          ...settings.mcpServers.map((server) => server.id),
+          ...enabled.map((server) => server.id),
+          ...apiIntegrations.map((integration) => integration.serverId),
+        ],
+      });
+      // A turn acting only through frozen delegations keeps exactly those.
+      apiIntegrations = [
+        ...apiIntegrations,
+        ...(options?.subjectId
+          ? carriedApiIntegrations
+          : apiIntegrationsMatchingDelegations(
+              carriedApiIntegrations,
+              options?.personalConnectionDelegations ?? [],
+            )),
+      ];
+    }
   }
   apiIntegrations = apiIntegrations.filter((integration) =>
     apiIntegrationIsExecutable(integration, settings, workspaceId),
@@ -1350,22 +1456,51 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     ...apiIntegrations.map((integration) => integration.serverId),
   ]);
   if (unresolved.length > 0) {
-    enabled.push(
-      ...(
-        await personalWorkspaceExtensionMcpServers(db, {
-          workspaceId,
-          subjectId: options.subjectId,
-          accountId: options.accountId,
-          // Duplicate checks need the workspace's complete own set, not only
-          // the targets; read it only once the workspace is a Personal one.
-          ownServers: async () => [
-            ...settings.mcpServers,
-            ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
-          ],
-        })
-      ).filter((server) => serverIds.has(server.id)),
-    );
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId: options.accountId,
+      workspaceId,
+      subjectId: options.subjectId,
+    });
     options.signal?.throwIfAborted();
+    if (origins.length > 0) {
+      // Duplicate checks need the workspace's complete own set, not only the
+      // targets; read it only once the workspace is a Personal one.
+      const ownMcp = [
+        ...settings.mcpServers,
+        ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
+      ];
+      enabled.push(
+        ...(
+          await personalWorkspaceExtensionMcpServers(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            ownServers: ownMcp,
+          })
+        ).filter((server) => serverIds.has(server.id)),
+      );
+      options.signal?.throwIfAborted();
+      apiIntegrations.push(
+        ...(
+          await personalWorkspaceExtensionApiIntegrations(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            serverIds: unresolved,
+            takenServerIds: async () => [
+              ...ownMcp.map((server) => server.id),
+              ...enabled.map((server) => server.id),
+              ...(await listInstalledApiIntegrations(db, workspaceId, options.subjectId)).map(
+                (integration) => integration.serverId,
+              ),
+            ],
+          })
+        ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId)),
+      );
+      options.signal?.throwIfAborted();
+    }
   }
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)

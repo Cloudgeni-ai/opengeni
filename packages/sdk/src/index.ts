@@ -1695,6 +1695,8 @@ export type {
   WorkspaceMemorySearchResponse,
   WorkspaceSessionDefaults,
   WorkspaceSettings,
+  WorkspaceDefaultExecutionTarget,
+  MemberDefaultExecutionTarget,
   WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
   VoiceInputProviderId,

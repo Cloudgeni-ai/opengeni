@@ -2,6 +2,7 @@ import type {
   DefaultModelSelection,
   LatencyMode,
   ReasoningEffort,
+  SessionEvent,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 
@@ -69,19 +70,15 @@ const CONNECTED_BILLING_CLASSES = new Set([
 /**
  * The composer selection offered in place of an unavailable session model:
  * the server-resolved default when selectable, else a selectable connected
- * service, else the first selectable model in picker order. A
- * remote-compaction session stays on Codex models. Applies only to the next
- * message; accepted turns and history keep their frozen model.
+ * service, else the first selectable model in picker order. Applies only to
+ * the next message; accepted turns and history keep their frozen model.
  */
 export function unavailableModelReplacement(input: {
   rows: readonly PickerModelRow[];
   defaultSelection: DefaultModelSelection | null;
   latencyMode: LatencyMode;
-  codexOnly: boolean;
 }): UnavailableModelReplacement | null {
-  const selectable = input.rows.filter(
-    (row) => row.selectable && (!input.codexOnly || row.catalog.source === "codex"),
-  );
+  const selectable = input.rows.filter((row) => row.selectable);
   const resolved = input.defaultSelection
     ? findPickerRow(selectable, input.defaultSelection.model)
     : undefined;
@@ -102,4 +99,45 @@ export function unavailableModelReplacement(input: {
         : defaultEffortForModel(row.catalog),
     latencyMode: latencyRunnable ? null : "standard",
   };
+}
+
+/**
+ * Failure codes for a ChatGPT/Codex plan that has run out of usage, and for a
+ * subscription capacity wait that ended without capacity.
+ */
+const CODEX_USAGE_LIMIT_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "codex_usage_limit_reached",
+  "codex_included_usage_exhausted",
+  "subscription_capacity_unavailable",
+]);
+
+export function isCodexUsageLimitFailure(failureCode: string | null | undefined): boolean {
+  return failureCode !== null && failureCode !== undefined
+    ? CODEX_USAGE_LIMIT_FAILURE_CODES.has(failureCode)
+    : false;
+}
+
+/** Turn lifecycle events after which an earlier usage-limit failure is no longer current. */
+const TURN_PROGRESS_EVENTS: ReadonlySet<string> = new Set([
+  "user.message",
+  "turn.started",
+  "turn.completed",
+  "turn.cancelled",
+  "turn.superseded",
+]);
+
+/**
+ * The chat's latest turn ended on a usage limit (the chat itself stays idle
+ * and takes new messages). Any later message or turn makes it stale.
+ */
+export function latestTurnFailedOnUsageLimit(events: readonly SessionEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type === "turn.failed") {
+      const code = (event.payload as Record<string, unknown> | null)?.code;
+      return isCodexUsageLimitFailure(typeof code === "string" ? code : null);
+    }
+    if (TURN_PROGRESS_EVENTS.has(event.type)) return false;
+  }
+  return false;
 }

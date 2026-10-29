@@ -125,7 +125,21 @@ every catalog read, session create, approval-policy read and worker claim.
   still set its approvals in Personal, stored for the Personal workspace like
   any of its own connectors.
 
-API integration definitions and MCP event sources are not carried yet.
+API Integrations follow the same rules
+(`personalWorkspaceExtensionApiIntegrations`): a curated definition (for
+example Outlook, OneDrive or Teams) or a workspace's own OpenAPI or GraphQL
+service installed in the origin workspace is carried when its instance is
+bound to one of the owner's own active **Only me** accounts there. An API
+Integration holds one instance per account, so Personal's own instances sit
+beside carried ones; only an instance Personal already has for the same
+account, or a server id it already serves, wins. The policy key is the curated
+definition's id, or `custom:<protocol>` for a workspace-authored one. The
+integrations list (`GET /v1/workspaces/:id/integrations`) marks a carried
+instance with `personalExtension`; the Connections page labels its account
+**From <workspace>** and leaves Reconnect, Remove and its settings to that
+workspace.
+
+MCP event sources are not carried yet.
 
 ### Credential headers
 

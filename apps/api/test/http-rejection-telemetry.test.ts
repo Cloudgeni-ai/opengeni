@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MissingPermissionRefusal, WORKSPACE_SETTINGS_REFUSAL } from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
 import {
   httpRejectionFactsFromEnvelope,
@@ -61,6 +62,50 @@ describe("HTTP rejection telemetry", () => {
     expect(rejectionFingerprint("workspace access denied")).not.toBe(
       rejectionFingerprint("organization is not available"),
     );
+  });
+
+  test("names the permission a plain-sentence refusal carries in details", () => {
+    const facts = httpRejectionFactsFromEnvelope(
+      {
+        error: {
+          status: 403,
+          code: "forbidden",
+          message: "You don't have permission to manage this workspace's tools and integrations.",
+          details: {
+            code: "missing_permission",
+            permission: "capabilities:manage",
+          },
+        },
+      },
+      "forbidden",
+    );
+    expect(facts.reason).toBe("permission:capabilities:manage");
+    const foreign = httpRejectionFactsFromEnvelope(
+      {
+        error: {
+          code: "forbidden",
+          message: "x",
+          details: { permission: `${sentinel}:x` },
+        },
+      },
+      "forbidden",
+    );
+    expect(foreign.reason).toBe("unclassified");
+    expect(JSON.stringify(foreign)).not.toContain(sentinel);
+  });
+
+  test("classifies the shared settings refusal as workspace:admin", () => {
+    expect(
+      httpRejectionFactsFromError(
+        new MissingPermissionRefusal("workspace:admin", {
+          message: WORKSPACE_SETTINGS_REFUSAL,
+        }),
+        "forbidden",
+      ),
+    ).toMatchObject({
+      code: "forbidden",
+      reason: "permission:workspace:admin",
+    });
   });
 
   test("classifies a thrown error that escaped the error handler", () => {
@@ -176,6 +221,56 @@ describe("HTTP rejection telemetry", () => {
 });
 
 describe("API request middleware", () => {
+  test("a missing permission reaches the client as a plain sentence with typed details", async () => {
+    const { createApp } = await import("../src/app");
+    const { testSettings } = await import("@opengeni/testing/settings");
+    const settings = testSettings();
+    const observability = createObservability(
+      {
+        ...settings,
+        observabilityStructuredLogs: false,
+        observabilityMetricsEnabled: true,
+      },
+      { component: "api" },
+    );
+    const app = createApp({
+      settings,
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      observability,
+    });
+    app.get("/v1/test-only/refusal", () => {
+      throw new MissingPermissionRefusal("capabilities:manage");
+    });
+    const response = await app.request("/v1/test-only/refusal");
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as {
+      error: {
+        code: string;
+        message: string;
+        details?: Record<string, unknown>;
+      };
+    };
+    expect(body.error).toMatchObject({
+      code: "forbidden",
+      message: "You don't have permission to manage this workspace's tools and integrations.",
+      details: {
+        code: "missing_permission",
+        permission: "capabilities:manage",
+      },
+    });
+    expect(body.error.message).not.toContain("missing permission");
+    const series = (await observability.prometheusMetrics())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_http_request_rejections_total{"));
+    expect(
+      series.some((line) => line.includes('reason="permission:capabilities:manage"')),
+      series.join("\n"),
+    ).toBe(true);
+  });
+
   test("counts and logs a rejected request while the client still receives the envelope", async () => {
     const { createApp } = await import("../src/app");
     const { testSettings } = await import("@opengeni/testing/settings");

@@ -1129,6 +1129,7 @@ import {
   registerSessionTurnAttemptClaim,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
+  sessionWorkstreamHasActiveWork,
   type SessionDiscoveryControl,
   type SessionCommandActor,
   SessionControlConflictError,
@@ -36162,6 +36163,69 @@ export async function setSessionAttention(
 }
 
 /**
+ * Whether archiving this chat must first ask to pause its work, answered from
+ * a plain read before any lock. Archive takes the person's archive lock and the
+ * workspace's control lock before it pauses; on a busy workspace those waits
+ * last many seconds, and the question must not wait behind them. The locked
+ * check in the pause stays the authority for work that starts in between.
+ * False when the chat is not one this person can archive here, is already
+ * archived for them, or changed since the version they saw, so those requests
+ * take the ordinary path and get its answer.
+ */
+export async function sessionArchiveNeedsPauseConfirmation(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    expectedVersion?: number | undefined;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (tx) => {
+      await requireSessionPersonalStateWriteAuthority(tx, input);
+      const [chat] = await tx
+        .select({
+          id: schema.sessions.id,
+          archived: schema.sessionPins.archived,
+          archiveVersion: schema.sessionPins.archiveVersion,
+        })
+        .from(schema.sessions)
+        .leftJoin(
+          schema.sessionPins,
+          and(
+            eq(schema.sessionPins.workspaceId, schema.sessions.workspaceId),
+            eq(schema.sessionPins.sessionId, schema.sessions.id),
+            eq(schema.sessionPins.subjectId, input.subjectId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            isNull(schema.sessions.parentSessionId),
+          ),
+        )
+        .limit(1);
+      if (!chat || chat.archived === true) return false;
+      if (
+        input.expectedVersion !== undefined &&
+        input.expectedVersion !== (chat.archiveVersion ?? 0)
+      ) {
+        return false;
+      }
+      return await sessionWorkstreamHasActiveWork(tx, input.workspaceId, input.sessionId);
+    },
+    undefined,
+    "none",
+  );
+}
+
+/**
  * Archive or restore one root chat for a single member. Archiving also removes
  * personal pin/follow-up labels so hidden work cannot remain in active rail
  * sections. Descendants inherit visibility from the archived root at list time.
@@ -43149,6 +43213,11 @@ export async function applyContextCompaction(
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
+    /**
+     * The replacement is a portable rebuild of a Codex remote_v2 session for
+     * another model: switch the session to portable compaction with it.
+     */
+    switchToPortableCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
@@ -43323,6 +43392,7 @@ export async function applyContextCompaction(
             // post-compaction response install the next authoritative count.
             lastInputTokens: null,
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(input.switchToPortableCompaction ? { codexCompactionMode: "portable" } : {}),
             ...(insertedEvents.length > 0
               ? {
                   lastSequence: fence.session.lastSequence + insertedEvents.length,
@@ -44119,6 +44189,70 @@ export async function requestSessionCompaction(
       reason: "compaction_requested",
     });
     return { wakeRevision, temporalWorkflowId };
+  });
+}
+
+/**
+ * Prepare a Codex remote_v2 session for a turn on another provider's model.
+ * Without a Codex checkpoint in its active history the session switches to
+ * portable compaction at once. With one, which only Codex can read, this
+ * requests a forced compaction instead: the turn's pre-turn compaction
+ * rebuilds a portable summary from the stored transcript and switches the
+ * session in the same transaction that installs it, so a failed rebuild is
+ * simply requested again by the next such turn. A portable session is left
+ * untouched (null). With `attempt`, the write happens only while that exact
+ * turn attempt still owns the session ("fenced" otherwise), so a stale or
+ * superseded claim never converts the chat.
+ */
+export async function convertSessionToPortableCompactionForModelSwitch(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  attempt?: { turnId: string; executionGeneration: number; attemptId: string },
+): Promise<
+  { codexCompactionMode: "remote_v2" | "portable"; compactRequested: boolean } | null | "fenced"
+> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    if (attempt) {
+      const fence = await lockTurnAttemptWriteFenceTx(scopedDb as unknown as Database, {
+        workspaceId,
+        sessionId,
+        ...attempt,
+      });
+      if (!fence.allowed) return "fenced";
+    }
+    const checkpoint = sql`exists (
+      select 1 from session_history_items history
+      where history.workspace_id = ${workspaceId}
+        and history.session_id = ${sessionId}
+        and history.active = true
+        and history.item ->> 'type' = 'compaction'
+        and jsonb_typeof(history.item -> 'encrypted_content') = 'string'
+        and history.item ->> 'encrypted_content' <> ''
+    )`;
+    const [converted] = await scopedDb
+      .update(schema.sessions)
+      .set({
+        codexCompactionMode: sql`case when ${checkpoint} then 'remote_v2' else 'portable' end`,
+        compactRequested: sql`${schema.sessions.compactRequested} or ${checkpoint}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessions.codexCompactionMode, "remote_v2"),
+        ),
+      )
+      .returning({
+        codexCompactionMode: schema.sessions.codexCompactionMode,
+        compactRequested: schema.sessions.compactRequested,
+      });
+    if (!converted) return null;
+    return {
+      codexCompactionMode: converted.codexCompactionMode === "portable" ? "portable" : "remote_v2",
+      compactRequested: converted.compactRequested,
+    };
   });
 }
 
@@ -87510,6 +87644,7 @@ export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = bo
   | (RequireIdleSession extends true
       ?
           | { added: false; reason: "session_not_idle" }
+          | { added: false; reason: "session_waiting_capacity" }
           | { added: false; reason: "session_paused" }
           | { added: false; reason: "workspace_paused" }
       : never)
@@ -87810,6 +87945,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
     rejectionReason:
       | "session_cancelled"
       | "session_not_idle"
+      | "session_waiting_capacity"
       | "session_paused"
       | "workspace_paused"
       | null,
@@ -87938,7 +88074,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
           }
           const reason =
             effectiveControl.state === "active"
-              ? "session_not_idle"
+              ? // A chat parked on a model account (for example a Codex plan
+                // out of usage or no longer connected) is told apart, so the
+                // schedule can name the fix: pick another model in the chat.
+                session.status === "waiting_capacity"
+                ? "session_waiting_capacity"
+                : "session_not_idle"
               : sessionPaused
                 ? "session_paused"
                 : "workspace_paused";
@@ -92555,6 +92696,7 @@ export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
+export * from "./workspace-member-execution-defaults";
 export * from "./recordings";
 export * from "./recording-live";
 export {

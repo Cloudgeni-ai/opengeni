@@ -70,9 +70,9 @@ const NO_WORDS: readonly string[] = [];
  * anywhere (`getDesktopDictation()`). It renders nothing: when the person
  * presses the dictation shortcut in any app, it records the microphone here
  * and transcribes with the workspace's voice input, and the app types the
- * text where their cursor is. Speech is kept the way the composer keeps it:
- * a dictation that fails or is cancelled after a few seconds stays saved,
- * and the composer offers it later.
+ * text where their cursor is. A dictation that fails stays saved, and the
+ * composer offers it later. A cancelled one is deleted; its speech goes to the
+ * app's recent dictations only, to play or transcribe again there.
  */
 export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   const t = useOpenGeniText();
@@ -94,6 +94,8 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   const current = useRef<Current | null>(null);
   /** The speech of the dictation being recorded, read for the app to keep. */
   const kept = useRef<{ id: string; audio: Promise<DesktopDictationAudio | null> } | null>(null);
+  /** While the app's Cancel runs: the cancelled dictation's speech, when it is worth keeping. */
+  const cancelling = useRef<{ audio: Promise<DesktopDictationAudio | null> | null } | null>(null);
 
   const report = useCallback(
     (next: DesktopDictationReport) => {
@@ -138,21 +140,30 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
     beforeStart: props.beforeStart,
     // Dictations an earlier page left are for the composer to offer.
     recover: false,
-    // The app keeps each dictation's speech with its text, to play or transcribe again.
-    onAudio: ({ audio, durationMilliseconds }) => {
+    // The app keeps each dictation's speech with its text, to play or transcribe
+    // again, and a cancelled dictation's speech on its own.
+    onAudio: ({ audio, durationMilliseconds, cancelled }) => {
+      const asked = cancelled ? cancelling.current : null;
+      if (asked) {
+        asked.audio = readSpeech(audio, durationMilliseconds);
+        return;
+      }
       const active = current.current;
       if (!active || active.again) return;
-      kept.current = {
-        id: active.id,
-        audio: audio.arrayBuffer().then(
-          (buffer) => ({
-            mimeType: audio.type || "audio/webm",
-            bytes: new Uint8Array(buffer),
-            durationMilliseconds,
+      if (cancelled) {
+        // The page's own Escape: the dictation ends here.
+        current.current = null;
+        kept.current = null;
+        void readSpeech(audio, durationMilliseconds).then((speech) =>
+          report({
+            dictationId: active.id,
+            phase: "cancelled",
+            ...(speech ? { audio: speech } : {}),
           }),
-          () => null,
-        ),
-      };
+        );
+        return;
+      }
+      kept.current = { id: active.id, audio: readSpeech(audio, durationMilliseconds) };
     },
     recordings: props.recordings,
     platform: props.platform,
@@ -179,8 +190,8 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
         });
         return;
       }
-      // A dictation still held here (failed, or cancelled after a few
-      // seconds) stays saved for the composer; this one starts fresh.
+      // A dictation still held here (one that failed) stays saved for the
+      // composer; this one starts fresh.
       if (voiceNow.status !== "idle") voiceNow.release();
       const again = request.kind === "transcribe";
       current.current = { id: request.dictationId, phase: "starting", declined: false, again };
@@ -196,17 +207,37 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
       case "stop":
         voiceNow.stop();
         return;
-      case "cancel":
+      case "cancel": {
         current.current = null;
+        kept.current = null;
         if (active.again) {
           // The app still has the speech: nothing here needs keeping.
           void voiceNow.discard();
-        } else {
-          // A start shorter than a few seconds is deleted; real speech stays saved.
-          voiceNow.cancel();
+          send({ dictationId: active.id, phase: "cancelled" });
+          return;
         }
-        send({ dictationId: active.id, phase: "cancelled" });
+        // Deleted here; speech worth keeping comes back for the app's recent dictations.
+        const asked: { audio: Promise<DesktopDictationAudio | null> | null } = { audio: null };
+        cancelling.current = asked;
+        try {
+          voiceNow.cancel();
+        } finally {
+          cancelling.current = null;
+        }
+        const { audio } = asked;
+        if (!audio) {
+          send({ dictationId: active.id, phase: "cancelled" });
+          return;
+        }
+        void audio.then((speech) =>
+          send({
+            dictationId: active.id,
+            phase: "cancelled",
+            ...(speech ? { audio: speech } : {}),
+          }),
+        );
         return;
+      }
       case "dismiss":
         current.current = null;
         if (active.again) void voiceNow.discard();
@@ -246,6 +277,8 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
     if (!pending) return;
     setPending(null);
     const { id, audio } = pending;
+    // Cancelled before it could start: nothing to record.
+    if (current.current?.id !== id) return;
     const starting = audio
       ? voiceRef.current.transcribe(new Blob([audio.bytes as BlobPart], { type: audio.mimeType }), {
           durationMilliseconds: audio.durationMilliseconds,
@@ -309,7 +342,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
         }
         return;
       case "recovered":
-        // Stopped here without transcribing (the page's own Escape): it stays saved.
+        // Set aside here without transcribing: it stays saved for the composer.
         current.current = null;
         report({ dictationId: active.id, phase: "cancelled" });
         return;
@@ -435,3 +468,18 @@ export function dictationErrorMessage(code: string | null, t: OpenGeniText): str
 }
 
 function noop(): void {}
+
+/** A dictation's speech as the app keeps it, or null when it can't be read. */
+function readSpeech(
+  audio: Blob,
+  durationMilliseconds: number,
+): Promise<DesktopDictationAudio | null> {
+  return audio.arrayBuffer().then(
+    (buffer) => ({
+      mimeType: audio.type || "audio/webm",
+      bytes: new Uint8Array(buffer),
+      durationMilliseconds,
+    }),
+    () => null,
+  );
+}

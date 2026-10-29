@@ -46,6 +46,7 @@ import {
 } from "../../realtime";
 import {
   OpenGeniApiError,
+  type NewSessionDraft,
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
@@ -888,7 +889,11 @@ function SessionsIndexRouteContent({
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
-    (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
+    (
+      remote: NewSessionDraftEditable,
+      history: NewSessionSelectionHistory,
+      memberTarget: NewSessionDraft["memberDefaultExecutionTarget"] | null,
+    ) => {
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -913,6 +918,7 @@ function SessionsIndexRouteContent({
       setSelectedProjectChannelId(projectSelection.channelId);
       const compute = initialWorkspaceMachineCompute({
         settings: workspace?.settings,
+        memberTarget,
         options: remote.options,
         fallback: projectSelection.compute,
         backend: defaultSandboxBackend,

@@ -144,13 +144,20 @@ pub async fn create<S: Store>(
         default_workdir: None,
         agent: None,
     };
+    // E2B's running sandbox sleeps like any other fleet sandbox whose
+    // create says nothing, and reaches every offer its team is given:
+    // E2B's API cannot name one. One killed at its timeout is never
+    // resumed, so it is not copied to object storage while it runs: a
+    // sandbox its host loses is lost, as on E2B, and a checkpoint would
+    // only stop its programs for nothing.
+    let mut sleep = front.service.settings().sleep;
+    if !auto_pause {
+        sleep.checkpoint_every_ms = None;
+    }
     let spec = Spec {
         image: template.image.clone(),
-        // E2B's running sandbox sleeps and checkpoints like any other
-        // fleet sandbox whose create says nothing, and reaches every
-        // offer its team is given: E2B's API cannot name one.
         config: template
-            .config(front.service.settings().sleep)
+            .config(sleep)
             .with_reach(front.service.settings().reach_of(team)),
         agent: None,
     };

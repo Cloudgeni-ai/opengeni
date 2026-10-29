@@ -24,7 +24,7 @@ import {
 import { toast } from "../../lib/toast";
 
 import { findPickerRow } from "../../../model-policy";
-import { withLineageAutomationFacts } from "../../../session-list-model";
+import { sessionDisplayTitle, withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
@@ -544,7 +544,13 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
+        const updated = await requestSessionArchive(
+          context,
+          target,
+          archived,
+          confirmArchive,
+          sessionDisplayTitle(target),
+        );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>

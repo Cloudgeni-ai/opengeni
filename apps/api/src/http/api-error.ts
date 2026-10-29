@@ -14,6 +14,7 @@ import {
 } from "@opengeni/db";
 import {
   ConnectionAccountSelectionError,
+  MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
 } from "@opengeni/core";
@@ -44,6 +45,18 @@ export class ApiHttpError extends HTTPException {
     this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
   }
+}
+
+/** A missing permission keeps its plain sentence and names the permission in `details`. */
+export function missingPermissionHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof MissingPermissionRefusal)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: error.details,
+  });
 }
 
 export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError | null {

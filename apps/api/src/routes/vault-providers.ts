@@ -61,6 +61,7 @@ import {
   type ExternalVaultProviderFactories,
   loadExternalVaultConnection,
   pendingVaultCredentialBundle,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   createConnection,
@@ -400,7 +401,7 @@ export function registerVaultProviderRoutes(
       payload.ownership === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") !== true
     ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     if (payload.ownership === "user" && !isPersonalConnectionOwnerPrincipal(authorization)) {
       throw new HTTPException(403, {
@@ -527,7 +528,7 @@ export function registerVaultProviderRoutes(
     requirePermission(authorization.grant, "secrets:write");
     const payload = await parseRequestJson(c, LinkProviderVaultRequest);
     if (payload.ownerKind === "organization" && !isAccountAdmin(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const context = vaultContextFor(authorization, workspaceId);
     try {
@@ -637,7 +638,7 @@ export function registerVaultProviderRoutes(
     requirePermission(authorization.grant, "secrets:write");
     const payload = await parseRequestJson(c, CreateManagedProviderVaultRequest);
     if (payload.ownerKind === "organization" && !isAccountAdmin(authorization)) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const context = vaultContextFor(authorization, workspaceId);
     let created: ProviderVault | undefined;
@@ -1246,7 +1247,7 @@ export function registerVaultProviderRoutes(
     ownership: "user" | "workspace" | "organization",
   ): void {
     if (ownership === "organization" && !isAccountAdmin(authorization))
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     if (ownership === "user" && !isPersonalConnectionOwnerPrincipal(authorization))
       throw new HTTPException(403, {
         message: "Only a signed-in person can manage a personal vault connection",

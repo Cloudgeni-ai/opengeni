@@ -9,7 +9,7 @@ import {
  * mark chats through these, so they behave identically everywhere.
  */
 import { useCallback, useMemo, useRef } from "react";
-import type { SessionListRow } from "../../../session-list-model";
+import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
 import { useAppContext } from "../../app-context";
 import { usePage } from "../navigation";
 import { applySessionArchiveProjection } from "../session-pagination";
@@ -92,7 +92,13 @@ export function useChatOperations(): ChatOperations {
       if (!accepted) return;
       archiving.current.add(chat.id);
       try {
-        const updated = await requestSessionArchive(context, chat, archived, confirmArchive);
+        const updated = await requestSessionArchive(
+          context,
+          chat,
+          archived,
+          confirmArchive,
+          sessionDisplayTitle(chat),
+        );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
         context.setSession((current) =>

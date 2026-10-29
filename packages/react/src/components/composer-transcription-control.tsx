@@ -92,7 +92,7 @@ export type ComposerTranscriptionMessages = {
 const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
   start: t("composerTranscriptionControl.startVoiceInput"),
   stop: t("composerTranscriptionControl.stopAndTranscribe"),
-  cancel: t("composerTranscriptionControl.stopWithoutTranscribing"),
+  cancel: t("composerTranscriptionControl.discardDictation"),
   retry: t("composerTranscriptionControl.retryVoiceInput"),
   transcribeSaved: t("composerTranscriptionControl.transcribeSavedRecording"),
   timeRemaining: t("composerTranscriptionControl.stopsAndTranscribesInSeconds", {
@@ -100,7 +100,7 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
   }),
   pauseRetrying: t("composerTranscriptionControl.pauseAutomaticRetry"),
   requestingPermission: t("composerTranscriptionControl.requestingMicrophone"),
-  recording: t("composerTranscriptionControl.recordingPressEscapeToStop"),
+  recording: t("composerTranscriptionControl.recordingPressEscapeToDiscard"),
   saving: t("composerTranscriptionControl.savingAudioLocally"),
   transcribing: t("composerTranscriptionControl.transcribing"),
   retrying: t("composerTranscriptionControl.savedRetryingTranscription"),
@@ -220,19 +220,20 @@ export function ComposerTranscriptionControl({
   const retrying = status === "retrying";
   const capturing = status === "requesting-permission" || status === "recording";
 
-  const cancelTranscription = transcription.cancel;
+  const setAsideTranscription = transcription.setAside;
   const discardTranscription = transcription.discard;
   const hasRecoverableRecording = transcription.hasRecoverableRecording;
   useEffect(() => {
     if (!suppressed) return;
     if (status === "recording" || status === "requesting-permission") {
-      cancelTranscription();
+      // Live voice took over: what was said so far stays saved to insert later.
+      setAsideTranscription();
     } else if (status === "error" && !hasRecoverableRecording) {
       // Live voice took over: a stale start error (nothing saved) would only
       // duplicate whatever live voice reports next to it.
       void discardTranscription();
     }
-  }, [cancelTranscription, discardTranscription, hasRecoverableRecording, status, suppressed]);
+  }, [setAsideTranscription, discardTranscription, hasRecoverableRecording, status, suppressed]);
   const active = capturing || status === "saving" || status === "transcribing";
   const recoverable =
     transcription.hasRecoverableRecording &&
@@ -347,7 +348,7 @@ export function ComposerTranscriptionControl({
                         savedTranscript
                           ? void transcription.insertSavedTranscript()
                           : retrying
-                            ? transcription.cancel()
+                            ? transcription.setAside()
                             : transcription.retry()
                       }
                       aria-label={

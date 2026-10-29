@@ -1,5 +1,10 @@
 import { createHash, createHmac } from "node:crypto";
-import { verifyDirectModelAccess } from "@opengeni/core";
+import {
+  verifyDirectModelAccess,
+  MissingPermissionRefusal,
+  WORKSPACE_SETTINGS_REFUSAL,
+  workspaceSettingsAuthorized,
+} from "@opengeni/core";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   assertClaudeWorkspaceCredential,
@@ -920,7 +925,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload: await c.req.json(),
       canManageOrganizationDestination:
         authorization.accountGrant?.permissions.includes("account:admin") === true,
-      canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+      canManageWorkspaceDestination: await workspaceSettingsAuthorized(
+        deps,
+        authorization,
+        workspaceId,
+      ),
       canManagePersonalDestination:
         authorization.contextIntegrity && authorization.authenticatedSubjectId === grant.subjectId,
     });
@@ -1004,7 +1013,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload: await c.req.json(),
         canManageOrganizationDestination:
           authorization.accountGrant?.permissions.includes("account:admin") === true,
-        canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+        canManageWorkspaceDestination: await workspaceSettingsAuthorized(
+          deps,
+          authorization,
+          workspaceId,
+        ),
         canManagePersonalDestination:
           authorization.contextIntegrity &&
           authorization.authenticatedSubjectId === grant.subjectId,
@@ -1038,6 +1051,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const { grant } = authorization;
     const payload = await parseRequestJson(c, UpdateConnectionRequest);
+    // Knowledge in this workspace is a workspace setting (requireWorkspaceSettingsGrant).
+    const canManageWorkspaceDestination = await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      workspaceId,
+    );
     // Policy first, then the existing tenancy prefix and exact credential row.
     // The locked live identity makes unchanged/reducing updates safe against a
     // concurrent replacement; all final writes below use this same transaction.
@@ -1111,13 +1130,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               destinationSelection.authorityKind === "organization" &&
               authorization.accountGrant?.permissions.includes("account:admin") !== true
             ) {
-              throw new HTTPException(403, { message: "missing permission: account:admin" });
+              throw new MissingPermissionRefusal("account:admin");
             }
             if (
               destinationSelection.authorityKind === "workspace" &&
-              !hasPermission(grant.permissions, "workspace:admin")
+              !canManageWorkspaceDestination
             ) {
-              throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+              throw new MissingPermissionRefusal("workspace:admin", {
+                message: WORKSPACE_SETTINGS_REFUSAL,
+              });
             }
             if (
               destinationSelection.authorityKind === "personal" &&
@@ -1396,7 +1417,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (
       !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
     )
-      throw new HTTPException(403, { message: "missing permission: connections:write" });
+      throw new MissingPermissionRefusal("connections:write");
     const existing = await getConnectionMetadata(db, workspaceId, connectionId, grant.subjectId);
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
@@ -1406,7 +1427,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.subjectId !== grant.subjectId &&
       !hasPermission(grant.permissions, "connections:write", grant.permissionMode)
     )
-      throw new HTTPException(403, { message: "missing permission: connections:write" });
+      throw new MissingPermissionRefusal("connections:write");
     assertNotReservedExternalVaultMetadata(existing.metadata);
     if (
       existing.subjectId === null &&
@@ -2087,7 +2108,7 @@ export function requireWorkspaceIntegrationAdministration(grant: {
   permissionMode?: Parameters<typeof hasPermission>[2];
 }): void {
   if (!hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode))
-    throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
+    throw new MissingPermissionRefusal("capabilities:manage");
 }
 
 /**
@@ -2102,7 +2123,7 @@ function connectionReadReach(grant: {
   if (hasPermission(grant.permissions, "connections:read", grant.permissionMode)) return "all";
   if (hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode))
     return "own";
-  throw new HTTPException(403, { message: "missing permission: connections:read" });
+  throw new MissingPermissionRefusal("connections:read");
 }
 
 function writableSubjectId(

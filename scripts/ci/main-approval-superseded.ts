@@ -154,6 +154,19 @@ export function dueMainRun(
   return now - last >= intervalMs ? head.id : null;
 }
 
+/**
+ * The newest full main run that failed on its first full attempt is re-run
+ * once, failed jobs only, the same retry a batch gets: one flaky test must not
+ * cost main its images for a whole interval. A failure on that retry stays.
+ */
+export function retryableMainRun(runs: MainRun[]): number | null {
+  const newest = runs
+    .filter((r) => r.runAttempt > 1 || r.versionMerge)
+    .sort((a, b) => Date.parse(b.runStartedAt) - Date.parse(a.runStartedAt))[0];
+  if (!newest || newest.versionMerge || newest.runAttempt !== 2) return null;
+  return newest.status === "completed" && newest.conclusion === "failure" ? newest.id : null;
+}
+
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY ?? "Cloudgeni-ai/opengeni";
   const token = process.env.GITHUB_TOKEN;
@@ -272,16 +285,23 @@ async function main() {
 
   if (process.env.MAIN_CI_DEFERRED === "true") {
     const recent = (await ciRuns("per_page=100")).workflow_runs;
+    const mainRuns = recent.map((r) => ({
+      id: r.id,
+      headSha: r.head_sha,
+      runAttempt: r.run_attempt,
+      runStartedAt: r.run_started_at,
+      status: r.status,
+      conclusion: r.conclusion,
+      versionMerge: isVersionMerge(r.head_commit?.message),
+    }));
+    const retry = retryableMainRun(mainRuns);
+    if (retry) {
+      console.log(`re-run the failed jobs of ${retry}${dryRun ? " (dry run)" : ""}`);
+      if (!dryRun) await api(`actions/runs/${retry}/rerun-failed-jobs`, { method: "POST" });
+      return;
+    }
     const due = dueMainRun(
-      recent.map((r) => ({
-        id: r.id,
-        headSha: r.head_sha,
-        runAttempt: r.run_attempt,
-        runStartedAt: r.run_started_at,
-        status: r.status,
-        conclusion: r.conclusion,
-        versionMerge: isVersionMerge(r.head_commit?.message),
-      })),
+      mainRuns,
       mainSha,
       Date.now(),
       mainCiInterval(process.env.MAIN_CI_INTERVAL_MINUTES),

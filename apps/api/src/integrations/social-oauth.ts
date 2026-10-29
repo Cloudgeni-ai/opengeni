@@ -49,6 +49,12 @@ export const SOCIAL_USER_AGENT = "opengeni:social-connector:v0.1.0 (self-hosted)
 // agent turn indefinitely.
 export const SOCIAL_TIMEOUT_MS = 10_000;
 
+/**
+ * A workspace-owned social account is a workspace setting: its OAuth start ran
+ * the full settings check, so the callback accepts a Personal workspace's owner.
+ */
+const SOCIAL_OWNER_SETTINGS = { personalOwnerSettings: true } as const;
+
 /** Token-endpoint failure that carries enough to tell invalid_grant from a blip. */
 export class SocialTokenRequestError extends Error {
   constructor(
@@ -314,6 +320,8 @@ export async function completeSocialOAuthCallback(
       db,
       state,
       state.ownership === "workspace" ? "workspace:admin" : "workspace:read",
+      null,
+      SOCIAL_OWNER_SETTINGS,
     );
   } catch (error) {
     logSocialOAuthFailure(observability, "grant_recheck", state, error);
@@ -355,6 +363,8 @@ export async function completeSocialOAuthCallback(
           tx,
           acceptedState,
           acceptedState.ownership === "workspace" ? "workspace:admin" : "workspace:read",
+          null,
+          SOCIAL_OWNER_SETTINGS,
         );
         return upsertSocialOAuthConnection(tx, {
           accountId: acceptedState.accountId,
@@ -412,6 +422,7 @@ async function completeSocialConnect(
       { ...state, ...(origin ? { externalContinuation: origin } : {}) },
       state.ownership === "workspace" ? "workspace:admin" : "workspace:read",
       origin,
+      SOCIAL_OWNER_SETTINGS,
     );
   };
   const operation = {

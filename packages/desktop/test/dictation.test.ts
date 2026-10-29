@@ -80,7 +80,10 @@ function harness(
     },
     replaceText: (id: string, text: string) => {
       const entry = history.find((item) => item.id === id);
-      if (entry) entry.text = text;
+      if (entry) {
+        entry.text = text;
+        delete entry.cancelled;
+      }
     },
     audio: (id: string) => audio.get(id) ?? null,
     clearHistory: () => {
@@ -441,6 +444,50 @@ describe("dictation", () => {
     h.shortcuts.get("Escape")!();
     expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
     expect(h.shortcuts.has("Escape")).toBe(false);
+    h.dictation.stop();
+  });
+
+  test("a cancelled dictation's speech is kept in recent dictations, and the retry shortcut types it", async () => {
+    const h = harness({
+      settings: { retryShortcut: { kind: "accelerator", accelerator: "Control+Shift+2" } },
+    });
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    tap(h.keys);
+    h.dictation.report(h.target, { dictationId: "d1", phase: "recording", startedAt: 1, level: 0 });
+    h.shortcuts.get("Escape")!();
+    expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
+    expect(h.last()).toEqual({ kind: "hidden" });
+    const speech = {
+      mimeType: "audio/webm",
+      bytes: new Uint8Array([1, 2, 3]),
+      durationMilliseconds: 6_000,
+    };
+    // Only the page that recorded it can send its speech back, once.
+    const stranger: DictationTarget = { ...h.target, id: 2 };
+    h.dictation.report(stranger, { dictationId: "d1", phase: "cancelled", audio: speech });
+    expect(h.history).toHaveLength(0);
+    h.dictation.report(h.target, { dictationId: "d1", phase: "cancelled", audio: speech });
+    h.dictation.report(h.target, { dictationId: "d1", phase: "cancelled", audio: speech });
+    expect(h.history).toHaveLength(1);
+    expect(h.history[0]).toMatchObject({
+      id: "d1",
+      text: "",
+      cancelled: true,
+      audio: { mimeType: "audio/webm", durationMilliseconds: 6_000 },
+    });
+    expect(h.dictation.historyAudio("d1")).toEqual(speech);
+    expect(h.paste.pasted).toBe(0);
+
+    h.shortcuts.get("Control+Shift+2")!();
+    expect(h.sent.at(-1)).toMatchObject({ kind: "transcribe", dictationId: "d2", audio: speech });
+    h.dictation.report(h.target, { dictationId: "d2", phase: "done", text: "said after all" });
+    await wait(10);
+    expect(h.history).toHaveLength(1);
+    expect(h.history[0]).toMatchObject({ id: "d1", text: "said after all" });
+    expect(h.history[0]?.cancelled).toBeUndefined();
+    expect(h.board.text).toBe("said after all");
     h.dictation.stop();
   });
 
@@ -918,6 +965,23 @@ describe("dictation settings", () => {
 
       store.replaceText(newest, "better text");
       expect(store.history()[0]).toMatchObject({ id: newest, text: "better text" });
+
+      // A cancelled dictation is kept for its speech only, until it is transcribed again.
+      const cancelled = {
+        id: "c1",
+        text: "",
+        at: new Date().toISOString(),
+        profileName: "Dictate",
+        language: null,
+        cancelled: true,
+      };
+      store.remember({ ...cancelled, id: "c0" });
+      expect(store.history()[0]?.id).toBe(newest);
+      store.remember(cancelled, speech(7));
+      expect(store.history()[0]).toMatchObject({ id: "c1", text: "", cancelled: true });
+      store.replaceText("c1", "said after all");
+      expect(store.history()[0]).toMatchObject({ id: "c1", text: "said after all" });
+      expect(store.history()[0]?.cancelled).toBeUndefined();
       store.clearHistory();
       expect(readdirSync(join(dir, "dictation-audio"))).toEqual([]);
     } finally {
@@ -1007,6 +1071,21 @@ describe("dictation platforms", () => {
       retryable: false,
     });
     expect(parseDictationReport({ phase: "cancelled" })).toBeNull();
+    expect(
+      parseDictationReport({
+        dictationId: "d1",
+        phase: "cancelled",
+        audio: { mimeType: "audio/webm", bytes: new Uint8Array([4]), durationMilliseconds: 3_000 },
+      }),
+    ).toEqual({
+      dictationId: "d1",
+      phase: "cancelled",
+      audio: { mimeType: "audio/webm", bytes: new Uint8Array([4]), durationMilliseconds: 3_000 },
+    });
+    expect(parseDictationReport({ dictationId: "d1", phase: "cancelled", audio: "x" })).toEqual({
+      dictationId: "d1",
+      phase: "cancelled",
+    });
     expect(parseDictationReport({ dictationId: "d1", phase: "elsewhere" })).toBeNull();
     // Speech comes with the text when it is audio; anything else is dropped, not the text.
     const bytes = new Uint8Array([1, 2]);

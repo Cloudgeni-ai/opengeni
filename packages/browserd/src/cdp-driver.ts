@@ -7531,6 +7531,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { type: "mouseMoved", x, y },
         input,
       );
+      // A background tab can take seconds to acknowledge the pointer's move
+      // (it draws no frames), long enough for the guard to have disarmed
+      // itself before the press arrives. Its clock restarts here, right
+      // before the press. Best effort: a guard this cannot reach is judged
+      // by its readback, as before.
+      if (guard !== null && !state.dialog) {
+        await this.sendTarget(
+          state,
+          "Runtime.callFunctionOn",
+          { objectId: guard.objectId, functionDeclaration: "function () { this.arm(); }" },
+          { timeoutMs: 2_000 },
+        ).catch(() => undefined);
+      }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
           state,
@@ -10676,10 +10689,13 @@ const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
 
 /** Resolves once work a page scheduled in response to the last key (a task
  * queued in the next animation frame, such as a React effect moving focus)
- * has run, or after 50 ms in a tab that does not animate (background). */
-const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
+ * has run. A hidden tab produces no frames, so it is waited on for 50 ms only.
+ * A visible tab's next frame can come well after 50 ms on a busy machine, and
+ * giving up early sends the next key to the old field, so it gets a longer
+ * safety cap. */
+export const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
   const done = () => resolve(true);
-  setTimeout(done, 50);
+  setTimeout(done, document.visibilityState === "hidden" ? 50 : 1000);
   requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
@@ -11123,8 +11139,9 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
 // judged by their own target: pointer capture can retarget a release, and a
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
-// reports what was held back. A guard that is never settled (a JavaScript
-// dialog interrupted the click) disarms itself after a few seconds.
+// reports what was held back, and its arm() restarts the clock below just
+// before the press. A guard that is never settled (a JavaScript dialog
+// interrupted the click) disarms itself a few seconds after that.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
@@ -11209,7 +11226,7 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   };
   const types = [...presses, ...followers];
   const guard = { blocked: null };
-  const expiresAt = Date.now() + 5000;
+  let expiresAt = Date.now() + 5000;
   let pointerDowns = 0;
   const listener = (event) => {
     if (Date.now() > expiresAt) {
@@ -11242,6 +11259,9 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   guard.settle = () => {
     for (const type of types) view.removeEventListener(type, listener, true);
     return guard.blocked;
+  };
+  guard.arm = () => {
+    expiresAt = Date.now() + 5000;
   };
   return guard;
 }`;

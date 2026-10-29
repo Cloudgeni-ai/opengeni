@@ -3478,6 +3478,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getMyDefaultExecutionTarget",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
+  },
+  {
     "id": "getMyUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/usage/me",
@@ -8474,6 +8484,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MemberAllowance"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setMyDefaultExecutionTarget",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [
+      "UpdateMemberDefaultExecutionTargetRequest"
+    ],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "setOpenGeniSlackBotOrganizationAccess",

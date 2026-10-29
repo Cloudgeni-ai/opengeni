@@ -32,6 +32,7 @@ import {
   createSandbox,
   claimEnrollmentConnection,
   discardUninitializedSessionShell,
+  setWorkspaceMemberExecutionDefault,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -393,6 +394,90 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       status: 422,
       message: expect.stringContaining("default machine is unavailable"),
     });
+  }, 60_000);
+
+  test("a person's own default places the chats they start in a shared workspace", async () => {
+    if (!available) return;
+    const { accountId, workspaceId: personalWorkspaceId } = await freshWorkspace();
+    const [team] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${accountId}, 'team') returning id`;
+    const sharedWorkspaceId = team!.id;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${sharedWorkspaceId}, ${accountId})`;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, 'subject', 'active', ${personalWorkspaceId}, 1)`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${accountId}, ${personalWorkspaceId}, 'subject'),
+        (${accountId}, ${sharedWorkspaceId}, 'subject')`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${personalWorkspaceId}, true),
+        set_config('opengeni.subject_id', 'subject', true),
+        set_config('opengeni.initiating_human_subject_id', 'subject', true)`;
+      const [row] = await tx<{ enrollmentId: string; sandboxId: string }[]>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${accountId}::uuid, ${personalWorkspaceId}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'my laptop', false
+        )`;
+      return row!;
+    });
+    const connection = await claimEnrollmentConnection(db, {
+      workspaceId: personalWorkspaceId,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: 1,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      leaseMs: 60_000,
+    });
+    expect(connection.claimed).toBe(true);
+    await admin`
+      update enrollments set last_seen_at = now(), workspace_root = '/srv/project'
+      where id = ${machine.enrollmentId}`;
+    const bus = busWithAgent({ workspaceId: personalWorkspaceId, agentId: machine.enrollmentId });
+    const person: AccessGrant = {
+      ...grant(accountId, sharedWorkspaceId),
+      principalKind: "human_session",
+    };
+
+    // An unusable own default falls back to the workspace default.
+    await setWorkspaceMemberExecutionDefault(db, {
+      accountId,
+      workspaceId: sharedWorkspaceId,
+      subjectId: "subject",
+      target: { kind: "machine", targetSandboxId: crypto.randomUUID() },
+    });
+    const fallback = await createSessionForRequest(deps(bus), person, sharedWorkspaceId, {
+      initialMessage: "my default machine is gone",
+    });
+    expect(fallback.activeSandboxId).not.toBe(machine.sandboxId);
+
+    await setWorkspaceMemberExecutionDefault(db, {
+      accountId,
+      workspaceId: sharedWorkspaceId,
+      subjectId: "subject",
+      target: { kind: "machine", targetSandboxId: machine.sandboxId },
+    });
+    const own = await createSessionForRequest(deps(bus), person, sharedWorkspaceId, {
+      initialMessage: "start on my own machine in the team workspace",
+    });
+    expect(own.activeSandboxId).toBe(machine.sandboxId);
+    expect(own.sandboxBackend).toBe("selfhosted");
+
+    // Callers that are not the person in the app (API keys, automations) keep
+    // following the workspace default.
+    const api = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, sharedWorkspaceId),
+      sharedWorkspaceId,
+      { initialMessage: "an API caller follows the workspace default" },
+    );
+    expect(api.activeSandboxId).not.toBe(machine.sandboxId);
   }, 60_000);
 
   test("a saved workspace machine default fails when Connected Machine execution is disabled", async () => {

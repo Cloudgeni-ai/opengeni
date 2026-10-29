@@ -3207,6 +3207,30 @@ export function machineCanBeWorkspaceDefault(
   return machine.scope !== "user" || workspace?.kind === "personal";
 }
 
+/**
+ * `GET /v1/workspaces/:workspaceId/my-default-execution-target`: the caller's
+ * own placement for the new chats they start in this workspace ("Your default
+ * machine"). Null follows the workspace default. Any active machine the caller
+ * can use qualifies, including their own Only me machine. `usable` is false
+ * when the saved machine was removed or is no longer available to them; their
+ * new chats then follow the workspace default until they choose again.
+ */
+export const MemberDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    target: WorkspaceDefaultExecutionTarget.nullable(),
+    usable: primitives.boolean,
+  }),
+);
+export type MemberDefaultExecutionTarget = z.infer<typeof MemberDefaultExecutionTarget>;
+
+/** `PUT /v1/workspaces/:workspaceId/my-default-execution-target`; null clears it. */
+export const UpdateMemberDefaultExecutionTargetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ target: WorkspaceDefaultExecutionTarget.nullable() }).strict(),
+);
+export type UpdateMemberDefaultExecutionTargetRequest = z.infer<
+  typeof UpdateMemberDefaultExecutionTargetRequest
+>;
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -10313,6 +10337,12 @@ export const NewSessionDraft = /* @__PURE__ */ defineSchema(() =>
     selectedProjectChannelId: z.string().uuid().nullable().optional(),
     options: NewSessionDraftOptions,
     selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
+    /**
+     * Read-only: the caller's own default placement for new chats here ("Your
+     * default machine") when it is usable now. A fresh form starts on it ahead
+     * of the workspace default. Never saved with the draft.
+     */
+    memberDefaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
     updatedAt: primitives.nullableString,
   }),
 );
@@ -11734,7 +11764,8 @@ export const RigVersion = /* @__PURE__ */ defineSchema(() =>
     // Operational build metadata is version-bound but not part of the immutable
     // rig definition. Each backend records its own truthful build state.
     providerImages: RigProviderImages.default({}),
-    // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
+    // Attribution: the person's subject ('user:<id>'; older versions say
+    // 'user:user:<id>') | 'session:<id>' | 'system'.
     createdBy: primitives.nullableString,
     active: primitives.boolean,
     createdAt: primitives.string,
@@ -15239,6 +15270,18 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       approvalRequiredToolCount: primitives.nonnegativeInteger,
       revisionId: primitives.nonEmptyString,
       contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+      /**
+       * Set on an instance a Personal workspace carries for its owner from
+       * another workspace where they connected it "Only me". It is managed in
+       * that workspace, not here.
+       */
+      personalExtension: z
+        .object({
+          originWorkspaceId: primitives.uuid,
+          originWorkspaceName: primitives.nonEmptyString,
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );
@@ -15943,9 +15986,10 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
       })
       .nullable()
       .optional(),
-    // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
-    // model admission for the life of the session; portable ⇒ plaintext compaction
-    // and free mid-session provider switching (today's behavior).
+    // Set at session create. remote_v2 ⇒ Codex remote compaction while the chat
+    // stays on Codex; switching to another provider's model rebuilds the context
+    // as a portable summary and turns the chat portable. portable ⇒ plaintext
+    // compaction and free mid-session provider switching.
     codexCompactionMode: CodexCompactionMode,
     /**
      * The `code_search` decision frozen at create. A turn gets the tool only when

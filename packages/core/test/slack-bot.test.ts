@@ -209,6 +209,6 @@ describe("Opengeni Slack bot trust predicates", () => {
     };
     await expect(
       validateOpenGeniSlackBotConnectionSelection({} as never, grant, workspaceId, connectionId),
-    ).rejects.toThrow("missing permission: connections:read");
+    ).rejects.toThrow("You don't have permission to view connections.");
   });
 });

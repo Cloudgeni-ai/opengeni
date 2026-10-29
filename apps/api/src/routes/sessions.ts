@@ -5,6 +5,7 @@ import {
   assertGoalResumeAllowed,
   GoalResumeBlockedError,
   turnAppActionGrant,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
@@ -372,6 +373,7 @@ import {
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
+  resolveMemberExecutionDefault,
   getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
   forkManagedHumanSession,
@@ -491,8 +493,8 @@ function requireViewerLifecyclePermission(grant: AccessGrant): void {
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: `missing permission: ${VIEWER_LIFECYCLE_PERMISSIONS.join(" or ")}`,
+  throw new MissingPermissionRefusal("stream:view", {
+    message: "You don't have permission to watch or use this chat's computer.",
   });
 }
 
@@ -955,13 +957,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
     });
-    return c.json(
-      await getActorNewSessionDraft(
+    const [draft, memberDefault] = await Promise.all([
+      getActorNewSessionDraft(
         { settings: catalog.settings, db },
         grant,
         workspaceId,
         authorization,
       ),
+      resolveMemberExecutionDefault(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+    ]);
+    // A fresh form starts on the caller's own default when it is usable now.
+    // Without one the draft keeps its usual shape and the form follows the
+    // workspace default.
+    return c.json(
+      memberDefault.usable && memberDefault.target
+        ? { ...draft, memberDefaultExecutionTarget: memberDefault.target }
+        : draft,
     );
   });
 

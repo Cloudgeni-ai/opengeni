@@ -23,6 +23,7 @@ import {
   delegatedHumanInputRequestIds,
   humanInputDelegationMessage,
 } from "../../../human-input-delegation";
+import { useOpenGeniText } from "../../../messages/runtime";
 import {
   ApprovalSurface,
   HumanInputSurface,
@@ -187,6 +188,7 @@ function DescendantRequestItem({
   delegatedInEvents: ReadonlySet<string>;
 }) {
   const sessionId = session.id;
+  const t = useOpenGeniText();
   const humanInput = useHumanInputRequests(sessionId, {
     client,
     workspaceId,
@@ -281,17 +283,12 @@ function DescendantRequestItem({
     return ids;
   }, [delegatedInEvents, delegations, requests]);
   const letAgentDecide = async (request: SessionHumanInputRequest) => {
-    const message = humanInputDelegationMessage({ sessionId, sessionTitle: title, request });
-    try {
-      await client.sendMessage(workspaceId, parentSessionId, {
-        ...message,
-        clientEventId: crypto.randomUUID(),
-      });
-    } catch (error) {
-      throw new Error(`Couldn't hand this to your agent. ${userErrorText(error)}`, {
-        cause: error,
-      });
-    }
+    const message = humanInputDelegationMessage(t, { sessionId, sessionTitle: title, request });
+    // A failure reaches the card as is, so it shows the API's own message.
+    await client.sendMessage(workspaceId, parentSessionId, {
+      ...message,
+      clientEventId: crypto.randomUUID(),
+    });
     delegatedRequests.add(request.id);
     markDelegated((value) => value + 1);
   };

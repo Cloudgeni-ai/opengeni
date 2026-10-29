@@ -1,5 +1,15 @@
 # Modular prompt changelog
 
+A blocked routine, reversible step no longer ends the turn with a question.
+Autonomy and persistence adds one general principle: take the conventional
+default without changing user or machine configuration, say which default was
+taken in the final answer, and continue; end the turn with a question only when
+the step is destructive, acts outside the workspace, needs authority the user
+has not given, or has no conventional default and the choice would materially
+change the result. Sessions run through the API, schedules and other headless
+paths often have no one to answer, so a question there ends the work unfinished.
+Both compositions change identically; legacy prompt digests are refreshed.
+
 Child questions the agent can answer. The Session coordination sentence on a
 `child_requires_action` update (263 bytes longer) now asks the agent to answer
 as soon as it can, before the person has to; to do agent work the question
