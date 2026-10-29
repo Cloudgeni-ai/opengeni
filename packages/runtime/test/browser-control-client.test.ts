@@ -38,6 +38,51 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  for (const modern of [false, true]) {
+    test(`opts into passkey backup flags with legacy-compatible responses (${modern})`, async () => {
+      const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const url = new URL(request.url);
+          expect(url.pathname).toBe(
+            `/v1/browser-sessions/${reference.browserSessionId}/passkeys/sync`,
+          );
+          expect(url.searchParams.get("backupFlags")).toBe("1");
+          expect(await request.json()).toEqual({
+            protocolVersion: 1,
+            ...reference,
+            credentials: null,
+            acknowledgeEventIds: [],
+          });
+          return success({
+            ...reference,
+            authenticators: 0,
+            events: [],
+            ...(modern ? { supportsBackupFlags: true } : {}),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const response = await client
+          .sessionClient({ reference, controlToken, viewToken })
+          .passkeySync({
+            protocolVersion: 1,
+            ...reference,
+            credentials: null,
+            acknowledgeEventIds: [],
+          });
+        expect(response.supportsBackupFlags).toBe(modern ? true : undefined);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
   test.each([
     "exact",
     "session",

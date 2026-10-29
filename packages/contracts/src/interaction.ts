@@ -4412,6 +4412,8 @@ export const BrowserPasskeyCredentialMaterial = /* @__PURE__ */ defineSchema(() 
       userDisplayName: z.string().max(512).nullable(),
       privateKey: passkeyBinary,
       signCount: z.number().int().nonnegative().max(0xffff_ffff),
+      backupEligibility: z.boolean().optional(),
+      backupState: z.boolean().optional(),
     })
     .strict(),
 );
@@ -4484,6 +4486,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       /** Page targets that currently host a virtual authenticator. */
       authenticators: primitives.nonnegativeInteger,
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
+      /** Sent only when the caller opts into backup-flag negotiation. */
+      supportsBackupFlags: z.literal(true).optional(),
     })
     .strict(),
 );

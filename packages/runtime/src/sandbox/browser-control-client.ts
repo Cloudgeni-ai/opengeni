@@ -2462,7 +2462,7 @@ export class BrowserControlSessionClient {
     return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("passkeys/sync"),
+        path: this.path("passkeys/sync?backupFlags=1"),
         token: this.controlToken,
         body: parsed,
       }),

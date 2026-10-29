@@ -454,7 +454,7 @@ describe("BrowserControlServer", () => {
   });
 
   test("passkey sync is control-only, bound to the session path and validated", async () => {
-    await withServer(async ({ server, reference }) => {
+    await withServer(async ({ server, reference, supervisor }) => {
       expect(
         (
           await request(server, "/v1/browser-sessions", {
@@ -500,6 +500,57 @@ describe("BrowserControlServer", () => {
       expect(synced.status).toBe(200);
       // The fake driver hosts no page authenticators; the manager still answers.
       expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+      const negotiated = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(negotiated)).data).toEqual({
+        ...reference,
+        authenticators: 0,
+        events: [],
+        supportsBackupFlags: true,
+      });
+      const credential = {
+        rpId: "localhost",
+        credentialId: "Y3JlZA==",
+        userHandle: null,
+        userName: null,
+        userDisplayName: null,
+        privateKey: "a2V5",
+        signCount: 0,
+      };
+      const event = {
+        type: "registered" as const,
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        targetId: "target-1",
+        origin: "http://localhost",
+        credential: { ...credential, backupEligibility: true, backupState: true },
+      };
+      supervisor.passkeySync = async () => ({ ...reference, authenticators: 1, events: [event] });
+      const legacyRegistration = await request(server, path, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(legacyRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [{ ...event, credential }],
+      });
+      const modernRegistration = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(modernRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [event],
+        supportsBackupFlags: true,
+      });
+      expect(event.credential.backupEligibility).toBe(true);
     });
   });
 
@@ -1757,6 +1808,7 @@ describe("BrowserControlServer", () => {
 async function withServer(
   callback: (fixture: {
     server: BrowserControlServer;
+    supervisor: BrowserSupervisor;
     reference: { browserSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
   options: {
@@ -1830,6 +1882,7 @@ async function withServer(
   try {
     await callback({
       server,
+      supervisor,
       reference: {
         browserSessionId: randomUUID(),
         controllerGeneration: "controller-1",
