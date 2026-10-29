@@ -7295,10 +7295,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ) {
       throw new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
     }
+    let sent = false;
     try {
-      await (
-        await this.ensureConnection()
-      ).send(
+      const connection = await this.ensureConnection();
+      // Setting the permission is the action's effect: once sent, a later
+      // failure (a lost connection, an unresponsive tab) leaves its outcome
+      // unknown rather than definitely not run. Only a definite refusal (the
+      // browser's own, or one its connection reports) proves it did not
+      // apply.
+      state.actionEffectCount += 1;
+      sent = true;
+      await connection.send(
         "Browser.setPermission",
         {
           ...this.contextScope(),
@@ -7309,6 +7316,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         inOpenedTab ? { sessionId: state.sessionId } : undefined,
       );
     } catch (error) {
+      if (
+        sent &&
+        (error instanceof CdpProtocolError || error instanceof InteractionDefiniteDriverError)
+      )
+        state.actionEffectCount -= 1;
       if (error instanceof CdpProtocolError) {
         throw new InteractionDefiniteDriverError(
           error.code === -32_601 ? "unsupported" : "invalid_action",
