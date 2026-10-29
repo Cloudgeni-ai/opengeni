@@ -5484,7 +5484,7 @@ export const sessions = pgTable(
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
-    // Who asked for the pending request (migration 1014): 'operator' for
+    // Who asked for the pending request (migration 1100): 'operator' for
     // /compact, 'proactive' for the worker's idle checkpoint after a turn that
     // reached the automatic threshold. NULL (older writers) reads as operator.
     // Meaningful only while compactRequested is true.
