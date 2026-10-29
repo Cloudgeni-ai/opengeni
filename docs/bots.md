@@ -53,7 +53,7 @@ shows its description. People edit all three with **Edit project…** in the
 project's menu, the same dialog as a chat's **Edit profile…**. Agents set them
 with `project_create` and `project_update`.
 
-The avatar lives on the `channels` row (migration `1098_project_avatar.sql`)
+The avatar lives on the `channels` row (migration `1100_project_avatar.sql`)
 and goes through `POST`/`PATCH /v1/workspaces/:workspaceId/channels`. Changing a
 project's profile needs the same permission as renaming it
 (`sessions:create`). Projects are shared with the whole workspace, so an image
