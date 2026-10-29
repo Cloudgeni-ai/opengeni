@@ -31,6 +31,7 @@ mod leased;
 mod link;
 mod listen;
 mod lossy;
+mod pointers;
 mod record;
 mod tls;
 
@@ -59,6 +60,7 @@ pub use lease::{terms_of, wire_terms};
 pub use leased::Leased;
 pub use link::MetricsRoute;
 pub use lossy::Lossy;
+pub use pointers::ControlPointers;
 pub use record::LeaseFile;
 pub use tls::{Tls, TlsFiles};
 
@@ -241,6 +243,21 @@ fn control_url(control: &str) -> anyhow::Result<()> {
 }
 
 impl FleetConfig {
+    /// The pointers to the host's stored copies, which the service keeps
+    /// (ADR 25), reached with the host's certificate under the
+    /// registration `gate` holds.
+    pub fn pointers(&self, gate: &LeaseGate) -> anyhow::Result<ControlPointers> {
+        let tls = Tls::load(&self.tls)?;
+        // As lease answers: only over mutual TLS, never redirected.
+        let http = reqwest::Client::builder()
+            .use_preconfigured_tls(tls.client)
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("building the control service's pointer client")?;
+        Ok(ControlPointers::new(http, &self.control, gate.clone()))
+    }
+
     /// Checks the host is fit to join (valid terms, a running guard) and
     /// reads the lease a previous run of the agent left. A lease file that
     /// cannot be read stops the agent: starting over could hand out

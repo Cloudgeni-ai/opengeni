@@ -16,6 +16,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_5,
     MIGRATION_6,
     MIGRATION_7,
+    MIGRATION_8,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -173,6 +174,25 @@ create index if not exists compute_images_image on compute_images (image);
 const MIGRATION_7: &str = "
 alter table compute_templates add column if not exists memory_request_mib bigint;
 alter table compute_templates add column if not exists cpu_request_millis bigint;
+";
+
+/// Version 8: the pointers to the fleet's stored copies (ADR 25), each
+/// with its owner stamp and a version no other write is ever given, and,
+/// once they were moved in from the object store, when and from where.
+const MIGRATION_8: &str = "
+create sequence if not exists compute_pointer_versions;
+create table if not exists compute_pointers (
+    name text primary key,
+    owner_epoch bigint not null,
+    owner_save bigint not null,
+    pointer bytea not null,
+    version bigint not null
+);
+create table if not exists compute_pointers_imported (
+    one boolean primary key default true check (one),
+    imported_ms bigint not null,
+    from_store text not null
+);
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

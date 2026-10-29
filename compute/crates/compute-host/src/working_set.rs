@@ -224,8 +224,9 @@ pub(crate) async fn put(
                     Err(_) => Err(PackError::Cancelled),
                 };
                 match stored {
-                    Ok(_) => Ok(PackPart {
-                        chunk: chunk.reference,
+                    // Named as stored, under the day it was stored on.
+                    Ok(put) => Ok(PackPart {
+                        chunk: put.reference,
                         pages,
                     }),
                     Err(error) => {
@@ -254,8 +255,7 @@ pub(crate) async fn put(
     };
     let bytes = serde_json::to_vec(&index).map_err(io::Error::other)?;
     let chunk = EncodedChunk::encode(&bytes, ZSTD_LEVEL)?;
-    chunks.put_chunk(&chunk).await?;
-    Ok(Some(chunk.reference))
+    Ok(Some(chunks.put_chunk(&chunk).await?.reference))
 }
 
 /// Reads the image's pages, each only after the chunks holding it have
@@ -391,16 +391,6 @@ impl Packer {
         }
         self.zeros
     }
-}
-
-/// The chunks holding the parts of the pack `index` names, for a sweep to
-/// keep.
-pub(crate) async fn parts(
-    chunks: &ChunkStore,
-    index: &ChunkRef,
-) -> Result<Vec<ChunkRef>, compute_storage::Error> {
-    let index: PackIndex = serde_json::from_slice(&chunks.get_chunk(index).await?)?;
-    Ok(index.parts.into_iter().map(|part| part.chunk).collect())
 }
 
 /// Fetches the pack `index` names into `memory`, a file of the image's

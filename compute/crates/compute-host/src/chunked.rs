@@ -44,11 +44,11 @@ use std::time::SystemTime;
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
+use compute_storage::copy::{self, Head, MemoryHead};
 use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::{Begun, ChunkStore, Publication, Rewrite};
 pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
 
 pub use crate::image::CHUNK_BYTES;
@@ -78,48 +78,15 @@ const VERIFY_CHECKS: usize = 64;
 /// zstd level 1: measured nearly as small as higher levels at a fraction of
 /// the time, which matters because sleeping waits for it.
 const ZSTD_LEVEL: i32 = 1;
-/// The stored copy's format. A host reads only this version and refuses
-/// any other.
-const HEAD_VERSION: u32 = 3;
 
 /// One chunk-sized piece of a stored file: where it is, and the chunk
 /// holding it (`None` for zeros).
 type Piece = (Range<u64>, Option<ChunkRef>);
 
-/// The manifests that make up one sandbox's stored copy.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Head {
-    version: u32,
-    disk: String,
-    memory: Option<MemoryHead>,
-    /// The order the guest touched memory after its last wake, stored as
-    /// one chunk.
-    profile: Option<ChunkRef>,
-    /// The memory pages at the start of that order, packed for one fetch:
-    /// the index chunk of a [`working_set`] pack.
-    pack: Option<ChunkRef>,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct MemoryHead {
-    state: String,
-    memory: String,
-    /// The runtime that made the image, if known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    runtime: Option<String>,
-}
-
+/// The head of a stored copy (see [`compute_storage::copy`]), in a format
+/// this build reads; it writes only [`copy::VERSION`].
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
-    let head: Head = serde_json::from_slice(bytes)
-        .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, operation, error))?;
-    if head.version != HEAD_VERSION {
-        return Err(EngineError::new(
-            ErrorKind::Fatal,
-            operation,
-            format!("unknown stored copy version {}", head.version),
-        ));
-    }
-    Ok(head)
+    Head::parse(bytes).map_err(|error| EngineError::caused_by(ErrorKind::Fatal, operation, error))
 }
 
 /// Keeps sandboxes in object storage (Google Cloud Storage, Azure Blob, S3)
@@ -313,6 +280,27 @@ impl Chunked {
         }
     }
 
+    /// The same store keeping its pointers in `pointers`, as a host in a
+    /// fleet keeps them in the control service (ADR 25).
+    #[must_use]
+    pub fn with_pointers(
+        self,
+        pointers: Arc<dyn compute_storage::pointer_store::PointerStore>,
+    ) -> Self {
+        Self {
+            chunks: self.chunks.with_pointers(pointers),
+            ..self
+        }
+    }
+
+    /// Checks once, before anything is stored, that the store can keep its
+    /// pointers safely: a host on its own keeps them in its object store,
+    /// which must then refuse a second create of the same object and a
+    /// replace of a version replaced since (Garage does neither).
+    pub async fn check_pointers(&self) -> Result<(), StorageError> {
+        self.chunks.check_pointers().await
+    }
+
     /// Deletes the chunks and manifests no sandbox's stored copy names any
     /// more, or with `delete` false only reports them (see
     /// [`compute_storage::sweep`]).
@@ -330,43 +318,7 @@ impl Chunked {
     /// deleting what it could not account for; only a damaged or missing
     /// working-set pack does not, since a wake without it is just slower.
     async fn names(&self, pointer: &[u8]) -> Result<Vec<String>, StorageError> {
-        let head: Head = serde_json::from_slice(pointer)?;
-        if head.version != HEAD_VERSION {
-            return Err(StorageError::Invalid("a stored copy of an unknown version"));
-        }
-        let mut manifests = vec![head.disk];
-        // A working-set pack holds memory pages, so it is kept only with
-        // the memory image it serves.
-        let pack = head.memory.as_ref().and(head.pack.as_ref());
-        if let Some(memory) = &head.memory {
-            manifests.extend([memory.state.clone(), memory.memory.clone()]);
-        }
-        let mut names = Vec::new();
-        for digest in manifests {
-            let manifest = self.chunks.get_manifest(&digest).await?;
-            names.push(ChunkStore::manifest_key(&digest));
-            names.extend(
-                manifest
-                    .extents
-                    .iter()
-                    .filter_map(|extent| match &extent.source {
-                        ExtentSource::Chunk { reference, .. } => Some(reference.key()),
-                        ExtentSource::Zero | ExtentSource::Base { .. } => None,
-                    }),
-            );
-        }
-        names.extend(head.profile.as_ref().map(ChunkRef::key));
-        if let Some(index) = pack {
-            names.push(index.key());
-            match working_set::parts(&self.chunks, index).await {
-                Ok(parts) => names.extend(parts.iter().map(ChunkRef::key)),
-                Err(error) if error.is_permanent() => {
-                    tracing::warn!(%error, "working-set pack unreadable; its parts may be swept");
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(names)
+        copy::names(&self.chunks, pointer).await
     }
 
     /// Begins an archive of `save`, checking the owner on the version its
@@ -698,15 +650,15 @@ impl Chunked {
         }
         let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL)
             .map_err(|error| storage_error("archive", error))?;
-        let stored = self
+        let put = self
             .chunks
             .put_chunk(&chunk)
             .await
             .map_err(|error| storage_error("archive", error))?;
-        if stored {
+        if put.new {
             crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
         }
-        Ok(Some(chunk.reference))
+        Ok(Some(put.reference))
     }
 
     /// Stores the working-set pack the learned profile `learned` asks for
@@ -829,7 +781,7 @@ impl Store for Chunked {
             return Ok(Archive::Cancelled);
         }
         let head = Head {
-            version: HEAD_VERSION,
+            version: copy::VERSION,
             disk,
             memory,
             profile,

@@ -70,6 +70,20 @@ enum Command {
         #[arg(long, default_value = ".")]
         authority: PathBuf,
     },
+    /// Deletes the chunks and manifests in the archive store that no
+    /// pointer the service keeps names any more (ADR 25). Run on a
+    /// schedule, such as daily; safe while hosts archive, on any object
+    /// store. Without `--delete`, only reports. Refused until the fleet's
+    /// pointers are in the service.
+    Sweep {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The archive store, as `serve --archive` takes it.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 #[derive(Args)]
@@ -707,7 +721,40 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Sweep {
+            database,
+            store,
+            delete,
+        } => sweep(&database, &store, delete).await,
     }
+}
+
+/// Sweeps the archive store `url` with the pointers the service keeps in
+/// `database`, printing the report.
+async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        database.database != "memory",
+        "a memory store keeps no fleet's pointers"
+    );
+    let store = Arc::new(postgres(database).await?);
+    anyhow::ensure!(
+        store.pointers_imported().await?.is_some(),
+        "the fleet's pointers are not in the service yet: it moves them in once no host \
+         of an earlier release is live, and nothing is swept before"
+    );
+    let chunks = ChunkStore::from_url(url)
+        .with_context(|| format!("the archive store {url}"))?
+        .with_context(|| format!("{url} names no object store"))?
+        .with_pointers(Arc::new(compute_control::pointers::Pointers::new(store)));
+    let chunks = &chunks;
+    let report = compute_storage::sweep::sweep(
+        chunks,
+        |pointer| async move { compute_storage::copy::names(chunks, &pointer).await },
+        delete,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 /// Writes a new authority to `out`, refusing to replace one there.

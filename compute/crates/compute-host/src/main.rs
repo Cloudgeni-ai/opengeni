@@ -690,6 +690,13 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;
+            // A sweep fences every pointer, on condition: the store must
+            // enforce conditions. A fleet's sweep runs from its control
+            // service, which keeps the pointers.
+            chunked
+                .check_pointers()
+                .await
+                .with_context(|| format!("{store} cannot keep pointers"))?;
             let report = chunked.sweep(delete).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
@@ -921,7 +928,12 @@ async fn run_with_store(
             .with_compress_threads(threads.compress)
             .with_watch(Arc::new(StoreAlarms(config.observer.clone())));
         if let Some((fleet, prepared)) = fleet {
-            let leased = Leased::new(chunked, prepared.gate.clone());
+            // The control service keeps a fleet's pointers (ADR 25).
+            let pointers = fleet.pointers(&prepared.gate)?;
+            let leased = Leased::new(
+                chunked.with_pointers(Arc::new(pointers)),
+                prepared.gate.clone(),
+            );
             return run_agent(
                 config,
                 engine,
@@ -932,6 +944,10 @@ async fn run_with_store(
             )
             .await;
         }
+        chunked
+            .check_pointers()
+            .await
+            .with_context(|| format!("{store} cannot keep this host's pointers"))?;
         return run_agent(config, engine, chunked, socket, canary, None).await;
     }
     anyhow::ensure!(
