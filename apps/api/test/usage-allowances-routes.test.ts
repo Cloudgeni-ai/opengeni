@@ -476,7 +476,52 @@ describe("allowance authorization matrix", () => {
     for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
   });
 
-  test("member can read only its own usage, never roster or config; machine own reads fail", async () => {
+  test("a person who can start chats reads the workspace budget, never the roster or a write", async () => {
+    const spies = storage();
+    const api = app();
+    const auth = await bearer(["workspace:read", "sessions:create"]);
+    const read = await request(api, `${path}/allowance`, auth);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual(config);
+    const state = await request(api, `${path}/allowance/state`, auth);
+    expect(state.status).toBe(200);
+    expect(await state.json()).toEqual({ version: 1, config });
+    expect(spies.state.mock.calls[0]![1]).toMatchObject({ accountId, workspaceId });
+    expect((await request(api, `${path}/usage/me`, auth)).status).toBe(200);
+
+    // Not the roster's usage, and no budget or member-limit change.
+    for (const [route, method, body] of [
+      [`${path}/usage`, "GET", undefined],
+      [`${path}/allowance`, "PUT", { ...config, version: undefined, expectedVersion: 1 }],
+      [`${path}/allowance`, "DELETE", { expectedVersion: 1 }],
+      [`${path}/allowance/grants`, "POST", { operationId: "member-grant", credits: 1 }],
+      [`${path}/members/user:other/allowance`, "PUT", { rule: { share: 1 }, expectedVersion: 0 }],
+    ] as const)
+      expect((await request(api, route, auth, method, body)).status, `${method} ${route}`).toBe(
+        403,
+      );
+    expect(spies.usage).toHaveBeenCalledTimes(1);
+    for (const spy of [spies.set, spies.clear, spies.grant, spies.member])
+      expect(spy).not.toHaveBeenCalled();
+
+    // An agent or service carrying the same permission is not that person, and
+    // a grant for another workspace reaches nothing here.
+    track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
+    for (const other of [
+      await bearer(["workspace:read", "sessions:create"], "agent_attempt"),
+      await bearer(["workspace:read", "sessions:create"], "service"),
+      await bearer(
+        ["workspace:read", "sessions:create"],
+        "human_session",
+        subjectId,
+        "44444444-4444-4444-8444-444444444444",
+      ),
+    ])
+      expect((await request(api, `${path}/allowance/state`, other)).status).toBe(403);
+    expect(spies.state).toHaveBeenCalledTimes(1);
+  });
+
+  test("a viewer reads only its own usage, never roster or config; machine own reads fail", async () => {
     const spies = storage();
     const api = app();
     const auth = await bearer(["workspace:read"]);

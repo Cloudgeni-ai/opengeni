@@ -166,11 +166,15 @@ so one call is never counted twice.
 
 | Operation | Required authority |
 | --- | --- |
-| Read workspace configuration | Workspace administration, verified human `account:admin`, or organization-key read authority |
+| Read workspace configuration | A person who can start chats in the workspace (a person's session holding `sessions:create`), workspace administration, verified human `account:admin`, or organization-key read authority |
 | Read the full usage/member page | Operational workspace access plus workspace administration, `account:admin`, or organization-key read authority |
 | Set or clear workspace configuration; add workspace grants | Full-access organization API key with literal `api_keys:manage`, or verified human `account:admin` |
 | Set an existing member's split | Verified human workspace administrator or full-access organization key; `account:admin` alone is insufficient |
 | Read `/usage/me` | The authenticated member; external products assert their verified user through `asUser` |
+
+Reading the configuration shows a member the budget and how members share
+it, never anyone else's usage. Agents, services and other session-bound tokens
+can't read it, even when they carry `sessions:create`.
 
 A workspace administrator cannot raise the workspace budget, clear it, or add
 grants merely by being an administrator. A workspace-scoped key is not a

@@ -85,6 +85,18 @@ export function requireAllowanceAuthority(
       sameOrganizationKey?.permissions.includes("workspace:read")
     )
       return;
+    // A person who can start chats in the workspace sees its budget (how much
+    // it has and how members share it), never the roster's usage. Agents and
+    // session-bound tokens were refused above.
+    if (
+      operation === "budget-read" &&
+      !organizationKey &&
+      grant.principalKind === "human_session" &&
+      !grant.serviceInitiator &&
+      !context.subjectId.startsWith("api_key:") &&
+      grant.permissions.includes("sessions:create")
+    )
+      return;
   } else if (operation === "workspace-write") {
     // Existing full keys retain key-control budget authority. Setup keys use
     // literal account allowance authority plus the canonical organization-key

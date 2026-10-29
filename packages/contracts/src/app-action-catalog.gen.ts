@@ -2908,7 +2908,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
@@ -2916,7 +2916,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "request": [],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
@@ -4172,7 +4172,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceAllowance"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "getWorkspaceAllowanceState",
@@ -4182,7 +4182,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceAllowanceState"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "getWorkspaceArtifact",
