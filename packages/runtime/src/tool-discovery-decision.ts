@@ -1,5 +1,7 @@
 import type { Tool } from "@openai/agents";
+import { setTimeout as pause } from "node:timers/promises";
 import {
+  DecisionUnavailableError,
   predicate,
   type DecisionModel,
   type DecisionResult,
@@ -154,7 +156,25 @@ export function toolSelectionRequest(input: ToolDecisionInput) {
   };
 }
 
-/** Tool discovery is one consumer of the shared typed decision-model category. */
+/**
+ * A selection failure worth one more try: a rate-limit reply, a server error,
+ * a dropped connection or an expired credential (the client discards it, so
+ * the retry signs in again). An invalid answer, a billing or permission
+ * refusal, or a malformed request would only repeat.
+ */
+const retryable = (error: unknown) =>
+  error instanceof DecisionUnavailableError &&
+  (error.code === "request_failed" ||
+    (error.status !== undefined &&
+      ([401, 408, 429].includes(error.status) || error.status >= 500)));
+/** Short, so both attempts fit well inside the search's selection deadline. */
+const RETRY_PAUSE_MS = 250;
+
+/**
+ * Tool discovery is one consumer of the shared typed decision-model category.
+ * A provider blip gets one quick retry before the search falls back to
+ * keywords; the caller's deadline and cancellation bound both attempts.
+ */
 export function createToolSelector(
   model: DecisionModel,
   options: {
@@ -166,11 +186,21 @@ export function createToolSelector(
     input.signal?.throwIfAborted();
     if (!input.candidates.length) return [];
     const request = toolSelectionRequest(input);
-    const result = await model.decide(request.input, request.questions, {
-      ...(input.signal ? { signal: input.signal } : {}),
-      ...(options.onUsage ? { onUsage: options.onUsage } : {}),
-      tag: "tool-discovery",
-    });
+    const decide = () =>
+      model.decide(request.input, request.questions, {
+        ...(input.signal ? { signal: input.signal } : {}),
+        ...(options.onUsage ? { onUsage: options.onUsage } : {}),
+        tag: "tool-discovery",
+      });
+    let result: DecisionResult;
+    try {
+      result = await decide();
+    } catch (error) {
+      input.signal?.throwIfAborted();
+      if (!retryable(error)) throw error;
+      await pause(RETRY_PAUSE_MS, undefined, input.signal ? { signal: input.signal } : {});
+      result = await decide();
+    }
     options.onResult?.(result);
     input.signal?.throwIfAborted();
     const judgments: ToolJudgment[] = input.candidates.map((candidate, id) => {

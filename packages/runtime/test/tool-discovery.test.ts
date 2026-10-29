@@ -666,6 +666,56 @@ describe("decision selection", () => {
       answering({ 0: { type: "noul", noul: 0.9 } })({ query: "get task", candidates }),
     ).rejects.toThrow();
   });
+  test("a provider blip gets one quick retry; a refusal or a second failure does not", async () => {
+    const candidates = ["tasks__get", "tasks__list"].map((name) => ({
+      name,
+      description: name,
+      inputFields: [],
+    }));
+    const answers = { 0: { type: "noul", noul: 0.9 }, 1: { type: "noul", noul: 0.1 } };
+    const replying = (...statuses: number[]) => {
+      let calls = 0;
+      const select = createToolSelector(
+        createHttpDecisionModel({
+          provider: "openrouter",
+          model: "test",
+          apiKey: "test-only",
+          fetch: (async () => {
+            const status = statuses[calls++] ?? 200;
+            return status === 200
+              ? Response.json({ answers, usage: {} })
+              : new Response("busy", { status });
+          }) as typeof fetch,
+        }),
+      );
+      return { select, calls: () => calls };
+    };
+
+    for (const status of [429, 503]) {
+      const blip = replying(status);
+      expect(await blip.select({ query: "get task", candidates })).toEqual([
+        { name: "tasks__get", probability: 0.9 },
+        { name: "tasks__list", probability: 0.1 },
+      ]);
+      expect(blip.calls()).toBe(2);
+    }
+
+    const refused = replying(403);
+    await expect(refused.select({ query: "get task", candidates })).rejects.toThrow("HTTP 403");
+    expect(refused.calls()).toBe(1);
+
+    const down = replying(429, 429);
+    await expect(down.select({ query: "get task", candidates })).rejects.toThrow("HTTP 429");
+    expect(down.calls()).toBe(2);
+
+    // Cancellation during the pause ends the search instead of retrying.
+    const cancelled = replying(429);
+    const controller = new AbortController();
+    const search = cancelled.select({ query: "get task", candidates, signal: controller.signal });
+    controller.abort();
+    await expect(search).rejects.toThrow();
+    expect(cancelled.calls()).toBe(1);
+  });
   test("an unsure selector loads its best guess and shows the next candidates", async () => {
     const runtime = decisionRuntime(
       judge({
