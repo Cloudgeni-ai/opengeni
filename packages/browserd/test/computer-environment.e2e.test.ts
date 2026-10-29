@@ -191,7 +191,7 @@ test.skipIf(!enabled)(
 );
 
 test.skipIf(!enabled)(
-  "pastes non-Latin text into a live Linux GTK entry when native keys cannot type it",
+  "types non-Latin text and passwords into a live Linux GTK entry through native keys",
   async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-unicode-typing-");
     const reference = {
@@ -218,7 +218,7 @@ test.skipIf(!enabled)(
       expect(focused.state).toBe("completed");
 
       // Exact-window keyboard delivery. The seat's US layout has none of these
-      // glyphs; the native helper refuses before input and the driver pastes.
+      // glyphs; the native helper binds them to spare keycodes for the session.
       const text = "ÆØÅ–π密";
       const typed = await supervisor.action({
         ...screenCommand(reference, focused.observation!.target, {
@@ -230,10 +230,10 @@ test.skipIf(!enabled)(
       });
       expect(typed).toMatchObject({ state: "completed" });
       await waitForValue(supervisor, reference, target.id, text);
-      expect(await supervisor.clipboard(reference)).toMatchObject({ text });
+      // Native keys leave the seat clipboard untouched.
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: null });
 
-      // Whole-screen delivery pastes ordinary literal text too. Secret
-      // references are never eligible for this fallback (computer-driver.test).
+      // Whole-screen keyboard delivery types a mixed password the same way.
       const screen = (await supervisor.listTargets(reference)).find(
         (candidate) => candidate.kind === "screen",
       );
@@ -248,11 +248,18 @@ test.skipIf(!enabled)(
         });
       }
       await waitForValue(supervisor, reference, target.id, password);
-      expect(await supervisor.clipboard(reference)).toMatchObject({ text: password });
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: null });
 
-      // A long unmapped string follows the same path: the helper
+      // More distinct glyphs than the keymap has spare keycodes: the helper
       // refuses before any key and the driver pastes the text instead, through
-      // the exact window and through the whole screen.
+      // the exact window and through the whole screen. Once the field has
+      // read it, the person's previous clipboard text is back.
+      const copied = "copied by the person";
+      expect(
+        await supervisor.action(
+          screenCommand(reference, screen, { type: "clipboard", operation: "write", text: copied }),
+        ),
+      ).toMatchObject({ state: "completed" });
       const glyphs = Array.from({ length: 248 }, (_, index) =>
         String.fromCodePoint(0x4e00 + index),
       ).join("");
@@ -278,7 +285,7 @@ test.skipIf(!enabled)(
         }),
       ).toMatchObject({ state: "completed" });
       await waitForValue(supervisor, reference, target.id, glyphs);
-      expect(await supervisor.clipboard(reference)).toMatchObject({ text: glyphs });
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: copied });
       for (const action of [
         { type: "keyboard", action: "press", value: "Control+a" },
         { type: "keyboard", action: "type", value: screenGlyphs },
@@ -288,7 +295,7 @@ test.skipIf(!enabled)(
         });
       }
       await waitForValue(supervisor, reference, target.id, screenGlyphs);
-      expect(await supervisor.clipboard(reference)).toMatchObject({ text: screenGlyphs });
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: copied });
 
       // Leave the acceptance text visible for the screenshot.
       expect(
@@ -306,6 +313,8 @@ test.skipIf(!enabled)(
         ),
       ).toMatchObject({ state: "completed" });
       await waitForValue(supervisor, reference, target.id, text);
+      // Glyphs bound earlier in the session still type as keys.
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: copied });
 
       const evidence = process.env.OPENGENI_COMPUTER_TYPING_EVIDENCE_DIR;
       if (evidence) {

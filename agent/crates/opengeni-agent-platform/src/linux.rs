@@ -49,10 +49,13 @@ mod key_bindings;
 mod keysym_layout;
 #[path = "linux_keysyms.rs"]
 mod keysyms;
+#[path = "linux_paste_offer.rs"]
+mod paste_offer;
 
 use key_bindings::{KeyBindingPlan, KeyBindings};
 
 pub use keysym_layout::{CompositorKey, CompositorLayout, KeymapNames};
+pub use paste_offer::{LinuxPasteOffer, LinuxPasteOutcome, LinuxPreviousClipboard};
 
 /// The OS family this build targets.
 #[must_use]
@@ -638,6 +641,18 @@ impl LinuxDesktop {
     /// A desktop found through a login session refuses once that session is
     /// no longer the one on the screen, so nothing is captured from or typed
     /// into a desktop nobody sees.
+    /// Takes the CLIPBOARD selection with `text` on a dedicated connection
+    /// until the returned offer is dropped, so the caller can paste it and
+    /// learn when the focused client has read it.
+    ///
+    /// # Errors
+    /// Unsupported when the display refuses the selection or the text needs
+    /// an incremental transfer.
+    pub fn offer_paste_text(&self, text: String) -> PlatformResult<LinuxPasteOffer> {
+        self.require_current_session()?;
+        paste_offer::offer(&self.display, text)
+    }
+
     fn connect(&self) -> PlatformResult<(x11rb::rust_connection::RustConnection, Screen)> {
         self.require_current_session()?;
         let (conn, screen_num) = self.display.connect().map_err(|e| {
