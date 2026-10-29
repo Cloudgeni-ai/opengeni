@@ -505,14 +505,26 @@ describe("decision selection", () => {
       inputFields: ["id"],
     }));
     const groups = toolSelectionGroups(candidates);
-    expect(groups.map((g) => g.length)).toEqual([TOOL_SELECTION_GROUP_SIZE, TOOL_SELECTION_GROUP_SIZE, 1]);
+    expect(groups.map((g) => g.length)).toEqual([
+      TOOL_SELECTION_GROUP_SIZE,
+      TOOL_SELECTION_GROUP_SIZE,
+      1,
+    ]);
     const request = toolSelectionRequest({ query: "do thing", candidates: groups[2]! });
     expect(request.input).toEqual({
       instructions: TOOL_SELECTION_INSTRUCTIONS,
-      candidates: [{ id: 0, name: `tool_${TOOL_SELECTION_GROUP_SIZE * 2}`, description: `Does thing ${TOOL_SELECTION_GROUP_SIZE * 2}.` }],
+      candidates: [
+        {
+          id: 0,
+          name: `tool_${TOOL_SELECTION_GROUP_SIZE * 2}`,
+          description: `Does thing ${TOOL_SELECTION_GROUP_SIZE * 2}.`,
+        },
+      ],
       query: "do thing",
     });
-    expect(request.questions).toEqual({ 0: { type: "predicate", instructions: { candidateId: 0 } } });
+    expect(request.questions).toEqual({
+      0: { type: "predicate", instructions: { candidateId: 0 } },
+    });
     expect(candidateSummary(`${"x".repeat(400)}.`)).toHaveLength(200);
   });
   test("groups are judged in parallel, then a final pass over their picks; one bad group fails the selection", async () => {
@@ -539,11 +551,21 @@ describe("decision selection", () => {
       async decide(input, questions) {
         requests++;
         const group = (input as { candidates: { name: string }[] }).candidates;
-        const names = group.map((candidate) => candidate.name);
-        const final = names.includes("tool_6") && names.includes(`tool_${TOOL_SELECTION_GROUP_SIZE + 1}`);
-        if (final) finalCandidates = names;
+        const groupNames = group.map((entry) => entry.name);
+        const final =
+          groupNames.includes("tool_6") &&
+          groupNames.includes(`tool_${TOOL_SELECTION_GROUP_SIZE + 1}`);
+        if (final) finalCandidates = groupNames;
         return {
-          usage: { model: "m", provider: "p", inputTokens: 1, outputTokens: 0, requests: 1, costUsd: 0, costSource: "provider-reported" },
+          usage: {
+            model: "m",
+            provider: "p",
+            inputTokens: 1,
+            outputTokens: 0,
+            requests: 1,
+            costUsd: 0,
+            costSource: "provider-reported",
+          },
           answers: Object.fromEntries(
             Object.keys(questions).map((id) => {
               const global = Number(group[Number(id)]!.name.slice("tool_".length));
@@ -575,11 +597,9 @@ describe("decision selection", () => {
     expect(chosen).toHaveLength(TOOL_SELECTION_MAX);
     // One group already judged its candidates against each other: no final pass.
     requests = 0;
-    expect(await createToolSelector(model)({ query: "q", candidates: candidates.slice(0, 10) })).toEqual([
-      "tool_6",
-      "tool_5",
-      "tool_7",
-    ]);
+    expect(
+      await createToolSelector(model)({ query: "q", candidates: candidates.slice(0, 10) }),
+    ).toEqual(["tool_6", "tool_5", "tool_7"]);
     expect(requests).toBe(1);
     let calls = 0;
     const failing: DecisionModel = {

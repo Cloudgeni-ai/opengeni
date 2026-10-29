@@ -1209,7 +1209,7 @@ export class LazyToolRuntime {
     setupFor: (chosen: readonly string[]) => Promise<string[]>,
     signal?: AbortSignal,
   ): Promise<GenericSearchMarker> {
-    const { query, limit, named, clear, strongest } = search;
+    const { query, named, clear, strongest } = search;
     if (named.length || clear.length || !this.decisionModel) {
       const chosen = named.length ? named : clear.length ? clear : strongest;
       const companions = await setupFor(chosen);

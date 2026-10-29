@@ -8,8 +8,10 @@ the conversational model picker. A model judges common input against named
 
 Two consumers use it:
 
-- Tool discovery judges the wider lexical shortlist, then resolves only exact
-  authorized candidate identities. Exact names and strong lexical matches bypass
+- Tool discovery judges the whole searchable catalog (up to 2,000 tools, best
+  lexical matches first) in parallel groups of 200, then one final request over
+  the groups' strongest picks, and resolves only exact authorized candidate
+  identities, at most five. Exact names and strong lexical matches bypass
   inference. Unconfigured, invalid or unavailable judgments recover through the
   normal best-match-first lexical path. Cancellation propagates.
 - `code_search` uses the same interface for file, passage, symbol and evidence

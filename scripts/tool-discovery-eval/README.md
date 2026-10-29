@@ -9,7 +9,7 @@ Improve the existing search/list/invoke path, not a second discovery API:
 - Search also covers integrations the person could connect. A search with no named or strong installed match reads the catalog's top three matches for the query (bounded at 2 s, best effort, alongside ranking and any decision model). When the query contains the whole name of one whose next step is a Connect card the person completes (a one-word name the ranker reads as an operation, such as "Send", never counts), the result names it in `notConnected` (a developer message after the result on native routes) and loads `capability_authorization_request`, so the card is the next call. The two setup tools also load together when either is chosen.
 - Ranking cannot tell that two connected accounts serve the same need ("my email" over Gmail and Outlook Mail). The first search in a turn that shows the model a tool reaching one connected account names the person's other accounts of the same connector or catalog category (not the broad "integrations" one, the "custom" one every custom server gets, or a fallback) in `connectedAccounts` (a developer message on native routes), once per turn; loads by exact name, single-account turns and unrelated accounts never carry it.
 - Native OpenAI/Azure and Codex routes **keep hosted client search and native function loading**. The shared selection runs inside that protocol, not a migration to text declarations / `tool_invoke`. Native search outputs carry only complete selected definitions; compact alternatives are available through `tool_list`, not embedded into the native search output.
-- An explicitly configured **decision model** handles ambiguous searches from the first 40 candidates. Strong lexical matches skip inference. The bypass requires resource coverage of at least 0.5 and a score at least 1.25 times the runner-up for every explicit clause. These are transparent heuristics, **not calibrated confidence probabilities**; the no-model default does not pretend its best-ranked choice is certain.
+- An explicitly configured **decision model** handles ambiguous searches over the whole searchable catalog (see [Whole-catalog selection](#whole-catalog-selection--october-29-2026)). Strong lexical matches skip inference. The bypass requires resource coverage of at least 0.5 and a score at least 1.25 times the runner-up for every explicit clause. These are transparent heuristics, **not calibrated confidence probabilities**; the no-model default does not pretend its best-ranked choice is certain.
 - `tool_list({view:"groups"})` is an on-demand directory; pass a returned `group` to browse it. Opaque connections stay together under compact display keys with a representative tool, rather than exposing long identity hashes or hundreds of tiny groups.
 - Schemas are not shortened or inferred. Selected definitions are frozen on the search call and disclosed after its result. They never enter a changing earlier prompt or top-level tools block.
 - No paid model, embedding index or credential is required for the default path. Optional typed inference needs explicit deployment configuration. There is no new inference timeout or concurrency quota. Unconfigured/unavailable selection uses best-match-first lexical recovery. Only selected schemas are loaded; alternatives remain compact.
@@ -30,6 +30,77 @@ The existing Jev client supplies the direct adapter; OpenAI and OpenRouter have
 distinct real Decisions adapters, **not chat-completions fallbacks**. See
 [configuration, accounting and verified provider boundaries](../../docs/decision-models.md).
 No production configuration was changed by this evaluation.
+
+## Whole-catalog selection — October 29, 2026
+
+**Problem.** The decision model only judged the 40 best lexical matches. Agents
+often describe a step in other words than the tool's own text: another language
+than the tool descriptions, a synonym, or several steps in one query. Lexical
+ranking then hid the right tool before any model saw it, and the model could only
+choose among wrong candidates or answer "no matching tools".
+
+**Change.**
+
+- The model judges the whole searchable pool, best lexical matches first, up to
+  2,000 tools. Only a larger pool is cut to its best matches.
+- Providers cap one request at 255 questions, so the pool is judged in parallel
+  groups of 200. The rubric sits once in the shared state and each question names
+  only its candidate id; per-question rubric text was most of the tokens.
+- A group judges its candidates without seeing the other groups, so each group
+  tends to pick its own "best" tool for the same action. When more than one group
+  has picks, one final request over the 12 strongest picks keeps only the best of
+  them. A catalog that fits in one group gets no final pass.
+- The rubric asks for the tools the agent should load for its next steps: the
+  best tool for each action, plus the tool that finds a record an action needs
+  (an id, a project, a template). Alternatives that do the same job are excluded.
+- At most five tools are selected. Exact names and strong lexical matches still
+  skip the model, and any failed request still recovers through lexical search.
+- The decision eval now sums usage over every request of a search. It previously
+  kept only the last request's usage, which undercounts multi-request searches.
+
+**Measurements** (`typesafe/jev-1.13` on OpenRouter's typed endpoint; no tools
+executed).
+
+Catalog A-like (764 tools, this repository's 60 labelled queries):
+
+| Variant | Top-1 | Top-3 | Wrongly included | Mean latency | Cost per search |
+| --- | --- | --- | --- | --- | --- |
+| Before: first 40 lexical candidates | 0.867 | 0.867 | 0.17 | 314 ms | $0.00066 |
+| Whole catalog, groups only | 0.85 | 0.883 | 1.48 | 468 ms | ≈ $0.0034 |
+| **Whole catalog, groups and final pass** | **0.867** | **0.867** | **0.15** | **615 ms** (p95 813 ms) | **$0.0035** |
+
+A large application catalog (1,091 tools from one application MCP server, 614
+real searches replayed from agent evaluation runs on four chat models). "Hit"
+means the selection includes the next new tool the agent actually went on to use;
+that label is noisy (an agent sometimes searched for one step and then did
+another), so read it as a relative measure. "Today" is the lexical result the
+agents saw.
+
+| Variant | Hit | Tools shown | p50 latency | Cost per search |
+| --- | --- | --- | --- | --- |
+| Today (lexical, no decision model) | 0.40 | 1.3 | n/a | $0 |
+| First 40 lexical candidates, decision model (60-search sample) | 0.50 | 2.0 | 278 ms | $0.0004 |
+| Whole catalog, groups only | 0.64 | 3.0 | 365 ms | $0.0029 |
+| **Whole catalog, groups and final pass** | **0.58** | **1.9** | **570 ms** | **$0.0030** |
+
+Per chat model, hit rate before and after (groups and final pass): strong model
+0.51 → 0.67 (97 searches), mid model 0.48 → 0.71 (195), cheap model 0.35 → 0.49
+(274), small model 0.20 → 0.33 (46). The cheaper models search more often and with
+vaguer queries, so they gain the most in absolute searches saved.
+
+The final pass trades about six points of hit rate on the large catalog for far
+fewer wrongly loaded tools on the general one (0.15 instead of 1.48). Every
+loaded tool stays in the agent's context for the rest of the run, so precision is
+kept. A single choice question over the whole catalog is not possible (at most 255
+options per question), and putting the whole catalog in one chat prompt took 1–20
+seconds per search.
+
+**Costs and risks.** About $0.003 per ambiguous search instead of $0.0007, and
+250–300 ms more latency, which is small next to one agent step. A catalog above
+2,000 tools is still cut to its best lexical matches. Tool descriptions and the
+search result format are unchanged; what changes is which tools a search loads.
+Selected definitions are still disclosed after the search result, so no text an
+earlier request sent changes.
 
 ## Repeated warm selector runs — October 21, 2026
 
