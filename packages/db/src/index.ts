@@ -92840,9 +92840,12 @@ export * from "./recordings";
 export * from "./recording-live";
 export {
   cosineSimilarity,
+  memberVoiceprints,
   recordingVoiceChannel,
   suggestSpeakersByVoice,
+  voiceMatchingVoiceprints,
   VOICE_SUGGESTION_THRESHOLD,
+  type KnownVoice,
   type RecordingSpeakerVoice,
   type RecordingVoiceChannel,
 } from "./recording-voices";

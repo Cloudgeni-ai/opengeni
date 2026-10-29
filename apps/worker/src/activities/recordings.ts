@@ -17,6 +17,7 @@ import {
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
   withoutMicrophoneEchoes,
+  withRecorderVoice,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingAlignedWords,
@@ -59,11 +60,13 @@ import {
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
   markRecordingDeleting,
+  memberVoiceprints,
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
   recordingVoiceChannel,
   setRecordingTrackPrepared,
+  voiceMatchingVoiceprints,
   type Database,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
@@ -786,9 +789,8 @@ export function createRecordingActivities(
           heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
           // The model's own diarization is still requested when it has one, so
           // a failure of ours falls back to it.
-          const diarize = plan.diarize && capabilities.diarization;
+          const diarize = capabilities.diarization;
           const useOurs =
-            plan.diarize &&
             ourDiarizer !== null &&
             (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
           const trackAudio = {
@@ -861,16 +863,37 @@ export function createRecordingActivities(
           audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
           trackWords.push({
             trackNumber: plan.trackNumber,
-            fixedLabel: plan.fixedLabel,
+            recorder: plan.recorderLabel ? { label: plan.recorderLabel, speaker: null } : null,
             words: shiftWords(words, offsetMilliseconds),
           });
         }
-        const segments = buildRecordingSegments(
-          withoutMicrophoneEchoes(trackWords, job.recording.tracks),
+        // With voice recognition on, the person recording's remembered voice
+        // picks theirs among the voices on their own microphone.
+        const ownerVoices =
+          recognizeVoices && trackWords.some((track) => track.recorder)
+            ? await memberVoiceprints(db, {
+                workspaceId: input.workspaceId,
+                memberSubjectId: input.ownerSubjectId,
+              })
+            : [];
+        const resolvedTracks = withoutMicrophoneEchoes(trackWords, job.recording.tracks).map(
+          (track) => {
+            const ours = trackVoices.find((voices) => voices.trackNumber === track.trackNumber);
+            const matched =
+              track.recorder && ours && ownerVoices.length > 0
+                ? voiceMatchingVoiceprints({
+                    voices: ours.result.voices,
+                    model: ours.result.voiceModel,
+                    known: ownerVoices,
+                  })
+                : null;
+            return withRecorderVoice(track, matched);
+          },
         );
+        const segments = buildRecordingSegments(resolvedTracks);
         const voices: RecordingSpeakerVoice[] = [];
         if (recognizeVoices) {
-          const labels = recordingSpeakerLabels(trackWords);
+          const labels = recordingSpeakerLabels(resolvedTracks);
           for (const { trackNumber, source, result } of trackVoices) {
             for (const voice of result.voices) {
               const label = labels.get(trackNumber)?.get(voice.speaker);
@@ -903,8 +926,10 @@ export function createRecordingActivities(
           segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),
         ).size;
         telemetry.providerCostUsd = costUsdMicros === null ? null : costUsdMicros / 1_000_000;
-        // A microphone beside computer or tab audio is the person recording.
-        const recorderLabels = plans.flatMap((plan) => (plan.fixedLabel ? [plan.fixedLabel] : []));
+        // A microphone beside computer or tab audio is the person recording's.
+        const recorderLabels = plans.flatMap((plan) =>
+          plan.recorderLabel ? [plan.recorderLabel] : [],
+        );
         const trackSpeakers: TrackSpeaker[] = [];
         if (recorderLabels.length > 0) {
           const displayName = await workspaceMemberDisplayName(db, {

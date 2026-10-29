@@ -375,16 +375,25 @@ A transcript that is already made and being charged and saved when the
 budget runs out is still saved, and a brief database error while saving it
 is retried at once.
 
-When a recording has computer or tab audio (a `system` track), the
-microphone track is the person recording and the system track is everyone
-else, so only the system track needs diarization. A microphone alone (a
-phone, or the web without tab audio) may hear a whole room, so it is
-diarized like any other track.
+Every track is diarized. When a recording has computer or tab audio (a
+`system` track), the microphone is the person recording's, but someone in
+the room with them may be on it too. One voice on the microphone is the
+person recording. With several, theirs is the voice that matches their
+remembered voice when the workspace recognizes voices, else the voice that
+spoke the most; the other voices on the microphone are told apart like on
+any other track. A microphone alone (a phone, or the web without tab audio)
+may hear a whole room, so nobody on it is assumed.
+Diarized speakers are numbered across the whole recording, by track and
+then by first appearance (`speaker_0`, `speaker_1`, …). Versions made before
+this numbered each track on its own, prefixed with the track
+(`t1_speaker_0`) when several tracks were diarized.
 Without headphones the microphone also hears the others from the speakers,
 so the transcript leaves out microphone words that were said at the same
 moment in the system track: runs of at least two words that match within
 1.5 seconds, with at most two misheard words in a row between them. What the
-person recording says, even right after someone else, stays.
+person recording says, even right after someone else, stays. This happens
+before the person recording's voice is picked, so the call's echo never
+counts as theirs.
 When the chosen model can tell speakers apart, its diarization is used.
 Otherwise, or when the request or `settings.recordings.diarizer` says
 `ours`, Opengeni tells the speakers apart itself, on the worker's CPU.
@@ -627,14 +636,16 @@ memory and storage at rates you set to your cloud's prices.
 - `GET` and `POST /v1/workspaces/:workspaceId/recording-people` read and add
   people in the directory.
 
-With a `system` track, every new version names the microphone's speaker
-(`track-N`) after the recording's owner, as "It's me" would: their person in
+With a `system` track, every new version names the person recording's voice
+on the microphone (`track-N`) after the recording's owner, as "It's me"
+would: their person in
 the directory, added for them if they have none, named from their profile
 (else their membership label or email). It has `source: "track"` and no
 `confidence`, so it reads as known rather than as a voice suggestion. A name
 a person gave that speaker always carries over instead, through every later
 version; clearing it leaves the speaker to the owner again in the next
-version. A microphone alone keeps diarized `Speaker 1`, `Speaker 2`, ….
+version. Other voices on that microphone, and a microphone alone, keep
+diarized `Speaker 1`, `Speaker 2`, ….
 
 ## Notes
 
@@ -787,10 +798,12 @@ from different models don't compare.
 Naming the microphone after the person recording enrolls nobody: adding
 them to the directory gives no agreement, a `track` speaker is not one
 "named as them" (only confirmed and carried-over speakers teach a
-voiceprint, so agreeing later learns nothing from it), and the microphone
-isn't diarized beside a system track, so it has no voice vector anyway.
-Since the owner is the microphone, they aren't suggested for a speaker on
-the system track, and the microphone itself is never offered a suggestion.
+voiceprint, so agreeing later learns nothing from it). Their voice vector
+is kept under `track-N` like any speaker's, so confirming that speaker as
+them does teach it. Since the owner is named already, they aren't suggested
+for any other speaker, and `track-N` itself is never offered a suggestion.
+Their voiceprint, when they agreed to one, only picks which voice on their
+microphone is theirs.
 
 When a transcript finishes, each unnamed speaker is compared with the
 remembered voices. A cosine similarity of 0.6 or more names the closest
