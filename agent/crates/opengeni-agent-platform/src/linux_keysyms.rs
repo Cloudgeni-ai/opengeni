@@ -1,10 +1,9 @@
 //! Unicode text to X11 keysyms.
 //!
 //! A character is typed through the keysym the current layout already binds
-//! (Latin-1, direct Unicode or a legacy keysym), or through a temporary spare
-//! keycode bound to [`text_keysym`].
+//! (Latin-1, direct Unicode or a legacy keysym).
 
-/// The keysym that X clients translate to `character`, used for remapping:
+/// The keysym that X clients translate to `character`:
 /// Latin-1 below U+0100 and the direct Unicode range (`0x0100_0000 + code
 /// point`) above it. Line breaks and tabs are the Return and Tab keys.
 pub(super) fn text_keysym(character: char) -> u32 {
@@ -14,13 +13,6 @@ pub(super) fn text_keysym(character: char) -> u32 {
         character if u32::from(character) < 0x100 => u32::from(character),
         character => 0x0100_0000 + u32::from(character),
     }
-}
-
-/// Whether `character` may be typed through a temporary spare keycode. Control
-/// characters other than line breaks and tabs have no glyph keysym.
-pub(super) fn remappable(character: char) -> bool {
-    let code = u32::from(character);
-    !(code < 0x20 || (0x7f..0xa0).contains(&code))
 }
 
 /// Every keysym that produces `character`, preferred first.
@@ -224,8 +216,6 @@ mod tests {
         assert!(keysym_types(0x03c0, 'Ā'));
         assert!(!keysym_types(0, '\0'));
         assert!(!keysym_types(0xffe1, '\u{ffe1}'));
-        assert!(remappable(' ') && remappable('密') && remappable('\u{a0}'));
-        assert!(!remappable('\n') && !remappable('\u{7f}') && !remappable('\u{9f}'));
     }
 
     #[test]

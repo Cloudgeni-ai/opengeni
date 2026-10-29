@@ -1,7 +1,5 @@
-//! Live X11 proof that desktop typing reaches a real text widget for text the
-//! keyboard layout cannot type (design BR-5): `ÆØÅ–π密` and a non-Latin
-//! password typed into a GTK entry through both XTEST delivery paths, with the
-//! temporary spare-keycode bindings restored afterwards.
+//! Live X11 proof that mapped text reaches a real widget through both delivery
+//! paths, while unmapped text is refused before any input or keymap change.
 //!
 //! # Why it is environment-gated
 //!
@@ -34,8 +32,8 @@ mod live {
     use x11rb::protocol::xproto::ConnectionExt as _;
 
     const TITLE: &str = "Opengeni Unicode typing fixture";
-    const TEXT: &str = "ÆØÅ–π密";
-    const PASSWORD: &str = "pÆss–wørd密π!";
+    const TEXT: &str = "Hello World 1!";
+    const PASSWORD: &str = "Password123!";
 
     const FIXTURE: &str = r#"
 import json, sys, gi
@@ -190,7 +188,7 @@ Gtk.main()
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn non_latin_text_reaches_a_gtk_entry_and_the_keymap_is_restored() {
+    async fn mapped_text_reaches_a_gtk_entry_and_unmapped_text_is_refused() {
         if std::env::var("OPENGENI_X11_TYPING_E2E").as_deref() != Ok("1") {
             eprintln!("SKIP: set OPENGENI_X11_TYPING_E2E=1 and run on a private Xvfb");
             return;
@@ -208,7 +206,7 @@ Gtk.main()
         eprintln!("desktop path typed {TEXT:?}");
 
         // Exact-window guarded delivery (managed desktops through the native
-        // computer adapter), with a mixed ASCII/non-Latin password.
+        // computer adapter), with mapped password text.
         assert_eq!(fixture.command("clear"), "");
         let activation = desktop
             .current_window_activation(window.clone())
@@ -224,7 +222,7 @@ Gtk.main()
         eprintln!("exact-window path typed {PASSWORD:?}");
 
         // Named chords keep their exact-window route proof: select all, then
-        // replace the selection with text that needs spare keycodes again.
+        // replace the selection with mapped text again.
         for input in [key_input("Control+a", false), text_input(TEXT)] {
             let activation = desktop
                 .current_window_activation(window.clone())
@@ -238,15 +236,25 @@ Gtk.main()
         }
         assert_eq!(fixture.text_eventually(TEXT), TEXT);
 
-        // More distinct glyphs than spare keycodes: refused before any key,
-        // with the keymap and the entry untouched (the browserd driver then
-        // pastes the text).
-        let glyphs: String = (0x4e00..0x4f00).filter_map(char::from_u32).collect();
-        let refusal = desktop.inject(&text_input(&glyphs)).await;
-        assert!(
-            matches!(&refusal, Err(PlatformError::Unsupported(message)) if message.ends_with("; use clipboard paste")),
-            "{refusal:?}"
-        );
+        // Even one unmapped glyph is refused. Neither a prefix nor the
+        // unmapped character may escape, on either delivery path.
+        for glyphs in ["密", "prefix密", "pÆss–wørd密π!"] {
+            let refusal = desktop.inject(&text_input(glyphs)).await;
+            assert!(
+                matches!(&refusal, Err(PlatformError::Unsupported(message)) if message.ends_with("; use clipboard paste")),
+                "{refusal:?}"
+            );
+            let activation = desktop
+                .current_window_activation(window.clone())
+                .await
+                .unwrap();
+            let refusal = desktop
+                .inject_activated_window(activation, vec![text_input(glyphs)])
+                .await
+                .unwrap_err();
+            assert!(!refusal.dispatched);
+            assert!(matches!(refusal.error, PlatformError::Unsupported(_)));
+        }
         assert_eq!(fixture.command("dump"), TEXT);
         assert_eq!(core_keymap(&display), keymap_before, "keymap untouched");
 

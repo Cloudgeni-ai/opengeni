@@ -2501,6 +2501,15 @@ All text/chord components in a physical batch are resolved before its first
 input request, so known unsupported mappings remain definite zero-input failures.
 Once any request may have escaped, failures retain an unknown outcome.
 
+X11 text uses only the existing keyboard layout, checked against the active
+group and locked modifiers. Temporary text-key bindings cannot be acknowledged
+by the receiving client: a busy application can refresh its map after the binding
+was restored and silently lose queued characters. Unmapped text is refused
+before the whole batch, without changing the map. The computer driver's existing
+validated clipboard fallback handles ordinary single-line text; secret references,
+control characters and seats without clipboard support remain explicit refusals.
+Named function-key remapping is unchanged and does not have this text guarantee.
+
 Window pointer preflight follows the mapped point through the X11 tree and
 requires the original client window and the same XRes resource owner, including
 embedded children. Covered or unprovable points are refused before XTEST input.

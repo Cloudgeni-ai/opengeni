@@ -191,7 +191,7 @@ test.skipIf(!enabled)(
 );
 
 test.skipIf(!enabled)(
-  "types non-Latin text and passwords into a live Linux GTK entry through native keys",
+  "pastes non-Latin text into a live Linux GTK entry when native keys cannot type it",
   async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-unicode-typing-");
     const reference = {
@@ -218,7 +218,7 @@ test.skipIf(!enabled)(
       expect(focused.state).toBe("completed");
 
       // Exact-window keyboard delivery. The seat's US layout has none of these
-      // glyphs; the native helper binds them to spare keycodes for the batch.
+      // glyphs; the native helper refuses before input and the driver pastes.
       const text = "ÆØÅ–π密";
       const typed = await supervisor.action({
         ...screenCommand(reference, focused.observation!.target, {
@@ -230,10 +230,10 @@ test.skipIf(!enabled)(
       });
       expect(typed).toMatchObject({ state: "completed" });
       await waitForValue(supervisor, reference, target.id, text);
-      // Native keys leave the seat clipboard untouched.
-      expect(await supervisor.clipboard(reference)).toMatchObject({ text: null });
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text });
 
-      // Whole-screen keyboard delivery replaces it with a mixed password.
+      // Whole-screen delivery pastes ordinary literal text too. Secret
+      // references are never eligible for this fallback (computer-driver.test).
       const screen = (await supervisor.listTargets(reference)).find(
         (candidate) => candidate.kind === "screen",
       );
@@ -248,9 +248,9 @@ test.skipIf(!enabled)(
         });
       }
       await waitForValue(supervisor, reference, target.id, password);
-      expect(await supervisor.clipboard(reference)).toMatchObject({ text: null });
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: password });
 
-      // More distinct glyphs than the keymap has spare keycodes: the helper
+      // A long unmapped string follows the same path: the helper
       // refuses before any key and the driver pastes the text instead, through
       // the exact window and through the whole screen.
       const glyphs = Array.from({ length: 248 }, (_, index) =>

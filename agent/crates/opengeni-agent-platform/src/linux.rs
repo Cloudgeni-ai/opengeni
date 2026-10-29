@@ -1483,8 +1483,9 @@ fn same_x11_client(
 
 // Resolve the entire batch on its delivery connection before any XTEST input.
 // A later unsupported glyph/chord must not turn an earlier emitted prefix into
-// a supposedly definite failure. Characters the layout lacks only reserve spare
-// keycodes here; the returned plan changes the keymap after every check passed.
+// a supposedly definite failure. Text never changes the keymap: a busy client
+// could translate its queued events only after a temporary binding was restored.
+// The returned plan is only for complete named function-key presses.
 fn prepare_inputs(
     conn: &x11rb::rust_connection::RustConnection,
     inputs: &[v1::DesktopInput],
@@ -1634,9 +1635,10 @@ fn inject_pointer(
 }
 
 /// Prepares key events from one complete immutable delivery keymap.
-/// Text the layout cannot type is bound to spare keycodes in `remap` (complete
-/// presses only: a held key must not outlive its temporary binding). So is a
-/// function key the layout lacks (F13 to F24 on most layouts).
+/// Text must be typeable on the existing layout, otherwise the whole batch is
+/// refused before input so the caller can use clipboard paste. A function key
+/// the layout lacks (F13 to F24 on most layouts) may still use `remap` for a
+/// complete press; a held key must not outlive its temporary binding.
 /// With another layout group active or a modifier such as Caps Lock locked
 /// (`check`), each character is sent on a key and with or without Shift so
 /// that it arrives as requested, or refused.
@@ -1648,14 +1650,10 @@ fn prepare_key(
 ) -> PlatformResult<Vec<(u8, u8)>> {
     let mut events = Vec::new();
     if key.is_text {
-        let complete = matches!(
-            key.action(),
-            v1::KeyAction::Press | v1::KeyAction::Unspecified
-        );
         let strokes = key
             .key
             .chars()
-            .map(|character| text_stroke(mapping, check, remap, complete, character))
+            .map(|character| text_stroke(mapping, check, character))
             .collect::<PlatformResult<Vec<_>>>()?;
         let shift = if strokes.iter().any(|stroke| stroke.shift) {
             Some(
@@ -1734,13 +1732,13 @@ fn is_function_keysym(keysym: u32) -> bool {
 }
 
 /// The stroke that types `character`: on the layout (in the active group and
-/// with Shift as locked modifiers require), or else (complete presses only)
-/// on a spare keycode.
+/// with Shift as locked modifiers require). Never temporarily rebind text:
+/// neither a server round trip nor a fixed delay acknowledges that a client
+/// has translated a queued key event. Refuse before input instead of reporting
+/// success for a character that a busy client can drop or translate differently.
 fn text_stroke(
     mapping: &X11KeyboardMapping,
     check: Option<&X11TextCheck>,
-    remap: &mut KeymapRemapPlan,
-    complete: bool,
     character: char,
 ) -> PlatformResult<X11KeyStroke> {
     let resolved = mapping.resolve_character(character);
@@ -1748,15 +1746,6 @@ fn text_stroke(
         Some(check) => check.stroke(resolved, character),
         None => resolved,
     }
-    .or_else(|| {
-        (complete && check.is_none_or(|check| check.bound_types(character)))
-            .then(|| remap.bind(mapping, character))
-            .flatten()
-            .map(|keycode| X11KeyStroke {
-                keycode,
-                shift: false,
-            })
-    })
     .ok_or_else(|| {
         PlatformError::Unsupported(format!(
             "X11 keymap cannot type Unicode scalar U+{:04X}; use clipboard paste",
@@ -2000,16 +1989,6 @@ impl X11TextCheck {
             )
         })
     }
-
-    /// Whether a spare keycode bound to `character` (one group, the glyph on
-    /// both levels) types it under the locked modifiers.
-    fn bound_types(&self, character: char) -> bool {
-        keysym_layout::gives(
-            keysyms::text_keysym(character),
-            character,
-            self.locked & 0x02 != 0,
-        )
-    }
 }
 
 /// Whether text must be checked in active group `group` with `locked`
@@ -2044,15 +2023,29 @@ fn x11_text_check(
         .xkb_get_state(xkb::ID::USE_CORE_KBD.into())
         .ok()
         .and_then(|cookie| cookie.reply().ok())
-        .ok_or_else(keyboard_layout_not_ready)?;
-    let group = u8::from(state.group);
-    let locked = u16::from(state.locked_mods).to_le_bytes()[0];
-    if !x11_text_needs_check(group, locked, mapping.num_lock_mask) {
+        .map(|state| {
+            (
+                u8::from(state.group),
+                u16::from(state.locked_mods).to_le_bytes()[0],
+            )
+        });
+    checked_x11_text_state(state, mapping.num_lock_mask, || {
+        keysym_layout::LayoutKeymap::read_types(conn)
+    })
+}
+
+/// Keep failed reads distinct from a plain keyboard that needs no extra check.
+fn checked_x11_text_state(
+    state: Option<(u8, u8)>,
+    num_lock: u8,
+    read_types: impl FnOnce() -> Option<keysym_layout::LayoutKeymap>,
+) -> PlatformResult<Option<X11TextCheck>> {
+    let (group, locked) = state.ok_or_else(keyboard_layout_not_ready)?;
+    if !x11_text_needs_check(group, locked, num_lock) {
         return Ok(None);
     }
     Ok(Some(X11TextCheck {
-        keymap: keysym_layout::LayoutKeymap::read_types(conn)
-            .ok_or_else(keyboard_layout_not_ready)?,
+        keymap: read_types().ok_or_else(keyboard_layout_not_ready)?,
         layout: usize::from(group),
         locked,
     }))
@@ -2064,7 +2057,7 @@ fn keyboard_layout_not_ready() -> PlatformError {
     )
 }
 
-/// Characters and function keys bound to spare keycodes for one delivery
+/// Function keys bound to spare keycodes for one delivery
 /// batch. Planning has no X11 side effect; [`KeymapRemap::apply`] performs the
 /// bindings.
 #[derive(Debug, Default)]
@@ -2075,15 +2068,6 @@ struct KeymapRemapPlan {
 }
 
 impl KeymapRemapPlan {
-    /// Returns the spare keycode bound to `character`, reusing a binding for a
-    /// repeated character. `None` when it is not a glyph or no spare is left.
-    fn bind(&mut self, mapping: &X11KeyboardMapping, character: char) -> Option<u8> {
-        if !keysyms::remappable(character) {
-            return None;
-        }
-        self.bind_keysym(mapping, keysyms::text_keysym(character))
-    }
-
     /// Returns the spare keycode bound to `keysym`, reusing a binding for a
     /// repeated keysym. `None` when no spare is left.
     fn bind_keysym(&mut self, mapping: &X11KeyboardMapping, keysym: u32) -> Option<u8> {
@@ -2995,21 +2979,17 @@ mod tests {
             Err("unsupported operation: X11 keymap cannot type Unicode scalar U+0061; use clipboard paste".into())
         );
 
-        // A spare keycode gives its glyph on both levels, which applications
-        // capitalize under Caps Lock: a capital is bound, a small letter is
-        // refused before anything is bound.
+        // Unmapped text is refused even if spare keycodes are available:
+        // a busy client cannot safely consume temporary text bindings.
         let spare = spare_keymap();
         let mut remap = KeymapRemapPlan::default();
-        assert_eq!(
-            prepare_key(
-                &spare,
-                Some(&caps),
-                &text("Æ", v1::KeyAction::Press),
-                &mut remap
-            )
-            .unwrap(),
-            plain(13)
-        );
+        assert!(prepare_key(
+            &spare,
+            Some(&caps),
+            &text("Æ", v1::KeyAction::Press),
+            &mut remap
+        )
+        .is_err());
         assert!(prepare_key(
             &spare,
             Some(&caps),
@@ -3017,7 +2997,7 @@ mod tests {
             &mut remap
         )
         .is_err());
-        assert_eq!(remap.bindings.len(), 1);
+        assert!(remap.bindings.is_empty());
     }
 
     #[test]
@@ -3084,7 +3064,24 @@ mod tests {
     }
 
     #[test]
-    fn text_the_layout_lacks_is_bound_to_spare_keycodes_once_per_glyph() {
+    fn failed_x11_state_and_key_type_reads_never_mean_unchecked_text() {
+        let unavailable = checked_x11_text_state(None, 0x10, || panic!("no state to check"));
+        assert!(matches!(unavailable, Err(PlatformError::Timeout(_))));
+        for state in [(1, 0), (0, 0x02)] {
+            let unavailable = checked_x11_text_state(Some(state), 0x10, || None);
+            assert!(matches!(unavailable, Err(PlatformError::Timeout(_))));
+        }
+        for state in [(0, 0), (0, 0x10)] {
+            assert!(checked_x11_text_state(Some(state), 0x10, || panic!(
+                "plain text needs no types"
+            ))
+            .unwrap()
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn text_the_layout_lacks_is_refused_without_reserving_spare_keycodes() {
         let mapping = spare_keymap();
         let mut remap = KeymapRemapPlan::default();
         // π is on the layout through its legacy keysym; Æ and 密 are not.
@@ -3092,43 +3089,30 @@ mod tests {
             prepare_key(
                 &mapping,
                 None,
-                &text("πÆ密Æa", v1::KeyAction::Press),
+                &text("πa", v1::KeyAction::Press),
                 &mut remap
             )
             .unwrap(),
             [
                 (KEY_PRESS, 12),
                 (KEY_RELEASE, 12),
-                (KEY_PRESS, 13),
-                (KEY_RELEASE, 13),
-                (KEY_PRESS, 10),
-                (KEY_RELEASE, 10),
-                (KEY_PRESS, 13),
-                (KEY_RELEASE, 13),
                 (KEY_PRESS, 8),
                 (KEY_RELEASE, 8),
             ]
         );
-        assert_eq!(
-            remap.bindings,
-            [(13, 0xc6, vec![0, 0]), (10, 0x0100_5bc6, vec![0, 0])]
-        );
-        // Later keys of the same batch reuse the bindings; a third glyph has no
-        // spare left and fails the whole batch before any input.
-        assert_eq!(
-            prepare_key(
-                &mapping,
-                None,
-                &text("密", v1::KeyAction::Unspecified),
-                &mut remap
-            )
-            .unwrap(),
-            [(KEY_PRESS, 10), (KEY_RELEASE, 10)]
-        );
+        for value in ["πÆ密Æa", "密", "aÆ"] {
+            for action in [v1::KeyAction::Press, v1::KeyAction::Unspecified] {
+                assert!(matches!(
+                    prepare_key(&mapping, None, &text(value, action), &mut remap),
+                    Err(PlatformError::Unsupported(_))
+                ));
+            }
+        }
+        assert!(remap.bindings.is_empty());
         let Err(PlatformError::Unsupported(message)) =
             prepare_key(&mapping, None, &text("Ø", v1::KeyAction::Press), &mut remap)
         else {
-            panic!("a glyph without a spare keycode must be unsupported");
+            panic!("an unmapped glyph must be unsupported even with spare keycodes");
         };
         assert_eq!(
             message,
