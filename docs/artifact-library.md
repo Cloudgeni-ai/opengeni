@@ -107,8 +107,8 @@ agent makes files through (`sandbox_file_publish`, uploads, browser downloads,
 generated images and videos): Only me in an Only me chat, otherwise the
 workspace. A person's own upload is shared unless they choose Only me. An
 explicit choice wins on the owner's behalf: `visibility` on
-`sandbox_file_publish`, or `scope` on `POST /files/uploads`. A personal
-workspace keeps every file private.
+`sandbox_file_publish`, or `scope` on `POST /files/uploads`. A Personal
+workspace follows the same rule; its Workspace audience is only its owner.
 
 The owner changes one finished file with
 `PUT /v1/workspaces/:workspaceId/files/:fileId/visibility` and

@@ -486,10 +486,8 @@ export async function createValidatedScheduledTask(input: {
       message: "Personal source tasks create a private session for each run",
     });
   if (learning) {
-    const workspace = await requireWorkspace(input.db, input.grant.workspaceId);
     const destination =
       knowledgeAction?.destination.kind === "personal" ||
-      workspace.kind === "personal" ||
       target?.tenancy?.visibility === "private" ||
       target?.memoryScope === "user"
         ? "personal"
@@ -2632,7 +2630,6 @@ async function validateScheduledTaskAgentConfig(input: {
           )
         : null;
     const privateDestination =
-      workspace.kind === "personal" ||
       (target?.visibility === "user_private" &&
         target.ownerSubjectId === fileActor.privateFileOwnerSubjectId) ||
       (target?.memoryScope === "user" &&

@@ -236,6 +236,8 @@ export class CuaComputerBackend implements ComputerBackend {
       // stale token (see dispatchBatch); elsewhere each action is its own.
       actionBatches,
       parallelApps: false,
+      // Only macOS brings a window to the front (see dispatchFocus).
+      targetFocus: platform === "macos" && permissions.accessibility,
     };
   }
 
@@ -344,6 +346,7 @@ export class CuaComputerBackend implements ComputerBackend {
         keyboardInput: permissions.accessibility,
         backgroundActions: permissions.accessibility,
         backgroundInput: macos && permissions.accessibility,
+        targetFocus: macos && permissions.accessibility,
         windowCapture: permissions.screen_recording,
         pointerInput: permissions.accessibility && permissions.screen_recording,
       };
@@ -439,7 +442,8 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "batch") return await this.dispatchBatch(command, false, standIn);
+      if (command.action.type === "batch")
+        return await this.dispatchBatch(command, false, standIn, unconfirmed);
       if (command.action.type === "focus") return await this.dispatchFocus(command);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
@@ -472,6 +476,7 @@ export class CuaComputerBackend implements ComputerBackend {
           { ...command, action: { type: "batch", actions: [command.action] } },
           true,
           standIn,
+          unconfirmed,
         );
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
@@ -768,6 +773,7 @@ export class CuaComputerBackend implements ComputerBackend {
     command: ComputerBackendActionCommand,
     single = false,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null> {
     const { steps, actionOf } = await this.batchSteps(command);
     const standIns: ComputerBackendRoleStandIn[] = [];
@@ -780,6 +786,9 @@ export class CuaComputerBackend implements ComputerBackend {
     let report = "";
     let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
       null;
+    // Raw input (a key press, or a press CUA could only send) with nothing
+    // confirming the app took it, as for one action (see dispatch).
+    let unconfirmedInput = false;
     try {
       for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
         const chunk = steps.slice(start, start + MAX_RUN_STEPS);
@@ -820,8 +829,19 @@ export class CuaComputerBackend implements ComputerBackend {
             name: used.name,
           });
         }
-        if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
-        else stopped = { step: start + outcome.completed, outcome };
+        if (outcome.kind === "completed") {
+          report += openedWindowsReport(outcome.windowChanges);
+          for (const index of outcome.unconfirmed) {
+            const action = actions[actionOf[start + index]!];
+            if (
+              action?.type === "keyboard" ||
+              (action?.type === "semantic" &&
+                action.action === "invoke" &&
+                steps[start + index]?.name === "click")
+            )
+              unconfirmedInput = true;
+          }
+        } else stopped = { step: start + outcome.completed, outcome };
       }
     } finally {
       await fronted.giveBack();
@@ -836,6 +856,7 @@ export class CuaComputerBackend implements ComputerBackend {
           standIn(used);
         }
     if (!stopped) {
+      if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const { after: confirmed, failures } = await this.confirmInput(after, steps);
@@ -1438,11 +1459,26 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendError | null> {
     const target = this.targetsById.get(targetId);
     if (!target) return null;
-    // CUA's wording names an input mode this tool does not offer.
+    // CUA's wording names an input mode this tool does not offer. The
+    // window's own focus action opens the way to the menu, so name it with
+    // the window's target: the dropdown lists a focus action too, which only
+    // moves the keyboard focus. Not where that focus would be refused (see
+    // dispatchFocus): then set_value is the way.
     if (cuaCode === "select_menu_would_raise_window")
       return new ComputerBackendError(
         code,
-        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+        `Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text${
+          this.identity.platform === "macos" && this.recentPersonInput() === undefined
+            ? `; to open the menu itself, first bring the window to the front with the action {type:'focus',targetId:'${targetId}'} (focus on the dropdown's ref only moves the keyboard focus), then invoke it again`
+            : ""
+        }`,
+        false,
+        false,
+      );
+    if (cuaCode === "popup_option_without_text")
+      return new ComputerBackendError(
+        code,
+        "That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
         false,
         false,
       );

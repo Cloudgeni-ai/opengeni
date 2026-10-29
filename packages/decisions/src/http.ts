@@ -8,10 +8,21 @@ import {
   type DecisionUsage,
 } from "./types";
 
+/**
+ * A bearer credential fetched per request, such as a cached Microsoft Entra
+ * token source. `discard` drops a token the provider rejected, so the next
+ * request signs in again.
+ */
+export type DecisionAccessToken = {
+  (): Promise<string>;
+  discard?(token: string): void;
+};
+
 export type HttpDecisionModelOptions = {
   provider: "openai" | "openrouter";
   model: string;
-  apiKey: string;
+  /** A static key, or an access token fetched before each request. */
+  apiKey: string | DecisionAccessToken;
   /** Full typed endpoint; never a chat-completions fallback. */
   endpoint?: string;
   fetch?: typeof fetch;
@@ -136,20 +147,32 @@ export function createHttpDecisionModel(config: HttpDecisionModelOptions): Decis
         config.provider === "openai"
           ? openAiDecisionRequest(config.model, input, questions)
           : openRouterDecisionRequest(config.model, input, questions);
+      let credential: string;
+      try {
+        credential = typeof config.apiKey === "string" ? config.apiKey : await config.apiKey();
+      } catch (cause) {
+        options.signal?.throwIfAborted();
+        throw new DecisionUnavailableError("Decision provider credential unavailable", { cause });
+      }
       let response: Response;
       try {
         response = await (config.fetch ?? fetch)(endpoint, {
           method: "POST",
-          headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+          headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
           body: JSON.stringify(request),
           ...(options.signal ? { signal: options.signal } : {}),
         });
       } catch (cause) {
         options.signal?.throwIfAborted();
-        throw new DecisionUnavailableError("Decision provider request failed", { cause });
+        throw new DecisionUnavailableError("Decision provider request failed", {
+          cause,
+          code: "request_failed",
+        });
       }
       if (!response.ok) {
         await response.body?.cancel();
+        if (response.status === 401 && typeof config.apiKey !== "string")
+          config.apiKey.discard?.(credential);
         const ErrorType =
           [401, 402, 403, 408, 429].includes(response.status) || response.status >= 500
             ? DecisionUnavailableError

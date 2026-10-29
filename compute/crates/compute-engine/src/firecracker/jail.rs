@@ -129,6 +129,9 @@ pub struct Launch<'a> {
     pub cgroup_parent: &'a Path,
     /// Network namespace to join, if any.
     pub netns: Option<&'a Path>,
+    /// Whether the kernel may compress the running VM's memory in RAM
+    /// (zswap, never written to a swap device) when the host is short.
+    pub compress_running: bool,
 }
 
 /// The jailer's command line for `spec`.
@@ -149,13 +152,17 @@ pub fn jailer_args(spec: &VmSpec, jail: &Jail, launch: &Launch<'_>) -> Vec<OsStr
     // parent. This one also keeps the VM's memory out of swap devices:
     // compressed pages stay in RAM, and nothing of the guest reaches disk.
     push("--cgroup", "memory.zswap.writeback=0".into());
-    // And a running VM is never compressed either, not even by the kernel
-    // under host memory pressure: zswap opens only while the agent
-    // compresses the paused VM (see `Cgroup::reclaim_to_zswap`), and so
-    // does swap, which zswap needs: with zswap turned off on the host,
-    // writeback 0 would mean nothing.
-    push("--cgroup", "memory.zswap.max=0".into());
-    push("--cgroup", "memory.swap.max=0".into());
+    // Where running VMs may be compressed (ADR 24), the kernel compresses
+    // what the agent's bounds push out of RAM; zswap needs swap slots for
+    // that, though with writeback 0 no page is ever written to them.
+    // Elsewhere a running VM is never compressed: zswap opens only while
+    // the agent compresses the paused VM (see `Cgroup::reclaim_to_zswap`).
+    let compressible = if launch.compress_running { "max" } else { "0" };
+    push(
+        "--cgroup",
+        format!("memory.zswap.max={compressible}").into(),
+    );
+    push("--cgroup", format!("memory.swap.max={compressible}").into());
     // What the VM is guaranteed: its requested memory is kept from reclaim
     // for others (reclaim the agent asks of this group itself, to compress
     // it, is not held back), and contended processors are shared by
@@ -288,6 +295,7 @@ mod tests {
                 binary: Path::new("/opt/bin/firecracker"),
                 cgroup_parent: Path::new("compute"),
                 netns: Some(Path::new("/run/netns/ogc-abc")),
+                compress_running: false,
             },
         );
         let text: Vec<String> = args
@@ -303,5 +311,29 @@ mod tests {
              --cgroup memory.max=1073741824 --netns /run/netns/ogc-abc --new-pid-ns \
              -- --api-sock /api.sock"
         );
+    }
+
+    #[test]
+    fn a_vm_compressed_while_running_gets_zswap_but_never_writeback() {
+        let spec = spec("/srv/vm/firecracker/abc/root", "abc");
+        let jail = Jail::new(&spec).unwrap();
+        let args = jailer_args(
+            &spec,
+            &jail,
+            &Launch {
+                binary: Path::new("/opt/bin/firecracker"),
+                cgroup_parent: Path::new("compute"),
+                netns: None,
+                compress_running: true,
+            },
+        );
+        let text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let text = text.join(" ");
+        assert!(text.contains("--cgroup memory.zswap.writeback=0"), "{text}");
+        assert!(text.contains("--cgroup memory.zswap.max=max"), "{text}");
+        assert!(text.contains("--cgroup memory.swap.max=max"), "{text}");
     }
 }

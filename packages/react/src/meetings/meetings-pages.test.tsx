@@ -35,8 +35,9 @@ const {
 const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
   await import("../testing/meetings-fixture");
 
-async function render(node: React.ReactNode) {
+async function render(node: React.ReactNode, host?: (container: HTMLElement) => void) {
   const container = document.createElement("div");
+  host?.(container);
   document.body.append(container);
   const root = createRoot(container);
   const store = createMeetingRecorderStore();
@@ -115,6 +116,45 @@ async function typeInto(field: HTMLInputElement | HTMLTextAreaElement, value: st
 }
 
 describe("Meetings list", () => {
+  test("takes its surfaces from the host page, as the embedded chat does", async () => {
+    const fixture = createMeetingsFixture();
+    const page = (
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />
+    );
+    // A dark host page darker than Opengeni's own page grey: the sticky bars
+    // and the page background become the host's color, not grey boxes.
+    const hosted = await render(page, (container) => {
+      container.setAttribute("data-og-theme", "dark");
+      container.style.backgroundColor = "rgb(26, 26, 25)";
+    });
+    // Inside Opengeni's own content pane, whose page background is already
+    // its own canvas, nothing is restyled.
+    const inApp = await render(page, (container) => {
+      container.setAttribute("data-og-theme", "dark");
+      container.style.backgroundColor = "rgb(32, 32, 32)";
+      container.style.setProperty("--og-color-bg", "#202020");
+    });
+    try {
+      await settle();
+      const hostedRoot = hosted.container.querySelector<HTMLElement>("[data-og-host-theme]");
+      expect(hostedRoot?.classList.contains("og-root")).toBe(true);
+      expect(hostedRoot?.style.getPropertyValue("--og-color-bg")).toBe("rgb(26 26 25)");
+      expect(hostedRoot?.style.getPropertyValue("--og-color-canvas")).toBe("rgb(26 26 25)");
+      expect(hostedRoot?.querySelectorAll("[data-og-host-theme]")).toHaveLength(0);
+      const inAppRoot = inApp.container.querySelector<HTMLElement>("[data-og-host-theme]");
+      expect(inAppRoot?.style.getPropertyValue("--og-color-bg")).toBe("");
+      expect(inAppRoot?.getAttribute("data-og-theme")).toBeNull();
+    } finally {
+      await hosted.unmount();
+      await inApp.unmount();
+    }
+  });
+
   test("lists meetings with their state and opens one", async () => {
     const fixture = createMeetingsFixture();
     const opened: string[] = [];
