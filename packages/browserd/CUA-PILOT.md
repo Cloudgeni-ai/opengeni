@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`bc18cf52f355a5beb3acb4492124b1c4090657f7`: upstream `cua-driver-rs-v0.37.0`
+`4c2a620b8a9e08165a5e186183369161ce80da94`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -30,6 +30,15 @@ whose earlier step closed or hid its window can still open the app's menu.
 A `run_steps` step addressed to a window that reads no elements and is closed
 or off screen fails at once (`window_not_on_screen`) instead of waiting out
 its timeout.
+On macOS keys addressed to a window that is not its app's main window make it
+main first (`cu-main-window-keys`): an app's shortcuts go to its main window
+whatever window has focus, so a background `cmd+L` focused another Chrome
+window's address bar, and the typed address was appended to the addressed
+window's current address instead of replacing it. The window stays main, as
+after a background press, and comes to the top of its app's own windows, which
+stay behind the person's app. When the app is the person's front app, or the
+window does not become main, the keys are refused with `window_not_main`
+before any is sent.
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -354,7 +363,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/bc18cf52f355a5beb3acb4492124b1c4090657f7/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/4c2a620b8a9e08165a5e186183369161ce80da94/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

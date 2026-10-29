@@ -1361,9 +1361,19 @@ export class CuaComputerBackend implements ComputerBackend {
     if (
       !target ||
       this.identity.platform !== "macos" ||
-      (cuaCode !== "window_not_key" && cuaCode !== "key_focus_unknown")
+      (cuaCode !== "window_not_key" &&
+        cuaCode !== "key_focus_unknown" &&
+        cuaCode !== "window_not_main")
     )
       return null;
+    // A shortcut goes to the app's main window, whichever window has focus.
+    if (cuaCode === "window_not_main")
+      return new ComputerBackendError(
+        code,
+        "Keys to this window could reach another of its app's windows, since an app's shortcuts go to its main window and this window could not be made main (when its app is the one in front, that would move the window the person is using), so none were sent: use this window's controls instead (set_value on a field, invoke on a button)",
+        false,
+        false,
+      );
     // The app named no focused window, or did not answer in time: nothing
     // is known about where keys would go.
     if (cuaCode === "key_focus_unknown")
