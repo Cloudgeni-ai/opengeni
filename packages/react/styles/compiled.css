@@ -13124,6 +13124,9 @@
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   font-weight: 500;
 }
+:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus {
+  outline: none;
+}
 :where(.og-root).og-session-capability-setup fieldset,:where(.og-root) .og-session-capability-setup fieldset {
   display: grid;
   gap: 10px;
@@ -13207,6 +13210,18 @@
   gap: 8px;
   margin-inline-start: auto;
   align-self: center;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary,:where(.og-root) .og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary {
+  border-color: transparent;
+  background: var(--og-color-fg);
+  color: var(--og-color-bg);
+  font-weight: 500;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary:hover,:where(.og-root) .og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary:hover {
+  background: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb,var(--og-color-fg) 85%,transparent);
+  }
 }
 @keyframes og-session-capability-spin {
   to {
@@ -14586,6 +14601,9 @@
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   font-weight: 500;
 }
+:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus {
+  outline: none;
+}
 :where(.og-root).og-session-capability-setup fieldset,:where(.og-root) .og-session-capability-setup fieldset {
   display: grid;
   gap: 10px;
@@ -14669,6 +14687,18 @@
   gap: 8px;
   margin-inline-start: auto;
   align-self: center;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary,:where(.og-root) .og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary {
+  border-color: transparent;
+  background: var(--og-color-fg);
+  color: var(--og-color-bg);
+  font-weight: 500;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary:hover,:where(.og-root) .og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary:hover {
+  background: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background: color-mix(in srgb,var(--og-color-fg) 85%,transparent);
+  }
 }
 @keyframes og-session-capability-spin {
   to {
@@ -15978,6 +16008,17 @@
 }
 :where(.og-root).og-connect-setup .og-connect-setup-primary:hover:not(:disabled),:where(.og-root) .og-connect-setup .og-connect-setup-primary:hover:not(:disabled) {
   background: var(--_og-color-primary-hover);
+}
+:where(.og-root).og-connect-setup a.og-connect-setup-primary,:where(.og-root) .og-connect-setup a.og-connect-setup-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-height: 2.75rem;
+  padding: .5rem .75rem;
+  border-width: 1px;
+  border-style: solid;
+  text-decoration: none;
 }
 :where(.og-root).og-connect-setup .og-connect-setup-secondary,:where(.og-root) .og-connect-setup .og-connect-setup-secondary {
   display: flex;

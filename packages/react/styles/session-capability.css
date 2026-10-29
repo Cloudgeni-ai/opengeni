@@ -61,6 +61,7 @@
 .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,
 .og-session-capability-shell[data-state="complete"] .og-session-capability-copy { color:var(--og-color-status-idle); }
 .og-session-capability-shell[data-state="complete"] .og-session-capability-copy { font-weight:500; }
+.og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus { outline:none; }
 .og-session-capability-setup fieldset { display:grid; gap:10px; margin:0; padding:0; border:0; min-width:0; }
 .og-session-capability-setup legend { padding:0 0 10px; font-weight:600; }
 .og-session-capability-setup input { margin-top:4px; accent-color:var(--og-color-accent-deep); }
@@ -78,6 +79,9 @@
 .og-session-capability-waiting > p:focus { outline:none; }
 .og-session-capability-spinner { flex:none; box-sizing:border-box; width:14px; height:14px; margin-top:3px; border-radius:999px; border:2px solid color-mix(in srgb,currentColor 25%,transparent); border-top-color:currentColor; animation:og-session-capability-spin .8s linear infinite; }
 .og-session-capability-waiting-actions { display:flex; gap:8px; margin-inline-start:auto; align-self:center; }
+/* Once the card can't see the sign-in window, opening it again is the way on. */
+.og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary { border-color:transparent; background:var(--og-color-fg); color:var(--og-color-bg); font-weight:500; }
+.og-session-capability-setup .og-session-capability-waiting-actions .og-session-capability-reopen-primary:hover { background:color-mix(in srgb,var(--og-color-fg) 85%,transparent); }
 @keyframes og-session-capability-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .og-session-capability-spinner { animation:none; } }
 @media (pointer:coarse) { .og-session-capability-actions button,.og-session-capability-setup button { min-height:44px; } }

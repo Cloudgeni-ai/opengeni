@@ -13,7 +13,8 @@
 const REVIEWED_GRAPH_TITLES: readonly (readonly [RegExp, string])[] = [
   // Outlook mail. Creating a message in Graph saves a draft; nothing is sent.
   [/^(me|users)\.(mailFolders\.(childFolders\.)*)?CreateMessages$/, "Save a draft email"],
-  [/^(me|users)\.sendMail$/, "Send an email"],
+  // Actions name the user they act for: "users.user.sendMail".
+  [/^(me|users(\.user)?)\.sendMail$/, "Send an email"],
   [/\.messages\.message\.send$/, "Send a draft email"],
   [/\.messages\.message\.reply$/, "Reply to an email"],
   [/\.messages\.message\.replyAll$/, "Reply all to an email"],
@@ -182,7 +183,7 @@ const READ_VERB =
 const QUALIFIER = /^(default|primary|active|current|main|preferred|public|private)$/;
 // A POST to "/accounts/{id}/close" performs that action on the account.
 const ROUTE_ACTION =
-  /^(accept|activate|apply|approve|archive|cancel|capture|close|confirm|copy|deactivate|decline|delete|deploy|disable|dismiss|enable|finalize|generate|lock|mark|merge|move|open|pause|pay|publish|refund|reject|remove|renew|reopen|rerun|reset|resolve|restart|restore|resume|retry|revoke|run|send|start|stop|submit|suspend|sync|transfer|trigger|unarchive|unlock|unpublish|update|verify|void)$/;
+  /^(accept|activate|apply|approve|archive|cancel|capture|close|confirm|copy|deactivate|decline|delete|deploy|disable|dismiss|enable|expire|finalize|generate|lock|mark|merge|move|open|pause|pay|publish|refund|reject|remove|renew|reopen|rerun|reset|resolve|restart|restore|resume|retry|revoke|run|send|start|stop|submit|suspend|sync|transfer|trigger|unarchive|unlock|unpublish|update|verify|void)$/;
 
 /** Action phrases whose meaning needs the thing they act on. */
 const SUBJECT_ACTIONS: Readonly<Record<string, (subject: string) => string>> = {
@@ -195,6 +196,38 @@ function singularObject(object: readonly string[]): string[] {
   if (object.length === 0 || object.slice(0, -1).some((word) => COUNTING.test(word)))
     return [...object];
   return [...object.slice(0, -1), singular(object.at(-1)!)];
+}
+
+/**
+ * Some APIs name each operation after its method and path: "PostChargesChargeCapture"
+ * is POST /charges/{charge}/capture. Rebuilds that route key so it reads like one,
+ * when the id starts with the operation's own method. A word that is the singular
+ * of the word before it ("charges" then "charge"), or "id", names one thing.
+ */
+function methodNamedRoute(key: string, method: string | undefined): string | undefined {
+  const match = /^(Get|Post|Put|Patch|Delete)([A-Z][A-Za-z0-9]*)$/.exec(key);
+  if (!match || match[1]!.toLowerCase() !== method?.toLowerCase()) return undefined;
+  const tokens = words(match[2]!);
+  // "GetPetById" names how it looks one up, not a path.
+  if (tokens.length === 0 || tokens.some((token) => PREPOSITION.test(token))) return undefined;
+  const segments: string[] = [];
+  let run: string[] = [];
+  for (const [index, token] of tokens.entries()) {
+    const previous = tokens[index - 1];
+    const parameter =
+      token === "id" ||
+      (previous !== undefined && previous !== token && singular(previous) === token);
+    if (!parameter) {
+      run.push(token);
+      continue;
+    }
+    // The plural before a parameter is its own segment: "checkout sessions {session}".
+    if (run.length > 0) segments.push(run.join("-"));
+    run = [];
+    segments.push(`{${token}}`);
+  }
+  if (run.length > 0) segments.push(run.join("-"));
+  return `${match[1]!.toLowerCase()}_/${segments.join("/")}`;
 }
 
 /** Tool `_meta` key for the display title. Hosts read it; models never see `_meta`. */
@@ -256,18 +289,21 @@ export function integrationOperationDisplayTitle(
     const noun = resource.length > 0 ? words(resource.at(-1)!) : [];
     if (noun.length === 0) return undefined;
     // One thing when the path names it, or when a POST creates it;
-    // "delete_/users" acts on every user.
+    // "delete_/users" acts on every user. A POST to one named thing
+    // ("post_/charges/{charge}") changes it.
     const one = isParameter(path.at(-1)) || method === "post";
     const verb = {
       get: "Read",
       head: "Read",
-      post: "Create",
+      post: isParameter(path.at(-1)) ? "Update" : "Create",
       put: "Update",
       patch: "Update",
       delete: "Delete",
     }[route[1] as "get"];
     return sentence([verb, ...(one ? singularObject(noun) : noun)]);
   }
+  const methodNamed = methodNamedRoute(key, context.method);
+  if (methodNamed) return integrationOperationDisplayTitle(methodNamed, context);
   // GraphQL operation keys read "query:issues" / "mutation:createIssue".
   const graphql = /^(query|mutation):(.+)$/.exec(key);
   const segments = (graphql ? graphql[2]! : key).split(/[./]/).filter(Boolean);

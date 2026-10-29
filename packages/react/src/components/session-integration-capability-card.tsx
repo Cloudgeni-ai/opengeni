@@ -105,6 +105,22 @@ function ScopedCard({
       );
     (target ?? region).focus({ preventScroll: true });
   }, [step]);
+  // Connecting replaces the setup controls with "Your account is connected";
+  // keep keyboard focus on the card by moving it to that line.
+  const shell = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (setupRef.current) shell.current = setupRef.current.closest(".og-session-capability-shell");
+  });
+  const connected = availability.kind === "connected";
+  useEffect(() => {
+    const card = shell.current;
+    if (!connected || !card) return;
+    const active = card.ownerDocument.activeElement;
+    if (active && active !== card.ownerDocument.body && active.isConnected) return;
+    card
+      .querySelector<HTMLElement>(".og-session-capability-copy[role=status]")
+      ?.focus({ preventScroll: true });
+  }, [connected]);
   const retrySignIn = flow.signInClosed || Boolean(error);
   const setup =
     availability.kind === "ready" && (attempt || busy || error) ? (
@@ -137,13 +153,28 @@ function ScopedCard({
         ) : null}
         {waiting ? (
           <div className="og-session-capability-waiting">
-            <span aria-hidden className="og-session-capability-spinner" />
+            {/* Once the window is gone the card asks instead of spinning. */}
+            {flow.signInWindowGone ? null : (
+              <span aria-hidden className="og-session-capability-spinner" />
+            )}
             <p role="status" tabIndex={-1}>
-              {t("sessionIntegrationCapabilityCard.finishSigningIn", { name: presentation.name })}
+              {flow.signInWindowGone
+                ? t("sessionIntegrationCapabilityCard.signInWindowGone")
+                : t("sessionIntegrationCapabilityCard.finishSigningIn", {
+                    name: presentation.name,
+                  })}
             </p>
             <span className="og-session-capability-waiting-actions">
-              <button type="button" onClick={flow.reopenSignIn}>
-                {t("sessionIntegrationCapabilityCard.reopenSignIn")}
+              <button
+                type="button"
+                className={
+                  flow.signInWindowGone ? "og-session-capability-reopen-primary" : undefined
+                }
+                onClick={flow.reopenSignIn}
+              >
+                {flow.signInWindowGone
+                  ? t("sessionIntegrationCapabilityCard.openSignInAgain")
+                  : t("sessionIntegrationCapabilityCard.reopenSignIn")}
               </button>
               <button
                 type="button"

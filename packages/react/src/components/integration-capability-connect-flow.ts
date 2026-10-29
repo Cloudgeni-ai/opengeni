@@ -66,6 +66,12 @@ export type IntegrationCapabilityConnect = {
   /** The sign-in window is open and the card waits for it. */
   waiting: boolean;
   /**
+   * While {@link waiting}, the card can no longer see the sign-in window: the
+   * person closed it, or the provider's page cut the card off from it. Either
+   * way the card offers to open it again; it never claims which happened.
+   */
+  signInWindowGone: boolean;
+  /**
    * A plain line when starting or signing in failed, or null. Never a raw
    * server message. Like {@link notice}, it shows only while setup is still at
    * the step it was written for, so it is never stale.
@@ -168,6 +174,7 @@ export function useIntegrationCapabilityConnect({
   const [error, setError] = useState<string | null>(null);
   const [signInClosed, setSignInClosed] = useState(false);
   const [leftOpen, setLeftOpen] = useState(false);
+  const [windowGone, setWindowGone] = useState(false);
   // Messages belong to the step they were written for (see `stepOf`).
   const [messageStep, setMessageStep] = useState("none");
   const [chatAccessFailed, setChatAccessFailed] = useState(false);
@@ -188,7 +195,22 @@ export function useIntegrationCapabilityConnect({
     setError(null);
     setSignInClosed(false);
     setLeftOpen(false);
+    setWindowGone(false);
   };
+
+  // Every line must be true while it shows: the "close the sign-in window"
+  // reminder goes once the window closes, and while waiting the card notices
+  // when it can no longer see the window. A window the provider cut off reads
+  // as closed too, so the card only offers to open it again.
+  useEffect(() => {
+    if (!waiting && !leftOpen) return;
+    const timer = setInterval(() => {
+      if (signInWindow.current?.isOpen?.() !== false) return;
+      setLeftOpen(false);
+      if (waiting) setWindowGone(true);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [waiting, leftOpen]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -458,6 +480,7 @@ export function useIntegrationCapabilityConnect({
     availability,
     busy,
     waiting,
+    signInWindowGone: waiting && windowGone,
     error: current ? error : null,
     signInClosed: current && signInClosed,
     notice: !current

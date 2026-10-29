@@ -248,3 +248,77 @@ test("attachments read as file names, optional attendees say so, and the text st
     "Content type: application/json",
   ]);
 });
+
+const htmlMessage = (content: string) =>
+  toolReviewFields({ body: { body: { contentType: "HTML", content } } }, api, "api_tool")
+    .fields[0]!;
+
+test("a long message still shows every link target, even one past the preview's cut", () => {
+  const paragraphs = Array.from(
+    { length: 30 },
+    (_, index) => `<p>Paragraph ${index + 1} of the quarterly update, nothing to click here.</p>`,
+  ).join("\r\n");
+  const content = `${paragraphs}<p>Pay on <a href="https://evil.example/pay">https://bank.example</a></p>`;
+  const message = htmlMessage(content);
+  expect(message.truncated).toBe(true);
+  expect(message.preview.startsWith("Links: https://evil.example/pay\n\nParagraph 1 of")).toBe(
+    true,
+  );
+  expect(message.preview.endsWith("…")).toBe(true);
+  // A target cut part way is not shown: "https://evil.example/pa…" names another address.
+  const cut = "x".repeat(1000 - "Pay on https://bank.example (https://evil.example/pa".length);
+  const partly = htmlMessage(
+    `${cut}Pay on <a href="https://evil.example/pay">https://bank.example</a>`,
+  );
+  expect(partly.preview.startsWith("Links: https://evil.example/pay\n\n")).toBe(true);
+  // A target the preview shows whole is not repeated.
+  const short = htmlMessage('<p>Pay on <a href="https://evil.example/pay">our portal</a>.</p>');
+  expect(short).toMatchObject({
+    preview: "Pay on our portal (https://evil.example/pay).",
+    truncated: false,
+  });
+  // Links beyond the part of the HTML that is read are listed too.
+  const huge = htmlMessage(
+    `${"<p>filler</p>".repeat(20_000)}<a href="https://late.example">ok</a>`,
+  );
+  expect(huge.preview.startsWith("Links: https://late.example\n\n")).toBe(true);
+});
+
+test("a very long list of link targets ends by pointing to Details", () => {
+  const content = Array.from(
+    { length: 400 },
+    (_, index) => `<area href="https://link-${index}.example/some/longer/path">`,
+  ).join("");
+  const message = htmlMessage(content);
+  expect(message.preview).toMatch(/^Links: https:\/\/link-0\.example\/some\/longer\/path, /);
+  expect(message.preview).toMatch(/, and \d+ more in Details\n\n$/);
+  expect(message.truncated).toBe(true);
+});
+
+test("link targets decode exactly as a browser decodes them, and form destinations show", () => {
+  const target = (href: string) =>
+    htmlMessage(`<a href="${href}">bank.example</a>`).preview.replace(
+      /^bank\.example \((.*)\)$/,
+      "$1",
+    );
+  // Numeric references without a semicolon, and any named reference.
+  expect(target("https://bank.example&#64evil.example")).toBe("https://bank.example@evil.example");
+  expect(target("https://bank.example&commat;evil.example")).toBe(
+    "https://bank.example@evil.example",
+  );
+  expect(target("https://bank.example&period;evil.example")).toBe(
+    "https://bank.example.evil.example",
+  );
+  // In an attribute, a legacy reference followed by "=" stays as written.
+  expect(target("https://e.example/?a=1&copy=2")).toBe("https://e.example/?a=1&copy=2");
+  expect(
+    htmlMessage('<form action="https://collect.example/post"><button>Send</button></form>').preview,
+  ).toBe("Links: https://collect.example/post\n\nSend");
+});
+
+test("blocks break lines the way a browser lays them out", () => {
+  expect(htmlMessage("<p>One<p>Two<div>Three</div>Four").preview).toBe("One\n\nTwo\nThree\nFour");
+  expect(htmlMessage("<ul><li>a</li><li>b</li></ul>after").preview).toBe("a\nb\nafter");
+  expect(htmlMessage("a<br>b<br><br>c<br><br><br>d").preview).toBe("a\nb\n\nc\n\nd");
+  expect(htmlMessage("Hello\r\n  there&nbsp;you&shy;r").preview).toBe("Hello there your");
+});
