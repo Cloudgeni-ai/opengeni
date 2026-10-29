@@ -1260,6 +1260,56 @@ describe("BrowserSession route discipline", () => {
     });
   });
 
+  test("publishes the controller's plain reason a tab produced no capture", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const undrawn =
+      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; try again in a moment, or read it with browser_observe.";
+    const stalled =
+      "browser screenshot stalled: Chrome did not draw this tab, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
+    const cases = [
+      [503, "resource_unavailable", undrawn],
+      [504, "timeout", stalled],
+    ] as const;
+    for (const [status, code, message] of cases) {
+      const internal = new BrowserControlRequestError(status, { code, message, retryable: true });
+      const projected = browserScreenshotError(internal);
+      expect(projected).toBeInstanceOf(HTTPException);
+      expect((projected as Error).cause).toBe(internal);
+      app.get(`/v1/test/browser-capture-${code}`, () => {
+        throw projected;
+      });
+    }
+    for (const [status, code, message] of cases) {
+      const path = `/v1/test/browser-capture-${code}`;
+      const response = await app.request(`http://localhost${path}`, {
+        headers: { "x-opengeni-correlation-id": "capture-request-43" },
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({
+        error: {
+          status,
+          code: "upstream_unavailable",
+          message,
+          retryable: true,
+          requestId: "capture-request-43",
+        },
+      });
+    }
+    // Any other unavailable capture keeps the ordinary envelope.
+    const other = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "PRIVATE /home/user/profile detail",
+      retryable: true,
+    });
+    expect(browserScreenshotError(other)).toBe(other);
+  });
+
   test("does not relabel another screenshot failure as a timeout", () => {
     for (const error of [
       new Error("unexpected"),
