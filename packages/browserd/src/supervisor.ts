@@ -312,6 +312,11 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
   upload: BrowserStateUploadAuthority;
 };
 
+/** Whether the caller asked for BrowserObservation.notice (see
+ * BROWSER_OBSERVATION_NOTICES_PARAMETER): the agent's own tools do, so a
+ * notice reaches the agent and nothing else uses it up. */
+export type BrowserObservationNoticeOptions = { notices?: boolean };
+
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
@@ -376,6 +381,14 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * reopened tab keeps its earlier ID, and calls naming an earlier tab that
    * did not reopen say why it is gone. */
   noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
+  /** The plain notice that a relaunch reloaded this tab's page, for the
+   * first result about it that reaches the caller; null when there is none
+   * or it was already given. */
+  takeReloadedTabNotice?(tabId: string): string | null;
+  /** The http(s) URL a tab showing the browser's error page failed to load:
+   * the address the browser reopens it at after a relaunch. Null when it
+   * can't be read. */
+  errorPageUrl?(tabId: string): Promise<string | null>;
   /** Give open tabs the IDs callers already hold for them (an earlier
    * controller on the same browser gave them those IDs). */
   adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
@@ -1538,6 +1551,7 @@ export class BrowserSupervisor {
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
+    options: BrowserObservationNoticeOptions = {},
   ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.mutateWithRecovery(runtime, async () => {
@@ -1547,7 +1561,7 @@ export class BrowserSupervisor {
     this.noteRecordingTarget(runtime, "select_tab", observation.target.id, {
       url: observation.target.url,
     });
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async closeTarget(
@@ -1562,13 +1576,17 @@ export class BrowserSupervisor {
     return targets;
   }
 
-  async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
+  async observe(
+    reference: BrowserSessionReference,
+    targetId: string,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.readWithRecovery(runtime, async () => {
       return await runtime.controller.observe(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async targetState(
@@ -1598,17 +1616,20 @@ export class BrowserSupervisor {
     return this.requireActive(reference).driver.readClipboard();
   }
 
-  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+  async action(
+    command: BrowserActionCommand,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
     });
     // Logged as the agent sent it: secret references are not resolved here.
     this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
-    const receipt = await this.presented(
-      runtime,
-      async () => await runtime.controller.run(command),
-    );
+    const ran = await this.presented(runtime, async () => await runtime.controller.run(command));
+    const receipt = ran.observation
+      ? { ...ran, observation: this.reported(runtime, ran.observation, options) }
+      : ran;
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
       await this.recoverIfUnavailable(runtime).catch(() => false);
@@ -3097,6 +3118,20 @@ export class BrowserSupervisor {
     this.rememberTarget(runtime, observation.target);
   }
 
+  /** An observation for a caller that asked for notices says, once, that a
+   * relaunch reloaded its tab's page. Other callers (a person's viewer, auth
+   * checks, API clients) neither see the notice nor use it up. */
+  private reported(
+    runtime: Runtime,
+    observation: BrowserObservation,
+    options: BrowserObservationNoticeOptions,
+  ): BrowserObservation {
+    const notice = options.notices
+      ? runtime.driver.takeReloadedTabNotice?.(observation.target.id)
+      : null;
+    return notice ? { ...observation, notice } : observation;
+  }
+
   private rememberTarget(runtime: Runtime, target: BrowserTarget): void {
     const index = runtime.lastTargets.findIndex((entry) => entry.id === target.id);
     if (target.selected) {
@@ -3502,7 +3537,7 @@ export class BrowserSupervisor {
     let targets: readonly BrowserTarget[] = runtime.lastTargets;
     if (driverAvailable) {
       try {
-        targets = await runtime.driver.listTargets();
+        targets = await restorableTargets(runtime.driver, await runtime.driver.listTargets());
       } catch {
         // The last tabs this controller saw.
       }
@@ -4952,6 +4987,24 @@ function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
     }));
 }
 
+/** Tabs as the browser reopens them after a relaunch: a tab showing the
+ * browser's error page is reopened at the address it failed to load, so it is
+ * recorded and matched under that address. Only for pairing tabs across a
+ * relaunch; what callers are shown keeps the browser's own URL. */
+async function restorableTargets(
+  driver: BrowserSupervisorDriver,
+  targets: readonly BrowserTarget[],
+): Promise<BrowserTarget[]> {
+  return await Promise.all(
+    targets.map(async (target) => {
+      if (!driver.errorPageUrl || !target.url.toLowerCase().startsWith("chrome-error:"))
+        return target;
+      const url = await driver.errorPageUrl(target.id).catch(() => null);
+      return url ? { ...target, url } : target;
+    }),
+  );
+}
+
 /** Tell a relaunched browser's driver which of its tabs reopened each tab of
  * the browser before it, so they keep their IDs. True when any did. Best
  * effort: a failure only leaves an old tab ID unexplained. */
@@ -4964,8 +5017,16 @@ async function noteRelaunchedTabs(
 ): Promise<boolean> {
   if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
   try {
-    const tabs = matchReopenedTabs(previous, current ?? (await driver.listTargets()));
-    if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
+    const reopened = await restorableTargets(driver, current ?? (await driver.listTargets()));
+    const tabs = matchReopenedTabs(previous, reopened);
+    if (tabs.length > 0) {
+      driver.noteRelaunchedTabs({
+        reason,
+        ...details,
+        tabs,
+        restoredTargetIds: reopened.map((target) => target.id),
+      });
+    }
     return tabs.some((tab) => tab.replacementId !== null);
   } catch {
     // Unexplained, not failed.
