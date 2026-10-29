@@ -11,6 +11,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   freezeAgentLearningPolicy,
   nestedPostgresSqlState,
+  prepareGeneratedWorkspaceFile,
   upsertWorkspaceMemberAsWorkspaceManager,
   type DbClient,
 } from "@opengeni/db";
@@ -20,6 +21,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
+import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { PostgresEditableArtifactAuthorization } from "../src/editable-artifact-production";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
@@ -585,7 +587,7 @@ async function agentTools(
     }
     return { isError: result.isError === true, value };
   };
-  return { call, close: () => mcp.close() };
+  return { call, grant, close: () => mcp.close() };
 }
 
 const toolBrief = (result: { isError: boolean; value: any }) =>
@@ -677,7 +679,7 @@ test("personal workspace: the owner and their agent create, share, publish and u
   );
 
   // An Only me Site in a personal workspace is shared before it is published,
-  // as in a shared workspace (1093): publishing never widens its audience.
+  // as in a shared workspace (1095): publishing never widens its audience.
   const privateSiteId = String(privateSite.json.artifact.id);
   const privatePublish = await m.publish(owner, ws, privateSiteId, {
     access: "public",
@@ -924,7 +926,7 @@ test("personal workspace: its Workspace Knowledge and files reach only its owner
     ["outsider (other organization)", f.outsider],
   ] as const;
 
-  // Knowledge saved to the personal workspace's own Workspace scope (1093).
+  // Knowledge saved to the personal workspace's own Workspace scope (1095).
   const entryId = crypto.randomUUID();
   const saved = await f.api(f.owner, "POST", entries(ws), {
     operationId: crypto.randomUUID(),
@@ -1037,6 +1039,43 @@ test("personal workspace: its Workspace Knowledge and files reach only its owner
     "404",
     brief(await f.api(f.people.admin, "GET", `${files("shared")}/${fileId}`)),
   );
+
+  // The agent in the owner's workspace chat there makes Workspace files, as
+  // in a shared workspace: a generated file takes the chat's audience.
+  const workspaceChat = await agentTools(f, ws, f.owner, "workspace_shared");
+  try {
+    const generatedId = crypto.randomUUID();
+    await withAccessGrantSessionRlsContext(
+      f.deps,
+      workspaceChat.grant,
+      async () =>
+        await prepareGeneratedWorkspaceFile(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaces.personal,
+          fileId: generatedId,
+          uploadId: crypto.randomUUID(),
+          filename: "chart.png",
+          safeFilename: "chart.png",
+          contentType: "image/png",
+          sizeBytes: 5,
+          sha256: "b".repeat(64),
+          bucket: "matrix",
+          objectKey: `workspaces/${f.workspaces.personal}/files/${generatedId}/chart.png`,
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+    );
+    const [generated] = await shared.admin<Array<{ owners: string[] | null }>>`
+      select private_owner_subject_ids as owners from files where id = ${generatedId}`;
+    m.record(
+      ws,
+      "owner's agent (workspace chat)",
+      "new generated file audience",
+      "workspace",
+      generated ? (generated.owners?.length ? "private" : "workspace") : "missing",
+    );
+  } finally {
+    await workspaceChat.close();
+  }
 
   const mismatches = printMatrix(m.cells);
   expect(mismatches).toEqual([]);

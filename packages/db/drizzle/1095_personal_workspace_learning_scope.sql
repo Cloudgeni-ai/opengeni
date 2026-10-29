@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: unbatched-data: the seed copies at most each member's latest Personal defaults and the few chat or task overrides from their own Personal workspace, a handful of agent_learning_revisions rows per organization member.
 -- A Personal workspace learns like a shared workspace. Its only difference is
 -- that nobody but its owner can be in it, so its Workspace layer is as private
 -- as the owner's Personal layer. Until now every chat or task there with a
@@ -12,12 +13,10 @@
 --      shared workspace;
 --   3. a personal-scope chat saving to the workspace is governed by the
 --      stricter of its own mode and the workspace's, as in a shared workspace;
---   4. the owner's own work there keeps reading their Personal layer
---      (Knowledge and their Only me files), which it always could: every
---      existing Personal-workspace Knowledge entry and file is personal, and
---      nobody else can see a Personal workspace's chats. The accepted-turn
---      snapshot records that owner as personalReadSubjectId; nothing reads a
---      Personal layer without it, and it never adds a write destination;
+--   4. as in a shared workspace, only work that learns for its person reads
+--      that person's Personal Knowledge and Only me files. The existing
+--      personal entries, Skills, instructions and Only me files made there
+--      are unchanged: the owner and their Only me chats keep them;
 --   5. the owner's saved Personal defaults, and their per-chat and per-task
 --      overrides from that workspace, are copied to the Personal workspace's
 --      own layer when it has none, so its chats keep the modes the owner
@@ -48,16 +47,9 @@ $a$;
   definition := replace(definition, anchor, '');
   EXECUTE definition;
 
-  -- 1, 2 and 4. The accepted turn's destination and its owner read.
+  -- 1 and 2. The accepted turn's destination.
   definition := pg_get_functiondef(format(
     '%I.knowledge_learning_for_turn(uuid,uuid,uuid)', current_schema())::regprocedure);
-  anchor := $a$  producer uuid; source_context text; accepted_at timestamptz;
-$a$;
-  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
-    RAISE EXCEPTION 'knowledge_learning_for_turn declaration anchor drifted';
-  END IF;
-  definition := replace(definition, anchor, $r$  producer uuid; source_context text; accepted_at timestamptz; personal_reader text;
-$r$);
   anchor := $a$  destination:=CASE WHEN s.visibility='user_private' OR s.memory_scope='user'
     OR (subject IS NOT NULL AND get_workspace_kind(p_account,p_workspace)='personal') THEN 'personal' ELSE 'workspace' END;
 $a$;
@@ -65,10 +57,6 @@ $a$;
     RAISE EXCEPTION 'knowledge_learning_for_turn destination anchor drifted';
   END IF;
   definition := replace(definition, anchor, $r$  destination:=CASE WHEN s.visibility='user_private' OR s.memory_scope='user' THEN 'personal' ELSE 'workspace' END;
-  -- A Personal workspace learns to its Workspace layer like a shared one
-  -- (1095). Its owner's own work there still reads their Personal layer.
-  personal_reader:=CASE WHEN destination='workspace' AND subject IS NOT NULL
-    AND get_workspace_kind(p_account,p_workspace)='personal' THEN subject END;
 $r$);
   anchor := $a$  -- Human-less work in a personal workspace reads but never saves (0868).
   IF destination='workspace' AND get_workspace_kind(p_account,p_workspace)='personal' THEN
@@ -79,26 +67,13 @@ $a$;
   IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
     RAISE EXCEPTION 'knowledge_learning_for_turn snapshot anchor drifted';
   END IF;
-  definition := replace(definition, anchor, $r$  result:=result||jsonb_build_object('defaultScope',destination,'subjectId',subject,'acceptedAt',accepted_at)
-    ||CASE WHEN personal_reader IS NULL THEN '{}'::jsonb
-      ELSE jsonb_build_object('personalReadSubjectId',personal_reader) END;
+  definition := replace(definition, anchor, $r$  result:=result||jsonb_build_object('defaultScope',destination,'subjectId',subject,'acceptedAt',accepted_at);
 $r$);
   EXECUTE definition;
 
-  -- 1 and 4. The live agent actor: its destination and its owner read.
+  -- 1. The live agent actor's destination.
   definition := pg_get_functiondef(format(
     '%I.knowledge_resolve_actor(uuid,uuid,jsonb)', current_schema())::regprocedure);
-  anchor := $a$BEGIN
-  IF p_account IS DISTINCT FROM nullif(current_setting('opengeni.account_id',true),'')::uuid
-$a$;
-  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
-    RAISE EXCEPTION 'knowledge_resolve_actor entry anchor drifted';
-  END IF;
-  definition := replace(definition, anchor, $r$BEGIN
-  -- Only an agent actor resolved below may read its owner's Personal layer.
-  PERFORM set_config('opengeni.knowledge_personal_reader','',true);
-  IF p_account IS DISTINCT FROM nullif(current_setting('opengeni.account_id',true),'')::uuid
-$r$);
   anchor := $a$  destination:=CASE WHEN s.visibility='user_private' OR s.memory_scope='user'
     OR (subject IS NOT NULL AND get_workspace_kind(p_account,p_workspace)='personal')
     THEN 'personal' ELSE 'workspace' END;
@@ -108,38 +83,6 @@ $a$;
   END IF;
   definition := replace(definition, anchor, $r$  destination:=CASE WHEN s.visibility='user_private' OR s.memory_scope='user'
     THEN 'personal' ELSE 'workspace' END;
-$r$);
-  anchor := $a$  IF policy->>'defaultScope' IS DISTINCT FROM destination OR (destination='personal' AND policy->>'subjectId' IS DISTINCT FROM subject) THEN
-    RAISE EXCEPTION 'Learning scope changed after acceptance' USING ERRCODE='42501';
-  END IF;
-$a$;
-  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
-    RAISE EXCEPTION 'knowledge_resolve_actor policy anchor drifted';
-  END IF;
-  definition := replace(definition, anchor, $r$  IF policy->>'defaultScope' IS DISTINCT FROM destination OR (destination='personal' AND policy->>'subjectId' IS DISTINCT FROM subject) THEN
-    RAISE EXCEPTION 'Learning scope changed after acceptance' USING ERRCODE='42501';
-  END IF;
-  -- The owner's own work in their Personal workspace reads their Personal
-  -- Knowledge and Only me files, and still writes to its own destination.
-  IF destination='workspace' AND subject IS NOT NULL AND policy->>'personalReadSubjectId'=subject THEN
-    PERFORM set_config('opengeni.knowledge_personal_reader',subject,true);
-    PERFORM set_config('opengeni.private_file_owner',subject,true);
-  END IF;
-$r$);
-  EXECUTE definition;
-
-  -- 4. Personal entries are readable by that owner's Personal-workspace work.
-  definition := pg_get_functiondef(format(
-    '%I.knowledge_scope_visible(%I.knowledge_entries)', current_schema(), current_schema())::regprocedure);
-  anchor := $a$        AND (current_setting('opengeni.knowledge_actor_kind',true)='human'
-          OR current_setting('opengeni.knowledge_default_scope',true)='personal')))
-$a$;
-  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
-    RAISE EXCEPTION 'knowledge_scope_visible personal anchor drifted';
-  END IF;
-  definition := replace(definition, anchor, $r$        AND (current_setting('opengeni.knowledge_actor_kind',true)='human'
-          OR current_setting('opengeni.knowledge_default_scope',true)='personal'
-          OR e.scope_subject_id=nullif(current_setting('opengeni.knowledge_personal_reader',true),''))))
 $r$);
   EXECUTE definition;
 

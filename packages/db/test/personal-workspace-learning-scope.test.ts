@@ -15,7 +15,6 @@ import {
   freezeAgentLearningPolicy,
   getAgentLearningSettings,
   getKnowledgeEntry,
-  learningPrivateFileOwner,
   saveAgentLearningSettings,
   saveKnowledgeEntry,
   type KnowledgeContext,
@@ -23,9 +22,9 @@ import {
 
 // Migration 1095: a Personal workspace learns like a shared one. Its chats that
 // aren't Only me learn to its own Workspace layer, which only its owner can
-// reach; the owner's own work there still reads their Personal layer. These
-// run as the restricted application role under FORCE RLS, and the settings
-// seed runs as the NOSUPERUSER migration owner.
+// reach, and like a shared workspace's chats they never read the owner's
+// Personal layer. These run as the restricted application role under FORCE
+// RLS, and the settings seed runs as the NOSUPERUSER migration owner.
 
 let db: RestrictedRuntimeTestDatabase | null = null;
 let client: ReturnType<typeof createDb>;
@@ -144,19 +143,14 @@ async function sqlState(action: Promise<unknown>) {
 }
 
 describe("a Personal workspace learns like a shared one", () => {
-  test("the owner's workspace chat there saves to the workspace and reads their Personal Knowledge; a shared workspace's chat does not", async () => {
+  test("the owner's workspace chat there saves to the workspace and, as in a shared workspace, reads no Personal Knowledge", async () => {
     const f = await fixture();
     const mine = await save(f.human(f.personalWorkspaceId), "My own note", "personal");
 
     const { agent } = await attempt(f, f.personalWorkspaceId);
     const policy = await freezeAgentLearningPolicy(client.db, agent);
-    expect(policy).toMatchObject({
-      defaultScope: "workspace",
-      subjectId: null,
-      personalReadSubjectId: f.subjectId,
-    });
-    // Its Only me files too, and nothing more: it writes to the workspace.
-    expect(learningPrivateFileOwner(policy)).toBe(f.subjectId);
+    expect(policy).toMatchObject({ defaultScope: "workspace", subjectId: null });
+    expect(Object.keys(policy)).not.toContain("personalReadSubjectId");
     const learned = await save(agent, "Learned in Personal");
     const stored = await getKnowledgeEntry(
       client.db,
@@ -164,17 +158,23 @@ describe("a Personal workspace learns like a shared one", () => {
       learned.entryId,
     );
     expect(stored).toMatchObject({ scope: "workspace" });
-    expect(await getKnowledgeEntry(client.db, agent, mine.entryId)).toMatchObject({
-      scope: "personal",
+    expect(await getKnowledgeEntry(client.db, agent, learned.entryId)).toMatchObject({
+      scope: "workspace",
     });
+    expect(await getKnowledgeEntry(client.db, agent, mine.entryId)).toBeNull();
+    // The owner still has their existing Personal entry.
+    expect(
+      await getKnowledgeEntry(client.db, f.human(f.personalWorkspaceId), mine.entryId),
+    ).toMatchObject({ scope: "personal" });
 
-    // The same person's workspace chat in a shared workspace reads no Personal layer.
+    // The same person's workspace chat in a shared workspace behaves the same,
+    // and never sees the Personal workspace's own Workspace Knowledge.
     const elsewhere = await attempt(f, f.sharedWorkspaceId);
-    const sharedPolicy = await freezeAgentLearningPolicy(client.db, elsewhere.agent);
-    expect(sharedPolicy.personalReadSubjectId).toBeUndefined();
-    expect(learningPrivateFileOwner(sharedPolicy)).toBeNull();
+    expect(await freezeAgentLearningPolicy(client.db, elsewhere.agent)).toMatchObject({
+      defaultScope: "workspace",
+      subjectId: null,
+    });
     expect(await getKnowledgeEntry(client.db, elsewhere.agent, mine.entryId)).toBeNull();
-    // And the Personal workspace's own Workspace Knowledge is not in it.
     expect(await getKnowledgeEntry(client.db, elsewhere.agent, learned.entryId)).toBeNull();
     expect(
       await getKnowledgeEntry(client.db, f.human(f.sharedWorkspaceId), learned.entryId),
@@ -186,7 +186,6 @@ describe("a Personal workspace learns like a shared one", () => {
     const { agent } = await attempt(f, f.personalWorkspaceId, true);
     const policy = await freezeAgentLearningPolicy(client.db, agent);
     expect(policy).toMatchObject({ defaultScope: "personal", subjectId: f.subjectId });
-    expect(policy.personalReadSubjectId).toBeUndefined();
     const learned = await save(agent, "Only me");
     expect(
       await getKnowledgeEntry(client.db, f.human(f.personalWorkspaceId), learned.entryId),

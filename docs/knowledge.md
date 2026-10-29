@@ -402,13 +402,14 @@ cannot reach it, so its Workspace layer is as private as the owner's Personal
 layer. An Only me chat, or a chat that chose user memory, learns for its
 verified person; a workspace chat, and work with no person such as a published
 Site's guest chat, learns to the Workspace layer under that workspace's modes.
-The owner's own work there also reads their Personal layer (Knowledge and their
-Only me files), recorded as `personalReadSubjectId` in the accepted-turn
-snapshot; that read never adds a write destination. Migration 1095 copied each
+As in a shared workspace, only work that learns for its person reads that
+person's Personal Knowledge and Only me files: a workspace chat there reads
+neither, and the files it makes are Workspace files. Migration 1095 copied each
 owner's saved Personal defaults, and their chat and task overrides from that
 workspace, to the Personal workspace's own layer when it had none, so its chats
 keep the modes the owner chose. Existing personal entries, Skills, instructions
-and files there are unchanged.
+and Only me files made there are unchanged; the owner and their Only me chats
+keep them.
 
 An agent saves to the destination it explicitly chooses, beyond its chat's
 default. From a chat that learns for its person, saving a workspace instruction,

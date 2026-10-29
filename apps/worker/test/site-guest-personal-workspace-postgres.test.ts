@@ -255,20 +255,14 @@ for (const posture of ["production", "restricted"] as const) {
     // The guest's agent never holds the owner's Personal layer.
     // It learns to the personal workspace's own Workspace layer, as in a shared one.
     const [snapshot] = await shared.admin<
-      Array<{
-        scope: string;
-        subject: string | null;
-        reader: string | null;
-        effective: Record<string, string>;
-      }>
+      Array<{ scope: string; subject: string | null; effective: Record<string, string> }>
     >`
       select snapshot->>'defaultScope' as scope, snapshot->>'subjectId' as subject,
-        snapshot->>'personalReadSubjectId' as reader, snapshot->'effective' as effective
+        snapshot->'effective' as effective
       from agent_learning_snapshots where session_id=${guest.sessionId}`;
     expect(snapshot).toEqual({
       scope: "workspace",
       subject: null,
-      reader: null,
       effective: { knowledge: "automatic", instructions: "automatic", skills: "automatic" },
     });
   }, 120_000);
@@ -329,7 +323,7 @@ async function claimForLearning(
   };
 }
 
-test("the owner's workspace chat in their personal workspace learns to it and reads their Personal layer; a human-less user-memory session still refuses", async () => {
+test("the owner's workspace chat in their personal workspace learns to it as in a shared workspace; a human-less user-memory session still refuses", async () => {
   const site = await personalWorkspaceSite({ funded: true });
   const own = await createSession(app.db, {
     accountId: site.accountId,
@@ -358,7 +352,6 @@ test("the owner's workspace chat in their personal workspace learns to it and re
   expect(ownPolicy).toMatchObject({
     defaultScope: "workspace",
     subjectId: null,
-    personalReadSubjectId: site.owner,
     ownerKey: `workspace:${site.workspaceId}`,
   });
   expect(ownPolicy.effective.skills).not.toBe("off");
@@ -438,7 +431,6 @@ test("other human-less work in a personal workspace learns to its Workspace laye
     subjectId: null,
     effective: { knowledge: "automatic", instructions: "automatic", skills: "automatic" },
   });
-  expect(policy.personalReadSubjectId).toBeUndefined();
 }, 120_000);
 
 test("a guest turn on a shared-workspace Site keeps its workspace learning destination", async () => {
