@@ -1422,8 +1422,17 @@ export function buildTimeline(
         if (event.duplicateOfEventId) break;
         const approvalId = stringValue(payload.approvalId);
         const decision = payload.decision;
-        const open = approvalId ? approvalWaitsById.get(approvalId) : undefined;
-        if (!open || (decision !== "approve" && decision !== "reject")) break;
+        if (!approvalId || (decision !== "approve" && decision !== "reject")) break;
+        // The call it names stops waiting too: an approved call runs now, a
+        // rejected one never will.
+        const call = callsById.get(approvalId);
+        if (call?.kind === "tool-call" && call.awaitingApproval) {
+          delete call.awaitingApproval;
+          if (decision === "approve") call.status = "running";
+          else call.approvalRejected = true;
+        }
+        const open = approvalWaitsById.get(approvalId);
+        if (!open) break;
         approvalWaitsById.delete(approvalId);
         const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
         if (action) action.decision = decision;

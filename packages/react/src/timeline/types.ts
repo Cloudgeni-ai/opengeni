@@ -202,9 +202,11 @@ export type ToolCallItem = {
   /**
    * Set while the call waits for a person's approval (`session.requiresAction`
    * names it): it has not run yet, so rows say so instead of "Done". Cleared
-   * when its output arrives or the turn ends.
+   * when the person decides, its output arrives or the turn ends.
    */
   awaitingApproval?: true | undefined;
+  /** The person rejected this call when asked, so it never ran. */
+  approvalRejected?: true | undefined;
   occurredAt: string;
   /** Canonical textual projection of the settled tool output. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;

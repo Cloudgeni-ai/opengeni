@@ -50,6 +50,46 @@ describe("a tool call waiting for approval", () => {
     expect(item.awaitingApproval).toBeUndefined();
     expect(item.status).toBe("cancelled");
   });
+
+  // Decisions carry no turn id on the wire.
+  const decide = (decision: "approve" | "reject") =>
+    event(
+      4,
+      "user.approvalDecision",
+      { approvalId: "call-1", decision },
+      null as unknown as string,
+    );
+
+  test("reads as running as soon as it is approved, before its output arrives", () => {
+    const item = call(buildTimeline(englishText, [...waiting, decide("approve")]));
+    expect(item.awaitingApproval).toBeUndefined();
+    expect(item.status).toBe("running");
+    expect(toolRowPresentation(englishText, item).running).toBe(true);
+  });
+
+  test("says it was rejected as soon as it is rejected, and after the rejection output", () => {
+    const rejected = [...waiting, decide("reject")];
+    const item = call(buildTimeline(englishText, rejected));
+    expect(item.awaitingApproval).toBeUndefined();
+    const row = toolRowPresentation(englishText, item);
+    expect(row.preview).toEqual({ kind: "text", text: "You rejected this" });
+    expect(row.running).toBe(false);
+    expect(row.cancelled).toBe(false);
+    const settled = call(
+      buildTimeline(englishText, [
+        ...rejected,
+        event(5, "agent.toolCall.output", {
+          id: "call-1",
+          output: "Tool approval was rejected. This proposed tool call was not run.",
+        }),
+        event(6, "turn.completed"),
+      ]),
+    );
+    expect(toolRowPresentation(englishText, settled).preview).toEqual({
+      kind: "text",
+      text: "You rejected this",
+    });
+  });
 });
 
 describe("an answered approval", () => {

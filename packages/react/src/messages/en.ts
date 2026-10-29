@@ -5581,6 +5581,7 @@ export const englishMessages = {
   "timeline.toolRenderers.viewPathbasename": "View {pathBasename}",
   "timeline.toolRenderers.waited": "Waited",
   "timeline.toolRenderers.waitingForYourApproval": "Waiting for your approval",
+  "timeline.toolRenderers.youRejectedThis": "You rejected this",
   "timeline.toolRenderers.wasNotFound": "was not found",
   "timeline.toolStep.archiveDocument.done": "Archived a document",
   "timeline.toolStep.archiveDocument.running": "Archiving a document",
