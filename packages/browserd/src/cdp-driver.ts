@@ -7056,6 +7056,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const origin = webOrigin(state.frame.url);
     try {
+      // Setting the permission is the action's effect: once sent, a later
+      // failure (a lost connection, an unresponsive tab) leaves its outcome
+      // unknown rather than definitely not run. Only the browser's own
+      // refusal proves it did not apply.
+      state.actionEffectCount += 1;
       await (
         await this.ensureConnection()
       ).send("Browser.setPermission", {
@@ -7066,6 +7071,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
     } catch (error) {
       if (error instanceof CdpProtocolError) {
+        state.actionEffectCount -= 1;
         throw new InteractionDefiniteDriverError(
           error.code === -32_601 ? "unsupported" : "invalid_action",
           error.code === -32_601
