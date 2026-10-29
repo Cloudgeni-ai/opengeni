@@ -164,6 +164,8 @@ const MAX_BACKOFF_MILLISECONDS = 30_000;
 const PROVEN_SESSION_MILLISECONDS = 30_000;
 /** How long to wait for the last words after asking the provider to finish. */
 const CLOSE_WAIT_MILLISECONDS = 3_000;
+/** Waits before retrying the save made when the recorder stops. */
+const FINAL_SAVE_RETRY_MILLISECONDS = [250, 1_000, 3_000];
 /** A plain commit not followed by its timed copy within this long is kept as is. */
 const UNTIMED_COMMIT_MILLISECONDS = 1_500;
 /** How far back the clock remembers where pushed audio sat in the recording. */
@@ -359,7 +361,8 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   };
 
   const save = async () => {
-    do {
+    let finalRetries = 0;
+    for (;;) {
       const batch = unsaved.slice(0, 100);
       const streamedMilliseconds = Math.round((streamedSamples / sampleRate) * 1_000);
       try {
@@ -368,13 +371,25 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
           streamedMilliseconds,
           segments: batch.map(({ trackNumber: _track, ...segment }) => segment),
         });
-      } catch {
-        // Saving is for other viewers only; try again a little later.
-        if (!closed) scheduleSave();
-        return;
+      } catch (error) {
+        // Saving is for other viewers; try again a little later.
+        if (!closed) {
+          scheduleSave();
+          return;
+        }
+        // Stopped: this save carries the last text and the audio streamed
+        // since the one before, so a passing failure is retried a few times.
+        const status = (error as { status?: unknown }).status;
+        const passing =
+          typeof status !== "number" || status >= 500 || status === 408 || status === 429;
+        const delay = FINAL_SAVE_RETRY_MILLISECONDS[finalRetries++];
+        if (!passing || delay === undefined) return;
+        await new Promise((done) => setTimeout(done, delay));
+        continue;
       }
       unsaved = unsaved.slice(batch.length);
-    } while (unsaved.length > 0);
+      if (unsaved.length === 0) return;
+    }
   };
 
   const addSegment = (text: string, start: number, end: number) => {

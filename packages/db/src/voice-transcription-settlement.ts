@@ -29,34 +29,6 @@ export type UnsettledVoiceTranscriptionCharge = {
 };
 
 /**
- * Whether one voice unit's usage receipt is durable. A settlement that failed
- * after its receipt committed is still charged: the workspace's next voice
- * admission applies its debit from the receipt.
- */
-export async function voiceTranscriptionReceiptRecorded(
-  db: Database,
-  input: { accountId: string; workspaceId: string; sourceId: string },
-): Promise<boolean> {
-  const { usageIdempotencyKey } = voiceTranscriptionSettlementKeys(input);
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await rawRows<{ found: number }>(
-        scopedDb,
-        sql`
-          select 1 as found from usage_events
-          where idempotency_key = ${usageIdempotencyKey}
-            and account_id = ${input.accountId}::uuid
-            and workspace_id = ${input.workspaceId}::uuid
-        `,
-      );
-      return rows.length > 0;
-    },
-  );
-}
-
-/**
  * Voice usage receipts in one workspace whose credit debit never committed
  * (the debit transaction failed after the receipt was durable). Bounded and
  * ordered oldest first; `minAgeMilliseconds` leaves an in-flight inline

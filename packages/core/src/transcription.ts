@@ -1,6 +1,6 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
-import type { CreditDebitAttribution, UsageEventProcessingResidency } from "@opengeni/db";
+import type { CreditDebitAttribution, Database, UsageEventProcessingResidency } from "@opengeni/db";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
@@ -129,28 +129,48 @@ export class TranscriptionBillingRefusedError extends Error {
  * Subscription providers (Codex, SuperGrok) never reach this port.
  */
 export type TranscriptionBilling = {
-  /** Refuse before any audio is sent when the payer cannot fund the call. */
+  /**
+   * Refuse before any audio is sent when the payer cannot fund the call.
+   * `feature` words the refusal for what was refused (voice input by default).
+   */
   admit(input: {
     accountId: string;
     workspaceId: string;
     attribution: CreditDebitAttribution;
+    feature?: TranscriptionBillingFeature;
   }): Promise<void>;
   /**
    * Record usage and debit credits once per unit, after use. The usage receipt
    * commits before the debit, so a failed debit leaves a durable receipt that
    * `admit` reconciles on the workspace's next voice request.
    */
-  settle(input: {
-    accountId: string;
-    workspaceId: string;
-    providerId: string;
-    model: string;
-    pricing: VoiceInputPricing;
-    usage: VoiceInputUsage | null;
-    billing: TranscriptionBillingContext;
-    /** Where the provider processed the audio (its route's residency claim). */
-    processingResidency?: UsageEventProcessingResidency;
-  }): Promise<{ creditCostMicros: number }>;
+  settle(input: TranscriptionSettlement): Promise<{ creditCostMicros: number }>;
+  /**
+   * Record one unit's usage receipt inside the caller's transaction, so the
+   * charge commits with the caller's own write or not at all. `settle` for
+   * the same unit then applies its debit at the recorded amount, and a debit
+   * that fails is applied from the receipt by a later admission.
+   */
+  recordReceipt?(
+    tx: Database,
+    input: TranscriptionSettlement,
+  ): Promise<{ creditCostMicros: number }>;
+};
+
+/** What a billing refusal names: voice input, or a meeting's live transcript. */
+export type TranscriptionBillingFeature = "voice_input" | "live_transcript";
+
+/** One unit of deployment-funded transcription to settle. */
+export type TranscriptionSettlement = {
+  accountId: string;
+  workspaceId: string;
+  providerId: string;
+  model: string;
+  pricing: VoiceInputPricing;
+  usage: VoiceInputUsage | null;
+  billing: TranscriptionBillingContext;
+  /** Where the provider processed the audio (its route's residency claim). */
+  processingResidency?: UsageEventProcessingResidency;
 };
 
 export class TranscriptionServiceError extends Error {

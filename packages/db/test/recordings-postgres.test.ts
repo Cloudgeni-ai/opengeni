@@ -38,7 +38,6 @@ import {
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
   listRecordingLiveSegments,
-  markRecordingLiveCharged,
   listRecordingNotes,
   listRecordingPeople,
   listRecordings,
@@ -49,6 +48,8 @@ import {
   RecordingConflictError,
   RecordingForbiddenError,
   RecordingNotFoundError,
+  recordUsageEvent,
+  releaseRecordingLiveGrant,
   rememberRecordingPersonVoice,
   reserveRecordingChunks,
   saveRecordingNote,
@@ -59,7 +60,12 @@ import {
   updateRecordingSpeakers,
   updateWorkspaceSettings,
   workspaceMemberDisplayName,
+  LIVE_GRANT_REFUSED_MESSAGE,
+  LIVE_GRANTS_FREE,
+  type Database,
   type DbClient,
+  type RecordingLiveModel,
+  type RecordingLiveRange,
 } from "../src";
 
 // The production posture: a NOSUPERUSER NOBYPASSRLS migration owner and FORCE
@@ -86,7 +92,9 @@ afterAll(async () => {
 }, 180_000);
 
 /** A live model nobody's credits pay for: its list-price cost counts toward allowances. */
-const unbilled = (costUsdMicros: number) => () => ({ chargedInCredits: false, costUsdMicros });
+/** A live model not charged in credits, listed at 100 micros a second. */
+const listPrice = (milliseconds: number) => Math.round(milliseconds / 10);
+const unbilled = () => ({ listPriceMicros: listPrice, charge: null });
 
 /** A shared workspace with its owner and one more member. */
 async function workspace() {
@@ -1529,7 +1537,7 @@ describe("recordings", () => {
       ],
     });
     const live = { providerId: "elevenlabs", model: "scribe_v2_realtime" };
-    const moved = (addedMilliseconds: number) => ({ live, addedMilliseconds, charge: null });
+    const moved = (addedMilliseconds: number) => ({ live, addedMilliseconds, charged: null });
     await expect(
       startRecordingLiveTrack(db, { ...memberActor, recordingId, trackNumber: 0, ...live }),
     ).rejects.toBeInstanceOf(RecordingForbiddenError);
@@ -1539,7 +1547,7 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 0,
         streamedMilliseconds: 1_000,
-        pricing: unbilled(100),
+        pricing: unbilled,
         segments: [],
       }),
     ).rejects.toMatchObject({ code: "no_live_session" });
@@ -1559,7 +1567,7 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 0,
         streamedMilliseconds: 4_000,
-        pricing: unbilled(400),
+        pricing: unbilled,
         segments: [segment(0, 100, "Hei alle."), segment(1, 2_000, "Kan dere høre meg?")],
       }),
     ).toEqual({ saved: 2, ended: false, ...moved(4_000) });
@@ -1570,7 +1578,7 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 0,
         streamedMilliseconds: 3_000,
-        pricing: unbilled(300),
+        pricing: unbilled,
         segments: [segment(1, 2_000, "changed")],
       }),
     ).toEqual({ saved: 0, ended: false, ...moved(0) });
@@ -1581,7 +1589,7 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 0,
         streamedMilliseconds: 5_500,
-        pricing: unbilled(550),
+        pricing: unbilled,
         segments: [],
       }),
     ).toEqual({ saved: 0, ended: false, ...moved(1_500) });
@@ -1591,7 +1599,7 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 0,
         streamedMilliseconds: 5_500,
-        pricing: unbilled(550),
+        pricing: unbilled,
         segments: [],
       }),
     ).toEqual({ saved: 0, ended: false, ...moved(0) });
@@ -1600,7 +1608,7 @@ describe("recordings", () => {
       recordingId,
       trackNumber: 1,
       streamedMilliseconds: 4_000,
-      pricing: unbilled(400),
+      pricing: unbilled,
       segments: [segment(0, 1_000, "Ja, fint.")],
     });
     await expect(
@@ -1609,7 +1617,7 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 1,
         streamedMilliseconds: 5_000,
-        pricing: unbilled(500),
+        pricing: unbilled,
         segments: [segment(1, 3_000, "not mine")],
       }),
     ).rejects.toBeInstanceOf(RecordingForbiddenError);
@@ -1679,7 +1687,7 @@ describe("recordings", () => {
           recordingId,
           trackNumber: 0,
           streamedMilliseconds: 5_000,
-          pricing: unbilled(500),
+          pricing: unbilled,
           segments: [segment(2, 4_000, "Ha det.")],
         })
       ).saved,
@@ -1717,10 +1725,10 @@ describe("recordings", () => {
         recordingId,
         trackNumber: 0,
         streamedMilliseconds: 6_000,
-        pricing: unbilled(600),
+        pricing: unbilled,
         segments: [segment(3, 5_000, "late")],
       }),
-    ).toEqual({ saved: 0, ended: true, live: null, addedMilliseconds: 0, charge: null });
+    ).toEqual({ saved: 0, ended: true, live: null, addedMilliseconds: 0, charged: null });
     const [rows] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count from recording_live_segments where recording_id = ${recordingId}`;
     expect(rows!.count).toBe(0);
@@ -1914,22 +1922,22 @@ describe("recordings and usage allowances", () => {
     });
     const live = { providerId: "elevenlabs", model: "scribe_v2_realtime" };
     await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live });
-    const stream = async (streamedMilliseconds: number, costUsdMicros: number) =>
+    const stream = async (streamedMilliseconds: number) =>
       await appendRecordingLiveSegments(db, {
         ...actor,
         recordingId,
         trackNumber: 0,
         streamedMilliseconds,
-        pricing: unbilled(costUsdMicros),
+        pricing: unbilled,
         segments: [],
       });
-    await stream(1_000, 100);
-    await stream(3_000, 250);
+    await stream(1_000);
+    await stream(3_000);
     // A late, older total changes nothing.
-    await stream(2_000, 200);
-    await stream(3_000, 250);
+    await stream(2_000);
+    await stream(3_000);
     usage = await getWorkspaceUsage(db, usageScope);
-    expect(usage.workspace.used).toBe(550);
+    expect(usage.workspace.used).toBe(600);
 
     await completeVersion(await finalizedRecording(scope, "workspace"), 600);
     expect(
@@ -1941,9 +1949,10 @@ describe("recordings and usage allowances", () => {
     ).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
   });
 
-  test("live audio charged in credits stores no list-price cost and is charged from its mark until the mark moves", async () => {
-    if (!client) return;
+  test("live audio charged in credits is charged in its save's transaction, once per range, and an allowance never counts it twice", async () => {
+    if (!client || !shared) return;
     const db = client.db;
+    const admin = shared.admin;
     const scope = await workspace();
     const usageScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
     await setWorkspaceAllowance(db, {
@@ -1966,13 +1975,41 @@ describe("recordings and usage allowances", () => {
     const live = { providerId: "azure-openai", model: "gpt-4o-transcribe" };
     await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber: 0, ...live });
     const asked: unknown[] = [];
-    const charged = (current: unknown) => {
+    let fail = false;
+    let entered: (() => void) | null = null;
+    let hold: Promise<void> | null = null;
+    // The charge records its usage receipt in the save's own transaction.
+    const charged = (current: RecordingLiveModel) => {
       asked.push(current);
-      return { chargedInCredits: true, costUsdMicros: 999_999 };
+      return {
+        listPriceMicros: listPrice,
+        charge: async (tx: Database, range: RecordingLiveRange) => {
+          const sourceId = `${recordingId}:live:0:${range.fromMilliseconds}-${range.toMilliseconds}`;
+          await recordUsageEvent(tx, {
+            ...usageScope,
+            eventType: "model.cost",
+            quantity: range.toMilliseconds - range.fromMilliseconds,
+            unit: "usd_micros",
+            sourceResourceType: "voice_transcription",
+            sourceResourceId: sourceId,
+            idempotencyKey: `voice.transcription_cost:${sourceId}`,
+          });
+          entered?.();
+          if (hold) await hold;
+          if (fail) throw new Error("the ledger is unavailable");
+        },
+      };
     };
+    const segment = (segmentNumber: number) => ({
+      segmentNumber,
+      startMilliseconds: segmentNumber * 1_000,
+      endMilliseconds: segmentNumber * 1_000 + 900,
+      text: `Line ${segmentNumber}.`,
+    });
     const stream = async (
       streamedMilliseconds: number,
       pricing: Parameters<typeof appendRecordingLiveSegments>[1]["pricing"] = charged,
+      segments: ReturnType<typeof segment>[] = [],
     ) =>
       await appendRecordingLiveSegments(db, {
         ...actor,
@@ -1980,42 +2017,151 @@ describe("recordings and usage allowances", () => {
         trackNumber: 0,
         streamedMilliseconds,
         pricing,
-        segments: [],
+        segments,
       });
-    const mark = async (toMilliseconds: number) =>
-      await markRecordingLiveCharged(db, { ...actor, recordingId, trackNumber: 0, toMilliseconds });
+    const receipts = async () =>
+      (
+        await admin<{ source: string }[]>`
+          select source_resource_id as source from usage_events
+          where workspace_id = ${scope.workspaceId} and source_resource_type = 'voice_transcription'`
+      )
+        .map((row) => row.source.split(":").at(-1))
+        .sort();
+    const used = async () => (await getWorkspaceUsage(db, usageScope)).workspace.used;
     // Streamed before charging began (an older release): it counts at list
     // price, and charging starts after it.
-    await stream(2_000, unbilled(200));
-    expect((await getWorkspaceUsage(db, usageScope)).workspace.used).toBe(200);
-    expect(await stream(5_000)).toMatchObject({
+    await stream(2_000, unbilled);
+    expect(await used()).toBe(200);
+    // The receipt commits with the text (the nested receipt leaves the save's
+    // own scope in place for the text after it).
+    expect(await stream(5_000, charged, [segment(0)])).toMatchObject({
+      saved: 1,
       live,
       addedMilliseconds: 3_000,
-      charge: { fromMilliseconds: 2_000, toMilliseconds: 5_000 },
+      charged: { fromMilliseconds: 2_000, toMilliseconds: 5_000 },
     });
     // The pricing is asked with the model the track streams to, under the lock.
     expect(asked).toEqual([live]);
-    // Not marked charged (the charge failed): the next save charges it again, grown.
-    expect(await stream(8_000)).toMatchObject({
-      addedMilliseconds: 3_000,
-      charge: { fromMilliseconds: 2_000, toMilliseconds: 8_000 },
+    // A charge that fails fails the whole save: no receipt, no text, no
+    // total; the retry charges the same audio once.
+    fail = true;
+    await expect(stream(8_000, charged, [segment(1)])).rejects.toThrow("the ledger is unavailable");
+    fail = false;
+    expect(await receipts()).toEqual(["2000-5000"]);
+    expect((await getRecording(db, { ...actor, recordingId })).tracks[0]!.live).toMatchObject({
+      streamedMilliseconds: 5_000,
     });
-    await mark(8_000);
-    // A late, lower mark never moves it back.
-    await mark(5_000);
-    expect(await stream(8_000)).toMatchObject({ addedMilliseconds: 0, charge: null });
-    expect(await stream(9_500)).toMatchObject({
-      charge: { fromMilliseconds: 8_000, toMilliseconds: 9_500 },
+    expect(await stream(8_000, charged, [segment(1)])).toMatchObject({
+      saved: 1,
+      charged: { fromMilliseconds: 5_000, toMilliseconds: 8_000 },
     });
-    // Charged audio never counts at list price as well, nor replaces the
-    // track's list-price cost.
-    expect((await getWorkspaceUsage(db, usageScope)).workspace.used).toBe(200);
-    const [row] = await shared!.admin<
-      { live_cost_usd_micros: string | null; live_charged_milliseconds: number | null }[]
-    >`
-      select live_cost_usd_micros, live_charged_milliseconds from recording_tracks
+    // Overlapping saves (a client retrying a save whose response was lost):
+    // the second waits for the first's charge, then charges only what's new.
+    let release: () => void = () => undefined;
+    hold = new Promise((done) => (release = done));
+    const inCharge = new Promise<void>((done) => (entered = done));
+    const first = stream(12_000);
+    await inCharge;
+    entered = null;
+    hold = null;
+    const second = stream(15_000);
+    await Bun.sleep(100);
+    release();
+    expect((await first).charged).toEqual({ fromMilliseconds: 8_000, toMilliseconds: 12_000 });
+    expect((await second).charged).toEqual({ fromMilliseconds: 12_000, toMilliseconds: 15_000 });
+    expect(await stream(15_000)).toMatchObject({ addedMilliseconds: 0, charged: null });
+    expect(await receipts()).toEqual(["12000-15000", "2000-5000", "5000-8000", "8000-12000"]);
+    // Charged audio never counts at list price as well.
+    expect(await used()).toBe(200);
+    // A pod of the previous release writes the list price of the whole total:
+    // only its new audio counts.
+    await admin`
+      update recording_tracks set live_streamed_milliseconds = 16000, live_cost_usd_micros = 1600
       where recording_id = ${recordingId} and track_number = 0`;
-    expect(row).toEqual({ live_cost_usd_micros: "200", live_charged_milliseconds: 8_000 });
+    expect(await used()).toBe(300);
+    // A switch to a model not charged in credits counts only its new audio,
+    // and moves the mark past it so it's never charged as well.
+    await stream(18_000, unbilled);
+    expect(await used()).toBe(500);
+    expect(await stream(20_000)).toMatchObject({
+      charged: { fromMilliseconds: 18_000, toMilliseconds: 20_000 },
+    });
+    expect(await used()).toBe(500);
+    const [row] = await admin<
+      {
+        live_cost_usd_micros: string;
+        live_charged_cost_usd_micros: string;
+        live_charged_milliseconds: number;
+      }[]
+    >`
+      select live_cost_usd_micros, live_charged_cost_usd_micros, live_charged_milliseconds
+      from recording_tracks where recording_id = ${recordingId} and track_number = 0`;
+    expect(row).toEqual({
+      live_cost_usd_micros: "2000",
+      live_charged_cost_usd_micros: "1500",
+      live_charged_milliseconds: 20_000,
+    });
+  });
+
+  test("a track charged in credits gets live sessions only while it reports the audio they stream", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    const live = { providerId: "azure-openai", model: "gpt-4o-transcribe" };
+    const start = async (trackNumber: number, bounded = true) =>
+      await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber, ...live, bounded });
+    const refused = (code: string) => ({ code, message: LIVE_GRANT_REFUSED_MESSAGE });
+    for (let session = 0; session < LIVE_GRANTS_FREE; session++) await start(0);
+    await expect(start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // A session the provider never started gives its place back.
+    await releaseRecordingLiveGrant(db, { ...actor, recordingId, trackNumber: 0 });
+    await start(0);
+    await expect(start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // Reported audio earns more: one more session for every five minutes.
+    await appendRecordingLiveSegments(db, {
+      ...actor,
+      recordingId,
+      trackNumber: 0,
+      streamedMilliseconds: 300_000,
+      pricing: unbilled,
+      segments: [],
+    });
+    await start(0);
+    await expect(start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // Audio not charged in credits is counted, never refused.
+    await start(0, false);
+    const behind = async (minutes: number) =>
+      await shared!.admin`
+        update recording_tracks
+        set live_grants = 0, live_first_granted_at = now() - make_interval(mins => ${minutes})
+        where recording_id = ${recordingId} and track_number = 0`;
+    // 30 minutes since the first session with 5 reported: 25 behind, past
+    // the 10 minutes plus a quarter of the time it allows.
+    await behind(30);
+    await expect(start(0)).rejects.toMatchObject(refused("live_streamed_behind"));
+    // 15 minutes with 5 reported is within it.
+    await behind(15);
+    await start(0);
+    // Each track is bounded on its own.
+    await start(1);
+    const rows = await shared.admin<{ track_number: number; live_grants: number }[]>`
+      select track_number, live_grants from recording_tracks
+      where recording_id = ${recordingId} order by track_number`;
+    expect([...rows]).toEqual([
+      { track_number: 0, live_grants: 1 },
+      { track_number: 1, live_grants: 1 },
+    ]);
   });
 
   test("an allowance that ignores unbilled usage doesn't count recordings", async () => {

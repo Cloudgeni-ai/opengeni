@@ -328,8 +328,7 @@ Opengeni, and the workspace's provider key never reaches the device:
 3. Finished stretches of text are saved with `POST …/live-segments`
    (`{ trackNumber, streamedMilliseconds, segments }`, at most 100 per call).
    A segment number sent again keeps its first copy, and the streamed time
-   (only ever raised) prices the track's `live.costUsd` (null for audio
-   charged in credits, below).
+   (only ever raised) prices the track's `live.costUsd` at list price.
 4. Other viewers read them with `GET …/live-segments?after=<sequence>`, which
    returns the new segments, the `after` to pass next time, and `ended` once
    the transcript is ready. The saved live text is deleted then.
@@ -339,31 +338,57 @@ Opengeni, and the workspace's provider key never reaches the device:
 A live model the deployment pays for (OpenAI or Azure OpenAI Realtime on the
 deployment's key) costs credits while credit billing is active. The payer is
 admitted before the grant is minted, so without credits `live-session`
-answers 402 (a usage limit 402 or 429, credits turned off or an unidentified
-payer 403 `policy_blocked`), and the recorder stops asking. A live model with
-no credit price is listed `available: false` with `unavailableReason:
-"unpriced"`, and `live-session` answers 503 with `retryable: false`.
+answers 402 ("Live transcript needs credits. Add credits to continue."), a
+usage limit 402 or 429, and credits turned off or an unidentified payer 403
+`policy_blocked`; the recorder stops asking. A live model with no credit
+price is listed `available: false` with `unavailableReason: "unpriced"`, and
+`live-session` answers 503 `model_unavailable` with `retryable: false`.
 Accounts on legacy billing (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`) are
 neither admitted nor charged, and see no price for live-only models.
 
-Each `live-segments` save charges the track's audio from its charged mark to
-its stored streamed total, at the model's voice price, as one unit named by
-both ends. The mark moves once the charge is durable (settled, or its usage
-receipt committed for the next voice admission to debit), so a failed charge
-is charged again, grown, by the next save. Charged audio stores no list-price
-`live.costUsd`, so a usage allowance that prices unbilled use doesn't count it
-a second time.
+Each `live-segments` save charges the track's audio from its charged mark
+(`recording_tracks.live_charged_milliseconds`) to its stored streamed total,
+at the model's voice price, as one unit named by both ends. The unit's usage
+receipt is recorded and the mark moved in the save's own transaction, with
+the text: overlapping saves (a retry after a lost response) wait on the
+recording's lock and charge only what the one before left, and a receipt
+that fails fails the save, which the recorder retries. The credit debit
+follows the commit with the same idempotency key; one that fails is applied
+from its receipt by the workspace's next voice admission (dictation, voice
+input or another live session), within 3 days. When the recorder stops, its
+last save is retried a few times, so the end of a meeting is charged too.
+
+`live.costUsd` is the list price of everything streamed, and
+`live_charged_cost_usd_micros` the list price of the part charged in credits;
+a usage allowance that prices unbilled use counts only the rest, so charged
+audio never counts twice (also when a track switches to a model not charged
+in credits, or a pod of the previous release writes the total during a
+deploy). Audio streamed to a model not charged in credits moves the mark too.
 
 The audio goes from the device straight to the provider, so the charged
 duration is the recorder's own `streamedMilliseconds`, not something the
 server measured. The ledger records it with basis `client_reported_duration`.
 The server only lets the total grow, so retries and late saves never charge
-twice, but a modified client can under-report its streaming time. Remaining
-gaps: a save whose charge fails with no later save (the last one of a
-recording) leaves that stretch unpaid; two overlapping saves for one track
-(a client retry while the first is still in flight) can each charge the
-overlap; and a charge that settles but whose mark fails to save is charged
-again by the next save.
+twice. To bound a recorder that stops reporting or under-reports, a track
+charged in credits gets 4 live sessions, one more for every 5 minutes of
+audio it reports, and at most 40; and none once the time since its first
+session is ahead of its reported audio by more than 10 minutes plus a quarter
+of that time. A refused grant is a 409 (`live_grant_limit` or
+`live_streamed_behind`, "The live transcript stopped for this track. The
+recording continues and is transcribed when it ends."). A session the
+provider fails to start isn't counted.
+
+Residual risk: each grant still opens one provider session (up to the
+provider's session limit) whose audio is only as metered as the recorder
+reports, so a modified client can stream unpaid audio within those bounds,
+for example by holding several sessions at once or under-reporting within the
+slack, and the bounds are per track, not per recording or account. A long
+pause followed by a reconnect counts as time not streamed, so after a pause of
+more than about 10 minutes plus a quarter of the meeting so far the track's
+preview stops (the recording and its transcript are unaffected). A save whose
+receipt never commits, after the recorder's last retries, leaves that last
+stretch unpaid, and a debit not reconciled within 3 days stays a receipt
+without a ledger entry.
 
 With a `system` track, the microphone's live text is under the recording
 owner's name (the person recording sees their own; others see the owner's

@@ -14,7 +14,6 @@ import {
   encryptEnvironmentValue,
   ensureExternalIdentity,
   getWorkspaceUsage,
-  recordUsageEvent,
   setWorkspaceAllowance,
   type DbClient,
 } from "@opengeni/db";
@@ -22,6 +21,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSpeechToTextDeployment } from "@opengeni/core/transcription-service";
+import { createVoiceInputBilling, reconcileUnsettledVoiceInputCharges } from "@opengeni/core";
 import { createApp, type AppDependencies } from "../src/app";
 import { meetingLanguage } from "../src/routes/recordings";
 
@@ -1188,17 +1188,18 @@ describe("recording routes", () => {
     ).toBe(400);
   });
 
-  test("a live transcript the deployment pays for is admitted against credits and charged for the audio it streamed", async () => {
+  test("a live transcript the deployment pays for is admitted against credits and charged for the audio it streamed, once", async () => {
     const AI = "https://ai.example.cognitiveservices.azure.com";
-    const settled: {
-      sourceId: string;
-      seconds: number | undefined;
-      trusted: number | undefined;
-      model: string;
-    }[] = [];
+    const real = createVoiceInputBilling({
+      db: db.db,
+      settings: testSettings({ usageLimitsMode: "managed" }),
+    });
     let credits = false;
-    /** How the next charge fails: before its usage receipt, or after it committed. */
-    let failNext: "before_receipt" | "after_receipt" | null = null;
+    /** Where the next charge fails: its receipt (in the save), or its debit after. */
+    let failNext: "receipt" | "debit" | null = null;
+    let holdDebit: Promise<void> | null = null;
+    let debitEntered: (() => void) | null = null;
+    const admitted: unknown[] = [];
     const transcription: TranscriptionService = {
       limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
       available: () => true,
@@ -1206,36 +1207,29 @@ describe("recording routes", () => {
         throw new Error("the live transcript never transcribes through the API");
       },
       billing: {
-        admit: async () => {
+        admit: async (input) => {
+          admitted.push(input.feature);
           if (credits) return;
           throw new TranscriptionBillingRefusedError({
             code: "insufficient_credits",
             message: "No credits.",
           });
         },
-        settle: async (input) => {
-          const failing = failNext;
-          failNext = null;
-          if (failing === "after_receipt") {
-            await recordUsageEvent(db.db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              eventType: "model.cost",
-              quantity: 1,
-              unit: "usd_micros",
-              sourceResourceType: "voice_transcription",
-              sourceResourceId: input.billing.sourceId,
-              idempotencyKey: `voice.transcription_cost:${input.billing.sourceId}`,
-            });
+        recordReceipt: async (tx, input) => {
+          if (failNext === "receipt") {
+            failNext = null;
+            throw new Error("the ledger is unavailable");
           }
-          if (failing) throw new Error("the ledger is unavailable");
-          settled.push({
-            sourceId: input.billing.sourceId,
-            seconds: input.billing.clientReportedDurationSeconds,
-            trusted: input.billing.trustedDurationSeconds,
-            model: input.model,
-          });
-          return { creditCostMicros: 1 };
+          return await real.recordReceipt!(tx, input);
+        },
+        settle: async (input) => {
+          debitEntered?.();
+          if (holdDebit) await holdDebit;
+          if (failNext === "debit") {
+            failNext = null;
+            throw new Error("the ledger is unavailable");
+          }
+          return await real.settle(input);
         },
       },
     };
@@ -1280,68 +1274,96 @@ describe("recording routes", () => {
       body: { error: { code: "payment_required", details: { code: "insufficient_credits" } } },
     });
     expect(minted).toEqual([]);
+    // The refusal is worded for the live transcript.
+    expect(admitted).toEqual(["live_transcript"]);
     credits = true;
     expect(await start()).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
-    const append = async (streamedMilliseconds: number) =>
+    const append = async (streamedMilliseconds: number, segments: unknown[] = []) =>
       await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
         trackNumber: 0,
         streamedMilliseconds,
-        segments: [],
+        segments,
       });
+    const range = (source: string) => source.slice(`${recordingId}:live:0:`.length);
+    const receipts = async () =>
+      (
+        await shared.admin<{ source: string }[]>`
+          select source_resource_id as source from usage_events
+          where workspace_id = ${scope.workspaceId} and source_resource_type = 'voice_transcription'
+          order by occurred_at, source_resource_id`
+      ).map((row) => range(row.source));
+    const debits = async () =>
+      await shared.admin<{ source: string; amount: string; basis: string }[]>`
+        select source_id as source, amount_micros::text as amount, metadata->>'basis' as basis
+        from credit_ledger_entries
+        where workspace_id = ${scope.workspaceId} and type = 'voice_transcription_debit'
+        order by created_at, source_id`;
     expect(await append(30_000)).toMatchObject({ status: 200, body: { saved: 0, ended: false } });
     // A retry and an older total add no audio; only what is new is charged, once.
     expect((await append(30_000)).status).toBe(200);
     expect((await append(20_000)).status).toBe(200);
-    expect((await append(45_000)).body).toEqual({ saved: 0, ended: false });
-    // A charge that fails before its receipt is charged again, grown, by the
-    // next save: no streamed audio goes unpaid.
-    failNext = "before_receipt";
+    // Overlapping saves (a retry after a lost response): the second save
+    // waits for nothing but the first's transaction, and charges only the
+    // audio after it, even while the first's debit is still in flight.
+    let release: () => void = () => undefined;
+    holdDebit = new Promise((done) => (release = done));
+    const inDebit = new Promise<void>((done) => (debitEntered = done));
+    const first = append(45_000);
+    await inDebit;
+    debitEntered = null;
+    holdDebit = null;
     expect((await append(50_000)).status).toBe(200);
+    release();
+    expect((await first).status).toBe(200);
+    expect(await receipts()).toEqual(["0-30000", "30000-45000", "45000-50000"]);
+    // A debit that fails leaves its receipt, so the audio isn't charged again;
+    // the next voice admission applies the debit from it.
+    failNext = "debit";
     expect((await append(60_000)).status).toBe(200);
-    // One whose receipt committed is charged from the receipt (the next
-    // admission debits it), so it isn't charged a second time.
-    failNext = "after_receipt";
     expect((await append(70_000)).status).toBe(200);
-    expect((await append(75_000)).status).toBe(200);
+    // A receipt that fails fails the save: nothing of it is kept, and the
+    // recorder's retry charges the audio once.
+    failNext = "receipt";
+    const line = { segmentNumber: 0, startMilliseconds: 0, endMilliseconds: 900, text: "Hi." };
+    expect((await append(80_000, [line])).status).toBe(500);
+    expect(
+      (await scope.owner.call("GET", `/recordings/${recordingId}`)).body.tracks[0].live,
+    ).toMatchObject({ streamedMilliseconds: 70_000 });
+    expect(await append(80_000, [line])).toMatchObject({ status: 200, body: { saved: 1 } });
+    const charged = [
+      "0-30000",
+      "30000-45000",
+      "45000-50000",
+      "50000-60000",
+      "60000-70000",
+      "70000-80000",
+    ];
+    expect([...(await receipts())].sort()).toEqual([...charged].sort());
+    expect((await debits()).map((row) => range(row.source)).sort()).toEqual(
+      charged.filter((source) => source !== "50000-60000").sort(),
+    );
+    expect(
+      await reconcileUnsettledVoiceInputCharges(db.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        minAgeMilliseconds: 0,
+      }),
+    ).toEqual({ reconciled: 1 });
+    const settled = await debits();
+    expect(settled.map((row) => range(row.source)).sort()).toEqual([...charged].sort());
     // The duration is the recorder's, and the ledger says so.
-    expect(settled).toEqual([
-      {
-        sourceId: `${recordingId}:live:0:0-30000`,
-        seconds: 30,
-        trusted: undefined,
-        model: "gpt-4o-transcribe",
-      },
-      {
-        sourceId: `${recordingId}:live:0:30000-45000`,
-        seconds: 15,
-        trusted: undefined,
-        model: "gpt-4o-transcribe",
-      },
-      {
-        sourceId: `${recordingId}:live:0:45000-60000`,
-        seconds: 15,
-        trusted: undefined,
-        model: "gpt-4o-transcribe",
-      },
-      {
-        sourceId: `${recordingId}:live:0:70000-75000`,
-        seconds: 5,
-        trusted: undefined,
-        model: "gpt-4o-transcribe",
-      },
-    ]);
-    // Audio charged in credits never counts against the allowance at list
-    // price as well, and the track stores no list-price cost for it.
+    expect(settled.find((row) => range(row.source) === "0-30000")?.basis).toBe(
+      "client_reported_duration",
+    );
+    // The allowance counts the credits once, never the list price as well.
     const usage = await getWorkspaceUsage(db.db, {
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
     });
-    expect(usage.workspace.used).toBe(0);
-    const recording = await scope.owner.call("GET", `/recordings/${recordingId}`);
-    expect(recording.body.tracks[0].live).toMatchObject({
-      streamedMilliseconds: 75_000,
-      costUsd: null,
-    });
+    expect(usage.workspace.used).toBe(
+      settled.reduce((total, row) => total - Number(row.amount), 0),
+    );
+    expect(usage.workspace.used).toBeGreaterThan(0);
   });
 
   test("an unpriced meeting model the deployment pays for isn't served while credits are billed, except on legacy billing", async () => {
@@ -1360,12 +1382,13 @@ describe("recording routes", () => {
         tracks: [{ trackNumber: 0, chunkCount: 1 }],
       });
     // No voice input MAI price: the meeting would be transcribed free, so it
-    // fails saying the model isn't available and nothing reaches the worker.
+    // fails saying the model isn't available (which the app words and offers
+    // another model for) and nothing reaches the worker.
     const refused = await finalize(await capturedRecording(scope));
     expect(refused.body.transcript).toMatchObject({
       providerId: "azure-speech",
       state: "failed",
-      errorCode: "unavailable",
+      errorCode: "model_unavailable",
     });
     expect(scope.started).toEqual([]);
     // CloudGeni's legacy account keeps today's behaviour.
@@ -1435,6 +1458,70 @@ describe("recording routes", () => {
     expect(calls).toEqual([]);
   });
 
+  test("a live transcript charged in credits gets no more sessions while its recorder doesn't report the audio they stream", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    let mintFails = false;
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async () => undefined,
+        settle: async () => ({ creditCostMicros: 1 }),
+        recordReceipt: async () => ({ creditCostMicros: 1 }),
+      },
+    };
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        mintFails
+          ? new Response("busy", { status: 503 })
+          : Response.json({
+              value: "ek_live",
+              expires_at: Date.now() / 1_000 + 600,
+            })) as typeof fetch,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const start = async () =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+    for (let session = 0; session < 3; session++) expect((await start()).status).toBe(201);
+    // A session the provider never started doesn't count.
+    mintFails = true;
+    expect((await start()).status).toBeGreaterThanOrEqual(500);
+    mintFails = false;
+    expect((await start()).status).toBe(201);
+    // Four sessions and no audio reported: the recorder gets no more, and
+    // treats the 409 as final. The recording itself carries on.
+    expect(await start()).toMatchObject({
+      status: 409,
+      body: {
+        error: {
+          code: "conflict",
+          message:
+            "The live transcript stopped for this track. The recording continues and is transcribed when it ends.",
+          retryable: false,
+          details: { code: "live_grant_limit" },
+        },
+      },
+    });
+  });
+
   test("credits turned off, or a payer that can't be identified, is a final 403 policy refusal, not a retryable 500", async () => {
     const AI = "https://ai.example.cognitiveservices.azure.com";
     const policyBlocked = () =>
@@ -1458,6 +1545,7 @@ describe("recording routes", () => {
           throw policyBlocked();
         },
         settle: async () => ({ creditCostMicros: 1 }),
+        recordReceipt: async () => ({ creditCostMicros: 1 }),
       },
     };
     const scope = await fixture({

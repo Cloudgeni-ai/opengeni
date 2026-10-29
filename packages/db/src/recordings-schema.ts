@@ -129,9 +129,14 @@ export const recordingTracks = pgTable(
     liveModel: text("live_model"),
     liveStreamedMilliseconds: integer("live_streamed_milliseconds").notNull().default(0),
     liveCostUsdMicros: bigint("live_cost_usd_micros", { mode: "number" }),
-    // Migration 1101. How far the track's streamed audio is charged in credits;
-    // null until a charged append first sets it.
+    // Migration 1101. How far the track's streamed audio is charged in credits,
+    // and that audio's list price (never counted by a usage allowance); null
+    // until a charged append first sets them.
     liveChargedMilliseconds: integer("live_charged_milliseconds"),
+    liveChargedCostUsdMicros: bigint("live_charged_cost_usd_micros", { mode: "number" }),
+    // Migration 1101. Live sessions granted for the track, and when the first was.
+    liveGrants: integer("live_grants"),
+    liveFirstGrantedAt: timestamp("live_first_granted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

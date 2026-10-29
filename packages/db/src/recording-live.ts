@@ -46,8 +46,58 @@ function trackWhere(input: { workspaceId: string; recordingId: string; trackNumb
 }
 
 /**
- * Note that a track streams to a live model. Only the person recording may,
- * and only while the recording is being captured.
+ * How far a track's live sessions may run ahead of the audio its recorder
+ * reports, when that audio is charged in credits. The audio goes from the
+ * device straight to the provider, so the recorder's own total is the meter;
+ * these bounds keep a recorder that stops reporting (or under-reports) from
+ * getting more sessions. A track gets {@link LIVE_GRANTS_FREE} sessions, one
+ * more for each {@link LIVE_GRANT_EARNED_PER_MILLISECONDS} of audio it
+ * reports, and at most {@link LIVE_GRANTS_MAX}; and none once the time since
+ * its first session is ahead of its reported audio by more than
+ * {@link LIVE_BEHIND_SLACK_MILLISECONDS} plus
+ * {@link LIVE_BEHIND_SLACK_FRACTION} of that time.
+ */
+export const LIVE_GRANTS_FREE = 4;
+export const LIVE_GRANT_EARNED_PER_MILLISECONDS = 5 * 60_000;
+export const LIVE_GRANTS_MAX = 40;
+export const LIVE_BEHIND_SLACK_MILLISECONDS = 10 * 60_000;
+export const LIVE_BEHIND_SLACK_FRACTION = 0.25;
+
+/** Why a track gets no more live sessions, or null when it may have one. */
+export function liveGrantRefusal(input: {
+  /** Sessions granted for the track so far. */
+  grants: number;
+  /** Audio the recorder reported streaming for the track. */
+  streamedMilliseconds: number;
+  /** Time since the track's first session; null before it has one. */
+  sinceFirstGrantMilliseconds: number | null;
+}): "live_grant_limit" | "live_streamed_behind" | null {
+  const allowed = Math.min(
+    LIVE_GRANTS_MAX,
+    LIVE_GRANTS_FREE + Math.floor(input.streamedMilliseconds / LIVE_GRANT_EARNED_PER_MILLISECONDS),
+  );
+  if (input.grants >= allowed) return "live_grant_limit";
+  const since = input.sinceFirstGrantMilliseconds;
+  if (
+    since !== null &&
+    since - input.streamedMilliseconds >
+      LIVE_BEHIND_SLACK_MILLISECONDS + LIVE_BEHIND_SLACK_FRACTION * since
+  ) {
+    return "live_streamed_behind";
+  }
+  return null;
+}
+
+/** The one message for a track refused more live sessions. */
+export const LIVE_GRANT_REFUSED_MESSAGE =
+  "The live transcript stopped for this track. The recording continues and is transcribed when it ends.";
+
+/**
+ * Note that a track streams to a live model, counting the session granted.
+ * Only the person recording may, and only while the recording is being
+ * captured. When the track's audio is charged in credits (`bounded`), a
+ * track whose sessions run far ahead of the audio it reports gets no more
+ * (see {@link liveGrantRefusal}).
  */
 export async function startRecordingLiveTrack(
   db: Database,
@@ -56,6 +106,8 @@ export async function startRecordingLiveTrack(
     trackNumber: number;
     providerId: string;
     model: string;
+    /** The track's audio is charged in credits, so its sessions are bounded. */
+    bounded?: boolean;
   },
 ): Promise<{ language: string | null }> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
@@ -69,9 +121,35 @@ export async function startRecordingLiveTrack(
         "not_capturing",
       );
     }
+    const [current] = await tx
+      .select({
+        streamed: schema.recordingTracks.liveStreamedMilliseconds,
+        grants: schema.recordingTracks.liveGrants,
+        sinceFirst: sql<
+          number | null
+        >`(extract(epoch from now() - ${schema.recordingTracks.liveFirstGrantedAt}) * 1000)::float8`,
+      })
+      .from(schema.recordingTracks)
+      .where(trackWhere(input))
+      .for("update");
+    if (!current) throw new RecordingNotFoundError("Track not found");
+    if (input.bounded) {
+      const refusal = liveGrantRefusal({
+        grants: current.grants ?? 0,
+        streamedMilliseconds: Number(current.streamed),
+        sinceFirstGrantMilliseconds:
+          current.sinceFirst === null ? null : Number(current.sinceFirst),
+      });
+      if (refusal) throw new RecordingConflictError(LIVE_GRANT_REFUSED_MESSAGE, refusal);
+    }
     const [track] = await tx
       .update(schema.recordingTracks)
-      .set({ liveProviderId: input.providerId, liveModel: input.model })
+      .set({
+        liveProviderId: input.providerId,
+        liveModel: input.model,
+        liveGrants: sql`coalesce(${schema.recordingTracks.liveGrants}, 0) + 1`,
+        liveFirstGrantedAt: sql`coalesce(${schema.recordingTracks.liveFirstGrantedAt}, now())`,
+      })
       .where(trackWhere(input))
       .returning({ trackNumber: schema.recordingTracks.trackNumber });
     if (!track) throw new RecordingNotFoundError("Track not found");
@@ -80,6 +158,26 @@ export async function startRecordingLiveTrack(
   });
 }
 
+/**
+ * Take back a session counted by {@link startRecordingLiveTrack} that the
+ * provider never started, so a provider outage doesn't use up the track's
+ * sessions.
+ */
+export async function releaseRecordingLiveGrant(
+  db: Database,
+  input: RecordingActor & { recordingId: string; trackNumber: number },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    await tx
+      .update(schema.recordingTracks)
+      .set({ liveGrants: sql`greatest(coalesce(${schema.recordingTracks.liveGrants}, 0) - 1, 0)` })
+      .where(trackWhere(input));
+  });
+}
+
+/** A stretch of a track's streamed audio, in milliseconds from its start. */
+export type RecordingLiveRange = { fromMilliseconds: number; toMilliseconds: number };
+
 export type AppendRecordingLiveSegmentsInput = RecordingActor & {
   recordingId: string;
   trackNumber: number;
@@ -87,15 +185,22 @@ export type AppendRecordingLiveSegmentsInput = RecordingActor & {
   streamedMilliseconds: number;
   /**
    * How the track's live model is paid, asked under the recording lock with
-   * the model the track streams to: whether its audio is charged in credits,
-   * and otherwise the estimated cost of `streamedMilliseconds` at its list
-   * price (which counts toward a usage allowance that prices unbilled use).
-   * Audio charged in credits stores no list-price cost, so it never counts
-   * against an allowance twice.
+   * the model the track streams to.
+   *
+   * `listPriceMicros` prices audio at the model's list price; the track
+   * stores the list price of everything streamed, which a usage allowance
+   * that prices unbilled use counts, less the list price of audio charged in
+   * credits, so charged audio never counts twice.
+   *
+   * `charge`, when the audio is charged in credits, records the charge for
+   * the range from the track's charged mark to its new stored total inside
+   * this transaction (its usage receipt), and the mark moves with it: the
+   * range is charged once however saves overlap or retry, and a failed
+   * charge fails the save (nothing of it commits) for the client to retry.
    */
   pricing: (live: RecordingLiveModel) => {
-    chargedInCredits: boolean;
-    costUsdMicros: number | null;
+    listPriceMicros: ((milliseconds: number) => number) | null;
+    charge: ((tx: Database, range: RecordingLiveRange) => Promise<void>) | null;
   };
   segments: ReadonlyArray<{
     segmentNumber: number;
@@ -115,20 +220,19 @@ export type AppendRecordingLiveSegmentsResult = {
   /** How far this call moved the track's stored streamed total. */
   addedMilliseconds: number;
   /**
-   * The streamed audio not yet charged, from the track's charged mark to its
-   * stored total, when it is charged in credits. Charge it, then move the
-   * mark with {@link markRecordingLiveCharged}; until then every save
-   * returns it again (grown by what streamed since).
+   * The range this call charged (its receipt committed with the save); its
+   * credit debit follows the commit, and a debit that fails is applied from
+   * the receipt later.
    */
-  charge: { fromMilliseconds: number; toMilliseconds: number } | null;
+  charged: RecordingLiveRange | null;
 };
 
 /**
  * Save finished live text. A segment number already saved keeps its first
  * copy. Once a transcript is ready the preview is over and nothing is saved.
  * The recording row lock orders a recording's appends, so the stored total
- * only grows and `addedMilliseconds` counts each millisecond once however
- * often a client retries.
+ * only grows, and `addedMilliseconds` counts and `charge` charges each
+ * millisecond once however often or concurrently a client retries.
  */
 export async function appendRecordingLiveSegments(
   db: Database,
@@ -142,7 +246,7 @@ export async function appendRecordingLiveSegments(
         ended: recording.state === "ready",
         live: null,
         addedMilliseconds: 0,
-        charge: null,
+        charged: null,
       };
     }
     const [before] = await tx
@@ -151,11 +255,10 @@ export async function appendRecordingLiveSegments(
         model: schema.recordingTracks.liveModel,
         streamed: schema.recordingTracks.liveStreamedMilliseconds,
         charged: schema.recordingTracks.liveChargedMilliseconds,
+        chargedCost: schema.recordingTracks.liveChargedCostUsdMicros,
       })
       .from(schema.recordingTracks)
       .where(trackWhere(input))
-      // The charged mark moves outside this lock (markRecordingLiveCharged),
-      // so the track row is read locked: a mark being moved is seen moved.
       .for("update");
     if (!before?.providerId || !before.model) {
       throw new RecordingConflictError(
@@ -164,31 +267,42 @@ export async function appendRecordingLiveSegments(
       );
     }
     const live = { providerId: before.providerId, model: before.model };
-    const { chargedInCredits, costUsdMicros } = input.pricing(live);
+    const { listPriceMicros, charge } = input.pricing(live);
     const streamedBefore = Number(before.streamed);
     const streamed = Math.max(streamedBefore, input.streamedMilliseconds);
     // Nothing charged yet: charging starts at what had streamed before it
     // (an older release's or a time credits weren't billed).
     const chargedUpTo = before.charged ?? streamedBefore;
+    const charged =
+      charge && streamed > chargedUpTo
+        ? { fromMilliseconds: chargedUpTo, toMilliseconds: streamed }
+        : null;
+    if (charge && charged) await charge(tx, charged);
+    const chargedCost =
+      charged && listPriceMicros
+        ? Number(before.chargedCost ?? 0) +
+          Math.max(0, listPriceMicros(charged.toMilliseconds) - listPriceMicros(chargedUpTo))
+        : null;
     await tx
       .update(schema.recordingTracks)
       .set({
         liveStreamedMilliseconds: streamed,
-        ...(chargedInCredits
-          ? { liveChargedMilliseconds: chargedUpTo }
-          : input.streamedMilliseconds >= streamedBefore
-            ? { liveCostUsdMicros: costUsdMicros }
+        // Audio streamed to a model not charged in credits counts at list
+        // price instead, so once charging began the mark moves past it too.
+        ...(charge
+          ? { liveChargedMilliseconds: charged?.toMilliseconds ?? chargedUpTo }
+          : before.charged !== null
+            ? { liveChargedMilliseconds: Math.max(before.charged, streamed) }
             : {}),
+        // The charged list price moves in the same statement as the total's,
+        // so the allowance trigger sees only what isn't charged.
+        ...(chargedCost !== null ? { liveChargedCostUsdMicros: chargedCost } : {}),
+        ...(listPriceMicros && input.streamedMilliseconds >= streamedBefore
+          ? { liveCostUsdMicros: listPriceMicros(streamed) }
+          : {}),
       })
       .where(trackWhere(input));
-    const result = {
-      live,
-      addedMilliseconds: streamed - streamedBefore,
-      charge:
-        chargedInCredits && streamed > chargedUpTo
-          ? { fromMilliseconds: chargedUpTo, toMilliseconds: streamed }
-          : null,
-    };
+    const result = { live, addedMilliseconds: streamed - streamedBefore, charged };
     if (input.segments.length === 0) return { saved: 0, ended: false, ...result };
     const saved = await tx
       .insert(schema.recordingLiveSegments)
@@ -207,24 +321,6 @@ export async function appendRecordingLiveSegments(
       .onConflictDoNothing()
       .returning({ segmentNumber: schema.recordingLiveSegments.segmentNumber });
     return { saved: saved.length, ended: false, ...result };
-  });
-}
-
-/**
- * Note that a track's streamed audio up to `toMilliseconds` is charged. The
- * mark only moves forward, so a late or repeated call changes nothing.
- */
-export async function markRecordingLiveCharged(
-  db: Database,
-  input: RecordingActor & { recordingId: string; trackNumber: number; toMilliseconds: number },
-): Promise<void> {
-  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
-    await tx
-      .update(schema.recordingTracks)
-      .set({
-        liveChargedMilliseconds: sql`greatest(coalesce(${schema.recordingTracks.liveChargedMilliseconds}, 0), ${input.toMilliseconds}::integer)`,
-      })
-      .where(trackWhere(input));
   });
 }
 

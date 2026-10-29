@@ -251,6 +251,52 @@ describe("live transcriber", () => {
     expect(api.saved.at(-1)!.streamedMilliseconds).toBe(200);
   });
 
+  test("the save made when recording stops is retried, so its last text and audio aren't lost", async () => {
+    for (const [failure, retried] of [
+      [Object.assign(new Error("Gateway timeout"), { status: 504 }), true],
+      [new TypeError("fetch failed"), true],
+      [
+        new OpenGeniApiError(
+          409,
+          JSON.stringify({ error: { code: "conflict", message: "No live transcript." } }),
+        ),
+        false,
+      ],
+    ] as const) {
+      FakeSocket.opened = [];
+      const api = client();
+      let failures = 1;
+      const flaky = {
+        ...api,
+        appendRecordingLiveSegments: async (
+          ...args: Parameters<typeof api.appendRecordingLiveSegments>
+        ) => {
+          if (failures-- > 0) throw failure;
+          return await api.appendRecordingLiveSegments(...args);
+        },
+      };
+      const live = createLiveTranscriber({
+        client: flaky,
+        workspaceId: "w",
+        recordingId: "r",
+        trackNumber: 1,
+        WebSocket: FakeSocket,
+      });
+      live.push(tenth(), 16_000, 0);
+      await settle();
+      FakeSocket.opened[0]!.open();
+      live.push(tenth(), 16_000, 100);
+      await live.close();
+      // The final save failed once; a passing failure is retried, a refusal isn't.
+      expect(api.saved.map((request) => request.streamedMilliseconds)).toEqual(
+        retried ? [200] : [],
+      );
+      if (retried) {
+        expect(api.saved[0]!.segments.map((segment) => segment.text)).toEqual(["See you."]);
+      }
+    }
+  });
+
   test("a missing provider key makes it unavailable without retrying", async () => {
     FakeSocket.opened = [];
     const api = client({
