@@ -3532,6 +3532,7 @@ export function buildOpenGeniAgent(
     instructionManifest: (manifest: Manifest) =>
       manifestWithoutFileResourceEntries(manifest, resources),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
+      ...(options.sandboxEnvironment ? { sandboxEnvironment: options.sandboxEnvironment } : {}),
       ...(options.authorizeAttemptExecution
         ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
         : {}),
@@ -4819,6 +4820,7 @@ export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
   options: {
+    sandboxEnvironment?: Record<string, string>;
     authorizeAttemptExecution?: () => Promise<void> | void;
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
@@ -4851,6 +4853,7 @@ function buildAgentCapabilitiesFromComposition(
   settings: Settings,
   skillComposition: RuntimeSkillComposition,
   options: {
+    sandboxEnvironment?: Record<string, string>;
     authorizeAttemptExecution?: () => Promise<void> | void;
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
@@ -4875,6 +4878,8 @@ function buildAgentCapabilitiesFromComposition(
     options.credentials
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
+          sandboxTemporaryDirectory:
+            (options.sandboxEnvironment ?? collectSandboxEnvironment(settings)).TMPDIR || "/tmp",
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
           ...(options.credentials ? { credentials: options.credentials } : {}),
         })
