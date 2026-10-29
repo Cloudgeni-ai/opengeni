@@ -58,6 +58,12 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/s
 import { TooltipProvider } from "../../../ui/tooltip";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
+import { desktopPlatform } from "../../lib/desktop";
+import {
+  chatHeaderInWindowBar,
+  isSessionRoutePath,
+  useWindowBarRowLeft,
+} from "../../lib/window-bar-row";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { isIntelligenceEffort } from "../../lib/session-tools";
@@ -263,6 +269,12 @@ export function SessionShell({
   );
 }
 
+/**
+ * In the macOS app a chat's header is the window bar's row, as in native Mac
+ * apps: its title and actions sit beside the traffic lights and the sidebar
+ * toggle, and the canvas, the rounded panel, starts under the bar as on every
+ * other page (the `[data-window-bar-row]` rules in the app's stylesheet).
+ */
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
@@ -271,6 +283,14 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
+  const headerInWindowBar = chatHeaderInWindowBar({
+    platform: desktopPlatform,
+    mobile: rail.isMobile,
+    session: Boolean(context.session),
+    pathname,
+  });
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  useWindowBarRowLeft(canvasRef, headerInWindowBar);
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
@@ -344,6 +364,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         {chatList && !rail.isMobile ? (
           <nav
             aria-label="Primary"
+            data-shell-rail
             data-collapsed={rail.collapsed}
             style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(
@@ -386,7 +407,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         ) : null}
 
         {/* Main canvas. */}
-        <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div
+          ref={canvasRef}
+          data-canvas
+          data-window-bar-row={headerInWindowBar ? "" : undefined}
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        >
           <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             {canvasBanners}
@@ -411,8 +437,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
-  const showSessionActions = Boolean(context.session) && isSessionRoute;
+  const showSessionActions = Boolean(context.session) && isSessionRoutePath(pathname);
   const sharedFeed = useSyncExternalStore(
     context.sessionEventFeedStore.subscribe,
     context.sessionEventFeedStore.getSnapshot,

@@ -2121,6 +2121,36 @@ describe("buildTimeline", () => {
     expect((items[0] as AgentMessageItem).text).toBe("OpenAI docs.");
   });
 
+  test.each([
+    [
+      "a handle with several references",
+      "Prices rose. \uE200cite\uE202turn0search3\uE202turn1view0\uE201 They fell later.",
+      "Prices rose. They fell later.",
+    ],
+    ["a file citation", "See the notes \uE200filecite\uE202turn3file0\uE201.", "See the notes."],
+    [
+      "a handle written as plain text",
+      "It ends in March.citeturn0search1turn0news2\nUse v3.",
+      "It ends in March.\nUse v3.",
+    ],
+    ["a plain-text file citation", "Done fileciteturn2file0.", "Done."],
+    ["a handle still streaming", "The answer is 42. \uE200cite\uE202turn0sea", "The answer is 42."],
+    ["stray delimiters from a cut-short handle", "Before \uE202 after\uE201.", "Before  after."],
+  ] as const)("hides %s from timeline text", (_label, text, visible) => {
+    reset();
+    const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
+
+    expect((items[0] as AgentMessageItem).text).toBe(visible);
+  });
+
+  test("keeps ordinary words that contain cite", () => {
+    reset();
+    const text = "Please cite turn 3 of the excited recital; citeturn4 stays.";
+    const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
+
+    expect((items[0] as AgentMessageItem).text).toBe(text);
+  });
+
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
     reset();
     const workerId = "0b3ba745-1111-4222-8333-9c76ad9e0000";

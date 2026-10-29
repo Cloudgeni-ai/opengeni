@@ -342,6 +342,8 @@ export const PASSKEY_FIELD_NAMES = [
   "userHandle",
   "userName",
   "privateKey",
+  "backupEligibility",
+  "backupState",
 ] as const;
 
 // Forbidden anywhere in a name: / { } # \ and C0/C1 control characters.

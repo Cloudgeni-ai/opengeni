@@ -183,6 +183,12 @@ export function requiresSignedFileResourceDownloads(
   if (activeSandboxBackend === "none") {
     return false;
   }
+  // Later messages reuse the local session. The SDK refuses new mount entries
+  // on a live box, so deliver attachments as verified files in ordinary
+  // directories, including for the default local S3-compatible store.
+  if (activeSandboxBackend === "local") {
+    return true;
+  }
   // A backend that cannot mount object storage at all (a Connected Machine, the
   // compute fabric) ALWAYS receives file resources as pre-signed downloads.
   // Otherwise the manifest would carry a mount entry the box never applies and

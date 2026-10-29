@@ -281,6 +281,8 @@
 .og-connect-setup .og-connect-setup-description { color:var(--og-color-fg-muted,inherit); font-size:13px; }
 .og-connect-setup .og-connect-setup-primary { width:100%; text-align:center; border-color:var(--og-color-primary-border); border-radius:8px; background:var(--og-color-primary); color:var(--og-color-primary-fg); font-size:14px; font-weight:500; }
 .og-connect-setup .og-connect-setup-primary:hover:not(:disabled) { background:var(--og-color-primary-hover); }
+/* A link to a page the person finishes on looks like the step's one action. */
+.og-connect-setup a.og-connect-setup-primary { display:flex; align-items:center; justify-content:center; box-sizing:border-box; min-height:2.75rem; padding:.5rem .75rem; border-width:1px; border-style:solid; text-decoration:none; }
 .og-connect-setup .og-connect-setup-secondary { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; }
 .og-connect-setup .og-connect-setup-secondary button { border:0; min-height:36px; padding:6px 8px; color:var(--og-color-fg-muted,inherit); font-size:12px; }
 .og-connect-setup .og-connect-setup-pending { display:grid; gap:10px; padding:14px 16px; border:1px solid var(--og-color-border,#888); border-radius:10px; background:var(--og-color-surface-1,transparent); color:var(--og-color-fg-muted,inherit); font-size:13px; line-height:1.55; }

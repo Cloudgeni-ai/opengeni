@@ -79,10 +79,13 @@ export function useRepositoryCatalogRefresh(
           ? [
               context.refreshGitHub(workspaceId, undefined, {
                 sync: explicit && canManageGitHub,
+                userInitiated: explicit,
               }),
             ]
           : []),
-        ...(canReadPersonal ? [context.refreshPersonalGitHub(workspaceId)] : []),
+        ...(canReadPersonal
+          ? [context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: explicit })]
+          : []),
       ]).then(() => undefined);
       accepted.inFlight = request;
       try {
@@ -410,6 +413,7 @@ export function useFollowUpRepositories(
       org: context.githubOrg,
       pending: disabled || context.busy,
       repoBusy: context.repoBusy,
+      githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
       githubAppBusy: context.githubAppBusy,
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,

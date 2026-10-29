@@ -366,6 +366,37 @@ function webSearchHostedTools(
 }
 
 describe("native web search hosted tool", () => {
+  for (const sandboxBackend of ["none", "docker"] as const) {
+    test(`route context size changes only the hosted-search budget (${sandboxBackend})`, () => {
+      const settings = testSettings({ sandboxBackend });
+      const baseline = webSearchHostedTools(buildOpenGeniAgent(settings, []));
+      expect(baseline[0]!.providerData).toMatchObject({ search_context_size: "medium" });
+      for (const size of ["low", "medium", "high"] as const) {
+        const actual = webSearchHostedTools(
+          buildOpenGeniAgent(settings, [], {
+            hostedWebSearchContextSize: size,
+          }),
+        );
+        expect(actual).toEqual([
+          {
+            ...baseline[0],
+            providerData: {
+              ...(baseline[0]!.providerData as object),
+              search_context_size: size,
+            },
+          },
+        ]);
+      }
+      expect(
+        webSearchHostedTools(
+          buildOpenGeniAgent(settings, [], {
+            hostedWebSearch: false,
+            hostedWebSearchContextSize: "low",
+          }),
+        ),
+      ).toEqual([]);
+    });
+  }
   test("default settings attach a web_search hosted tool on the non-sandbox Agent path", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     const tools = webSearchHostedTools(agent);

@@ -767,6 +767,9 @@ describe("organization MCP action search", () => {
         expect.arrayContaining(["createSessionShareLink"]),
       ]);
     }
+    // Short words keep their final "e", so they don't match other words'
+    // prefixes: "line" is not "link".
+    expect(found("line")).not.toContain("createSessionShareLink");
     // Adding someone, inviting them or widening a chat's audience each point
     // to the share link for letting one person read one chat.
     for (const [query, id] of [

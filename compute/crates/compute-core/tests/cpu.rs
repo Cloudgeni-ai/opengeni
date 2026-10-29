@@ -35,15 +35,15 @@ struct Rig {
 
 impl Rig {
     fn new(millis: u64) -> Self {
-        Self::with(HostPolicy {
+        Self::with(&HostPolicy {
             cpu_budget: Some(millis),
             ..HostPolicy::default()
         })
     }
 
-    fn with(policy: HostPolicy) -> Self {
+    fn with(policy: &HostPolicy) -> Self {
         Self {
-            host: Host::new(policy).unwrap(),
+            host: Host::new(*policy).unwrap(),
             now: At::ZERO,
         }
     }
@@ -350,7 +350,7 @@ fn an_overdrawn_budget_admits_no_wake_until_enough_sleeps() {
 
 #[test]
 fn a_wake_short_of_processor_time_ends_no_idle_vm_for_memory() {
-    let mut rig = Rig::with(HostPolicy {
+    let mut rig = Rig::with(&HostPolicy {
         cpu_budget: Some(1000),
         admission: Some(Admission {
             budget: 2 * GIB,
@@ -377,7 +377,7 @@ fn a_wake_short_of_processor_time_ends_no_idle_vm_for_memory() {
 
 #[test]
 fn a_wake_refused_for_memory_gives_its_processor_time_back() {
-    let mut rig = Rig::with(HostPolicy {
+    let mut rig = Rig::with(&HostPolicy {
         cpu_budget: Some(1000),
         admission: Some(Admission {
             budget: 4 * GIB,
@@ -515,7 +515,7 @@ fn a_smaller_budget_admits_no_wake_until_it_fits_and_a_larger_one_lets_held_wake
         Some(Resource::Cpu)
     );
     // Nothing to change without a budget.
-    let mut unbudgeted = Rig::with(HostPolicy::default());
+    let mut unbudgeted = Rig::with(&HostPolicy::default());
     unbudgeted.send(Input::CpuBudget { millis: 500 });
     assert_eq!(unbudgeted.host.cpu_capacity(), None);
 }

@@ -43,6 +43,7 @@ describe("repository catalog refresh", () => {
     await hook.result.current.onOpenRefresh();
     expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
       sync: false,
+      userInitiated: false,
     });
     expect(context.refreshPersonalGitHub).toHaveBeenCalledTimes(1);
     await hook.rerender();
@@ -54,6 +55,7 @@ describe("repository catalog refresh", () => {
     await hook.result.current.onRefresh();
     expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
       sync: true,
+      userInitiated: true,
     });
     expect(context.refreshGitHub).toHaveBeenCalledTimes(3);
     await hook.unmount();
@@ -75,6 +77,7 @@ describe("repository catalog refresh", () => {
     await hook.result.current.onRefresh();
     expect(reader.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
       sync: false,
+      userInitiated: true,
     });
     expect(reader.refreshPersonalGitHub).not.toHaveBeenCalled();
     const personal = fixture(["connections:read"]);

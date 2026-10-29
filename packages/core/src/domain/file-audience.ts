@@ -25,8 +25,6 @@ export const FILE_PRIVATE_DISABLED_MESSAGE = "Only me is turned off for this org
 export const FILE_OWNER_REQUIRED_MESSAGE = "Only the file's owner can change who can open it.";
 export const FILE_NOT_SHAREABLE_MESSAGE =
   "Session screenshots and saved tool output stay with their chat and can't be shared.";
-export const FILE_PERSONAL_WORKSPACE_MESSAGE =
-  "Files in a personal workspace are only yours; there is nobody to share them with.";
 
 /** The stored audience of a file, in Site vocabulary. */
 export function fileVisibility(file: Pick<FileAsset, "scope">): WorkspaceArtifactVisibility {
@@ -59,16 +57,16 @@ export async function fileAccessFor(
   if (visibility === "workspace")
     return {
       visibility,
-      whoCanOpen: `Everyone in the workspace “${input.workspace.name.slice(0, 200)}” can open this file.`,
+      whoCanOpen:
+        input.workspace.kind === "personal"
+          ? `Everyone in the personal workspace “${input.workspace.name.slice(0, 200)}” can open this file; only its owner is in it.`
+          : `Everyone in the workspace “${input.workspace.name.slice(0, 200)}” can open this file.`,
     };
   const name = await personName(db, input.file.ownerSubjectId ?? null);
   const only = name ? `Only ${name} can open this file` : "Only its owner can open this file";
   return {
     visibility,
-    whoCanOpen:
-      input.workspace.kind === "personal"
-        ? `${only}; it is in a personal workspace.`
-        : `${only}. Anyone else who opens its link is told it is private.`,
+    whoCanOpen: `${only}. Anyone else who opens its link is told it is private.`,
   };
 }
 
@@ -78,7 +76,7 @@ export async function fileAccessFor(
  * and `person` is the human the request acts for. Omitted, the file follows
  * the chat. Choosing the workspace from an Only me chat shares it on the
  * chat owner's behalf; choosing Only me from a shared chat needs a person who
- * may make things Only me here. A personal workspace keeps everything private.
+ * may make things Only me here. A personal workspace follows the same rule.
  */
 export async function resolveNewFileAudience(input: {
   db: Database;
@@ -89,8 +87,6 @@ export async function resolveNewFileAudience(input: {
   requested: WorkspaceArtifactVisibility | undefined;
 }): Promise<{ privateOwnerSubjectId: string | null; ownerSubjectId: string | null }> {
   const owner = input.chatOwner ?? input.person;
-  if (input.workspace.kind === "personal" && owner)
-    return { privateOwnerSubjectId: owner, ownerSubjectId: owner };
   const visibility = input.requested ?? (input.chatOwner ? "private" : "workspace");
   if (visibility === "workspace") return { privateOwnerSubjectId: null, ownerSubjectId: owner };
   if (!owner) throw new HTTPException(422, { message: FILE_PRIVATE_OWNER_MESSAGE });
@@ -117,8 +113,6 @@ export async function changeFileVisibility(input: {
   fileId: string;
   visibility: WorkspaceArtifactVisibility;
 }): Promise<{ file: FileAsset; changed: boolean }> {
-  if (input.workspace.kind === "personal")
-    throw new HTTPException(422, { message: FILE_PERSONAL_WORKSPACE_MESSAGE });
   if (!input.person) throw new HTTPException(403, { message: FILE_OWNER_REQUIRED_MESSAGE });
   if (
     input.visibility === "private" &&
