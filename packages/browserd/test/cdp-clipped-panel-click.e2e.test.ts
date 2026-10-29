@@ -495,3 +495,47 @@ e2e(
   },
   60_000,
 );
+
+// Search results whose links show somewhere their own box does not: a title
+// positioned below the link's empty inline box, and a link whose box does
+// not grow to hold its floated title. And a wide block link padded far to
+// one side inside a column that clips it, beside an ad column: the middle of
+// its border box shows, the middle of its content box lies over the ads.
+const RESULTS = fixture([
+  "<!doctype html><title>Results</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "#col{position:absolute;left:200px;top:0;width:300px;overflow:hidden}",
+  ".result{position:relative;height:90px}",
+  ".bar{position:absolute;left:0;top:0;width:300px;height:20px;background:#fff}",
+  "#ads{position:absolute;left:500px;top:0;width:400px;height:600px;background:#eee}",
+  "</style>",
+  '<div id="col">',
+  '<div class="result"><span>Cached </span><a href="#a" id="positioned"><span style="position:absolute;left:0;top:40px;width:280px;height:30px">Positioned result</span></a><b class="bar">Ad</b></div>',
+  '<div class="result"><a href="#b" id="floated" style="display:block"><span style="float:left;width:280px;height:30px">Floated result</span></a><div style="clear:both"></div></div>',
+  '<div class="result"><a href="#c" id="padded" style="display:block;width:900px;margin-left:-400px;padding-left:410px">Padded result</a></div>',
+  "</div>",
+  '<div id="ads" role="complementary" aria-label="Ads">Ads</div>',
+  "<script>",
+  "globalThis.log=[];",
+  'for (const link of document.querySelectorAll("a")) link.addEventListener("click",(event)=>{event.preventDefault();log.push(link.id)});',
+  'document.getElementById("ads").addEventListener("click",()=>log.push("ads"));',
+  "</script>",
+]);
+
+e2e(
+  "a link that shows outside its own box, or only on one side of its clipped center, is clicked where it shows",
+  async () => {
+    await withSession(RESULTS, async ({ evaluate, click }) => {
+      const link = (name: string) =>
+        ({ type: "click", locator: { kind: "role", role: "link", name, exact: true } }) as const;
+      for (const name of ["Positioned result", "Floated result", "Padded result"]) {
+        const result = await click(link(name));
+        expect({ name, error: result.error ?? null }).toEqual({ name, error: null });
+        expect(result.state).toBe("completed");
+      }
+      expect(await evaluate("log")).toEqual(["positioned", "floated", "padded"]);
+    });
+  },
+  60_000,
+);

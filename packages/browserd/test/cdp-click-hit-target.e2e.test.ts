@@ -16,7 +16,7 @@ async function openFixture(html: string) {
   const controllerGeneration = `controller-${randomUUID()}`;
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
-    headed: false,
+    headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
       : {}),
@@ -388,6 +388,9 @@ async function withBackgroundTab(
   const controllerGeneration = `controller-${randomUUID()}`;
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
+    // Headless on purpose: without focus emulation, headed Chrome delivers
+    // no presses at all to a tab that is not in front, so these cases would
+    // test Chrome rather than the driver.
     headed: false,
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -502,6 +505,32 @@ e2e(
         expect(result.error ?? null).toBeNull();
         expect(result.state).toBe("completed");
         await posted;
+      },
+    );
+  },
+  60_000,
+);
+
+e2e(
+  "a click in a background tab does not wait for Chrome to acknowledge the pointer's move",
+  async () => {
+    await withBackgroundTab(
+      {
+        "/start": START,
+        "/page":
+          '<!doctype html><title>Save</title><button id="save">Save</button><script>globalThis.log=[];for(const type of ["pointermove","pointerdown","click"])addEventListener(type,(event)=>log.push(event.type),true);</script>',
+      },
+      async ({ page, click, evaluate }) => {
+        expect(await evaluate("document.visibilityState")).toBe("hidden");
+        const started = performance.now();
+        const result = await click(page, "#save");
+        const elapsed = performance.now() - started;
+        expect(result.error ?? null).toBeNull();
+        expect(result.state).toBe("completed");
+        // The pointer still arrives before it presses.
+        expect(await evaluate("log")).toEqual(["pointermove", "pointerdown", "click"]);
+        // Chrome holds a hidden page's pointer move for about five seconds.
+        expect(elapsed).toBeLessThan(3_000);
       },
     );
   },

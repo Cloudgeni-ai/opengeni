@@ -7525,24 +7525,44 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const input = sessionId === undefined ? {} : { sessionId };
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
     try {
-      await this.sendActionTarget(
+      // The guard's clock restarts just before the input, and it reports
+      // whether the page is hidden (a background tab without focus
+      // emulation). Best effort: a guard this cannot reach is judged by its
+      // readback, as before.
+      const hidden =
+        guard !== null &&
+        !state.dialog &&
+        (await this.sendTarget<{ result?: unknown }>(
+          state,
+          "Runtime.callFunctionOn",
+          {
+            objectId: guard.objectId,
+            functionDeclaration: HIT_TARGET_GUARD_ARM_FUNCTION,
+            returnByValue: true,
+          },
+          { timeoutMs: 2_000 },
+        )
+          .then((armed) => isRecord(armed.result) && armed.result.value === true)
+          .catch(() => false));
+      // A hidden page draws no frames, and Chrome holds the pointer's move
+      // there for about five seconds before acknowledging it. The press
+      // that follows delivers the move first, in order, so there the press
+      // goes out as soon as the move has been sent.
+      let moveSent = () => {};
+      const sent = new Promise<void>((resolve) => {
+        moveSent = resolve;
+      });
+      const moved = this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
         { type: "mouseMoved", x, y },
-        input,
+        { ...input, sent: moveSent },
       );
-      // A background tab can take seconds to acknowledge the pointer's move
-      // (it draws no frames), long enough for the guard to have disarmed
-      // itself before the press arrives. Its clock restarts here, right
-      // before the press. Best effort: a guard this cannot reach is judged
-      // by its readback, as before.
-      if (guard !== null && !state.dialog) {
-        await this.sendTarget(
-          state,
-          "Runtime.callFunctionOn",
-          { objectId: guard.objectId, functionDeclaration: "function () { this.arm(); }" },
-          { timeoutMs: 2_000 },
-        ).catch(() => undefined);
+      if (hidden) {
+        void moved.catch(() => undefined);
+        await Promise.race([sent, moved]);
+      } else {
+        await moved;
       }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
@@ -7558,6 +7578,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           input,
         );
       }
+      await moved;
     } catch (error) {
       // The input already fails or pauses this action (a JavaScript dialog,
       // an unresponsive tab), and reading the guard back now could wait on
@@ -7831,9 +7852,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser node cannot receive pointer input",
       );
     }
-    // Scrolling runs page scroll listeners, so it counts as a possible effect
-    // and a later refusal stays an unknown outcome. When the target is already
-    // in view nothing scrolls, and a refusal (covered, no box) is definite.
+    // Bringing the target into view is not input: a refusal before any input
+    // (covered, no box) is definite whether or not the page scrolled, and the
+    // observation that comes with it shows where the page now is.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
     // Where scroll offsets cannot be read (a child frame), whether the
     // target moved tells whether anything scrolled.
@@ -7843,7 +7864,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         : null;
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
-    const effectsBeforeElementScroll = state.actionEffectCount;
     try {
       await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
         backendNodeId: backendDOMNodeId,
@@ -7851,8 +7871,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } catch (error) {
       // -32001: the tab's session is gone, which is not about this element.
       if (!(error instanceof CdpProtocolError) || error.code === -32_001) throw error;
-      // The browser refused the scroll itself, so nothing moved.
-      state.actionEffectCount = effectsBeforeElementScroll;
+      state.actionEffectCount = effectsBeforeScroll;
       throw scrollRefusal(error.message) ?? error;
     }
     const boxAfter =
@@ -7863,7 +7882,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         : boxBefore !== null &&
           boxAfter !== null &&
           Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
-    if (unscrolled && scrollBefore !== null) state.actionEffectCount = effectsBeforeScroll;
+    state.actionEffectCount = effectsBeforeScroll;
     // The page reacts to a scroll on its next frames (a sticky header that
     // shrinks once the page scrolls, and the content it moves), so after one
     // the target is measured only once it has stopped moving.
@@ -7969,17 +7988,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     backendDOMNodeId: number,
   ): Promise<{ x: number; y: number }> {
+    // The middle of the border box, where the hit tests look: the content
+    // box's middle lies elsewhere in an element padded more on one side.
     const result = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
       backendNodeId: backendDOMNodeId,
     });
-    if (!isRecord(result.model) || !Array.isArray(result.model.content)) {
+    if (!isRecord(result.model) || !Array.isArray(result.model.border)) {
       throw new InteractionDefiniteDriverError(
         "invalid_action",
         "browser element has no visible action point",
         true,
       );
     }
-    const numbers = result.model.content.filter(
+    const numbers = result.model.border.filter(
       (value): value is number => typeof value === "number" && Number.isFinite(value),
     );
     if (numbers.length < 8) {
@@ -8035,8 +8056,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // when the element is not rotated or skewed; otherwise skip this path.
     const [x1, y1, x2, y2, x4, y4] = [quad[0]!, quad[1]!, quad[2]!, quad[3]!, quad[6]!, quad[7]!];
     // It must also keep its orientation: mirrored (scaleX(-1)) or turned
-    // (180°) boxes map the page's fractions onto the wrong side.
-    if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5 || x2 <= x1 || y4 <= y1) return null;
+    // (180°) boxes map the page's offsets onto the wrong side. An empty box
+    // (a link whose box does not hold its content) has none to lose.
+    if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5 || x2 < x1 || y4 < y1) return null;
     const { bounds, offset } = await this.pageWindowInFrame(state);
     const found = await this.callOnNode(state, backendDOMNodeId, VISIBLE_PART_FUNCTION, [
       { value: bounds },
@@ -8044,14 +8066,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (isRecord(found) && isRecord(found.nested)) {
       return { nested: nestedControlName(found.nested) };
     }
-    if (!Array.isArray(found) || found.length !== 2) return null;
-    const [fx, fy] = found;
-    if (typeof fx !== "number" || typeof fy !== "number") return null;
-    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return null;
-    return {
-      x: offset.x + x1 + fx * (x2 - x1),
-      y: offset.y + y1 + fy * (y4 - y1),
-    };
+    if (!isRecord(found)) return null;
+    const { x: dx, y: dy, width, height } = found;
+    if (
+      typeof dx !== "number" ||
+      typeof dy !== "number" ||
+      typeof width !== "number" ||
+      typeof height !== "number" ||
+      ![dx, dy, width, height].every(Number.isFinite)
+    )
+      return null;
+    // The page measures in its own CSS pixels; the box model in the tab's,
+    // which differ by any scale applied to the target. An empty box shows no
+    // scale, so none is assumed.
+    const scaleX = width > 0 && x2 > x1 ? (x2 - x1) / width : 1;
+    const scaleY = height > 0 && y4 > y1 ? (y4 - y1) / height : 1;
+    return { x: offset.x + x1 + dx * scaleX, y: offset.y + y1 + dy * scaleY };
   }
 
   /** A cross-origin frame cannot see how much of its window the page shows:
@@ -8177,20 +8207,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       isolatedFrameId: frameId,
     }).catch(() => false);
     if (sticky !== true) return null;
-    const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
-    const effectsBeforeScroll = state.actionEffectCount;
     for (const alignment of ["end", "center", "start"] as const) {
-      // Scrolling runs page scroll listeners, so it is a possible effect: a
-      // refusal after it is reported as an unknown outcome.
-      await this.callOnNode(
-        state,
-        backendDOMNodeId,
-        SCROLL_INTO_VIEW_FUNCTION,
-        [{ value: alignment }],
-        {
-          potentialEffect: true,
-        },
-      );
+      // Like the scroll into view, not input: a refusal after it is definite.
+      await this.callOnNode(state, backendDOMNodeId, SCROLL_INTO_VIEW_FUNCTION, [
+        { value: alignment },
+      ]);
       // Layout that reacts to the scroll, such as a popover that follows its
       // anchor, catches up on the next frames. Test the hit after it has.
       await this.callOnNode(state, backendDOMNodeId, SETTLE_FRAMES_FUNCTION, [], {
@@ -8200,13 +8221,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return await this.centerPoint(state, backendDOMNodeId);
       }
     }
-    // Nothing could move (for example a sticky bar taller than its scroller):
-    // no scroll listener ran, so the refusal is still definite.
-    if (
-      scrollBefore !== null &&
-      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-    )
-      state.actionEffectCount = effectsBeforeScroll;
     return null;
   }
 
@@ -9496,7 +9510,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
-    options: { potentialEffect?: boolean; sessionId?: string; timeoutMs?: number } = {},
+    options: {
+      potentialEffect?: boolean;
+      sessionId?: string;
+      timeoutMs?: number;
+      /** Called once the command has gone out to the browser. */
+      sent?: () => void;
+    } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
@@ -9529,6 +9549,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId: options.sessionId ?? this.commandSession(state, method),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
+    options.sent?.();
     try {
       const result = await Promise.race([
         command.then((value) => ({ kind: "result" as const, value })),
@@ -11012,8 +11033,9 @@ function nestedControlName(reported: Record<string, unknown>): string {
   return quoted(`${kept}…`);
 }
 
-// A point on the part of the target that shows, as fractions of its border
-// box, that reaches the target itself, nearest the middle of that part. A
+// A point on the part of the target that shows, as its offset from the
+// target's border box (with that box's size, which can be empty), that
+// reaches the target itself, nearest the middle of that part. A
 // point whose hit lies in a separate control nested in the target (a card's
 // own Delete button) does not count: when only such controls show, returns
 // { nested } naming the first. Null when no point qualifies, or when the
@@ -11024,7 +11046,6 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return null;
   ${HIT_HELPERS}
   ${SHOWN_PART_HELPER}
   const cx = rect.left + rect.width / 2;
@@ -11037,8 +11058,28 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   if (centre && !owns(centre, element) && (holds(element, cx, cy) || shutOut(element))) {
     return null;
   }
-  const area = visibleArea(element, rect, bounds);
-  const points = area && shownPoints(element, area);
+  const shown = (box) => {
+    if (box.width <= 0 || box.height <= 0) return null;
+    const area = visibleArea(element, box, bounds);
+    return area && shownPoints(element, area);
+  };
+  let points = shown(rect);
+  // Where its own box shows nothing, the target's content can still show
+  // outside that box, which is where a person clicks it: a link whose text
+  // is positioned elsewhere, or whose box does not grow to hold its floated
+  // children (no box at all). Only boxes that reach past its own are new.
+  if (!points) {
+    const outside = (box) =>
+      box.left < rect.left || box.top < rect.top || box.right > rect.right || box.bottom > rect.bottom;
+    const descendants = element.querySelectorAll("*");
+    let tried = 0;
+    for (let index = 0; index < descendants.length && tried < 50 && !points; index += 1) {
+      const box = descendants[index].getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0 || !outside(box)) continue;
+      tried += 1;
+      points = shown(box);
+    }
+  }
   if (!points) return null;
   // What is on top at the middle of the part that shows covers the target
   // there, as at its centre.
@@ -11097,7 +11138,7 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
       nested = nested ?? control;
       continue;
     }
-    return [(point.x - rect.left) / rect.width, (point.y - rect.top) / rect.height];
+    return { x: point.x - rect.left, y: point.y - rect.top, width: rect.width, height: rect.height };
   }
   return nested ? { nested: name(nested) } : null;
 }`;
@@ -11140,9 +11181,13 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
 // reports what was held back, and its arm() restarts the clock below just
-// before the press. A guard that is never settled (a JavaScript dialog
-// interrupted the click) disarms itself a few seconds after that.
+// before the click's input. A guard that is never settled (a JavaScript
+// dialog interrupted the click) disarms itself a few seconds after that.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
+/** Restarts a guard's clock just before the click's input, and reports
+ * whether its page is hidden. */
+const HIT_TARGET_GUARD_ARM_FUNCTION =
+  'function () { this.arm(); return document.visibilityState === "hidden"; }';
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported
