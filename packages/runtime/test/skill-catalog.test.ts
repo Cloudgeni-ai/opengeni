@@ -3,9 +3,12 @@ import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../src/index";
 import {
   formatSkillCatalog,
+  SKILL_CATALOG_INLINE_MAX_BYTES,
+  SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES,
   SKILL_CATALOG_MAX_BYTES,
   SKILL_CATALOG_MAX_ENTRIES,
   skillCatalogEntryIds,
+  skillInstructionsBody,
 } from "../src/skill-catalog";
 
 describe("sandbox-independent Skill catalog", () => {
@@ -69,6 +72,110 @@ describe("sandbox-independent Skill catalog", () => {
     const catalog = formatSkillCatalog([]);
     expect(catalog).toContain("skill_read");
     expect(catalog).not.toContain("skill-management");
+  });
+
+  const header = [
+    "## Skills",
+    "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
+    "For finding, installing, creating, or editing Skills, read the skill-management Skill. Management tools are lazy and available through tool search.",
+    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
+  ];
+  const management = {
+    id: "builtin:skill-management",
+    name: "skill-management",
+    description: "Manage Skills",
+  };
+  const deploy = { id: "workspace:deploy", name: "deploy", description: "Deploy services" };
+
+  test("a catalog without shown-in-full entries renders exactly as before", () => {
+    expect(formatSkillCatalog([deploy, management])).toBe(
+      [
+        ...header,
+        '- {"id":"builtin:skill-management","name":"skill-management","description":"Manage Skills"}',
+        '- {"id":"workspace:deploy","name":"deploy","description":"Deploy services"}',
+      ].join("\n"),
+    );
+  });
+
+  test("shows short instructions in full, first, under one notice", () => {
+    const catalog = formatSkillCatalog([
+      deploy,
+      management,
+      {
+        id: "skill-1",
+        name: "reply-in-norwegian",
+        description: "Applies in every conversation with this user.",
+        instructions: "  Always reply in Norwegian.\nKeep code and quotes as they are.\n",
+      },
+    ]);
+    expect(catalog).toBe(
+      [
+        ...header,
+        "Entries with an instructions field show that Skill's complete instructions: follow them whenever the description applies, without skill_read.",
+        '- {"id":"skill-1","name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian.\\nKeep code and quotes as they are."}',
+        '- {"id":"builtin:skill-management","name":"skill-management","description":"Manage Skills"}',
+        '- {"id":"workspace:deploy","name":"deploy","description":"Deploy services"}',
+      ].join("\n"),
+    );
+    expect([...skillCatalogEntryIds(catalog)].sort()).toEqual([
+      "builtin:skill-management",
+      "skill-1",
+      "workspace:deploy",
+    ]);
+  });
+
+  test("keeps larger instructions read-on-demand and bounds the inline total", () => {
+    const atBound = "a".repeat(SKILL_CATALOG_INLINE_MAX_BYTES);
+    const tooLarge = formatSkillCatalog([management, { ...deploy, instructions: `${atBound}b` }]);
+    expect(tooLarge).toBe(formatSkillCatalog([management, deploy]));
+
+    const entries = Array.from({ length: 6 }, (_, index) => ({
+      id: `skill-${index}`,
+      name: `pref-${index}`,
+      description: `Preference ${index}`,
+      instructions: String(index).repeat(SKILL_CATALOG_INLINE_MAX_BYTES),
+    }));
+    const catalog = formatSkillCatalog([management, ...entries]);
+    const shown = catalog.split("\n").filter((line) => line.includes('"instructions"'));
+    expect(shown.length).toBe(
+      SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES / SKILL_CATALOG_INLINE_MAX_BYTES,
+    );
+    expect(shown.map((line) => JSON.parse(line.slice(2)).id)).toEqual([
+      "skill-0",
+      "skill-1",
+      "skill-2",
+      "skill-3",
+    ]);
+    expect(catalog).toContain('"id":"skill-5","name":"pref-5","description":"Preference 5"}');
+    // Empty instructions stay a plain descriptor.
+    expect(formatSkillCatalog([management, { ...deploy, instructions: "  " }])).toBe(
+      formatSkillCatalog([management, deploy]),
+    );
+  });
+
+  test("never omits shown-in-full entries when the index is full", () => {
+    const filler = Array.from({ length: SKILL_CATALOG_MAX_ENTRIES + 10 }, (_, index) => ({
+      id: `a-${String(index).padStart(3, "0")}`,
+      name: `a-${String(index).padStart(3, "0")}`,
+      description: "Filler",
+    }));
+    const catalog = formatSkillCatalog([
+      ...filler,
+      { id: "z", name: "zz-preference", description: "Always", instructions: "Be brief." },
+    ]);
+    expect(skillCatalogEntryIds(catalog).has("z")).toBe(true);
+    expect(catalog).toContain("11 additional Skills are omitted");
+  });
+
+  test("reads the SKILL.md body without its frontmatter", () => {
+    expect(
+      skillInstructionsBody(
+        "---\nname: reply-in-norwegian\ndescription: Always.\n---\n\n# Norwegian\n\nReply in Norwegian.\n",
+      ),
+    ).toBe("# Norwegian\n\nReply in Norwegian.");
+    expect(skillInstructionsBody("Plain body\r\n")).toBe("Plain body");
+    expect(skillInstructionsBody("---\nname: x\ndescription: y\n---\n  \n")).toBeNull();
+    expect(skillInstructionsBody("---\nunterminated")).toBe("---\nunterminated");
   });
 
   test("composes through the ordinary no-sandbox instruction path", () => {

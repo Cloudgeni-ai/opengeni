@@ -32,6 +32,7 @@ import {
   createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
   sideFeatureRouteRunnable,
+  skillInstructionsBody,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
@@ -142,6 +143,13 @@ import {
   attachTaskVaultSecretCapture,
   currentAttemptSecretValues,
 } from "./secret-values";
+
+/**
+ * The largest personal SKILL.md the Skill index reads for showing in full: a
+ * description of up to 1,024 characters plus a body within the index's own
+ * inline bound. Larger Skills are never transferred just to build the index.
+ */
+const PERSONAL_SKILL_MARKDOWN_MAX_BYTES = 8 * 1024;
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -561,11 +569,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
     toolFamilies.skills === false
       ? Promise.resolve([])
-      : listSkillDescriptors(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-        }),
+      : listSkillDescriptors(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+          },
+          { personalSkillMarkdownMaxBytes: PERSONAL_SKILL_MARKDOWN_MAX_BYTES },
+        ),
   ]);
   const bundledSkills =
     toolFamilies.skills === false
@@ -598,11 +610,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           ...withoutSessionShadowedSkills(
             sharedSkillDescriptors.filter((entry) => entry.activationMode === "workspace_managed"),
             sessionShadowedSkillNames(selectedSkills),
-          ).map((entry) => ({
-            id: entry.id,
-            name: entry.title,
-            description: entry.description,
-          })),
+          ).map((entry) => {
+            // A short personal Skill (a standing preference) is shown in full,
+            // within the index's inline bounds, so it applies without a read.
+            const instructions = entry.personalSkillMarkdown
+              ? skillInstructionsBody(entry.personalSkillMarkdown)
+              : null;
+            return {
+              id: entry.id,
+              name: entry.title,
+              description: entry.description,
+              ...(instructions ? { instructions } : {}),
+            };
+          }),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,

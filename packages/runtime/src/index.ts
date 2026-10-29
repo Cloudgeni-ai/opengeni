@@ -97,6 +97,7 @@ import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog
 export {
   formatSkillCatalog,
   skillCatalogEntryIds,
+  skillInstructionsBody,
   type SkillCatalogDescriptor,
 } from "./skill-catalog";
 import {
