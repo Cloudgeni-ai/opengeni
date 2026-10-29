@@ -1,4 +1,3 @@
-import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { homeSessionSections } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
@@ -11,7 +10,6 @@ import {
   HEADING_MAX_FONT_SCALE,
   ModelPickerSheet,
   fontStyle,
-  ModelMark,
   Icon,
   SectionLabel,
   SessionComposer,
@@ -51,6 +49,7 @@ import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher";
 import { openOnWeb, webPaths } from "@/web-links";
+import { rememberPendingPrompt } from "@/pending-prompt";
 
 export default function HomeScreen() {
   return (
@@ -189,7 +188,6 @@ function Home() {
         : { workspaceId, model, effort, latencyMode }),
       ...patch,
     }));
-  const pill = model ? compactModelPill(t, models, model, effort) : null;
   const sections = useMemo(
     () => homeSessionSections(t, lists.sessions, lists.pinned, HOME_RECENT_LIMIT),
     [t, lists],
@@ -245,6 +243,7 @@ function Home() {
     const text = draft.trim();
     if (!workspaceId || !canCreate) return;
     setCreating(true);
+    const sentAt = new Date().toISOString();
     try {
       // The exact snapshot being sent; acknowledged once the session exists.
       const flushed = await draftSync.flushForSend().catch(() => null);
@@ -261,6 +260,11 @@ function Home() {
         ...(chosen.excludedMcpServerIds
           ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
           : {}),
+        resources: [...chosen.resources, ...attachments.readyResources],
+      });
+      rememberPendingPrompt(client, workspaceId, created.id, {
+        text: text || "See the attached files.",
+        sentAt,
         resources: [...chosen.resources, ...attachments.readyResources],
       });
       if (flushed) await draftSync.acknowledgeConsumed(flushed).catch(() => null);
@@ -468,13 +472,9 @@ function Home() {
             liftWithKeyboard={false}
             bottomInset={0}
             options={
-              pill ? (
+              model ? (
                 <ComposerPill
-                  label={pill.name}
-                  detail={pill.effort}
-                  fast={latencyMode === "fast"}
-                  ultrafast={latencyMode === "ultrafast"}
-                  leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
+                  label="Model"
                   onPress={() => {
                     catalog.refresh();
                     setPickerOpen(true);

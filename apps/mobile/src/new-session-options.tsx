@@ -107,13 +107,17 @@ export interface NewSessionOptions {
  */
 export function useNewSessionOptions(workspaceId: string | null): NewSessionOptions {
   const { client } = useAccount();
-  const [state, setState] = useState<NewSessionChoices & { workspaceId: string | null }>({
+  const [state, setState] = useState<
+    NewSessionChoices & { workspaceId: string | null; visibilityChosen: boolean }
+  >({
     workspaceId,
+    visibilityChosen: false,
     ...EMPTY_CHOICES,
   });
   const [catalog, setCatalog] = useState<{
     workspaceId: string | null;
     canCreatePrivate: boolean;
+    defaultVisibility: SessionVisibility;
     repositories: GitHubRepository[];
     machines: MachineView[];
     projects: Channel[];
@@ -121,6 +125,7 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
   }>({
     workspaceId: null,
     canCreatePrivate: false,
+    defaultVisibility: "workspace",
     repositories: [],
     machines: [],
     projects: [],
@@ -135,8 +140,11 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     void Promise.all([
       client
         .getSessionTenancyCreateCapabilities(workspaceId)
-        .then((caps) => caps.canCreatePrivate)
-        .catch(() => false),
+        .then((caps) => ({
+          canCreatePrivate: caps.canCreatePrivate,
+          defaultVisibility: caps.defaultVisibility ?? ("workspace" as const),
+        }))
+        .catch(() => ({ canCreatePrivate: false, defaultVisibility: "workspace" as const })),
       client
         .listGitHubRepositories(workspaceId)
         .then((response) => response.repositories.filter((repo) => !repo.archived))
@@ -160,11 +168,11 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
           ),
         )
         .catch(() => [] as NewSessionConnector[]),
-    ]).then(([canCreatePrivate, repositories, machines, projects, connectors]) => {
+    ]).then(([tenancy, repositories, machines, projects, connectors]) => {
       if (current) {
         setCatalog({
           workspaceId,
-          canCreatePrivate,
+          ...tenancy,
           repositories,
           machines,
           projects,
@@ -177,7 +185,10 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     };
   }, [client, workspaceId]);
 
-  const own = state.workspaceId === workspaceId ? state : { workspaceId, ...EMPTY_CHOICES };
+  const own =
+    state.workspaceId === workspaceId
+      ? state
+      : { workspaceId, ...EMPTY_CHOICES, visibilityChosen: false };
   const ready = catalog.workspaceId === workspaceId;
   const repositories = ready ? catalog.repositories : [];
   const machines = ready ? catalog.machines : [];
@@ -187,13 +198,21 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
   const patch = useCallback(
     (next: Partial<NewSessionChoices>) =>
       setState((current) => ({
-        ...(current.workspaceId === workspaceId ? current : { workspaceId, ...EMPTY_CHOICES }),
+        ...(current.workspaceId === workspaceId
+          ? current
+          : { workspaceId, ...EMPTY_CHOICES, visibilityChosen: false }),
         ...next,
+        ...(next.visibility !== undefined ? { visibilityChosen: true } : {}),
         workspaceId,
       })),
     [workspaceId],
   );
-  const visibility = canCreatePrivate ? own.visibility : "workspace";
+  // Match the web: show the server's actual default until the person chooses.
+  const visibility = canCreatePrivate
+    ? own.visibilityChosen
+      ? own.visibility
+      : catalog.defaultVisibility
+    : "workspace";
   const targetSandboxId = machines.some((machine) => machine.sandboxId === own.targetSandboxId)
     ? own.targetSandboxId
     : null;
@@ -237,7 +256,8 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     choices,
     apply: (next) => patch(next),
     request: () => ({
-      ...(visibility === "private" ? { visibility } : {}),
+      // Explicit Workspace must not silently fall back to an Only me default.
+      ...(ready ? { visibility } : {}),
       ...(targetSandboxId ? { targetSandboxId } : {}),
       ...(channelId ? { channelId } : {}),
       ...(excludedConnectorIds.length > 0 ? { excludedMcpServerIds: excludedConnectorIds } : {}),
@@ -250,7 +270,7 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
       patch({
         repositoryIds: [],
         excludedConnectorIds: [],
-        visibility: "workspace",
+        visibility: catalog.defaultVisibility,
       }),
   };
 }

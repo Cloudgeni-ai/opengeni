@@ -1,4 +1,3 @@
-import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
@@ -12,7 +11,6 @@ import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
   ComposerPill,
   Icon,
-  ModelMark,
   ModelPickerSheet,
   NativeSessionScreen,
   SessionActionsButton,
@@ -46,6 +44,7 @@ import { copyText } from "@/clipboard";
 import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
+import { readPendingPrompt, forgetPendingPrompt } from "@/pending-prompt";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-access";
 import { AppThemeProvider } from "@/theme";
@@ -142,6 +141,7 @@ export default function SessionScreen() {
   return (
     <AppThemeProvider>
       <LiveSession
+        key={`${account?.id ?? "signed-out"}:${workspaceId}:${id}`}
         client={client}
         models={models}
         baseUrl={account?.baseUrl ?? null}
@@ -310,9 +310,13 @@ function LiveSession(props: {
   });
   const policy = composer.policy ?? null;
   const model = policy?.model ?? session?.model ?? null;
-  const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
-  // The web composer's phone-width pill: compact model name, effort when it is a choice.
-  const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
+  const [pendingPrompt] = useState(() =>
+    readPendingPrompt(props.client, props.workspaceId, props.sessionId),
+  );
+  useEffect(() => {
+    if (controller.initialHistoryReady)
+      forgetPendingPrompt(props.client, props.workspaceId, props.sessionId);
+  }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
@@ -558,6 +562,7 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        pendingPrompt={pendingPrompt}
         focusSequence={props.focusSequence}
         client={props.client}
         models={props.models}
@@ -581,13 +586,9 @@ function LiveSession(props: {
             },
           },
           renderLeading: () => attachMenu,
-          options: pill ? (
+          options: model ? (
             <ComposerPill
-              label={pill.name}
-              detail={pill.effort}
-              fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
-              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
-              leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
+              label="Model"
               onPress={
                 policy
                   ? () => {

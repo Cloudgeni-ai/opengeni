@@ -7,6 +7,7 @@ import {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkHasDetails,
   readableWorkShowsPreview,
@@ -1156,20 +1157,7 @@ export function MessageTimeline({
   useLayoutEffect(() => {
     liveNoteIdsByWorkRef.current = liveNoteIdsByWork;
   }, [liveNoteIdsByWork]);
-  const turnsWithOutput = useMemo(
-    () =>
-      new Set(
-        resolvedItems.flatMap((item) =>
-          "turnId" in item &&
-          item.turnId &&
-          (item.kind === "tool-call" ||
-            ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
-            ? [item.turnId]
-            : [],
-        ),
-      ),
-    [resolvedItems],
-  );
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(resolvedItems), [resolvedItems]);
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
