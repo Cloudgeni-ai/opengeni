@@ -6090,6 +6090,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {
     void (async () => {
       let consecutiveFailures = 0;
+      // Since when the page has not answered a frame's commands in time.
+      let unresponsiveSince: number | null = null;
       while (!expected.fallbackAbort.signal.aborted) {
         await delay(FRAME_FALLBACK_INTERVAL_MS * expected.options.everyNthFrame);
         if (expected.fallbackAbort.signal.aborted) return;
@@ -6099,8 +6101,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         try {
           await this.captureFallbackFrame(targetId, expected);
           consecutiveFailures = 0;
+          if (unresponsiveSince !== null) {
+            frameStreamDiagnostic("browser.frame.page_responsive", {
+              browserSessionId: this.browserSessionId,
+              targetId,
+              unresponsiveMs: Date.now() - unresponsiveSince,
+            });
+            unresponsiveSince = null;
+          }
         } catch (error) {
           if (error instanceof CaptureBusyError) continue;
+          // A page whose main thread is busy, or a tab its browser is not
+          // drawing, answers none of a frame's commands in time. The stream
+          // keeps sampling and shows the page again once it answers; the tab
+          // closing or its browser going away still ends it (removeState).
+          if (error instanceof CdpCommandTimeoutError) {
+            if (unresponsiveSince === null) {
+              unresponsiveSince = Date.now();
+              frameStreamDiagnostic("browser.frame.page_unresponsive", {
+                browserSessionId: this.browserSessionId,
+                targetId,
+                method: error.method,
+              });
+            }
+            continue;
+          }
           consecutiveFailures += 1;
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);

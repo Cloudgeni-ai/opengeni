@@ -1588,6 +1588,40 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a failed frame producer closes the viewer socket with a terminal error", async () => {
+    let subscription: LatestBrowserFrameSubscription | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        await websocketMessage(websocket);
+        const closed = websocketClosed(websocket);
+        subscription!.fail(new Error("browser target closed"));
+        expect(await closed).toMatchObject({
+          code: 1011,
+          reason: "frame stream unavailable: browser target closed",
+        });
+      },
+      {
+        onFrameSubscription: (value) => {
+          subscription = value;
+        },
+      },
+    );
+  });
+
   test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1817,6 +1851,7 @@ async function withServer(
     failStart?: boolean;
     screenshotError?: Error;
     closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -1902,6 +1937,7 @@ function fakeDriver(
     failStart?: boolean;
     screenshotError?: Error;
     closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -2051,6 +2087,7 @@ function fakeDriver(
     },
     async subscribeFrames() {
       const subscription = new LatestBrowserFrameSubscription(async () => undefined);
+      options.onFrameSubscription?.(subscription);
       queueMicrotask(() => subscription.push(frame(context, target)));
       return subscription;
     },
