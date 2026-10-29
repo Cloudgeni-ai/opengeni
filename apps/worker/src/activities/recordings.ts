@@ -780,6 +780,7 @@ export function createRecordingActivities(
                 track.durationMilliseconds - offsetMilliseconds,
               ),
               signal,
+              store: true,
             }),
           );
           telemetry.preparedBytes += audio.storedBytes;
@@ -1049,6 +1050,7 @@ export function createRecordingActivities(
             offsetMilliseconds,
             knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
             signal,
+            store: false,
           }),
         );
         telemetry.preparedBytes += audio.storedBytes;
@@ -1254,6 +1256,9 @@ export function createRecordingActivities(
   /**
    * The track's prepared file: reused when an earlier version made it,
    * otherwise built from the chunks and stored for playback and re-runs.
+   * Without `store` it is only built: a dictation's text is waited for, its
+   * audio is never played back here, and the dictation is deleted soon
+   * after, so a slow or busy object store doesn't hold up the text.
    */
   async function preparedTrackAudio(input: {
     db: Database;
@@ -1272,6 +1277,7 @@ export function createRecordingActivities(
     offsetMilliseconds: number;
     knownDurationMilliseconds: number;
     signal: AbortSignal | undefined;
+    store: boolean;
   }): Promise<{
     bytes: Uint8Array;
     mimeType: string;
@@ -1291,11 +1297,13 @@ export function createRecordingActivities(
       trackNumber: input.trackNumber,
       extension: `${PREPARED_AUDIO_REVISION}.${format.extension}`,
     });
-    const existing = await getRecordingTrackPreparedObject(input.db, {
-      ...input.actor,
-      recordingId: input.recordingId,
-      trackNumber: input.trackNumber,
-    });
+    const existing = input.store
+      ? await getRecordingTrackPreparedObject(input.db, {
+          ...input.actor,
+          recordingId: input.recordingId,
+          trackNumber: input.trackNumber,
+        })
+      : null;
     if (existing?.objectKey === objectKey) {
       const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
       if (stored && stored.bytes.byteLength === existing.bytes) {
@@ -1318,6 +1326,7 @@ export function createRecordingActivities(
       readChunk: async (chunk) =>
         (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
     });
+    if (!input.store) return { ...prepared, storedBytes: 0 };
     await input.objectStorage.putObject({
       key: objectKey,
       contentType: prepared.mimeType,
