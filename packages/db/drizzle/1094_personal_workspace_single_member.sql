@@ -20,7 +20,9 @@
 --   workspace or organization.
 -- - An organization membership can't point at someone else's Personal
 --   workspace (the existing foreign key keeps it in its own organization).
--- - A Personal workspace keeps its identity, and no workspace can take one on later.
+-- - A Personal workspace keeps its identity, and no existing workspace can take
+--   one on. New workspaces get it only from Personal provisioning; the API
+--   refuses the reserved source.
 --
 -- Rolling: the previous release never writes a row into a Personal workspace
 -- (0219's provisioning refuses one, and every member writer needs

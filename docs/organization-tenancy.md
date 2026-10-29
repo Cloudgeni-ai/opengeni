@@ -290,7 +290,7 @@ release. A workspace is Personal when it carries the Personal identity:
   or moving it to another person while it points at one (the existing
   `(personal_workspace_id, account_id)` foreign key already keeps it in the
   same organization);
-- changing a Personal workspace's identity, or giving another workspace one.
+- changing a Personal workspace's identity, or giving an existing workspace one.
 
 `POST /v1/workspaces` and `PUT /v1/workspaces/external` refuse that external
 source (422), so nobody can create someone's Personal workspace before they

@@ -7,6 +7,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
+  bootstrapWorkspace,
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -452,6 +453,18 @@ describe("a row in a Personal workspace is never membership to the runtime", () 
       (await listWorkspacesForSubject(client.db, org.owner)).map((workspace) => workspace.id),
     ).not.toContain(org.personalWorkspaceId);
     expect(await listWorkspaceMembers(client.db, org.personalWorkspaceId)).toEqual([]);
+    const bootstrapped = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "opengeni:configured",
+      accountExternalId: `bootstrap-${crypto.randomUUID()}`,
+      accountName: "Bootstrap",
+      workspaceExternalSource: "opengeni:configured",
+      workspaceExternalId: `bootstrap-${crypto.randomUUID()}`,
+      workspaceName: "Bootstrap",
+      subjectId: org.owner,
+    });
+    expect(bootstrapped.workspaceGrants.map((grant) => grant.workspaceId)).not.toContain(
+      org.personalWorkspaceId,
+    );
     // The shared workspace's membership is unaffected.
     expect(await getWorkspaceGrant(client.db, org.owner, org.sharedWorkspaceId)).not.toBeNull();
 
