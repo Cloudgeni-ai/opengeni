@@ -2707,10 +2707,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // frame back for up to a screenshot's deadline, not a frame's.
       const seedBusyUntil = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
       let seedFailure: unknown;
+      let seeded = false;
       for (let attempt = 0; attempt < FRAME_CAPTURE_FAILURE_LIMIT; attempt += 1) {
         try {
           await this.captureFallbackFrame(targetId, configured.screencast);
           seedFailure = undefined;
+          seeded = true;
           break;
         } catch (error) {
           seedFailure = error;
@@ -2718,15 +2720,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             attempt -= 1;
             continue;
           }
+          // A page that does not answer in time (its main thread is busy, or
+          // its browser is not drawing it yet) is not a failed stream. The
+          // subscriber gets its first frame from the stream once it answers,
+          // as a running stream does.
+          if (error instanceof CdpCommandTimeoutError) {
+            seedFailure = undefined;
+            frameStreamDiagnostic("browser.frame.subscribe.unseeded", {
+              browserSessionId: this.browserSessionId,
+              targetId,
+              method: error.method,
+            });
+            break;
+          }
           if (attempt + 1 < FRAME_CAPTURE_FAILURE_LIMIT) await delay(25 * (attempt + 1));
         }
       }
       if (seedFailure !== undefined) throw seedFailure;
-      frameStreamDiagnostic("browser.frame.subscribe.seeded", {
-        browserSessionId: this.browserSessionId,
-        targetId,
-        sequence: configured.screencast.sequence,
-      });
+      if (seeded)
+        frameStreamDiagnostic("browser.frame.subscribe.seeded", {
+          browserSessionId: this.browserSessionId,
+          targetId,
+          sequence: configured.screencast.sequence,
+        });
     } catch (error) {
       await configured.subscription.close().catch(() => undefined);
       throw error;

@@ -1424,7 +1424,7 @@ describe("workflow execution graph manifest", () => {
     expect(headless).toBeDefined();
     expect(headed).toBeDefined();
     expect(headed).not.toBe(headless);
-    expect(headless["timeout-minutes"]).toBe(6);
+    expect(headless["timeout-minutes"]).toBe(7);
     expect(headed["timeout-minutes"]).toBe(5);
     expect(headed.run).toContain("streams a mobile headed tab continuously");
     const stepBudget = job.steps.reduce((sum, step) => sum + (step["timeout-minutes"] ?? 0), 0);
