@@ -8,7 +8,13 @@ import {
   type DecisionUsage,
 } from "@opengeni/decisions";
 
-export type ToolDecisionCandidate = { name: string; description: string; inputFields: string[] };
+export type ToolDecisionCandidate = {
+  name: string;
+  /** The name its server publishes, when the model name is a shortened alias. */
+  fullName?: string;
+  description: string;
+  inputFields: string[];
+};
 export type ToolDecisionInput = {
   query: string;
   /**
@@ -109,11 +115,12 @@ export function selectFromJudgments(
   };
 }
 
-export function decisionCandidate(tool: Tool): ToolDecisionCandidate {
+export function decisionCandidate(tool: Tool, fullName?: string): ToolDecisionCandidate {
   if (tool.type !== "function") throw new Error("Only function tools are discovery candidates");
   const description = tool.description ?? "";
   return {
     name: tool.name,
+    ...(fullName && fullName !== tool.name ? { fullName } : {}),
     description:
       description.length > TOOL_SELECTION_POLICY.descriptionChars
         ? `${description.slice(0, TOOL_SELECTION_POLICY.descriptionChars - 1)}…`

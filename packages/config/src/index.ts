@@ -3700,6 +3700,19 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    provider.models.forEach((model, index) => {
+      if (model.hostedWebSearchContextSize === undefined) return;
+      const hostedSearchEnabled =
+        model.capabilities?.hostedTools.webSearch.runnable ?? model.hostedWebSearch ?? false;
+      if (provider.api !== "responses" || !hostedSearchEnabled) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["models", index, "hostedWebSearchContextSize"],
+          message:
+            "hostedWebSearchContextSize requires a Responses route with hosted web search enabled",
+        });
+      }
+    });
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({
@@ -6466,10 +6479,13 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export_status",
 ];
 
-/** Tools that read event sources and events; they exist only where event triggers run. */
+/** Tools for event sources and events; they exist only where event triggers run. */
 const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
 ];
 
 /**
