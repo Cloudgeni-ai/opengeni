@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`006e02ab0fd759c944da12e9a9e2aec86dee1bb8`: upstream `cua-driver-rs-v0.37.0`
+`81cf0b7f29dca5226478e62d942dedb77ee50f09`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -177,7 +177,8 @@ the one item a closed `<select>` lists (the option it shows) opens the menu,
 raising the browser window, and can bring the browser down. So a press on any
 pop-up button's option (an item of its open menu, or that listed item) chooses
 the option on the button as `set_value` does, and a menu still open after a
-choice is closed. `set_value` chooses a Chromium `<select>`'s option by
+choice is closed. An option with no text to choose it by is refused in the
+background (`popup_option_without_text`) instead of being pressed. `set_value` chooses a Chromium `<select>`'s option by
 type-ahead also while the browser is the front app with the select in another
 of its windows, instead of opening the menu, which ordered that window above
 the one in front. A background pixel click on the option a closed `<select>`
@@ -373,7 +374,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/006e02ab0fd759c944da12e9a9e2aec86dee1bb8/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/81cf0b7f29dca5226478e62d942dedb77ee50f09/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

@@ -4863,7 +4863,7 @@ describe("CUA desktop boundary", () => {
             code: "unsupported",
             dispatched: true,
             message:
-              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text; to open the menu itself, bring this window to the front with focus on its target, then invoke it again",
+              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text; to open the menu itself, first bring the window to the front with the action {type:'focus',targetId:'cua:window:42:1'} (focus on the dropdown's ref only moves the keyboard focus), then invoke it again",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
@@ -4894,6 +4894,39 @@ describe("CUA desktop boundary", () => {
         } finally {
           await backend.close();
         }
+      }
+    });
+
+    test("a dropdown refusal offers the window's focus only while focus would bring it forward", async () => {
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: true,
+        total: 3,
+        executed: 1,
+        failed_step: 0,
+        steps: [
+          {
+            index: 0,
+            ok: false,
+            phase: "action",
+            code: "select_menu_would_raise_window",
+            message: 'Open the menu with delivery_mode:"foreground" only if the user agreed',
+          },
+        ],
+      };
+      // Someone used the computer moments ago: focus would be refused, so
+      // the refusal names only the way that works.
+      const backend = await CuaComputerBackend.open(fixture, "macos", { personInput: () => 3 });
+      try {
+        const target = (await backend.targets())[0]!;
+        const failure = await backend
+          .dispatch(batch(await backend.observe(target.id)))
+          .catch((error) => error);
+        expect(failure.message).toBe(
+          "CUA stopped the batch at action 1: Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text",
+        );
+      } finally {
+        await backend.close();
       }
     });
 
