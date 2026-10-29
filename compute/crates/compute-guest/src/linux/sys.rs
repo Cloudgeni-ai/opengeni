@@ -307,6 +307,57 @@ pub fn alive(pid: i32) -> bool {
     found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// `pidfd_open(2)`: a descriptor that names process `pid` for as long as
+/// it is open, even once the number passes to another process.
+pub fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
+    // SAFETY: no pointers.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let fd = i32::try_from(fd).map_err(|_| io::Error::other("descriptor out of range"))?;
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel just returned this descriptor, and nothing else
+    // owns it.
+    Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) })
+}
+
+/// Sends `SIGKILL` to the process `pidfd` names (`pidfd_send_signal(2)`).
+pub fn pidfd_kill(pidfd: &OwnedFd) -> io::Result<()> {
+    // SAFETY: a descriptor this process owns; the kernel takes a null
+    // `siginfo` to mean an ordinary signal from this process.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Waits at most `limit` for the process `pidfd` names to end; whether it
+/// did.
+pub fn wait_ended(pidfd: &OwnedFd, limit: Duration) -> io::Result<bool> {
+    let mut poll = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(limit.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: one pollfd that lives through the call.
+    let ready = unsafe { libc::poll(&raw mut poll, 1, millis) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ready > 0)
+}
+
 /// Sends `signal` to every process but this one (`kill(-1, …)`).
 pub fn signal_all(signal: libc::c_int) {
     // SAFETY: no pointers.

@@ -178,10 +178,12 @@ impl Host {
     /// Bytes of memory a new spare VM may take now: room above the
     /// admission buffer and above the high watermark, counting what is
     /// claimed and filling already; 0 while a wake waits for memory,
-    /// queued or refused and held, and with a memory policy but no reading
-    /// yet. `None` when nothing limits it: no admission and no memory
-    /// policy. Report the VM with [`crate::Input::Spare`] at once to book
-    /// what it takes.
+    /// queued or refused and held, while the memory rule holds back what
+    /// a sandbox in use borrowed, is short, or cannot hold a sandbox to
+    /// its bound (ADR 24: a spare waits for work that runs), and with a
+    /// memory policy but no reading yet. `None` when nothing limits it: no
+    /// admission and no memory policy. Report the VM with
+    /// [`crate::Input::Spare`] at once to book what it takes.
     #[must_use]
     pub fn spare_room(&self) -> Option<u64> {
         let budget = self
@@ -205,7 +207,10 @@ impl Host {
                 .into_iter()
                 .filter(|step| needs_memory(*step))
                 .any(|step| !self.queues[step.index()].is_empty());
-        Some(if waiting { 0 } else { room })
+        let held = self
+            .memory_levels()
+            .is_some_and(|levels| levels.short || levels.held_back > 0 || levels.over_bound > 0);
+        Some(if waiting || held { 0 } else { room })
     }
 
     /// Whether a new spare VM that takes `bytes` of memory, may write

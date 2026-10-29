@@ -25,6 +25,7 @@ import {
   type RoutedCallScope,
 } from "./routing/routed-call-scope";
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -563,8 +564,11 @@ function singleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function shellMarkerPath(token: string): string {
-  return `${SHELL_MARKER_DIR}/${token}`;
+function shellMarkerPath(token: string, directory = SHELL_MARKER_DIR): string {
+  if (!posix.isAbsolute(directory) || directory.includes("\0")) {
+    throw new Error("Sandbox temporary directory must be absolute");
+  }
+  return `${directory}/${token}`;
 }
 
 function shellCancellationPath(markerPath: string): string {
@@ -610,7 +614,7 @@ function processInspectionCommandLines(): string[] {
 
 function cancellableGroupLeaderCommand(command: string, markerPath: string): string {
   const marker = singleQuote(markerPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(markerPath));
   return [
     ...processInspectionCommandLines(),
     `__opengeni_marker=${marker}`,
@@ -740,7 +744,7 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
   const sourceVariable = `__opengeni_sync_source_${token}`;
   const bodyVariable = `__opengeni_sync_body_${token}`;
   const marker = singleQuote(markerPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(markerPath));
   const groupLeaderCommand = [
     ...processInspectionCommandLines(),
     `[ "\${${sourceVariable}+x}" = x ] || exit 125`,
@@ -805,7 +809,7 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
 function pendingShellCancellationCommand(state: PendingShellStart): string {
   const marker = singleQuote(state.markerPath);
   const cancellation = singleQuote(state.cancellationPath);
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(state.markerPath));
   const token = singleQuote(state.token);
   return [
     ...processInspectionCommandLines(),
@@ -855,7 +859,7 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
 function retainedShellCancellationCommand(state: ActiveShellSession): string {
   const marker = singleQuote(state.markerPath!);
   const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
-  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const markerDir = singleQuote(posix.dirname(state.markerPath!));
   const token = singleQuote(state.token!);
   return [
     ...processInspectionCommandLines(),
@@ -1107,6 +1111,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
+  private readonly shellMarkerDirectory: string;
   private readonly secretResolver: SecretResolver | null;
   private readonly credentials: CredentialEnvironment | null;
   private readonly secretFileSessions = new Set<CommandCancellationSession>();
@@ -1115,6 +1120,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
+    const temporaryDirectory = options.sandboxTemporaryDirectory || "/tmp";
+    this.shellMarkerDirectory = posix.join(temporaryDirectory, "opengeni-turn-shell");
     this.cutPolling = options.cutPolling === true;
     this.secretResolver = options.secretResolver ?? null;
     this.credentials = options.credentials ?? null;
@@ -1311,7 +1318,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         session.cancelExecCommand && useRemoteOpCancellation
           ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`)
           : null;
-      const markerPath = shellMarkerPath(crypto.randomUUID());
+      const markerPath = shellMarkerPath(
+        crypto.randomUUID(),
+        useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
+      );
       const command = useRemoteOpCancellation
         ? args.cmd
         : lossless
@@ -1739,7 +1749,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return await this.correlatedInvoke(tool.invoke, runContext, input, details);
     }
     const token = crypto.randomUUID();
-    const markerPath = shellMarkerPath(token);
     const correlationId = details?.toolCall?.callId ?? `turn_exec_${token}`;
     const cancelExecCommand = cancellationSession?.cancelExecCommand;
     // Connected-machine exec is already a durable process-tree op and
@@ -1747,6 +1756,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // wrapper and preserves the user's command byte-for-byte. PTY-backed
     // cloud/local sessions use the portable SDK session + POSIX marker.
     const useRemoteOpCancellation = await usesRemoteOperationCancellation(cancellationSession);
+    const markerPath = shellMarkerPath(
+      token,
+      useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
+    );
     if (this.cancelled) throw cancellationError(this.reason);
     // Secret references: managed sandboxes always parse the command in
     // POSIX sh (the wrapper below), so splice now; connected machines
@@ -3158,6 +3171,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 }
 
 export type TurnToolCancellationControllerOptions = {
+  /** The sandbox manifest's TMPDIR, not the worker's temporary directory.
+   * Resolve once so launch, reads and cancellation retain the same literal
+   * marker identity even if the environment changes later. */
+  sandboxTemporaryDirectory?: string;
   /**
    * Honor long model-requested foreground waits (settings.experimentCutPolling,
    * OPENGENI_EXPERIMENT_CUT_POLLING; on by default in production settings).

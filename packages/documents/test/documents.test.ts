@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { LiteParse } from "@llamaindex/liteparse";
+import { testSettings } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import {
@@ -8,6 +9,7 @@ import {
   RecursiveTextChunker,
   canViewDocument,
   chunkText,
+  createDocumentServices,
   decodeKnowledgeBrowseCursor,
   decodeDocumentIndexCheckpoint,
   deterministicEmbedding,
@@ -503,6 +505,99 @@ describe("documents", () => {
     }
     // Local embeddings never need a credential.
     expect(new DeterministicEmbeddingProvider(3).available).not.toBe(false);
+  });
+
+  describe("signing in as the deployment identity", () => {
+    const identity = {
+      azureTenantId: "00000000-0000-4000-8000-000000000001",
+      azureClientId: "00000000-0000-4000-8000-000000000002",
+      azureClientSecret: "client-secret",
+    };
+    const embeddingBase = "https://embeddings.example.openai.azure.com/openai/v1";
+
+    test("uses a token source for the embedding resource", () => {
+      const config = documentOpenAIEmbeddingConfig(
+        testSettings({
+          ...identity,
+          documentEmbeddingProvider: "openai",
+          documentEmbeddingAuth: "deployment_identity",
+          documentEmbeddingBaseUrl: embeddingBase,
+          documentEmbeddingApiKey: "ignored-key",
+        }),
+      );
+      expect(typeof config.apiKey).toBe("function");
+      expect(config.baseURL).toBe(embeddingBase);
+    });
+
+    test("without the identity or base URL it is unavailable and tries no other key", () => {
+      const previous = process.env.OPENAI_API_KEY;
+      process.env.OPENAI_API_KEY = "environment-key";
+      try {
+        for (const settings of [
+          { documentEmbeddingBaseUrl: embeddingBase },
+          { ...identity, documentEmbeddingBaseUrl: undefined },
+        ]) {
+          const config = documentOpenAIEmbeddingConfig(
+            testSettings({
+              ...settings,
+              documentEmbeddingProvider: "openai",
+              documentEmbeddingAuth: "deployment_identity",
+              documentEmbeddingApiKey: "ignored-key",
+            }),
+          );
+          expect(config.apiKey).toBeNull();
+          expect(new OpenAIEmbeddingProvider(config).available).toBe(false);
+        }
+      } finally {
+        if (previous === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = previous;
+      }
+    });
+
+    test("sends the token and drops one the provider rejects", async () => {
+      const seen: (string | null)[] = [];
+      const server = Bun.serve({
+        port: 0,
+        fetch(request) {
+          seen.push(request.headers.get("authorization"));
+          return Response.json({ error: { message: "bad token" } }, { status: 401 });
+        },
+      });
+      try {
+        const discarded: string[] = [];
+        const token = Object.assign(async () => "entra-token", {
+          discard: (value: string) => void discarded.push(value),
+        });
+        const embedder = new OpenAIEmbeddingProvider({
+          apiKey: token,
+          baseURL: `http://127.0.0.1:${server.port}/openai/v1`,
+          model: "embedding-deployment",
+          dimensions: 3,
+        });
+        expect(embedder.available).toBe(true);
+        await expect(embedder.embedMany(["hello"])).rejects.toThrow();
+        expect(seen).toEqual(["Bearer entra-token"]);
+        expect(discarded).toEqual(["entra-token"]);
+      } finally {
+        server.stop(true);
+      }
+    });
+
+    test("curation at another address does not receive the token", async () => {
+      const services = createDocumentServices(
+        testSettings({
+          ...identity,
+          documentEmbeddingProvider: "openai",
+          documentEmbeddingAuth: "deployment_identity",
+          documentEmbeddingBaseUrl: embeddingBase,
+          documentCurationProvider: "openai",
+          documentCurationBaseUrl: "https://curation.example.com/v1",
+        }),
+      );
+      await expect(
+        services.curator!.curate({ text: "x", filename: "x.txt", title: "x", bases: [] }),
+      ).rejects.toThrow("requires an API key");
+    });
   });
 });
 

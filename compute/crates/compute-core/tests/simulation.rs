@@ -199,6 +199,7 @@ impl World {
                 high_watermark: 10 * GIB,
                 compressed_percent: 30,
                 balloon_grace: Duration::from_secs(2),
+                outgrowth: None,
             }),
             ..HostPolicy::default()
         };
@@ -290,6 +291,11 @@ impl World {
             }
             Action::Lend { loan } => panic!("{loan:?} lent, but nothing borrows here"),
             Action::Discard { sandbox } => panic!("{sandbox:?} discarded, but nothing is spare"),
+            Action::Shrink { sandbox, .. }
+            | Action::EndForMemory { sandbox }
+            | Action::Bound { sandbox, .. } => {
+                panic!("{sandbox:?} bounded, but this host has no rule for outgrowth")
+            }
             Action::Notify { sandbox, notice } => {
                 let Some(truth) = self.live.get_mut(&sandbox) else {
                     return;

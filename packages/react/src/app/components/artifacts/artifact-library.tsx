@@ -54,7 +54,6 @@ import {
   type ToolbarFilterValue,
 } from "../../../ui/toolbar";
 import { useAppContext } from "../../app-context";
-import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";
@@ -121,7 +120,7 @@ function onlyMe(item: ArtifactCatalogItem): boolean {
 
 /**
  * Share or limit a file from its row, with the same confirmation as its
- * page. Only its owner sees the choice, and never in a Personal workspace.
+ * page. Only its owner sees the choice.
  */
 function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) {
   const context = useAppContext();
@@ -131,7 +130,6 @@ function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) 
     item.ownedByViewer &&
     item.visibility &&
     item.status === "active" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext) &&
     hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
   );
   const audience = useArtifactAudience({

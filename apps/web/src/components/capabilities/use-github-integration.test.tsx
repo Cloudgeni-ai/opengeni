@@ -365,3 +365,57 @@ for (const count of [1, 2])
       await rendered.unmount();
     }
   });
+
+describe("GitHub load failures", () => {
+  test("a repository list that never loaded says so, with a retry the person started", async () => {
+    const refreshes: unknown[][] = [];
+    const context = {
+      ...appContext(
+        ["github:manage"],
+        mock(async () => ({})),
+      ),
+      githubStatusFailed: true,
+      githubCatalogReady: false,
+      refreshGitHub: async (...args: unknown[]) => {
+        refreshes.push(args);
+      },
+    };
+    const rendered = await renderAdapter(context);
+    try {
+      const model = rendered.model();
+      expect(model.chip).toEqual({ label: "Needs attention", tone: "warn" });
+      expect(model.notice?.title).toBe("Repositories could not be loaded.");
+      // No endless "Loading repositories…" block next to the failure.
+      expect(model.access).toBeUndefined();
+      model.notice!.action!.onClick();
+      expect(refreshes).toEqual([[WORKSPACE_ID, undefined, { userInitiated: true }]]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a failed first status load retries as a refresh the person started", async () => {
+    const refreshes: unknown[][] = [];
+    const context = {
+      ...appContext(
+        ["github:manage"],
+        mock(async () => ({})),
+      ),
+      githubStatus: null,
+      githubStatusFailed: true,
+      githubCatalogReady: false,
+      refreshGitHub: async (...args: unknown[]) => {
+        refreshes.push(args);
+      },
+    };
+    const rendered = await renderAdapter(context);
+    try {
+      const model = rendered.model();
+      expect(model.notice?.title).toBe("GitHub status could not be loaded.");
+      model.notice!.action!.onClick();
+      expect(refreshes).toEqual([[WORKSPACE_ID, undefined, { userInitiated: true }]]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});

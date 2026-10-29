@@ -748,6 +748,12 @@ bun run test:unit
 ```
 
 The full unit command uses the same test discovery and process isolation as CI.
+`bun run test:unit` is fail-fast like CI: after the first failing file it stops
+starting new files, and its closing summary states how many planned files were
+skipped. Such a run is not full coverage. To cover every file locally, run
+`bun run test:unit:all` (the same as `bun run test:unit -- --keep-going`): it
+runs every planned file, then lists all failing files with files run versus
+planned and exits non-zero if any failed.
 For focused checks, use `bun test ./path/to/file.test.ts`; do not run the entire
 unit corpus in one shared test process. Prepared-runtime tests, including native
 report delivery, remain separate package-contract checks with their required
