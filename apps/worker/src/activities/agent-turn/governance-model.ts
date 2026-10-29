@@ -387,10 +387,10 @@ export async function prepareGovernanceAndModel(
   // on every attempt, so recovery never adds a tool mid-turn.
   const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
-  const hostedToolsBillCredits = hostedToolsBillCreditsForTurn(
-    capabilitySettings,
-    deps.chargesOpenGeniCredits,
-  );
+  const hostedToolsBillCredits = hostedToolsBillCreditsForTurn(capabilitySettings, {
+    accountId: input.accountId,
+    chargesOpenGeniCredits: deps.chargesOpenGeniCredits,
+  });
   const nativeImageProviderBinding =
     providerApi === "responses"
       ? openAiHostedImageProviderBindingForTurn(

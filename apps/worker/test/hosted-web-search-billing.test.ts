@@ -126,6 +126,7 @@ describe("hosted web search on a credit-billed turn", () => {
     expect(debits[0]).toMatchObject({
       type: "web_search_debit",
       amountMicros: 21_000,
+      usage: "gpt-hosted",
       idempotencyKey: `credit:web_search_debit:hosted:${TURN}:resp_hosted_search`,
       metadata: { requests: 2, providerCostMicros: 20_000, marginBps: 500 },
     });

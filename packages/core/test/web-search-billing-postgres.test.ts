@@ -40,7 +40,7 @@ const billed = testSettings({
   sandboxBackend: "none",
 });
 
-async function fixture(options: { credits?: number } = {}) {
+async function fixture(options: { credits?: number; modelScopedCredits?: number } = {}) {
   const human = `user:web-search:${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "web-search-billing",
@@ -106,6 +106,19 @@ async function fixture(options: { credits?: number } = {}) {
       sourceType: "test_grant",
       sourceId: crypto.randomUUID(),
       idempotencyKey: `test:web-search-grant:${grant.workspaceId}`,
+    });
+  }
+  if (options.modelScopedCredits) {
+    // Like the Free plan's monthly credit: spendable on the turn's model only.
+    await applyCreditLedgerEntry(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      type: "grant",
+      amountMicros: options.modelScopedCredits,
+      eligibleModelIds: ["scripted-model"],
+      sourceType: "test_grant",
+      sourceId: crypto.randomUUID(),
+      idempotencyKey: `test:web-search-scoped-grant:${grant.workspaceId}`,
     });
   }
   const scope: WebSearchCallScope = {
@@ -349,5 +362,45 @@ describe("web search credit billing", () => {
     const offRows = await shared.admin`select 1 from usage_events
         where account_id=${off.scope.accountId} and source_resource_type='web_search'`;
     expect(offRows).toHaveLength(0);
+  }, 180_000);
+
+  test("model-scoped credit (the Free plan's) pays web search on a turn whose hosted tools bill credits", async () => {
+    const { scope } = await fixture({ modelScopedCredits: 1_000_000 });
+    const billing = createWebSearchBilling({ db: client.db, settings: billed });
+    // Without the turn's model, only general credit counts, as before.
+    const refusal = await billing.admit(scope, 5_000).catch((error: unknown) => error);
+    expect((refusal as WebSearchBillingRefusedError).code).toBe("insufficient_credits");
+    const billedTurn = { ...scope, creditUsageModelId: "scripted-model" };
+    await billing.admit(billedTurn, 5_000);
+    await billing.settle(billedTurn, {
+      operationId: crypto.randomUUID(),
+      operation: "search",
+      provider: "parallel",
+      providerMicros: 1_000,
+      creditMicros: 1_050,
+      marginBps: 500,
+      basis: "list_price",
+    });
+    await settleHostedWebSearchUsage(client.db, billed, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      turnAttemptId: scope.attemptId,
+      sourceId: `${scope.turnId}:resp_scoped`,
+      model: "scripted-model",
+      requests: 1,
+    });
+    const allocated = await shared.admin<{ amount: string; total: string }[]>`
+        select e.amount_micros::text as amount, sum(a.amount_micros)::text as total
+          from credit_ledger_entries e
+          join credit_debit_allocations a on a.debit_entry_id = e.id
+         where e.account_id=${scope.accountId} and e.type=${WEB_SEARCH_DEBIT_TYPE}
+         group by e.id, e.amount_micros order by e.amount_micros`;
+    // Both charges were paid in full by the model-scoped grant.
+    expect(allocated.map((row) => [Number(row.amount), Number(row.total)])).toEqual([
+      [-10_500, 10_500],
+      [-1_050, 1_050],
+    ]);
   }, 180_000);
 });

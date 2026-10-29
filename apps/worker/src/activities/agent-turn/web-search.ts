@@ -70,7 +70,7 @@ export function turnWebSearchPlan(
     creditsDisabled: !workspaceCreditModelsAllowed,
     // Hosted search on a deployment-paid model is replaced by the metered
     // provider tools when the turn gets them.
-    creditBilledModel: hostedToolsBillCredits,
+    hostedToolsBillCredits,
   });
 }
 

@@ -1,5 +1,6 @@
 import {
   hostedWebSearchCharge,
+  paidHostedToolsChargeCredits,
   webSearchCreditBillingActive,
   type Settings,
 } from "@opengeni/config";
@@ -34,6 +35,13 @@ export type WebSearchCallScope = {
   sessionId: string;
   turnId: string;
   attemptId: string;
+  /**
+   * The credit-billed turn's product model when its paid hosted tools bill
+   * credits ({@link paidHostedToolsChargeCredits}): the monthly plan and
+   * grants covering that model pay first, then general credit, exactly as
+   * for the turn's Gateway images and chat. Omitted: general credit only.
+   */
+  creditUsageModelId?: string;
 };
 
 export type WebSearchCallCost = {
@@ -97,12 +105,13 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
         );
       }
       const attribution = await attributionFor(scope);
-      // Non-model resources spend general credits only; API work credits only.
+      // General credit, plus the plan and grants covering the turn's model
+      // when the turn's paid hosted tools bill credits; API work credits only.
       const origin = attribution.kind === "unknown" ? undefined : attribution.billingOrigin;
       const balance = await getSpendableCreditBalance(
         deps.db,
         scope.accountId,
-        undefined,
+        scope.creditUsageModelId,
         undefined,
         undefined,
         origin,
@@ -169,6 +178,7 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
             sourceType: WEB_SEARCH_SOURCE_TYPE,
             sourceId: shared.sourceResourceId,
             idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
+            ...(scope.creditUsageModelId ? { usage: scope.creditUsageModelId } : {}),
             metadata: {
               // turnId lets the allowance trigger resolve the causal human
               // from the immutable turn receipt.
@@ -196,9 +206,12 @@ export const HOSTED_WEB_SEARCH_SOURCE_PREFIX = "hosted";
  * on one credit-billed model response, at the hosted list price plus the
  * web-search margin. This is a separate debit from the response's model
  * debit, keyed by the same durable response identity (`sourceId`), so a
- * retried settlement never charges twice. The caller decides that the
- * response is credit-billed, billing is active and its cost was not
- * reported by a Gateway (whose reported cost already includes search).
+ * retried settlement never charges twice. Like the turn's Gateway images and
+ * chat, it is never refused: the monthly plan and grants covering the
+ * response's model pay first, then general credit. The caller passes only
+ * credit-billed responses whose cost was not reported by a Gateway (a
+ * reported cost already includes search); the single check point
+ * {@link paidHostedToolsChargeCredits} decides whether the charge applies.
  */
 export async function settleHostedWebSearchUsage(
   db: Database,
@@ -216,7 +229,15 @@ export async function settleHostedWebSearchUsage(
     requests: number;
   },
 ): Promise<{ creditMicros: number }> {
-  if (!webSearchCreditBillingActive(settings) || input.requests <= 0) return { creditMicros: 0 };
+  if (
+    input.requests <= 0 ||
+    !paidHostedToolsChargeCredits(settings, {
+      accountId: input.accountId,
+      chargesOpenGeniCredits: true,
+    })
+  ) {
+    return { creditMicros: 0 };
+  }
   const charge = hostedWebSearchCharge(settings, input.requests);
   const shared = {
     accountId: input.accountId,
@@ -257,6 +278,8 @@ export async function settleHostedWebSearchUsage(
         sourceType: WEB_SEARCH_SOURCE_TYPE,
         sourceId: shared.sourceResourceId,
         idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
+        // The plan and grants covering the response's model pay first.
+        usage: input.model,
         metadata: {
           ...creditDebitAttributionMetadata(attribution),
           provider: HOSTED_WEB_SEARCH_SOURCE_PREFIX,

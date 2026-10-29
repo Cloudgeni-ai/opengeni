@@ -8,7 +8,7 @@ import { openingToolsFromTurnMetadata, type TurnExecutionPolicyV1 } from "@openg
 import {
   configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
-  webSearchCreditBillingActive,
+  paidHostedToolsChargeCredits,
   type ModelProviderApi,
   type ResolvedModelProvider,
   type Settings,
@@ -264,21 +264,18 @@ export function hostedWebSearchForTurn(
 
 /**
  * Whether paid tools the model provider hosts (its own web search and image
- * generation) would run on Opengeni's bill on this turn: the accepted model
- * is billed in Opengeni credits (cost class `credits`, the same class the
- * claim bills) and credit billing is active (`OPENGENI_BILLING_MODE=stripe`
- * or `OPENGENI_USAGE_LIMITS_MODE=managed`). Such a turn gets Opengeni's
- * metered tools instead, or is charged for what the provider reports.
- * Turns on the user's own keys or subscriptions, free models and
- * billing-off deployments are false and keep their hosted tools unchanged.
- * Derived from the frozen accepted policy's cost class, so every recovery
- * attempt of a turn gets the same answer.
+ * generation) would run on Opengeni's bill on this turn, decided by the
+ * single check point {@link paidHostedToolsChargeCredits} from the claim's
+ * billing class (`chargesOpenGeniCredits`, the frozen accepted policy's cost
+ * class `credits`). Such a turn gets Opengeni's metered tools instead, or is
+ * charged for what the provider reports. Every recovery attempt of a turn
+ * gets the same answer.
  */
 export function hostedToolsBillCreditsForTurn(
-  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
-  chargesOpenGeniCredits: boolean,
+  settings: Parameters<typeof paidHostedToolsChargeCredits>[0],
+  turn: { accountId: string; chargesOpenGeniCredits: boolean },
 ): boolean {
-  return chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
+  return paidHostedToolsChargeCredits(settings, turn);
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   WEB_SEARCH_PROVIDER_IDS,
   getSettings,
   hostedWebSearchCharge,
+  paidHostedToolsChargeCredits,
   resolveWebSearchProvider,
   webSearchCallPricing,
   webSearchCreditMicros,
@@ -318,41 +319,62 @@ describe("web search tool plan", () => {
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
   });
 
-  test("a credit-billed model while billing is active swaps hosted search for provider tools", () => {
+  test("paid hosted tools billing credits swaps hosted search for provider tools", () => {
     const billed: WebSearchSettings = {
       ...base,
       billingMode: "stripe",
       webSearchProvider: "tinyfish,parallel",
       webSearchProviderCredentials: keys({ tinyfish: "t", parallel: "p" }),
     };
-    expect(webSearchToolPlan(billed, { hostedWebSearch: true, creditBilledModel: true })).toEqual({
-      hostedWebSearch: false,
-      providerTools: ["web_search", "web_fetch"],
-    });
-    // Other cost classes and billing-off deployments are unchanged.
-    expect(webSearchToolPlan(billed, { hostedWebSearch: true, creditBilledModel: false })).toEqual({
-      hostedWebSearch: true,
-      providerTools: [],
-    });
     expect(
-      webSearchToolPlan(
-        { ...billed, billingMode: "disabled" },
-        { hostedWebSearch: true, creditBilledModel: true },
-      ),
+      webSearchToolPlan(billed, { hostedWebSearch: true, hostedToolsBillCredits: true }),
+    ).toEqual({ hostedWebSearch: false, providerTools: ["web_search", "web_fetch"] });
+    expect(
+      webSearchToolPlan(billed, { hostedWebSearch: true, hostedToolsBillCredits: false }),
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
     // Hosted search stays when the turn cannot get a provider web_search.
     expect(
       webSearchToolPlan(
         { ...billed, webSearchProvider: "parallel" },
-        { hostedWebSearch: true, creditBilledModel: true, creditsDisabled: true },
+        { hostedWebSearch: true, hostedToolsBillCredits: true, creditsDisabled: true },
       ),
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
     expect(
       webSearchToolPlan(
         { ...base, billingMode: "stripe" },
-        { hostedWebSearch: true, creditBilledModel: true },
+        { hostedWebSearch: true, hostedToolsBillCredits: true },
       ),
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
+  });
+
+  test("the single check point charges only credit-billed models while billing is active", () => {
+    const account = { accountId: "11111111-1111-4111-8111-111111111111" };
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "stripe" },
+        { ...account, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(true);
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "disabled", usageLimitsMode: "managed" },
+        { ...account, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(true);
+    // Own keys, subscriptions and free-policy models.
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "stripe" },
+        { ...account, chargesOpenGeniCredits: false },
+      ),
+    ).toBe(false);
+    // Billing-off deployments.
+    expect(
+      paidHostedToolsChargeCredits(
+        { billingMode: "disabled", usageLimitsMode: "none" },
+        { ...account, chargesOpenGeniCredits: true },
+      ),
+    ).toBe(false);
   });
 });
 

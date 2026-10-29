@@ -113,6 +113,8 @@ describe("hosted web search settlement", () => {
       sourceType: "web_search",
       sourceId: `hosted:${TURN}:resp_1`,
       idempotencyKey: `credit:web_search_debit:hosted:${TURN}:resp_1`,
+      // The plan and grants covering the response's model pay first.
+      usage: "priced-model",
       metadata: {
         turnId: TURN,
         initiatingHumanSubjectId: "user:1",

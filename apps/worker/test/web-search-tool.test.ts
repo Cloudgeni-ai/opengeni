@@ -123,7 +123,7 @@ describe("turn web search plan", () => {
     });
   });
 
-  test("a credit-billed turn while billing is active gets the metered provider tools instead of hosted search", () => {
+  test("a turn whose paid hosted tools bill credits gets the metered provider tools instead of hosted search", () => {
     const both = { hostedWebSearch: false, providerTools: ["web_search", "web_fetch"] };
     for (const billing of [{ billingMode: "stripe" }, { usageLimitsMode: "managed" }] as const) {
       const billed = { ...settings, ...billing };
@@ -134,11 +134,6 @@ describe("turn web search plan", () => {
         providerTools: [],
       });
     }
-    // Billing off: unchanged, whatever the model's cost class.
-    expect(turnWebSearchPlan(model(true), settings, true, true)).toEqual({
-      hostedWebSearch: true,
-      providerTools: [],
-    });
     // No provider configured: hosted search stays and settlement charges it.
     expect(
       turnWebSearchPlan(model(true), testSettings({ billingMode: "stripe" }), true, true),

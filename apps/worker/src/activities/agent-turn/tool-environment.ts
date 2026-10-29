@@ -847,6 +847,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       sessionId: input.sessionId,
       turnId: turn.id,
       attemptId: input.attemptId,
+      // A turn whose paid hosted tools bill credits pays its web tools from
+      // the plan and grants covering its model first, like its Gateway images.
+      ...(hostedToolsBillCredits ? { creditUsageModelId: turnExecutionPolicy.productModelId } : {}),
     },
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,

@@ -11,13 +11,23 @@ import {
 
 describe("hosted tools on Opengeni's bill", () => {
   test("only a credit-billed turn on a billing-active deployment bills hosted tools", () => {
-    expect(hostedToolsBillCreditsForTurn({ billingMode: "stripe" }, true)).toBe(true);
+    const turn = (chargesOpenGeniCredits: boolean) => ({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      chargesOpenGeniCredits,
+    });
+    expect(hostedToolsBillCreditsForTurn({ billingMode: "stripe" }, turn(true))).toBe(true);
     expect(
-      hostedToolsBillCreditsForTurn({ billingMode: "disabled", usageLimitsMode: "managed" }, true),
+      hostedToolsBillCreditsForTurn(
+        { billingMode: "disabled", usageLimitsMode: "managed" },
+        turn(true),
+      ),
     ).toBe(true);
-    expect(hostedToolsBillCreditsForTurn({ billingMode: "stripe" }, false)).toBe(false);
+    expect(hostedToolsBillCreditsForTurn({ billingMode: "stripe" }, turn(false))).toBe(false);
     expect(
-      hostedToolsBillCreditsForTurn({ billingMode: "disabled", usageLimitsMode: "none" }, true),
+      hostedToolsBillCreditsForTurn(
+        { billingMode: "disabled", usageLimitsMode: "none" },
+        turn(true),
+      ),
     ).toBe(false);
   });
 
