@@ -756,6 +756,16 @@ type TargetState = {
   /** Captures of this tab not answered yet, each with the time its caller
    * stops waiting for it. At most one is sent at a time (see sendCapture). */
   capturesRunning: Map<Promise<void>, number>;
+  /** A frame's layout read not answered yet (see frameLayoutMetrics). */
+  frameLayoutRunning?: Promise<LayoutMetrics> | undefined;
+};
+
+/** The page's visual viewport and content size in CSS pixels, and its pixel
+ * ratio under emulation (Page.getLayoutMetrics). */
+type LayoutMetrics = {
+  viewport: { x: number; y: number; width: number; height: number };
+  content: { width: number; height: number };
+  pixelRatio: number | null;
 };
 
 /** The page's size, screen and scale as it reports them, in CSS pixels, and
@@ -6080,14 +6090,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async layoutMetrics(
-    state: TargetState,
-    timeoutMs?: number,
-  ): Promise<{
-    viewport: { x: number; y: number; width: number; height: number };
-    content: { width: number; height: number };
-    pixelRatio: number | null;
-  }> {
+  private async layoutMetrics(state: TargetState, timeoutMs?: number): Promise<LayoutMetrics> {
     const response = await this.sendTarget<{
       cssVisualViewport?: unknown;
       cssContentSize?: unknown;
@@ -6102,6 +6105,37 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ? state.emulatedViewport.deviceScaleFactor * zoom
         : null;
     return { viewport, content, pixelRatio };
+  }
+
+  /** A frame's layout read, with at most one unanswered per tab: a read the
+   * page does not answer within the frame deadline stays in flight (up to the
+   * command deadline), and later frames wait on it again rather than queue
+   * one more behind it in a renderer that is busy. */
+  private async frameLayoutMetrics(state: TargetState): Promise<LayoutMetrics> {
+    let running = state.frameLayoutRunning;
+    if (!running) {
+      const read = this.layoutMetrics(state);
+      running = read;
+      state.frameLayoutRunning = read;
+      const settled = () => {
+        if (state.frameLayoutRunning === read) state.frameLayoutRunning = undefined;
+      };
+      read.then(settled, settled);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        running,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new CdpCommandTimeoutError("Page.getLayoutMetrics", state.sessionId)),
+            FRAME_CAPTURE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async viewport(state: TargetState): Promise<BrowserObservationValue["viewport"]> {
@@ -6183,7 +6217,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const state = this.states.get(targetId);
       if (!state) throw new Error("browser target does not exist");
       if (state.screencasts.get(expected.key) !== expected) return;
-      const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
+      const metrics = await this.frameLayoutMetrics(state);
       const viewport = metrics.viewport;
       const captured =
         this.engine === "chrome"

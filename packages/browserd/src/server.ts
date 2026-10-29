@@ -182,6 +182,9 @@ type BrowserSocket = Bun.ServerWebSocket<InteractionSocketData>;
 
 /** Seconds a controller connection may stay silent before the server closes it. */
 const BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS = 120;
+/** The payload of the ping a browser frame socket gets once its subscription
+ * is open (the agent's relay pump waits for it). */
+const BROWSER_FRAMES_SUBSCRIBED_PING = "opengeni.frames.subscribed";
 
 /**
  * An action request answers only once its action or batch finished, which
@@ -2090,6 +2093,10 @@ export class BrowserControlServer {
         return;
       }
       data.subscription = subscription;
+      // Tells a relaying agent the stream is open before its first frame,
+      // which a page busy when its view opens sends only once it answers.
+      // A viewer's WebSocket answers it on its own.
+      socket.ping(BROWSER_FRAMES_SUBSCRIBED_PING);
       let sent = 0;
       for await (const frame of subscription) {
         if (data.closed) break;
