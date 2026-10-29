@@ -2509,6 +2509,29 @@ All text/chord components in a physical batch are resolved before its first
 input request, so known unsupported mappings remain definite zero-input failures.
 Once any request may have escaped, failures retain an unknown outcome.
 
+X11 text the layout cannot type is bound to spare keycodes (keycodes with no
+keysym) for the rest of the session, never only for one batch. The server
+cannot confirm that a receiving client has refreshed its keymap, so a binding
+restored after the action returns could reach a busy application late and lose
+or repeat characters. Each binding is recorded in a root-window property with an
+owner window that lives exactly as long as the session's own X connection. A
+claimed spare is never rebound to another glyph; sessions that bind the same
+glyph share it. When the last session using a spare closes, its keycode is
+restored after a short grace period, and a session start restores the bindings
+of owners that have gone away (a crashed process). Named function keys the layout
+lacks (F13 to F24) use the same bindings.
+
+When a batch needs more distinct glyphs than spare keycodes remain, it is refused
+before its first key. The computer driver then pastes ordinary single-line text
+through a CLIPBOARD owner of the helper's own: once a client of the focused
+window has read the text (clipboard-manager reads do not count), the previous
+clipboard text is put back, or the clipboard is emptied again if it was empty.
+It cannot be put back when it held something other than text, was too large to
+read whole, or the target did not read the paste within three seconds; the pasted
+text then stays. A copy the person makes meanwhile is kept. Text with secret
+references is never pasted: it is refused with a message that names neither the
+character nor the clipboard.
+
 Window pointer preflight follows the mapped point through the X11 tree and
 requires the original client window and the same XRes resource owner, including
 embedded children. Covered or unprovable points are refused before XTEST input.
