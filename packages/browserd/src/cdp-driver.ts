@@ -4716,6 +4716,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  /** Whether the tab is hidden behind another tab and nothing keeps it
+   * drawing (focus emulation), so Chrome holds the pointer's moves sent to
+   * it. A tab that cannot be read counts as shown. */
+  private async hiddenWithoutFocusEmulation(state: TargetState): Promise<boolean> {
+    if (this.engine === "lightpanda" || this.focusEmulation || state.dialog) return false;
+    return (
+      (await this.evaluateIsolated(
+        state,
+        "document.visibilityState",
+        FRAME_CAPTURE_TIMEOUT_MS,
+      ).catch(() => null)) === "hidden"
+    );
+  }
+
   /** Has a hidden tab draw its document before input is sent to it. Chromium
    * drops presses, releases and keys sent to a page that has never drawn, as
    * a tab opened in the background has not, and still acknowledges them, so
@@ -7713,26 +7727,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
+    const hidden = await this.hiddenWithoutFocusEmulation(state);
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
     try {
-      await this.sendActionTarget(
+      let markSent: () => void = () => undefined;
+      const sent = new Promise<void>((resolve) => {
+        markSent = resolve;
+      });
+      const moved = this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
         { type: "mouseMoved", x, y },
-        input,
+        { ...input, onSent: markSent },
       );
-      // A background tab can take seconds to acknowledge the pointer's move
-      // (it draws no frames), long enough for the guard to have disarmed
-      // itself before the press arrives. Its clock restarts here, right
-      // before the press. Best effort: a guard this cannot reach is judged
-      // by its readback, as before.
-      if (guard !== null && !state.dialog) {
-        await this.sendTarget(
-          state,
-          "Runtime.callFunctionOn",
-          { objectId: guard.objectId, functionDeclaration: "function () { this.arm(); }" },
-          { timeoutMs: 2_000 },
-        ).catch(() => undefined);
+      // A hidden page holds the pointer's move until it draws a frame, which
+      // it does not, and Chrome acknowledges it only after about five
+      // seconds. The press is not held back that long: sent after the move,
+      // it has the page take the move first and run its handlers for it
+      // before the press. The guard stays armed until it has judged the
+      // press, however long those handlers take.
+      if (hidden) {
+        moved.catch(() => undefined);
+        await Promise.race([sent, moved]);
+      } else {
+        await moved;
       }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
@@ -7748,6 +7766,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           input,
         );
       }
+      if (hidden) await moved;
     } catch (error) {
       // The input already fails or pauses this action (a JavaScript dialog,
       // an unresponsive tab), and reading the guard back now could wait on
@@ -9733,7 +9752,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
-    options: { potentialEffect?: boolean; sessionId?: string; timeoutMs?: number } = {},
+    options: {
+      potentialEffect?: boolean;
+      sessionId?: string;
+      timeoutMs?: number;
+      /** Called once the command has gone out to the browser. */
+      onSent?: () => void;
+    } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
@@ -9766,6 +9791,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId: options.sessionId ?? this.commandSession(state, method),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
+    options.onSent?.();
     try {
       const result = await Promise.race([
         command.then((value) => ({ kind: "result" as const, value })),
@@ -11508,10 +11534,17 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
 // judged by their own target: pointer capture can retarget a release, and a
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
-// reports what was held back, and its arm() restarts the clock below just
-// before the press. A guard that is never settled (a JavaScript dialog
-// interrupted the click) disarms itself a few seconds after that.
+// reports what was held back. A guard that is never settled (a JavaScript
+// dialog interrupted the click) disarms itself a few seconds after the press.
+// Until the press arrives it stays armed however long the page takes to get
+// there (a page busy on the pointer's arrival), up to a limit; one that
+// reaches that limit first settles as "lapsed", and one that saw no press at
+// all (the browser dropped it, or it went to another document) as
+// "unpressed", so neither click is counted as delivered.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
+/** How long a click's guard waits for its press: longer than the input
+ * commands of one click can take (each is bounded at 30 s). */
+const HIT_TARGET_GUARD_UNPRESSED_LIMIT_MS = 60_000;
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported
@@ -11594,16 +11627,22 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
     return true;
   };
   const types = [...presses, ...followers];
-  const guard = { blocked: null };
-  let expiresAt = Date.now() + 5000;
+  const guard = { blocked: null, lapsed: false };
+  let pressed = false;
+  let expiresAt = Date.now() + ${HIT_TARGET_GUARD_UNPRESSED_LIMIT_MS};
   let pointerDowns = 0;
   const listener = (event) => {
     if (Date.now() > expiresAt) {
+      if (!pressed) guard.lapsed = true;
       guard.settle();
       return;
     }
     if (!event.isTrusted) return;
     if (presses.includes(event.type)) {
+      if (!pressed) {
+        pressed = true;
+        expiresAt = Date.now() + 5000;
+      }
       if (event.type === "pointerdown") pointerDowns += 1;
       const hit = event.composedPath()[0];
       // Only a click's first press is judged: a double-click's second press
@@ -11627,10 +11666,9 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   for (const type of types) view.addEventListener(type, listener, true);
   guard.settle = () => {
     for (const type of types) view.removeEventListener(type, listener, true);
-    return guard.blocked;
-  };
-  guard.arm = () => {
-    expiresAt = Date.now() + 5000;
+    if (guard.blocked !== null) return guard.blocked;
+    if (guard.lapsed) return "lapsed";
+    return pressed ? null : "unpressed";
   };
   return guard;
 }`;
