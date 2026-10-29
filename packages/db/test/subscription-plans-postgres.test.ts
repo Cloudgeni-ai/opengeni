@@ -1012,7 +1012,10 @@ for (const posture of ["production", "restricted"] as const) {
     }
     expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
     // A genuinely new person is still refused.
-    await expectState(() => run(() => provision(accountId, `user:${crypto.randomUUID()}`)), "P0S01");
+    await expectState(
+      () => run(() => provision(accountId, `user:${crypto.randomUUID()}`)),
+      "P0S01",
+    );
   }, 180_000);
 }
 
