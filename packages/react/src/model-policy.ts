@@ -6,6 +6,7 @@ import {
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { type OpenGeniText } from "./messages/runtime";
+import { regionRestrictedText } from "./inference-region";
 
 export type PickerBillingClass = ModelPickerBillingClass;
 
@@ -97,7 +98,11 @@ export function availabilityReasonLabel(
   if (!reason) {
     return null;
   }
-  return AVAILABILITY_REASON_LABELS(t)[reason] ?? t("modelPolicy.unavailable");
+  return (
+    regionRestrictedText(t, reason) ??
+    AVAILABILITY_REASON_LABELS(t)[reason] ??
+    t("modelPolicy.unavailable")
+  );
 }
 
 export function effortOptionsForModel(model: ClientModel): ReasoningEffort[] {
@@ -387,21 +392,26 @@ export function projectPickerRows(
     });
 }
 
-/** Project the lightweight client-config model list into the same picker contract. */
+/**
+ * Project the lightweight client-config model list into the same picker
+ * contract. Only a region restriction makes a row unselectable here: the
+ * other availability reasons are hints this list never enforced.
+ */
 export function projectClientModelRows(
   t: OpenGeniText,
   models: ClientModel[],
 ): PickerModelRow<ClientModel>[] {
   return models.map((catalog) => {
     const billingClass = billingClassForModel(catalog);
+    const regionRestricted = regionRestrictedText(t, catalog.availability?.reason);
     return {
       id: catalog.id,
       label: modelDisplayName(catalog),
       ...compactLabel(catalog),
       billingClass,
       billingClassLabel: billingClassLabel(t, billingClass),
-      selectable: true,
-      unavailableReason: null,
+      selectable: regionRestricted === null,
+      unavailableReason: regionRestricted,
       provider: catalog.provider,
       providerLabel: catalog.providerLabel,
       catalog,

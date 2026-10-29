@@ -4852,7 +4852,7 @@ export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
     upstreamModelId: "aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     aliases: [],
     capabilities: opperCapabilities({

@@ -709,6 +709,12 @@ export type {
 } from "./model-policy";
 export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
 export {
+  REGION_RESTRICTED,
+  inferenceFeatureRestriction,
+  isRegionRestricted,
+  regionRestrictedText,
+} from "./inference-region";
+export {
   humanizeModelSlug,
   isRawModelLabel,
   modelDisplayName,
