@@ -59,7 +59,11 @@ import { TooltipProvider } from "../../../ui/tooltip";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { desktopPlatform } from "../../lib/desktop";
-import { useWindowBarRowLeft } from "../../lib/window-bar-row";
+import {
+  chatHeaderInWindowBar,
+  isSessionRoutePath,
+  useWindowBarRowLeft,
+} from "../../lib/window-bar-row";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { isIntelligenceEffort } from "../../lib/session-tools";
@@ -265,19 +269,12 @@ export function SessionShell({
   );
 }
 
-/** A chat's own page, where the canvas starts with the chat's header. */
-function isSessionRoutePath(pathname: string): boolean {
-  return /\/sessions\/[^/]+/.test(pathname);
-}
-
 /**
  * In the macOS app a chat's header is the window bar's row, as in native Mac
  * apps: its title and actions sit beside the traffic lights and the sidebar
  * toggle, and the canvas, the rounded panel, starts under the bar as on every
  * other page (the `[data-window-bar-row]` rules in the app's stylesheet).
  */
-const HEADER_IN_WINDOW_BAR = desktopPlatform === "macos";
-
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
@@ -286,11 +283,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const headerInWindowBar =
-    HEADER_IN_WINDOW_BAR &&
-    !rail.isMobile &&
-    Boolean(context.session) &&
-    isSessionRoutePath(pathname);
+  const headerInWindowBar = chatHeaderInWindowBar({
+    platform: desktopPlatform,
+    mobile: rail.isMobile,
+    session: Boolean(context.session),
+    pathname,
+  });
   const canvasRef = useRef<HTMLDivElement | null>(null);
   useWindowBarRowLeft(canvasRef, headerInWindowBar);
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a

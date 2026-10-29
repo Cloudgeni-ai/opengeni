@@ -105,8 +105,9 @@ export async function windowBarRow(page: Page) {
       top: box.top,
       bottom: box.bottom,
       drag: getComputedStyle(header).getPropertyValue("-webkit-app-region"),
-      // A full-window layer (and its backdrop) may cover the row.
+      // While a full-window layer is open the row must step aside.
       layerOpen: document.documentElement.hasAttribute("data-window-layer-open"),
+      shown: header.getClientRects().length > 0,
       buttons: [...header.querySelectorAll<HTMLElement>("button")]
         .filter((button) => button.getClientRects().length > 0)
         .map((button) => {
@@ -202,7 +203,13 @@ export async function expectWindowTop(page: Page, platform: string) {
       expect(control.bottom).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
       expect(control.drag).toBe("no-drag");
     }
-    if (row) {
+    if (row?.layerOpen) {
+      // Under a full-window layer the header is not drawn, so none of its
+      // buttons can be clicked or focused.
+      expect(row.shown).toBe(false);
+      expect(row.buttons).toEqual([]);
+    } else if (row) {
+      expect(row.shown).toBe(true);
       expect(row.left).toBeGreaterThanOrEqual(
         controls.some((control) => control.visible) ? MACOS_BAR_ROW_LEFT : MACOS_BAR_CONTROLS_LEFT,
       );
@@ -211,7 +218,10 @@ export async function expectWindowTop(page: Page, platform: string) {
       expect(row.buttons.length).toBeGreaterThan(0);
       for (const button of row.buttons) {
         expect(button.drag).toBe("no-drag");
-        if (!row.layerOpen) expect(button.clickable).toBe(true);
+        expect({ label: button.label, clickable: button.clickable }).toEqual({
+          label: button.label,
+          clickable: true,
+        });
         expect(button.top).toBeGreaterThanOrEqual(0);
         expect(button.bottom).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
       }

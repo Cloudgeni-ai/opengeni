@@ -245,7 +245,21 @@ test("a chat's header is the macOS window bar's row", async () => {
       // closes from it.
       await header.getByRole("button", { name: "Open workspace", exact: true }).click();
       await page.getByRole("button", { name: "Close workspace", exact: true }).waitFor();
+      // Below 1024px the open workspace fills the window: on macOS the header
+      // steps out of the bar under it (expectWindowTop checks it is hidden
+      // and takes no clicks).
+      if (platform === "macos") expect((await windowBarRow(page))!.layerOpen).toBe(width < 1024);
       await expectWindowTop(page, platform);
+      if (width >= 1024) {
+        // So does the maximized workspace.
+        await page.getByRole("button", { name: "Maximize dock", exact: true }).click();
+        await page.getByRole("button", { name: "Restore dock", exact: true }).waitFor();
+        if (platform === "macos") expect((await windowBarRow(page))!.layerOpen).toBe(true);
+        await expectWindowTop(page, platform);
+        await page.getByRole("button", { name: "Restore dock", exact: true }).click();
+        await page.getByRole("button", { name: "Maximize dock", exact: true }).waitFor();
+        await expectWindowTop(page, platform);
+      }
       await page.getByRole("button", { name: "Close workspace", exact: true }).click();
       await header.getByRole("button", { name: "Open workspace", exact: true }).waitFor();
       await check();

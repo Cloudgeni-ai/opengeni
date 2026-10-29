@@ -2,6 +2,30 @@ import { useEffect, useLayoutEffect, type RefObject } from "react";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
+/** A chat's own page, where the canvas starts with the chat's header. */
+export function isSessionRoutePath(pathname: string): boolean {
+  return /\/sessions\/[^/]+/.test(pathname);
+}
+
+/**
+ * Whether a chat's header is the window bar's row: only in the macOS app, in
+ * the docked (not mobile) layout, on a chat's own page with its session open.
+ * Everywhere else, the web app included, the header stays in the canvas.
+ */
+export function chatHeaderInWindowBar(options: {
+  platform: string | null | undefined;
+  mobile: boolean;
+  session: boolean;
+  pathname: string;
+}): boolean {
+  return (
+    options.platform === "macos" &&
+    !options.mobile &&
+    options.session &&
+    isSessionRoutePath(options.pathname)
+  );
+}
+
 /**
  * While `active`, keeps `--og-window-bar-row-left` on the canvas at the
  * canvas's left edge in the window, so a header the host lifts into the

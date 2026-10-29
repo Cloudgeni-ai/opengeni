@@ -204,6 +204,14 @@ html[data-desktop="macos"] [data-window-bar-row] > [data-titlebar] {
   backdrop-filter: none;
 }
 
+/* A full-window layer (`data-window-layer-open`) covers the chat, so the
+   chat's header steps out of the bar with it, as the sidebar toggle does:
+   not drawn, its buttons neither clickable nor focusable. (Not visibility:
+   the buttons' own transitions would keep them clickable for a moment.) */
+html[data-desktop="macos"][data-window-layer-open] [data-window-bar-row] > [data-titlebar] {
+  display: none;
+}
+
 /* Layers that fill the window's content (a full-window Site or artifact, the
    maximized workspace) are the same inset panel, over the rail. The sidebar
    toggle has nothing to show or hide under them: while one is open the layer
