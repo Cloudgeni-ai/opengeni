@@ -909,7 +909,9 @@ fn write_nonblocking(path: &Path, value: &[u8]) -> io::Result<()> {
 
 /// Runs `write` on a thread of its own and returns its result once it
 /// ends, or `Ok` once `applied` says its effect shows while it goes on,
-/// looking every `look`.
+/// looking every `look`. A look that fails, or cannot make sense of what
+/// shows (such as a file being rewritten), proves nothing either way: the
+/// write's own result says then.
 fn write_until_applied(
     look: Duration,
     write: impl FnOnce() -> io::Result<()> + Send + 'static,
@@ -926,7 +928,7 @@ fn write_until_applied(
         match outcome.recv_timeout(look) {
             Ok(result) => return result,
             Err(RecvTimeoutError::Timeout) => {
-                if applied()? {
+                if applied().unwrap_or(false) {
                     return Ok(());
                 }
             }
