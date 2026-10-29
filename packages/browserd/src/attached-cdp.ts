@@ -12,6 +12,7 @@ import {
 import {
   AgentBrowserDriver,
   isBlankTabUrl,
+  PERMISSION_OPENED_TABS_ONLY,
   type AgentBrowserDriverOptions,
   type BrowserCdpConnection,
   type BrowserCommandRunner,
@@ -42,6 +43,13 @@ const MAX_EVENT_LISTENERS = 16_384;
 // Chrome reports the debugger detach that ends a refused navigation on its own
 // event stream, usually just before or after the failed command's reply.
 const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
+// A page command's deadline when its caller sets none, as on a direct CDP
+// connection: a page that stops answering (a dialog it opened before the
+// debugger attached blocks it) must fail the command, not hold it forever.
+const PAGE_COMMAND_TIMEOUT_MS = 30_000;
+// A live page answers attaching in well under a second; one that has not
+// answered after this is blocked or hung.
+const ATTACH_TIMEOUT_MS = 10_000;
 // Retry bounds while the event stream is re-established after it broke.
 const RESYNC_RETRY_MIN_MS = 100;
 const RESYNC_RETRY_MAX_MS = 5_000;
@@ -53,6 +61,66 @@ const DOWNLOAD_START_SLACK_MS = 5_000;
 const DOWNLOAD_FIND_ATTEMPTS = 10;
 const DOWNLOAD_FIND_RETRY_MS = 200;
 const MAX_TRACKED_DOWNLOADS = 1_000;
+// The site permissions Chrome lets an extension set, by their CDP names, as
+// the extension's `permissions.set` names them. The others it cannot set.
+const ATTACHED_SITE_PERMISSIONS = new Map([
+  ["videoCapture", "camera"],
+  ["audioCapture", "microphone"],
+  ["geolocation", "geolocation"],
+  ["notifications", "notifications"],
+]);
+const SITE_PERMISSION_UNSUPPORTED =
+  "In the person's own Chrome, only camera, microphone, geolocation and notifications permissions can be set.";
+const SITE_PERMISSIONS_OUTDATED =
+  "The browser extension in the person's Chrome is too old to set site permissions; Chrome updates it on its own.";
+const SITE_PERMISSION_CONSENT_REQUIRED =
+  "The person must allow site permissions once in their Chrome first. A tab asking them to is open there; ask them to allow it, then try again.";
+const SITE_PERMISSION_CONSENT_DECLINED =
+  "The person has not allowed site permissions in their Chrome. Ask them to allow it in the browser extension's popup, then try again.";
+const SITE_PERMISSION_TAB_CHANGED =
+  "The tab left this site before the permission was set; observe the tab again.";
+const SITE_PERMISSION_UNSUPPORTED_SITE =
+  "In the person's own Chrome, permissions can be set only for http and https sites with a plain host name or IP address.";
+const SITE_PERMISSION_LIMIT_REACHED =
+  "Agents have already set 1,000 site permissions in the person's Chrome; set ones no longer needed back to prompt, or ask the person to remove some in the extension's popup.";
+const SITE_PERMISSION_REFUSED =
+  "The browser extension in the person's Chrome refused this permission request; nothing was set.";
+
+/** What the agent is told when the extension does not set a permission.
+ * Anything else (Chrome's own refusal, a lost connection) is reported as for
+ * any other command. */
+function sitePermissionRefusal(error: AttachedBrowserBridgeError): Error {
+  // The extension could not read the request: nothing reached Chrome.
+  if (error.code === "invalid_request")
+    return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_REFUSED);
+  if (error.code !== "driver_rejected") return error;
+  switch (error.extensionCode) {
+    case "consent_required":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_REQUIRED,
+      );
+    case "consent_declined":
+      return new InteractionDefiniteDriverError(
+        "permission_denied",
+        SITE_PERMISSION_CONSENT_DECLINED,
+      );
+    case "not_opened_by_agent":
+      return new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
+    case "tab_changed":
+      return new InteractionDefiniteDriverError(
+        "document_stale",
+        SITE_PERMISSION_TAB_CHANGED,
+        true,
+      );
+    case "unsupported_site":
+      return new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED_SITE);
+    case "limit_reached":
+      return new InteractionDefiniteDriverError("invalid_action", SITE_PERMISSION_LIMIT_REACHED);
+    default:
+      return error;
+  }
+}
 
 const EXTENSION_RESTRICTED_SCHEMES = [
   "about:",
@@ -96,6 +164,10 @@ type AttachedTab = {
   url: string | null;
   active: boolean;
   controllable: boolean;
+  /** Null when the extension does not say. */
+  windowId: number | null;
+  /** Whether Chrome unloaded the tab's page to save memory. */
+  discarded: boolean;
 };
 
 type BridgeDebuggerEvent = {
@@ -282,10 +354,22 @@ export function createAttachedChromeDriver(
     },
     connect: async () => transport.connection,
     engine: "chrome",
-    permissionControl: false,
+    // Permissions go through the extension (see setSitePermission), which
+    // sets only some of them and only once the person allowed it to, and
+    // only in a tab this session opened: every other tab is the person's.
+    permissionControl: "opened_tabs",
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
+    // A dialog a page opened before Chrome's debugger attached blocks it and
+    // can be neither read nor answered: a tab whose page does not answer says
+    // so quickly, and handle_dialog dismiss hides the tab for a moment, which
+    // makes Chrome close it.
+    attachTimeoutMs: ATTACH_TIMEOUT_MS,
+    personDialogs: {
+      inFront: async (tabId) => await transport.connection.tabInFront(tabId),
+      hideForAMoment: async (tabId) => await transport.connection.hideTabForAMoment(tabId),
+    },
     ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
     // Chrome saves downloads in the person's own downloads folder; the
     // session keeps a copy of each one its tabs start.
@@ -580,10 +664,78 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.markActive();
     this.inFlight += 1;
     try {
-      return await this.sendNow<T>(method, params, options);
+      const sent = this.sendNow<T>(method, params, options);
+      if (!options.sessionId) return await sent;
+      return await withPageDeadline(
+        sent,
+        method,
+        options.sessionId,
+        options.timeoutMs ?? PAGE_COMMAND_TIMEOUT_MS,
+      );
     } finally {
       this.inFlight -= 1;
       this.lastActivityAt = Date.now();
+    }
+  }
+
+  /** Whether the tab is the one shown in its window. */
+  async tabInFront(tabId: string): Promise<boolean> {
+    if (this.stopped || this.failure) return false;
+    const listed = requireTabs(
+      (await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs,
+    );
+    return listed.find((entry) => entry.id === tabId)?.active === true;
+  }
+
+  /**
+   * Hide a tab in front for a moment with its debugger released. Chrome lets
+   * no extension read or answer a dialog (alert, confirm, prompt) a page
+   * opened while nothing debugged it, and holds every page command until
+   * someone does; it closes such a dialog, as Cancel, when the tab is hidden
+   * while nothing debugs it. The tab shown instead is a new blank one, so no
+   * page of the person's sees anything, or else another tab of the same
+   * window when the blank one opens in another window; anything created is
+   * closed again. The tab comes back to front only if the person did not
+   * show another one meanwhile. A tab not in front, or one another session
+   * here is debugging, is left be.
+   */
+  async hideTabForAMoment(tabId: string): Promise<"hidden" | "not_front" | "unavailable"> {
+    if (this.stopped || this.failure || this.debuggerHeldElsewhere(tabId)) return "unavailable";
+    const listTabs = async () =>
+      requireTabs((await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs);
+    const tab = (await listTabs()).find((entry) => entry.id === tabId);
+    if (!tab?.active) return "not_front";
+    if (tab.windowId === null) return "unavailable";
+    const blank = requireTab(
+      (
+        await this.bridge.request<{ tab: unknown }>({
+          type: "tabs.create",
+          url: "about:blank",
+        })
+      ).tab,
+    );
+    try {
+      let shown: AttachedTab | undefined = blank;
+      if (blank.windowId !== tab.windowId) {
+        const siblings = (await listTabs()).filter(
+          (entry) => entry.id !== tabId && entry.id !== blank.id && entry.windowId === tab.windowId,
+        );
+        // Showing a discarded tab would load its page again.
+        shown = siblings.find((entry) => !entry.discarded) ?? siblings[0];
+      }
+      if (!shown) return "unavailable";
+      if (this.attachedTabs.has(tabId)) {
+        await this.bridge.request({ type: "debugger.detach", tabId });
+        this.forgetReleasedAttachment(tabId);
+      }
+      await this.bridge.request({ type: "tabs.activate", tabId: shown.id });
+      // Give back only this switch, never one the person made meanwhile.
+      const now = await listTabs();
+      if (now.find((entry) => entry.id === shown.id)?.active === true)
+        await this.bridge.request({ type: "tabs.activate", tabId });
+      return "hidden";
+    } finally {
+      await this.bridge.request({ type: "tabs.close", tabId: blank.id }).catch(() => undefined);
     }
   }
 
@@ -602,6 +754,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
             true,
           );
         const navigation = method === "Page.navigate";
+        // A permission for the site of exactly this tab (see setSitePermission).
+        if (method === "Browser.setPermission")
+          return (await this.setSitePermission(params, tabId)) as T;
         if (navigation && typeof params.url === "string") this.assertNavigable(params.url);
         const mayChangePage = mayChangePageContent(method);
         if (mayChangePage) this.pendingInput.set(tabId, (this.pendingInput.get(tabId) ?? 0) + 1);
@@ -986,9 +1141,53 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         this.tabSessions.set(targetId, sessionId);
         return { sessionId };
       }
+      case "Browser.setPermission":
+        // Only for a tab: the driver sends it on that tab's session.
+        throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
       default:
         throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
     }
+  }
+
+  /** A permission for the exact site the tab `tabId` shows, set by the
+   * extension in the person's own Chrome once they allowed it to. The
+   * extension sets it only while this connection's attachment to that tab
+   * lasts and the tab shows that site. */
+  private async setSitePermission(
+    params: Readonly<Record<string, unknown>>,
+    tabId: string,
+  ): Promise<Record<string, unknown>> {
+    const name =
+      typeof params.permission === "object" && params.permission !== null
+        ? (params.permission as { name?: unknown }).name
+        : undefined;
+    const permission = typeof name === "string" ? ATTACHED_SITE_PERMISSIONS.get(name) : undefined;
+    if (!permission) {
+      throw new InteractionDefiniteDriverError("unsupported", SITE_PERMISSION_UNSUPPORTED);
+    }
+    // An extension from before this command would not answer it at all.
+    const ping = await this.bridge.request<{ sitePermissions?: unknown } | null>({ type: "ping" });
+    if (ping?.sitePermissions !== true) {
+      throw new InteractionDefiniteDriverError("unsupported", SITE_PERMISSIONS_OUTDATED);
+    }
+    const attachment = this.tabAttachments.get(tabId);
+    if (attachment === undefined) {
+      throw new InteractionDefiniteDriverError("document_stale", SITE_PERMISSION_TAB_CHANGED, true);
+    }
+    try {
+      await this.bridge.request({
+        type: "permissions.set",
+        tabId,
+        attachment,
+        origin: params.origin,
+        permission,
+        setting: params.setting,
+      });
+    } catch (error) {
+      if (error instanceof AttachedBrowserBridgeError) throw sitePermissionRefusal(error);
+      throw error;
+    }
+    return {};
   }
 
   /** Chrome answers a navigation to a page the extension may not control by
@@ -1410,6 +1609,8 @@ function requireTab(value: unknown): AttachedTab {
     url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
+    windowId: Number.isSafeInteger(tab.windowId) ? (tab.windowId as number) : null,
+    discarded: tab.discarded === true,
   };
 }
 
@@ -1737,6 +1938,30 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
     throw new CdpTransportError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+/** A page command's result, or CdpCommandTimeoutError once its deadline
+ * passes; a late result is dropped. */
+async function withPageDeadline<T>(
+  sent: Promise<T>,
+  method: string,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new CdpCommandTimeoutError(method, sessionId)),
+      boundedTimeout(timeoutMs),
+    );
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([sent, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void sent.catch(() => undefined);
+  }
 }
 
 async function delay(milliseconds: number): Promise<void> {

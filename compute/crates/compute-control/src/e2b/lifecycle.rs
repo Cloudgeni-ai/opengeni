@@ -2,9 +2,10 @@
 //! each request does in each of them
 //! ([ADR 19](../../../../docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
 //!
-//! E2B's running sandbox sleeps whenever idle, like any other, and wakes on
-//! any request or traffic: that is the host's business and is not a state
-//! here. E2B's pause and its timeout are different. They are recorded
+//! E2B's running sandbox that pauses at its timeout sleeps whenever idle,
+//! like any other, and wakes on any request or traffic: that is the host's
+//! business and is not a state here. One killed at its timeout never sleeps
+//! (see [`super::ops::create`]). E2B's pause and its timeout are different. They are recorded
 //! states (`Pausing`, `Paused`, `Killing`) that traffic does not cancel: a
 //! pause ends every stream through the front door, has the owner host save
 //! the sandbox to at least Saved, and is complete only once the host

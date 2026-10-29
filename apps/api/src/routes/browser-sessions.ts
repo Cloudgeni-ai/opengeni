@@ -6106,6 +6106,7 @@ export function withInitialView<
     }) {
   if (
     !launched?.targets ||
+    !launched.observation ||
     response.operation.state !== "completed" ||
     response.operation.replayed ||
     response.session.lifecycle !== "active" ||

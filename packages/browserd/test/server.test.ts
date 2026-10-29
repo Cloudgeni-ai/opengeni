@@ -39,6 +39,28 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("tells the supervisor whether a create's caller can take a session with no observation", async () => {
+    await withServer(async ({ server, reference }) => {
+      const supervisor = (server as unknown as { supervisor: BrowserSupervisor }).supervisor;
+      const create = supervisor.createSession.bind(supervisor);
+      const creations: unknown[] = [];
+      supervisor.createSession = (async (options: never, creation?: unknown) => {
+        creations.push(creation);
+        return await create(options, creation as never);
+      }) as typeof supervisor.createSession;
+      for (const path of ["/v1/browser-sessions?acceptsNoObservation=1", "/v1/browser-sessions"]) {
+        const created = await request(server, path, {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBeLessThan(300);
+      }
+      // An older caller, which sends no parameter, is told apart.
+      expect(creations).toEqual([{ acceptsNoObservation: true }, { acceptsNoObservation: false }]);
+    });
+  });
+
   test("fences new controller work atomically and releases only the owning update", async () => {
     await withServer(async ({ server, reference }) => {
       const operationId = randomUUID();
@@ -567,7 +589,7 @@ describe("BrowserControlServer", () => {
   });
 
   test("passkey sync is control-only, bound to the session path and validated", async () => {
-    await withServer(async ({ server, reference }) => {
+    await withServer(async ({ server, reference, supervisor }) => {
       expect(
         (
           await request(server, "/v1/browser-sessions", {
@@ -613,6 +635,57 @@ describe("BrowserControlServer", () => {
       expect(synced.status).toBe(200);
       // The fake driver hosts no page authenticators; the manager still answers.
       expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+      const negotiated = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(negotiated)).data).toEqual({
+        ...reference,
+        authenticators: 0,
+        events: [],
+        supportsBackupFlags: true,
+      });
+      const credential = {
+        rpId: "localhost",
+        credentialId: "Y3JlZA==",
+        userHandle: null,
+        userName: null,
+        userDisplayName: null,
+        privateKey: "a2V5",
+        signCount: 0,
+      };
+      const event = {
+        type: "registered" as const,
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        targetId: "target-1",
+        origin: "http://localhost",
+        credential: { ...credential, backupEligibility: true, backupState: true },
+      };
+      supervisor.passkeySync = async () => ({ ...reference, authenticators: 1, events: [event] });
+      const legacyRegistration = await request(server, path, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(legacyRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [{ ...event, credential }],
+      });
+      const modernRegistration = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(modernRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [event],
+        supportsBackupFlags: true,
+      });
+      expect(event.credential.backupEligibility).toBe(true);
     });
   });
 
@@ -1650,6 +1723,40 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a failed frame producer closes the viewer socket with a terminal error", async () => {
+    let subscription: LatestBrowserFrameSubscription | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        await websocketMessage(websocket);
+        const closed = websocketClosed(websocket);
+        subscription!.fail(new Error("browser target closed"));
+        expect(await closed).toMatchObject({
+          code: 1011,
+          reason: "frame stream unavailable: browser target closed",
+        });
+      },
+      {
+        onFrameSubscription: (value) => {
+          subscription = value;
+        },
+      },
+    );
+  });
+
   test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1870,6 +1977,7 @@ describe("BrowserControlServer", () => {
 async function withServer(
   callback: (fixture: {
     server: BrowserControlServer;
+    supervisor: BrowserSupervisor;
     reference: { browserSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
   options: {
@@ -1878,6 +1986,7 @@ async function withServer(
     failStart?: boolean;
     screenshotError?: Error;
     closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -1944,6 +2053,7 @@ async function withServer(
   try {
     await callback({
       server,
+      supervisor,
       reference: {
         browserSessionId: randomUUID(),
         controllerGeneration: "controller-1",
@@ -1963,6 +2073,7 @@ function fakeDriver(
     failStart?: boolean;
     screenshotError?: Error;
     closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -2114,6 +2225,7 @@ function fakeDriver(
     },
     async subscribeFrames() {
       const subscription = new LatestBrowserFrameSubscription(async () => undefined);
+      options.onFrameSubscription?.(subscription);
       queueMicrotask(() => subscription.push(frame(context, target)));
       return subscription;
     },

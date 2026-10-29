@@ -380,6 +380,30 @@ describe("computer session and action text", () => {
     );
   });
 
+  test("a computer whose focus action cannot bring a window forward says so when opened", () => {
+    const session = {
+      id: "c1",
+      lifecycle: "active",
+      placement: { kind: "connected_machine" },
+      platform: "windows",
+      adapter: "opengeni.cua.windows.v1",
+      displayId: null,
+      capabilities: { semanticObservation: true, clipboard: false, targetFocus: false },
+      failureCode: null,
+    };
+    expect(computerOpenText({ session, targets: [target] }).split("\n")[1]).toBe(
+      "Not available: clipboard, window focus",
+    );
+    // A computer that offers focus, or does not say, lists nothing for it.
+    for (const targetFocus of [true, undefined])
+      expect(
+        computerOpenText({
+          session: { ...session, capabilities: { ...session.capabilities, targetFocus } },
+          targets: [target],
+        }).split("\n")[1],
+      ).toBe("Not available: clipboard");
+  });
+
   test("marks a window that cannot be read off screen, with one fixed note", () => {
     const offScreen = { ...target, id: "window:2", title: "Chrome", offScreen: true as const };
     const text = computerTargetsText([target, offScreen]);
@@ -558,6 +582,47 @@ describe("computerObservationDiff", () => {
         ...receipt,
         state: "outcome_unknown",
         error: { code: "driver_failed", message: "failed", retryable: false },
+        unconfirmedInput: true as const,
+      }),
+    ).not.toContain(line);
+  });
+
+  test("a batch whose input the driver could not confirm and that changed no element says so too", () => {
+    const unchanged = {
+      ...computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!,
+      capturedFrame: undefined,
+    };
+    const completed = { operationId: "op-1", state: "completed", error: null };
+    const batch = {
+      type: "batch" as const,
+      targetId: "window:1",
+      actionCount: 3,
+      steps: [completed, completed, completed],
+      observation: unchanged,
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    expect(
+      computerActionText({ ...batch, unconfirmedInput: true as const })
+        .split("\n")
+        .slice(0, 2),
+    ).toEqual(["Batch completed on window:1: 3 actions.", line]);
+    expect(computerActionText(batch)).not.toContain(line);
+    const changed = {
+      ...computerObservationDiff(
+        reading("o_1", ribbon),
+        reading("o_2", [node("e10", "radio", "Style 0", { value: "1" }), ...ribbon.slice(1)]),
+      )!,
+      capturedFrame: undefined,
+    };
+    expect(
+      computerActionText({ ...batch, observation: changed, unconfirmedInput: true as const }),
+    ).not.toContain(line);
+    // A stopped batch already says its stopped action may have taken effect.
+    expect(
+      computerActionText({
+        ...batch,
+        steps: [completed, { ...completed, state: "outcome_unknown" }],
         unconfirmedInput: true as const,
       }),
     ).not.toContain(line);

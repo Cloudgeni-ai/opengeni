@@ -12986,6 +12986,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.avatar": "ref(SessionAvatar)! null",
         "$.createdAt": "string!",
         "$.createdBy": "string! null",
         "$.description": "string! null",
@@ -14184,6 +14185,7 @@
         "$.screenCapture": "boolean!",
         "$.semanticActions": "boolean!",
         "$.semanticObservation": "boolean!",
+        "$.targetFocus": "boolean?",
         "$.windowCapture": "boolean!"
       }
     },
@@ -14831,6 +14833,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
         "$.name": "string!"
       }
@@ -29434,6 +29437,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string? null",
         "$.name": "string?",
         "$.pinned": "boolean?"
@@ -35520,6 +35524,10 @@
     },
     "@opengeni/sdk/model-picker-order": {
       "compareModelPickerOrder": "value",
+      "ModelLabelCandidate": "type",
+      "ModelLabelDistinction": "type",
+      "modelLabelDistinctions": "value",
+      "ModelLabelGeography": "type",
       "ModelPickerBillingCandidate": "type",
       "ModelPickerBillingClass": "type",
       "modelPickerBillingClassFor": "value"
@@ -36469,6 +36477,7 @@
       "projectPendingApprovals": "value",
       "projectPendingHumanInputRequests": "value",
       "projectPickerRows": "value",
+      "promptSendDestination": "value",
       "PROVIDER_RECOVERY_NOTICE_DETAIL": "value",
       "ProviderRecoveryCondition": "type",
       "providerRecoveryExhaustedText": "value",
@@ -37822,7 +37831,8 @@
       "projectPickerRows": "value",
       "runnableLatencyModesForModel": "value",
       "scopedBillingClassLabel": "value",
-      "sortPickerRows": "value"
+      "sortPickerRows": "value",
+      "withDistinctLabels": "value"
     },
     "@opengeni/react/native-previews": {
       "inlineHtmlDocument": "value",
@@ -38540,6 +38550,7 @@
       "presentedToolKind": "value",
       "PresentedToolKind": "type",
       "presentsToolOutputPreview": "value",
+      "promptSendDestination": "value",
       "QUESTION_NAV_HIDDEN_PX": "value",
       "QUESTION_NAV_MARGIN_PX": "value",
       "QuestionNavPrompt": "type",
