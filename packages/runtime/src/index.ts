@@ -3796,6 +3796,19 @@ function maybeInstallLazyToolTransport(
       return accounts;
     },
     options.toolSearchMeaningRanker,
+    () => {
+      // The decision model reads a shortened model name's full published name.
+      const published = new Map<string, string>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        for (const name of server.modelToolNames()) {
+          const toolName = server.toolDisplayMetadata(name)?.toolName;
+          if (toolName) published.set(name, toolName);
+        }
+      }
+      return published;
+    },
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }

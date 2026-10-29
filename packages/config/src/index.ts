@@ -3700,6 +3700,19 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    provider.models.forEach((model, index) => {
+      if (model.hostedWebSearchContextSize === undefined) return;
+      const hostedSearchEnabled =
+        model.capabilities?.hostedTools.webSearch.runnable ?? model.hostedWebSearch ?? false;
+      if (provider.api !== "responses" || !hostedSearchEnabled) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["models", index, "hostedWebSearchContextSize"],
+          message:
+            "hostedWebSearchContextSize requires a Responses route with hosted web search enabled",
+        });
+      }
+    });
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({

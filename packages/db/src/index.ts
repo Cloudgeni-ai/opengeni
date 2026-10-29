@@ -22642,6 +22642,7 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     workspaceId: row.workspaceId,
     name: row.name,
     description: row.description ?? null,
+    avatar: storedSessionAvatar(row.avatar),
     pinned: row.pinned,
     sortOrder: row.sortOrder,
     createdBy: row.createdBy ?? null,
@@ -22657,6 +22658,7 @@ export async function createChannel(
     workspaceId: string;
     name: string;
     description?: string | null;
+    avatar?: SessionAvatar | null;
     createdBy?: string | null;
   },
 ): Promise<Channel> {
@@ -22681,6 +22683,7 @@ export async function createChannel(
             workspaceId: input.workspaceId,
             name: input.name,
             description: input.description ?? null,
+            avatar: input.avatar ?? null,
             sortOrder: nextSortOrder,
             createdBy: input.createdBy ?? null,
           })
@@ -22736,6 +22739,7 @@ export async function updateChannel(
   input: {
     name?: string | undefined;
     description?: string | null | undefined;
+    avatar?: SessionAvatar | null | undefined;
     pinned?: boolean | undefined;
   },
 ): Promise<Channel | null> {
@@ -22746,6 +22750,7 @@ export async function updateChannel(
         .set({
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
           ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
           updatedAt: new Date(),
         })
@@ -93059,9 +93064,12 @@ export * from "./recordings";
 export * from "./recording-live";
 export {
   cosineSimilarity,
+  memberVoiceprints,
   recordingVoiceChannel,
   suggestSpeakersByVoice,
+  voiceMatchingVoiceprints,
   VOICE_SUGGESTION_THRESHOLD,
+  type KnownVoice,
   type RecordingSpeakerVoice,
   type RecordingVoiceChannel,
 } from "./recording-voices";

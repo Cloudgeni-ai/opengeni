@@ -12986,6 +12986,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.avatar": "ref(SessionAvatar)! null",
         "$.createdAt": "string!",
         "$.createdBy": "string! null",
         "$.description": "string! null",
@@ -14832,6 +14833,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
         "$.name": "string!"
       }
@@ -29439,6 +29441,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string? null",
         "$.name": "string?",
         "$.pinned": "boolean?"
@@ -35532,6 +35535,10 @@
     },
     "@opengeni/sdk/model-picker-order": {
       "compareModelPickerOrder": "value",
+      "ModelLabelCandidate": "type",
+      "ModelLabelDistinction": "type",
+      "modelLabelDistinctions": "value",
+      "ModelLabelGeography": "type",
       "ModelPickerBillingCandidate": "type",
       "ModelPickerBillingClass": "type",
       "modelPickerBillingClassFor": "value"
@@ -37835,7 +37842,8 @@
       "projectPickerRows": "value",
       "runnableLatencyModesForModel": "value",
       "scopedBillingClassLabel": "value",
-      "sortPickerRows": "value"
+      "sortPickerRows": "value",
+      "withDistinctLabels": "value"
     },
     "@opengeni/react/native-previews": {
       "inlineHtmlDocument": "value",
