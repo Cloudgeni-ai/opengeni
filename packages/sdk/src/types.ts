@@ -30,6 +30,7 @@ export type {
   InsightsCallsScope,
 } from "./insights-usage";
 import type {
+  ClientModelResidencyV1,
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
@@ -2108,6 +2109,7 @@ export type SessionListEntry = Pick<
   | "workspaceId"
   | "accountId"
   | "status"
+  | "activeTurnId"
   | "backgroundCommandActivity"
   | "hasSchedules"
   | "hasUpcomingSchedules"
@@ -2154,6 +2156,19 @@ export type SessionListEntry = Pick<
    */
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
+  /**
+   * Newest turn in execution order: the last queued turn, else the executing
+   * turn, else the most recently finished one. Null when the session has no
+   * turn; absent from older servers and SDK-projected full pages.
+   */
+  latestTurn?: SessionListLatestTurn | null | undefined;
+};
+
+export type SessionListLatestTurn = {
+  id: string;
+  status: SessionTurnStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
 };
 export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
   projection: "summary";
@@ -2216,6 +2231,8 @@ export type SessionListResponse = {
   contentArchivedOnly?: true;
   /** Receipt for the started-or-messaged-by-you filter. */
   mineOnly?: true;
+  /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
+  sessionIdsApplied?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -3980,11 +3997,12 @@ export type CreateSessionRequest = {
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   /**
-   * First-party tools `modelContext` is for, such as the tool that reaches the
-   * open document it names. The first turn loads them before its first model
-   * request, as a tool search by name would, so it can use them without
-   * searching; the session's tools are unchanged. Decided once at creation;
-   * names outside the session's tool selection are ignored.
+   * Tools `modelContext` is for, such as the tool that reaches the open
+   * document it names, or the tools an application's MCP server publishes for
+   * the record it names (by their published names). The first turn loads them
+   * before its first model request, as a tool search by name would, so it can
+   * use them without searching; the session's tools are unchanged. Decided
+   * once at creation; names outside the session's tool selection are ignored.
    */
   modelContextTools?: string[] | undefined;
   /**
@@ -4302,6 +4320,9 @@ export type FirstPartyMcpToolName =
   | "scheduled_task_runs_list"
   | "event_sources_list"
   | "events_get"
+  | "event_sources_create_webhook"
+  | "event_sources_update"
+  | "event_sources_delete"
   | "slack_bot_list_channels"
   | "slack_bot_search"
   | "slack_bot_channel_history"
@@ -4490,6 +4511,8 @@ export type ClientModel = {
    * is EU-only and this model's route is not EU by its residency record.
    */
   availability?: ModelAvailabilityV1 | undefined;
+  /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+  residency?: ClientModelResidencyV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -8120,6 +8143,11 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  /**
+   * Shown to people instead of the folder icon, like a chat's avatar. Absent
+   * from servers that predate project profiles.
+   */
+  avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
   createdBy: string | null;
@@ -8130,11 +8158,14 @@ export type Channel = {
 export type CreateChannelRequest = {
   name: string;
   description?: string;
+  avatar?: SessionAvatar | null;
 };
 
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  /** null clears it; omitted keeps it. */
+  avatar?: SessionAvatar | null;
   pinned?: boolean;
 };
 

@@ -244,6 +244,7 @@ import {
   SessionListAccessError,
   SessionListCursorError,
   SessionListCursorExpiredError,
+  SESSION_LIST_MAX_SESSION_IDS,
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatusWithEvent,
@@ -1196,6 +1197,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
           ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
           ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
+          ...(query.sessionIds ? { sessionIds: query.sessionIds } : {}),
           ...(authorizationScope ? { authorizationScope } : {}),
           // A managed human's own personal workspace has no membership row, so
           // the list's removal fence must fall back to the organization-membership
@@ -6276,6 +6278,7 @@ export function sessionListQuery(
   createdFrom: Date | undefined;
   createdBefore: Date | undefined;
   scopeSubjectId: SessionScopeSubjectId | undefined;
+  sessionIds: string[] | undefined;
   hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
@@ -6456,10 +6459,25 @@ export function sessionListQuery(
     }
     scopeSubjectId = parsedEndUser.data;
   }
+  // Comma-separated; one id per value keeps 200 ids within ordinary URL limits.
+  let sessionIds: string[] | undefined;
+  if (query.sessionIds !== undefined) {
+    if (!allowCursor) throw new HTTPException(400, { message: 'sessionIds requires view="page"' });
+    const ids = query.sessionIds.split(",");
+    if (
+      ids.length > SESSION_LIST_MAX_SESSION_IDS ||
+      ids.some((id) => !z.string().uuid().safeParse(id).success)
+    )
+      throw new HTTPException(400, {
+        message: `sessionIds must be 1 to ${SESSION_LIST_MAX_SESSION_IDS} comma-separated session ids`,
+      });
+    sessionIds = [...new Set(ids.map((id) => id.toLowerCase()))];
+  }
   const hasPageFilters =
     needsYouOnly ||
     contentArchivedOnly ||
     mineOnly ||
+    sessionIds !== undefined ||
     originSiteId !== undefined ||
     siteAccessId !== undefined ||
     channelId !== undefined ||
@@ -6512,6 +6530,7 @@ export function sessionListQuery(
     createdFrom,
     createdBefore,
     scopeSubjectId,
+    sessionIds,
     hasPageFilters,
   };
 }

@@ -1226,8 +1226,8 @@ export async function acquireSharedTestDatabase(
  * Grant the runtime role what a migration withholds until the previous
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES,
  * DEFERRED_RUNTIME_TARGET_ROUTINES and RUNTIME_DEFERRED_FULL_DML_TABLES):
- * EXECUTE on the personal-machine owner lookup (0978), the connected-command
- * re-arm (0984), the queued-turn hold summary (0988), the held browser
+ * EXECUTE on the personal-machine owner lookup (0978), the queued-turn hold
+ * summary (0988), the held browser
  * routines (1002), the EU-only inference change function (1060) and the
  * secret history scrub's reader and cell writer (1091), and passkey storage
  * (0998). Tests that exercise them run as they will once they are granted.
@@ -1240,11 +1240,7 @@ export async function grantDeferredRuntimeAccess(
   await admin.unsafe(`
     GRANT EXECUTE ON FUNCTION opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid)
       TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text)
-      TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.summarize_queued_turns_by_hold()
-      TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)
       TO ${grantee};

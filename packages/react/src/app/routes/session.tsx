@@ -73,7 +73,12 @@ import {
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
-import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  sessionTurnKeepsRunControl,
+} from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
@@ -1522,7 +1527,10 @@ export function SessionRoute({
               setReconnectRequest(null);
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
-                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
                 return;
               }
               // Same continuation as after a first setup from a card: the
@@ -2446,9 +2454,7 @@ function SessionChatPane(props: {
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments({
     scope:
-      props.session.tenancy?.visibility === "private" ||
-      props.session.memoryScope === "user" ||
-      context.workspaces.find((w) => w.id === props.session.workspaceId)?.kind === "personal"
+      props.session.tenancy?.visibility === "private" || props.session.memoryScope === "user"
         ? "personal"
         : "workspace",
   });
@@ -2842,7 +2848,12 @@ function SessionChatPane(props: {
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
-      props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: props.session.status,
+        activeTurnId: props.session.activeTurnId,
+        queuedPrompts: props.queue.queue.length,
+        admissionBlock: props.session.admissionBlock,
+      }),
     busySend: resolveWorkspaceBusySend(workspace?.settings),
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
@@ -4286,7 +4297,11 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
-                running={usageLimitTreeActive || props.pendingWake}
+                running={
+                  usageLimitTreeActive ||
+                  sessionTurnKeepsRunControl(props.session.status) ||
+                  props.pendingWake
+                }
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,
@@ -4356,10 +4371,7 @@ function SessionChatPane(props: {
                           ? {
                               workspaceId: props.session.workspaceId,
                               sessionId: props.session.id,
-                              scope: chatLearningScope(
-                                props.session,
-                                isPersonalWorkspace(workspace, context.managedSelfContext),
-                              ),
+                              scope: chatLearningScope(props.session),
                               canEdit: workspacePermissions.includes("sessions:control"),
                               onOpen: props.onOpenAgentSettings,
                             }

@@ -51,7 +51,7 @@ impl Rig {
     /// A host that can hold `budget` bytes of guest memory and guarantees
     /// `millis` of processor time.
     fn new(budget: u64, millis: u64) -> Self {
-        Self::with(HostPolicy {
+        Self::with(&HostPolicy {
             admission: Some(Admission {
                 budget,
                 buffer: 0,
@@ -62,9 +62,9 @@ impl Rig {
         })
     }
 
-    fn with(policy: HostPolicy) -> Self {
+    fn with(policy: &HostPolicy) -> Self {
         Self {
-            host: Host::new(policy).unwrap(),
+            host: Host::new(*policy).unwrap(),
             now: At::ZERO,
         }
     }
@@ -364,7 +364,7 @@ fn a_create_asked_again_does_not_count_its_own_booking() {
 
 #[test]
 fn a_new_sandbox_is_not_pushed_deeper_while_booked() {
-    let mut rig = Rig::with(HostPolicy {
+    let mut rig = Rig::with(&HostPolicy {
         admission: Some(Admission {
             budget: 2 * GIB,
             buffer: 2 * GIB,
@@ -388,7 +388,7 @@ fn a_new_sandbox_is_not_pushed_deeper_while_booked() {
 
 #[test]
 fn a_create_books_the_disk_its_first_wake_needs() {
-    let mut rig = Rig::with(HostPolicy {
+    let mut rig = Rig::with(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,
@@ -426,7 +426,7 @@ fn a_create_books_the_disk_its_first_wake_needs() {
 /// wake; one short by more is short whatever that reading shows.
 #[test]
 fn a_create_that_may_fit_once_the_disk_is_read_awaits_the_reading() {
-    let mut rig = Rig::with(HostPolicy {
+    let mut rig = Rig::with(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: 0,
             reserve_inodes: 0,

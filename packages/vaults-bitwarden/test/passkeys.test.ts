@@ -134,6 +134,8 @@ describe("Bitwarden passkeys", () => {
         userName: "person@example.test",
         userDisplayName: "A Person",
         signCount: 0,
+        backupEligibility: true,
+        backupState: true,
       },
       {
         credentialId: IMPORTED_ID,
@@ -142,6 +144,8 @@ describe("Bitwarden passkeys", () => {
         userName: "person@example.test",
         userDisplayName: "A Person",
         signCount: 7,
+        backupEligibility: true,
+        backupState: true,
       },
     ]);
     // The handed-out key signs like the stored one.

@@ -101,7 +101,24 @@ pub fn kept(device: &Path, timeout: Duration) -> io::Result<Option<Watchdog>> {
 /// that and closes it; a [`Barrier`] sent after it shows when systemd has
 /// done one or the other.
 pub fn keep(socket: &str, name: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
-    notify(socket, &format!("FDSTORE=1\nFDNAME={name}\nFDPOLL=0\n"), fd)
+    notify(
+        socket,
+        &format!("FDSTORE=1\nFDNAME={name}\nFDPOLL=0\n"),
+        Some(fd),
+    )
+}
+
+/// Feeds systemd's watchdog of the service (`WATCHDOG=1`), through its
+/// notification socket `socket`, without waiting for systemd to take it
+/// (ADR 26: the guard of a host that shares its machine feeds this one
+/// instead of the machine's).
+///
+/// # Errors
+///
+/// When the message cannot be sent, as when systemd has not taken those
+/// sent before it ([`io::ErrorKind::WouldBlock`]).
+pub fn ping(socket: &str) -> io::Result<()> {
+    notify(socket, "WATCHDOG=1\n", None)
 }
 
 /// A barrier sent to systemd (`BARRIER=1`, as `sd_notify_barrier` sends
@@ -123,7 +140,7 @@ impl Barrier {
     /// sent before it ([`io::ErrorKind::WouldBlock`]).
     pub fn send(socket: &str) -> io::Result<Self> {
         let (reader, writer) = std::io::pipe()?;
-        notify(socket, "BARRIER=1\n", writer.as_fd())?;
+        notify(socket, "BARRIER=1\n", Some(writer.as_fd()))?;
         // Only systemd's end is left, so the pipe hangs up once it closes it.
         drop(writer);
         Ok(Self(reader))
@@ -151,7 +168,7 @@ impl Barrier {
 /// when systemd's queue is full: systemd waits on the same busy machine
 /// as everything else, and the guard asks it from the step that feeds the
 /// watchdog, which must not wait; it asks again later.
-fn notify(socket: &str, message: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
+fn notify(socket: &str, message: &str, fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
     let address = match socket.strip_prefix('@') {
         Some(abstract_name) => SocketAddrUnix::new_abstract_name(abstract_name.as_bytes())?,
         None if socket.starts_with('/') => SocketAddrUnix::new(socket)?,
@@ -168,10 +185,12 @@ fn notify(socket: &str, message: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
         SocketFlags::CLOEXEC,
         None,
     )?;
-    let fds = [fd];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
+    let fds = fd.map(|fd| [fd]);
+    if let Some(fds) = &fds
+        && !control.push(SendAncillaryMessage::ScmRights(fds))
+    {
         return Err(io::Error::other("no room for the file descriptor"));
     }
     let sent = sendmsg_addr(
@@ -250,21 +269,40 @@ pub fn stored(name: &str, identity: Identity) -> io::Result<bool> {
 /// then refuses, and logs, from a process that is not the service's main
 /// one.
 fn listing(unit: &str, user: bool) -> Command {
-    let mut list = Command::new("systemd-analyze");
-    for passed in [
-        "NOTIFY_SOCKET",
-        "LISTEN_PID",
-        "LISTEN_FDS",
-        "LISTEN_FDNAMES",
-    ] {
-        list.env_remove(passed);
-    }
+    let mut list = systemd_tool("systemd-analyze");
     if user {
         list.arg("--user");
     }
     list.args(["fdstore", "--json=short", unit])
         .stdin(Stdio::null());
     list
+}
+
+/// Runs `systemctl` with `args` and waits for it: the stop hook's and the
+/// hand-over's of a shared machine's guard (ADR 26), never the guard's.
+///
+/// # Errors
+///
+/// When it cannot be run.
+pub fn systemctl(args: &[&str]) -> io::Result<std::process::Output> {
+    let mut command = systemd_tool("systemctl");
+    command.args(args).stdin(Stdio::null());
+    command.output()
+}
+
+/// systemd's tool `program`, without the notification socket or the
+/// descriptors systemd passed this process (see [`listing`]).
+fn systemd_tool(program: &str) -> Command {
+    let mut tool = Command::new(program);
+    for passed in [
+        "NOTIFY_SOCKET",
+        "LISTEN_PID",
+        "LISTEN_FDS",
+        "LISTEN_FDNAMES",
+    ] {
+        tool.env_remove(passed);
+    }
+    tool
 }
 
 /// The service a process in the cgroup `cgroup` (as `/proc/<pid>/cgroup`
