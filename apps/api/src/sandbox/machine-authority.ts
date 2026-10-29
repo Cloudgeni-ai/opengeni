@@ -17,9 +17,11 @@
 // enrollments:manage: a read-only delegation never becomes a machine write.
 // Keys, services and agents acting as themselves are refused as before.
 
-import type { ResourceAuthorityScope } from "@opengeni/contracts";
+import type { Permission, ResourceAuthorityScope } from "@opengeni/contracts";
 import {
   hasPermission,
+  missingPermissionOf,
+  MissingPermissionRefusal,
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
@@ -66,10 +68,7 @@ export async function requireMachineAccessGrant(
   workspaceId: string,
   permission: "enrollments:read",
 ): Promise<AccessGrantAuthorization> {
-  const missing = (error: unknown, needed: string) =>
-    error instanceof HTTPException &&
-    error.status === 403 &&
-    error.message === `missing permission: ${needed}`;
+  const missing = (error: unknown, needed: Permission) => missingPermissionOf(error) === needed;
   try {
     return await requireAccessGrantAuthorization(c, deps, workspaceId, permission);
   } catch (error) {
@@ -79,7 +78,9 @@ export async function requireMachineAccessGrant(
     return await requireAccessGrantAuthorization(c, deps, workspaceId, "enrollments:manage");
   } catch (error) {
     if (missing(error, "enrollments:manage")) {
-      throw new HTTPException(403, { message: NO_MACHINE_ACCESS });
+      throw new MissingPermissionRefusal("enrollments:read", {
+        message: NO_MACHINE_ACCESS,
+      });
     }
     throw error;
   }
@@ -143,6 +144,8 @@ export function requireMachineScopeAuthority(
 /** Changing who can use a machine stays with workspace machine managers. */
 export function requireMachineAudienceAuthority(authorization: AccessGrantAuthorization): void {
   if (!holds(authorization, "enrollments:manage")) {
-    throw new HTTPException(403, { message: MACHINE_AUDIENCE_REFUSAL });
+    throw new MissingPermissionRefusal("enrollments:manage", {
+      message: MACHINE_AUDIENCE_REFUSAL,
+    });
   }
 }

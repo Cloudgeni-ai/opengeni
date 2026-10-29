@@ -23,6 +23,14 @@ export type SiteViewProps = {
   toolBridge?: SiteToolBridgeFactory | undefined;
   /** Who is viewing, answered to the Site's `site.viewer`. */
   viewer?: SiteViewer | undefined;
+  /**
+   * The Site's own address (`/admin?tab=2`), answered to `site.location`;
+   * with `onSiteLocationChange` the host keeps it, for example in its URL.
+   * Omit both and the view keeps it itself, starting at `/`.
+   */
+  siteLocation?: string | undefined;
+  /** The Site moved itself with `site.navigate`. */
+  onSiteLocationChange?: ((href: string, options: { replace: boolean }) => void) | undefined;
   theme?: "light" | "dark" | undefined;
   /** Shown instead of the archived notice; the console links to its full page. */
   archivedMessage?: string | undefined;
@@ -57,6 +65,11 @@ export type SiteViewProps = {
   watch?: "live" | "reconnecting" | undefined;
   /** Drawn instead of the version badge, for example a version history menu. */
   versionControl?: ReactNode | undefined;
+  /**
+   * The toolbar's first control, for example a Back to the page the Site was
+   * opened from. It shows while the Site loads or can't be shown, too.
+   */
+  toolbarStart?: ReactNode | undefined;
   /** Host-controlled full screen; omit to let the frame manage it. */
   fullScreen?: boolean | undefined;
   onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
@@ -73,6 +86,8 @@ export function SiteView({
   siteId,
   toolBridge,
   viewer,
+  siteLocation,
+  onSiteLocationChange,
   theme,
   archivedMessage,
   showTitle = true,
@@ -84,6 +99,7 @@ export function SiteView({
   versionId,
   watch,
   versionControl,
+  toolbarStart,
   fullScreen,
   onFullScreenChange,
   className,
@@ -176,17 +192,31 @@ export function SiteView({
         : undefined,
     [content, siteId, toolBridge],
   );
+  // Without the Site there is no toolbar, but its first control stays, so a
+  // Back never disappears while the Site loads or fails.
+  const withStart = (state: ReactNode) =>
+    toolbarStart ? (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-12 shrink-0 items-center border-b border-border/80 px-3 sm:px-4">
+          {toolbarStart}
+        </div>
+        {state}
+      </div>
+    ) : (
+      state
+    );
   if (error)
-    return (
+    return withStart(
       <ArtifactProblem
         view={artifactLoadErrorView(t, error, "site", labels)}
         onRetry={() => void load()}
-      />
+      />,
     );
-  if (!snapshot || !content) return <ArtifactLoading label={loadingLabel ?? labels.loadingSite} />;
+  if (!snapshot || !content)
+    return withStart(<ArtifactLoading label={loadingLabel ?? labels.loadingSite} />);
   if (snapshot.detail.artifact.status === "archived")
-    return (
-      <div className="p-4 text-sm text-fg-muted">{archivedMessage ?? labels.siteArchived}</div>
+    return withStart(
+      <div className="p-4 text-sm text-fg-muted">{archivedMessage ?? labels.siteArchived}</div>,
     );
   const liveState: SiteLiveState | undefined =
     versionId === undefined && watch === undefined
@@ -209,9 +239,12 @@ export function SiteView({
           : undefined
       }
       headerControls={versionControl}
+      {...(toolbarStart ? { toolbarStart } : {})}
       liveState={liveState}
       toolBridge={bridge}
       viewer={viewer}
+      {...(siteLocation !== undefined ? { siteLocation } : {})}
+      {...(onSiteLocationChange ? { onSiteLocationChange } : {})}
       connectedToolCount={content.requestedTools.length}
       theme={theme}
       {...(showToolbar !== undefined ? { showToolbar } : {})}

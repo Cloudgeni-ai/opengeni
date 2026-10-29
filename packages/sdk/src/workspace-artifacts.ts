@@ -46,6 +46,22 @@ export type SiteSidebarStateResponse = {
   archivedAt: string | null;
 };
 
+/** Move a Site's sidebar row from one project to another; null is Default. */
+export type UpdateSiteProjectRequest = {
+  fromChannelId: string | null;
+  channelId: string | null;
+};
+
+/** The result of moving a Site's sidebar row. */
+export type SiteProjectResponse = {
+  siteId: string;
+  channelId: string | null;
+  /** The Site itself moved: the row was its own project's. */
+  siteMoved: boolean;
+  /** The row's conversations that moved with it. */
+  movedSessionIds: string[];
+};
+
 /** This person's latest recorded open of a Site, which orders its sidebar row. */
 export type SiteOpenedResponse = {
   /** When the open was recorded (ISO 8601). */

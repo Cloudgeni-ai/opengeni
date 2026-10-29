@@ -988,6 +988,35 @@ describe("observability", () => {
     });
   });
 
+  test("public structured logs admit a desktop app version, never other text", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      for (const clientAppVersion of [
+        "0.1.32",
+        "1.2.3-beta.4",
+        "unknown",
+        "0.1",
+        "x0.1.32",
+        "0.1.32 (Mac)",
+      ]) {
+        obs.warn("version", { clientAppVersion });
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(observed.map((line) => JSON.parse(line).clientAppVersion ?? null)).toEqual([
+      "0.1.32",
+      "1.2.3-beta.4",
+      "unknown",
+      null,
+      null,
+      null,
+    ]);
+  });
+
   test("public structured logs admit projected web client error text and nothing raw", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;

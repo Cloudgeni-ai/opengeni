@@ -5,6 +5,7 @@
  * workspace's sidebar order for next and previous chat. It is a cache for speed, never a source of authority: opening a chat
  * still goes through the normal authorized reads.
  */
+import type { SessionAvatar } from "@opengeni/sdk";
 import { useSyncExternalStore } from "react";
 import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
 
@@ -12,6 +13,8 @@ export type ChatRecord = {
   id: string;
   workspaceId: string;
   title: string;
+  /** The chat's avatar, drawn as the sidebar draws it; null when it has none. */
+  avatar: SessionAvatar | null;
   updatedAt: number;
   pinned: boolean;
   archived: boolean;
@@ -42,7 +45,26 @@ function storageKey(subjectId: string): string {
   return `opengeni.recentChats.${subjectId}`;
 }
 
-type StoredRecent = { id: string; workspaceId: string; title: string; at: number };
+type StoredRecent = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  at: number;
+  avatar?: SessionAvatar | undefined;
+};
+
+const AVATAR_KINDS = new Set(["emoji", "icon", "letters", "image"]);
+
+/** A stored avatar, or undefined when it is missing or not one this version draws. */
+function storedAvatar(value: unknown): SessionAvatar | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const kind = (value as { kind?: unknown }).kind;
+  return typeof kind === "string" && AVATAR_KINDS.has(kind) ? (value as SessionAvatar) : undefined;
+}
+
+function sameAvatar(a: SessionAvatar | null, b: SessionAvatar | null): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
 
 function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
   try {
@@ -60,7 +82,16 @@ function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
       ) {
         return [];
       }
-      return [{ id: entry.id, workspaceId: ws, title: entry.title, at: entry.at }];
+      const avatar = storedAvatar(entry.avatar);
+      return [
+        {
+          id: entry.id,
+          workspaceId: ws,
+          title: entry.title,
+          at: entry.at,
+          ...(avatar ? { avatar } : {}),
+        },
+      ];
     });
   } catch {
     return [];
@@ -110,6 +141,7 @@ function directory(subjectId: string): DirectoryState {
             id: item.id,
             workspaceId: item.workspaceId,
             title: item.title,
+            avatar: item.avatar ?? null,
             updatedAt: item.at,
             pinned: false,
             archived: false,
@@ -138,7 +170,15 @@ function persistRecent(subjectId: string, state: DirectoryState): void {
   const stored: StoredRecent[] = state.recent.flatMap((id) => {
     const record = state.rows.get(id);
     return record
-      ? [{ id, workspaceId: record.workspaceId, title: record.title, at: record.updatedAt }]
+      ? [
+          {
+            id,
+            workspaceId: record.workspaceId,
+            title: record.title,
+            at: record.updatedAt,
+            ...(record.avatar ? { avatar: record.avatar } : {}),
+          },
+        ]
       : [];
   });
   try {
@@ -153,6 +193,7 @@ export function chatRecordFromRow(row: SessionListRow, readAt: number = Date.now
     id: row.id,
     workspaceId: row.workspaceId,
     title: sessionDisplayTitle(row),
+    avatar: row.avatar ?? null,
     updatedAt: Date.parse(row.updatedAt) || 0,
     pinned: Boolean(row.pinned),
     archived: Boolean(row.archived),
@@ -200,6 +241,7 @@ export function rememberChats(subjectId: string, rows: readonly SessionListRow[]
       (current &&
         current.row &&
         current.title === next.title &&
+        sameAvatar(current.avatar, next.avatar) &&
         current.updatedAt === next.updatedAt &&
         current.pinned === next.pinned &&
         current.archived === next.archived &&

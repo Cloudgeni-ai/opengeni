@@ -13,6 +13,8 @@ import {
 } from "../../lib/turn-failure-analytics";
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
+import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
+import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -29,6 +31,7 @@ export function FailedSessionBanner({
   onChooseModel,
   workspaceId,
   canBuyCredits = false,
+  onAddCredits,
   canConnectModel = false,
   modelChanged = false,
   canChooseModel = false,
@@ -39,6 +42,7 @@ export function FailedSessionBanner({
   sandboxRecovery,
   analyticsKey,
   shownInTimeline = false,
+  codexUsage,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
@@ -50,6 +54,8 @@ export function FailedSessionBanner({
   onChooseModel?: ((modelId: string) => void) | undefined;
   workspaceId?: string | undefined;
   canBuyCredits?: boolean | undefined;
+  /** Opens the add-credits prompt in the chat; without it, Add credits opens billing. */
+  onAddCredits?: (() => void) | undefined;
   canConnectModel?: boolean | undefined;
   modelChanged?: boolean | undefined;
   canChooseModel?: boolean | undefined;
@@ -72,6 +78,11 @@ export function FailedSessionBanner({
    * recovery actions here instead of a second headline and Details.
    */
   shownInTimeline?: boolean | undefined;
+  /**
+   * When the ChatGPT/Codex plan is out of usage: say when it resets, with a
+   * "Continue at reset" switch in place of Retry.
+   */
+  codexUsage?: CodexUsageChoice | undefined;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
@@ -90,15 +101,21 @@ export function FailedSessionBanner({
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
   const offerCredits = Boolean(workspaceId && canBuyCredits);
   const offerConnect = Boolean(workspaceId && canConnectModel);
-  const headline = freeModelLimit
-    ? freeModelDailyLimitReason({
-        modelChanged,
-        canBuyCredits: offerCredits,
-        canConnectModel: offerConnect,
-        subscriptions,
-        canChooseModel: hasModelPicker ?? canChooseModel,
-      })
-    : reason;
+  const codexUsageFailure =
+    codexUsage && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure
+      ? codexUsage
+      : null;
+  const headline = codexUsageFailure
+    ? `Codex usage limit reached. ${codexUsageFailure.resetText}`
+    : freeModelLimit
+      ? freeModelDailyLimitReason({
+          modelChanged,
+          canBuyCredits: offerCredits,
+          canConnectModel: offerConnect,
+          subscriptions,
+          canChooseModel: hasModelPicker ?? canChooseModel,
+        })
+      : reason;
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -109,13 +126,23 @@ export function FailedSessionBanner({
       return actions.onRetry();
     },
   };
-  const retryActions =
-    trackedActions &&
+  // Retry would only hit the same limit: the switch runs the turn again
+  // once the limit resets. Another model from the picker continues at once.
+  const retryActions = codexUsageFailure ? (
+    <>
+      <ContinueAtResetSwitch {...codexUsageFailure} />
+      {codexUsageFailure.error ? (
+        <p role="alert" className="order-last basis-full text-xs text-fg-muted">
+          {codexUsageFailure.error}
+        </p>
+      ) : null}
+    </>
+  ) : trackedActions &&
     !failure.safetyRefusal &&
     failure.failureCode !== "knowledge_learning_scope_changed" &&
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
-      <FailedSessionActions {...trackedActions} />
-    ) : null;
+    <FailedSessionActions {...trackedActions} />
+  ) : null;
   if (shownInTimeline && compaction && !structuralFailure) {
     const recovery = sandboxRecovery ? (
       <SandboxRecoveryActions
@@ -164,7 +191,11 @@ export function FailedSessionBanner({
         {freeModelLimit && !modelChanged && workspaceId ? (
           <>
             {offerCredits ? (
-              <BuyCreditsLink workspaceId={workspaceId} primary={!offerConnect} />
+              <BuyCreditsLink
+                workspaceId={workspaceId}
+                primary={!offerConnect}
+                onAddCredits={onAddCredits}
+              />
             ) : null}
             {offerConnect ? (
               <ConnectModelLink
@@ -186,13 +217,17 @@ export function FailedSessionBanner({
                 Use {switchTo.label}
               </Button>
               {workspaceId && canBuyCredits ? (
-                <BuyCreditsLink workspaceId={workspaceId} primary={false} />
+                <BuyCreditsLink
+                  workspaceId={workspaceId}
+                  primary={false}
+                  onAddCredits={onAddCredits}
+                />
               ) : null}
             </>
           ) : workspaceId && canBuyCredits ? (
-            <BuyCreditsLink workspaceId={workspaceId} primary />
+            <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
           ) : workspaceId && canConnectModel ? (
-            <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
+            <ConnectModelLink workspaceId={workspaceId} label="Use your own provider account" />
           ) : null
         ) : sandboxRecovery ? (
           <SandboxRecoveryActions
@@ -211,7 +246,31 @@ export function FailedSessionBanner({
 }
 
 /** The banner's one unblocking action is the primary; next to Connect it is the outline. */
-function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary: boolean }) {
+function BuyCreditsLink({
+  workspaceId,
+  primary,
+  onAddCredits,
+}: {
+  workspaceId: string;
+  primary: boolean;
+  onAddCredits?: (() => void) | undefined;
+}) {
+  if (onAddCredits) {
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant={primary ? "default" : "outline"}
+        onClick={() => {
+          noteTurnFailureAction("buy_credits");
+          onAddCredits();
+        }}
+        {...analyticsAction("buy_credits")}
+      >
+        Add credits
+      </Button>
+    );
+  }
   return (
     <Button asChild size="sm" variant={primary ? "default" : "outline"}>
       <Link
@@ -221,7 +280,7 @@ function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary
         onClick={() => noteTurnFailureAction("buy_credits")}
         {...analyticsAction("buy_credits")}
       >
-        Buy credits
+        Add credits
       </Link>
     </Button>
   );

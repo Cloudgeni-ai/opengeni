@@ -638,7 +638,6 @@ An effective first-party permission ceiling of `[]` remains zero delegated
 Opengeni authority. Runtime skips only remote Opengeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
-See [automation defaults](automations.md#empty-first-party-authority).
 
 Managed password sign-ups require email verification outside local development
 unless the operator explicitly disables `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`.
@@ -1072,11 +1071,10 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
 The `@opengeni/sdk` major is the API compatibility major. Within a major the
 public surface (SDK-reachable `/v1` routes and their shapes, the session event
-envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, automation
-ingress) evolves additively and both sides are tolerant readers. Breaking
-changes need a deprecation with `Deprecation`/`Sunset` headers, at least 90
-days on the managed service, and a new major. `bun run check:public-api` and
-`bun run test:sdk-compat` enforce it in CI.
+envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
+routes) evolves additively and both sides are tolerant readers. Breaking
+changes need a deprecation, at least 90 days on the managed service, and a new
+major. `bun run check:public-api` enforces it in CI.
 
 Official builds expose `serverVersion` in health and client config; nothing
 negotiates at runtime.
@@ -1092,7 +1090,7 @@ the local switch; activation switches gate producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
-`scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
+and `scripts/public-api/`.
 
 `embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
 narrow. `/session-proxy` adds grants, transactional source authorization, session-bound
@@ -1577,7 +1575,7 @@ from old workers during a rolling deployment.
 Admission and provenance differ; logical turn, attempt, event, recovery, and
 usage boundaries remain shared. No parallel agent engine is created.
 
-Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
+Canonical: [`goals.md`](goals.md), [`automations-and-events.md`](design/automations-and-events.md),
 [`nested-agent-depth.md`](nested-agent-depth.md), and
 [`reliability-fixes.md`](reliability-fixes.md).
 
@@ -1613,10 +1611,9 @@ ceilings apply; defaults never rewrite sessions or accepted attempts.
 
 Fresh provider-qualified Gateway/OpenRouter/Opper selections recheck the exact active
 slug under the catalog's shared transaction lock before committing a session,
-turn, task, trigger, binding, or occurrence. This covers fresh sessions,
-explicit switches, new/materially reaccepted schedules, automation triggers,
-PR-review bindings, and fresh generated-session occurrences. Automation adapter
-templates own acceptance; parameters cannot bypass this gate. Deployment-curated
+turn, task, or occurrence. This covers fresh sessions, explicit switches,
+new/materially reaccepted schedules, and fresh generated-session occurrences.
+Deployment-curated
 workspace models retain public provider prefixes but have no mutable custom row
 and bypass this fence. Retirement holds the exclusive counterpart. Accepted
 work, exact replays, same-model/existing-session continuations, and
@@ -1699,6 +1696,17 @@ and validate epochs/authority.
 Nothing from a vault is injected into compute. `{{secret:…}}` references in
 tool arguments resolve per call at the execution boundary, so vault and policy
 changes apply to the next command without restarting a box.
+Opengeni's own hand-off tools (sessions, messages, goals, schedules, notes,
+Knowledge, artifacts, notifications and any new first-party tool) never resolve
+them: they store or forward reference text, and the receiving work resolves it
+at its own execution boundary. Only a short, justified list of first-party
+tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
+Opt-in credential profiles (workspace, plus session additions children inherit)
+name variables whose references the attempt's resolver turns into values for
+each command's own environment at the same boundary
+(`packages/runtime/src/sandbox/credential-profile-delivery.ts`); nothing is
+written to config or kept on the box, and the values are masked like any other
+resolved value.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -2602,6 +2610,26 @@ without it (the machine was removed there), the status is `not_connected` with
 `errorCode: "removed"` (shown as computer use off) and turning it on enrolls
 afresh with a new token instead of reusing the stale local connection; a read that fails (network,
 sign-in, server error) is reported as such and never taken as removal.
+While it is on but not yet usable (`reconnecting`), the status says what it
+waits for (`waitingOn`: the agent starting, another agent copy, the server
+seeing it online, a sign-in the server turned down, or a move into the app),
+read from the agent's service state and the authentication line under each
+connection in `opengeni-agent connections`. `useThisComputer` marks such a
+wait `stalled` after a minute, and the switch then shows that reason with
+**Try again**, which restarts an agent that is already running. A connection
+the agent has stopped retrying (`Reconnect required`) is
+`errorCode: "reconnect_required"` at once, and turning on enrolls it again.
+When the refused connection was made in another workspace and this one uses
+it (`alsoIn`) while the server still lists it there, turning on enrolls it
+again in the workspace where it was made (a personal computer has one live
+connection on a server) and lets this workspace, and every other one that used
+it, use the new connection. A computer removed where it was made is never
+enrolled there again: it is set up in this workspace instead, as it is when
+that workspace no longer allows it. A listing that can't be read asks to try
+again, and a grant refused here after enrolling there is reported as such.
+`summary()` reports such a connection as `needsReconnect`, and the menu bar
+says the computer needs reconnecting, with **Reconnect This Computer…**
+opening the app, instead of "connecting…".
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
@@ -2876,7 +2904,20 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Conversation, source, tool, and error text is not centrally regex-redacted.
+  Known secret values (what an attempt's references resolve to and the
+  credentials Opengeni injects) are replaced by their references in tool
+  results, model input and stored conversation text before storage and before
+  the model sees them (docs/secrets.md, Masking). Other conversation, source,
+  tool, and error text is not regex-redacted, with one narrow exception: tool
+  results and their stored copies also mask high-precision secret shapes (URL
+  passwords, connection-string passwords, Azure keys, PEM private keys and
+  well-known token formats), capture each value into the root session's Task
+  vault and write its reference, or a `[masked <kind>]` marker when capture is
+  not possible. Known-value and shape masking supersede the 5 August 2026
+  "keep content exact" decision for these two cases, approved on 26 October
+  2026. A workspace admin can remove a known secret or a built-in secret
+  shape from chosen sessions' stored history afterwards; see
+  docs/secrets.md, "Removing secrets from stored history".
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
@@ -2995,8 +3036,9 @@ Topics: [`README.md`](README.md).
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
-| Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
+| Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
+| Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |
@@ -3020,6 +3062,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Vaults, `{{secret:…}}` references, secret delivery, or secret reads | `packages/contracts/src/vaults.ts`, `packages/core/src/domain/vaults/`, `packages/db/src/vaults.ts`, `packages/vaults/`, `apps/api/src/routes/vaults.ts` | [`secrets.md`](secrets.md) |
+| Credential profiles (per-command CLI credentials) | `packages/contracts/src/credential-profiles.ts`, `packages/core/src/domain/credential-profiles.ts`, `packages/db/src/credential-profiles.ts`, `packages/runtime/src/sandbox/credential-profile-delivery.ts`, `apps/api/src/routes/credential-profiles.ts` | [`secrets.md`](secrets.md#credential-profiles) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
 | Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 
@@ -3052,16 +3095,15 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
-| Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
-| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
+| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
-| Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `packages/react/src/app/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
@@ -3082,59 +3124,21 @@ persistent checkpoint/lock volume; the independent operator image is published
 separately from runtime images. See [database backups](backups.md) for retention,
 validation, isolated restoration and coverage limits.
 
-The standalone merge batcher (`scripts/merge-batcher/`) is an operational
-controller, not part of the API or Temporal workers. Active mode requires an
-explicitly operator-initialized ledger, never automatically recreated. Initialization
-requires proven stopped/zero-instance operation. The controller reconstructs state
-from Git objects and GitHub, builds one merge commit per admitted PR without checking
-out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
-run-attempt receipts distinguish assertion failures from infrastructure and
-cancellation. Landing requires the exact tested tree, a fast-forward base fence and
-a final head/readiness reread. Normally the tested tip itself lands; a narrowly
-verified merge-main-only head refresh may append same-tree ancestry commits for
-native PR merge identity, retaining immutable tested-tip/run evidence and explicit
-old/new-head linkage. `scripts/merge-batcher/head-refresh.ts` proves clean main-only
-merge ancestry and whole-batch tree identity; the final executor recomputes it
-before CAS. Late PR-head races require post-land reconciliation,
-never a claim that the newer head was tested. Post-merge CI retains its full test
-inventory and independent service/e2e/image gates. Main pushes can reuse complete
-unit coverage from a successful Batch attempt only with identical-tree, canonical
-manifest, exact attempt and archive-digest proof (`scripts/ci/reuse-batch-units.ts`).
-Impact-selected subsets or missing/unknown evidence run the ordinary main units;
-the full-green release receipt contract is unchanged.
-Separately, a non-Version, non-control-plane, non-CI-definition batcher landing whose exact tree passed
-a trusted `queue/live` Batch attempt skips main's test lanes by attestation
-(`scripts/ci/batch-attestation.ts`); artifacts, images and the unchanged receipts
-still run; release admission refuses such receipts. This is a documented
-coverage reduction (see docs/merge-batcher.md).
-Candidate plan/source/selected-unit/ready success may land on red or unknown
-full-main CI. A two-hour latency breaker retains raw measurements and deducts only
-bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
-trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
-parked without attribution, while unrelated ready heads proceed. Parking survives
-main advancement and label churn for the same PR head; new heads or explicit native
-auto-merge re-enables after parking can re-enter. Intake accepts a current native
-auto-merge request or queue-ready label with exact-head checks. Parking durably
-disables auto-merge; native MERGED readback is distinct from ledger landing/closure.
-Comparable base evidence and trusted same-way failure fingerprints are not yet
-available; neither full-main success nor matching job names proves member blame.
-`queue-health.yml` records provider batch timing separately from the controller's
-admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
-writes. The separately authorized CI-shadow stage pushes candidate refs only,
-with one hosted candidate in flight; it never updates main or PR readiness.
-Its portable container and deployment/rollback boundary are documented in
-[merge batcher](merge-batcher.md); the historical measurements and inactive
-native/vendor configurations remain in [merge queue](merge-queue.md).
-The offline [administration bundle](merge-batcher-admin/README.md) keeps legacy
-version 3 plans verifiable and offers explicit version 4 App-only plans with an
-App-bound guiding check. Both retain exact saved Manual rollback; an offline
-plan is not authorization or qualification for a live policy transition.
+The merge batcher (`scripts/batcher/`, run by `.github/workflows/merge-batcher.yml`)
+is a stateless GitHub Actions pass, not part of the API or Temporal workers. Each
+pass reads the queued PRs, the `batch/<id>` branch and that branch's CI from
+GitHub, takes the next step and exits. It builds a candidate with GitHub's merge
+API, tests it with ordinary `ci.yml` planned from the candidate's base, and lands
+each member as one squash commit through the pull request merge API after checking
+that every landed tree equals the tested tree. Main runs the full suite on a
+cadence (`scripts/ci/main-approval-superseded.ts`); that run, not a batch, is the
+release gate. See [merge batcher](merge-batcher.md) and [main CI](main-ci.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
-| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
-| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
+| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`main-ci.md`](main-ci.md) |
+| Merge batcher and batch CI | `scripts/batcher/`, `.github/workflows/merge-batcher.yml`, `.github/workflows/ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---
@@ -3289,3 +3293,12 @@ post-commit fanout uses the existing durable control outboxes. Shared-chat contr
 authority is independent of creator identity. Restore never resumes, and explicit
 Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
 background-command semantics.
+
+Teams group chats use a separate native workspace-visible session namespace.
+The Connector roster freezes exact Teams actor-to-Opengeni human mappings in
+`teams_bot_routes.group_audience`; a membership revision fences roster lookup
+against authenticated membership changes. Changes retire the old route rather
+than transferring history. Native admission rechecks all linked members, sender
+permissions and the exact group allowlist; each outbound part revalidates the
+provider roster. Personal routes and private-session authority remain separate.
+See [Teams release readiness](microsoft-teams-release-readiness.md).

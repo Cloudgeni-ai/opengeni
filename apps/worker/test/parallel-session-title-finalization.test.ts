@@ -194,6 +194,7 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
           withSessionTitleProviderRequestContext: async (operation: () => Promise<unknown>) =>
             operation(),
           finalizeTurnOpStreamOps: async () => {},
+          compactionModeOptions: {},
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]),
       ).rejects.toBe(unavailable);
       expect(order).toEqual(

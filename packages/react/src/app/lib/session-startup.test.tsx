@@ -187,3 +187,29 @@ test("reopening a stalled queued session keeps the wait chip absent", () => {
     ),
   ).toBeNull();
 });
+
+test("a chat in a panel times its own start under a shell that follows no chat", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const value = session();
+  // The Site view's shell has no page chat; the side chat brings its own clock.
+  const render = (panelClock: boolean) => (
+    <SessionStartupProvider session={null}>
+      {panelClock ? (
+        <SessionStartupProvider session={value}>
+          <Probe value={value} />
+        </SessionStartupProvider>
+      ) : (
+        <Probe value={value} />
+      )}
+    </SessionStartupProvider>
+  );
+  try {
+    await act(async () => root.render(render(false)));
+    expect(container.textContent).toBe("");
+    await act(async () => root.render(render(true)));
+    expect(container.textContent).toBe("starting");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

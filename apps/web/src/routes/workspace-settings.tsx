@@ -14,7 +14,7 @@ import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { MeetingDefaultsSection } from "@/components/meetings/meeting-defaults-section";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
-import { DefaultMachineRow } from "@/components/settings/default-machine-row";
+import { DefaultMachineRow, MyDefaultMachineRow } from "@/components/settings/default-machine-row";
 import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
 import { WorkspaceSandboxImageRow } from "@/components/workspace-sandbox-image-row";
 import {
@@ -224,20 +224,15 @@ function OperationalWorkspaceSettingsRoute({
       ) : null}
 
       {section === "usage" ? (
-        personal ? (
-          <Notice tone="muted" title="Budgets apply to shared workspaces">
-            Your Personal workspace uses {organizationLabel}'s credits without a monthly budget.
-          </Notice>
-        ) : (
-          <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
-            <LazyWorkspaceUsagePage
-              key={workspaceId}
-              workspaceId={workspaceId}
-              workspaceName={activeWorkspace?.name ?? "this workspace"}
-              organizationId={accountId}
-            />
-          </Suspense>
-        )
+        <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
+          <LazyWorkspaceUsagePage
+            key={workspaceId}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationId={accountId}
+            personalOrganizationLabel={personal ? organizationLabel : undefined}
+          />
+        </Suspense>
       ) : null}
 
       {section === "api-keys" ? (
@@ -483,6 +478,7 @@ function WorkspaceGeneralSettings({
           }
         />
         <DefaultMachineRow workspaceId={workspaceId} />
+        <MyDefaultMachineRow workspaceId={workspaceId} />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow

@@ -8,7 +8,8 @@ import { ErrorCode, Permission } from "@opengeni/contracts";
  *
  * - `code` is the public `ErrorEnvelope.code` (a closed enum).
  * - `reason` is `permission:<name>` when the refusal names a missing permission
- *   from the closed permission catalog, else the envelope's typed
+ *   from the closed permission catalog (as `details.permission`, or in a
+ *   legacy "missing permission: <name>" message), else the envelope's typed
  *   `details.code` when it is a short identifier, else `control:<code>` for a
  *   Connected Machine control failure, else `unclassified`.
  * - `fingerprint` is a one-way hash of the message with identifiers and
@@ -48,8 +49,14 @@ export function normalizeRejectionMessage(message: string): string {
 
 export function rejectionReasonFromMessage(message: string | undefined): string | null {
   if (!message) return null;
-  const permission = MISSING_PERMISSION.exec(message)?.[1];
-  return permission && PERMISSIONS.has(permission) ? `permission:${permission}` : null;
+  return permissionReason(MISSING_PERMISSION.exec(message)?.[1]);
+}
+
+/** `permission:<name>` for a permission from the closed catalog, else null. */
+function permissionReason(permission: unknown): string | null {
+  return typeof permission === "string" && PERMISSIONS.has(permission)
+    ? `permission:${permission}`
+    : null;
 }
 
 /** Classify a parsed `ErrorEnvelope`-shaped body. Unknown shapes still get a code. */
@@ -78,6 +85,7 @@ export function httpRejectionFactsFromEnvelope(
   return {
     code,
     reason:
+      permissionReason(details?.permission) ??
       rejectionReasonFromMessage(message) ??
       detailCode ??
       controlCode ??
@@ -92,9 +100,14 @@ export function httpRejectionFactsFromError(
   fallbackCode: string,
 ): HttpRejectionFacts {
   const message = error instanceof Error ? error.message : undefined;
+  const permission =
+    error && typeof error === "object" ? (error as { permission?: unknown }).permission : undefined;
   return {
     code: fallbackCode,
-    reason: rejectionReasonFromMessage(message) ?? UNCLASSIFIED_REJECTION_REASON,
+    reason:
+      permissionReason(permission) ??
+      rejectionReasonFromMessage(message) ??
+      UNCLASSIFIED_REJECTION_REASON,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
   };
 }

@@ -42,10 +42,8 @@ export type IncidentTelemetryResponderMetadata = {
   firstPartyMcpPermissions: readonly Permission[];
   rig: IncidentTelemetryRigMetadata | null;
   /**
-   * Vaults the responder reaches under the task's vault policy. The preflight
-   * contract still says "variable set" (`requiredVariableSetNames`,
-   * `requiredVariableNames`, route kind `variable_set`): those now name vaults
-   * and items, matched case-insensitively.
+   * Vaults the responder reaches under the task's vault policy, matched by
+   * name case-insensitively (vault and item names in the preflight).
    */
   vaults: readonly IncidentTelemetryVaultMetadata[];
   /** Exact durable session policy version, or null for a not-yet-created session. */
@@ -160,15 +158,13 @@ export function evaluateIncidentTelemetryPreflight(
   const vaultsByName = new Map(
     input.responder.vaults.map((vault) => [secretNameKey(vault.name), vault]),
   );
-  if (preflight.requiredVariableSetNames.some((name) => !vaultsByName.has(secretNameKey(name)))) {
+  if (preflight.requiredVaultNames.some((name) => !vaultsByName.has(secretNameKey(name)))) {
     return blocked("incident_responder_under_capable");
   }
   const reachableItemNames = new Set(
     input.responder.vaults.flatMap((vault) => vault.items.map((item) => secretNameKey(item.name))),
   );
-  if (
-    preflight.requiredVariableNames.some((name) => !reachableItemNames.has(secretNameKey(name)))
-  ) {
+  if (preflight.requiredSecretNames.some((name) => !reachableItemNames.has(secretNameKey(name)))) {
     return blocked("incident_responder_under_capable");
   }
 
@@ -179,10 +175,10 @@ export function evaluateIncidentTelemetryPreflight(
   if (route.kind === "first_party" && !selectedFirstPartyTools.has(route.tool)) {
     return blocked("incident_responder_under_capable");
   }
-  if (route.kind === "variable_set") {
-    const selected = vaultsByName.get(secretNameKey(route.variableSetName));
+  if (route.kind === "vault") {
+    const selected = vaultsByName.get(secretNameKey(route.vaultName));
     const names = new Set(selected?.items.map((item) => secretNameKey(item.name)) ?? []);
-    if (!selected || route.variableNames.some((name) => !names.has(secretNameKey(name)))) {
+    if (!selected || route.secretNames.some((name) => !names.has(secretNameKey(name)))) {
       return blocked("incident_responder_under_capable");
     }
   }

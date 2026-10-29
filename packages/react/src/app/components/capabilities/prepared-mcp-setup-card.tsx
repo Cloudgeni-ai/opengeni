@@ -84,6 +84,7 @@ function ScopedCard({ item, client, workspaceId, sessionId, canConfigure, onConf
       logo={null}
       typeLabel={t("sessionMcpCapabilityCard.mcpServer")}
       description={proposal.rationale}
+      clampDescription
       skill={false}
       expanded={false}
       complete={false}

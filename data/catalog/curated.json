@@ -457,6 +457,23 @@
       "description": "Jira issues and Confluence pages through Atlassian's hosted Rovo MCP server, scoped to what you can already see.",
       "category": "project-management",
       "featured": true,
+      "tier": "verified",
+      "provenance": "vendor-hosted:support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server",
+      "presentation": {
+        "providerName": "Atlassian",
+        "introduction": "Let agents work with the Jira and Confluence sites you can already access.",
+        "capabilities": [
+          {
+            "title": "Find and understand work",
+            "description": "Search Jira issues and Confluence pages, and use them as context for your work."
+          },
+          {
+            "title": "Update Jira and Confluence",
+            "description": "Create and update issues, add comments, and create or edit pages. You choose which actions need approval."
+          }
+        ],
+        "permissionSummary": "Atlassian asks you to approve access to the sites you choose. Agents only see what your Atlassian account can see. If connecting fails with a domain or policy error, an Atlassian organization admin must allow the Opengeni domain for the Rovo MCP server in Atlassian Administration."
+      },
       "documentationUrl": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
       "notes": [
         "Snapshot name was the bare domain 'jira.com'. Upstream discovery for atlassian.com no longer lists an MCP surface, so the Rovo server row is keyed to jira.com; the earlier atlassian.net row for the same endpoint is superseded by this one.",
@@ -482,6 +499,8 @@
       "category": "productivity",
       "featured": true,
       "official": false,
+      "tier": "verified",
+      "provenance": "vendor-hosted:developers.google.com/workspace/drive/api/reference/mcp",
       "mcpUrl": "https://drivemcp.googleapis.com/mcp/v1",
       "authKind": "oauth2",
       "scopesHint": [

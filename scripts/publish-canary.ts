@@ -122,10 +122,11 @@ export function planCanaryVersions(
 }
 
 type RegistryPackage = {
-  "dist-tags": { latest?: string; canary?: string };
+  "dist-tags": { latest?: string; canary?: string; "canary-backfill"?: string };
   versions: Record<
     string,
     {
+      gitHead?: unknown;
       dist?: {
         integrity?: string;
         attestations?: { url?: string; provenance?: { predicateType?: string } };
@@ -155,6 +156,79 @@ export class CanaryRegistryUnavailable extends Error {}
 
 /** npm accepted every write, but some versions were not readable within one confirmation window. */
 export class CanaryVisibilityPending extends Error {}
+
+// `canary` always names the newest published main source. A publication for an
+// older main commit (a staging deploy of an earlier source, a re-run attempt or
+// a late dispatch) still publishes its exact versions for pinning, but under
+// `canary-backfill`, so `npm install @opengeni/<pkg>@canary` never goes back.
+export const CANARY_BACKFILL_TAG = "canary-backfill";
+export type CanaryDistTag = "canary" | typeof CANARY_BACKFILL_TAG;
+const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
+/**
+ * `canary` moves only when the source descends from (or equals) the source of
+ * every version the tag currently names. Versions published before canaries
+ * recorded their source (`gitHead`) cannot be ordered and do not hold the tag.
+ */
+export function selectCanaryDistTag(
+  source: string,
+  taggedSources: readonly (string | undefined)[],
+  descends: (ancestor: string, descendant: string) => boolean,
+): CanaryDistTag {
+  if (!SOURCE_SHA_PATTERN.test(source)) throw new Error("Canary source identity is invalid");
+  for (const tagged of taggedSources) {
+    if (tagged === undefined || tagged === source) continue;
+    if (!SOURCE_SHA_PATTERN.test(tagged)) throw new Error("Canary tag source identity is invalid");
+    if (!descends(tagged, source)) return CANARY_BACKFILL_TAG;
+  }
+  return "canary";
+}
+
+/** Git ancestry on the controller's complete main history; unknown order fails closed. */
+export function canarySourceDescends(root: string, ancestor: string, descendant: string): boolean {
+  const result = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
+  });
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  throw new Error("Canary tag source order cannot be established; no publication was attempted");
+}
+
+/** The recorded source of each distinct version the `canary` tag names now. */
+export async function currentCanarySources(
+  metadata: ReadonlyMap<string, RegistryPackage>,
+  read: typeof readRegistryPackage = readRegistryPackage,
+  custody?: CanaryCustody,
+): Promise<(string | undefined)[]> {
+  const tagged = new Map<string, string>();
+  for (const [name, pkg] of metadata) {
+    const version = pkg["dist-tags"].canary;
+    if (version !== undefined && !tagged.has(version)) tagged.set(version, name);
+  }
+  const sources: (string | undefined)[] = [];
+  for (const [version, name] of tagged) {
+    // Canary versions created before the canary versioning scheme stay unordered.
+    if (!/^\d+\.\d+\.\d+-canary\.(0|[1-9]\d*)$/.test(version)) {
+      sources.push(undefined);
+      continue;
+    }
+    const current = await read(name, fetch, registry, {
+      revalidate: true,
+      receiptVersion: version,
+      signal: AbortSignal.timeout(CANARY_RECEIPT_REQUEST_TIMEOUT_MS),
+      custody,
+    });
+    const gitHead = current.versions[version]?.gitHead;
+    if (gitHead !== undefined && gitHead !== null && typeof gitHead !== "string") {
+      throw new Error(`Canary tag source identity is invalid for ${name}`);
+    }
+    sources.push(gitHead ?? undefined);
+  }
+  return sources;
+}
 
 type RegistryReadOptions = {
   signal?: AbortSignal;
@@ -281,7 +355,9 @@ export async function readRegistryPackage(
       (Object.hasOwn(tags, "latest") &&
         typeof (tags as Record<string, unknown>).latest !== "string") ||
       (Object.hasOwn(tags, "canary") &&
-        typeof (tags as Record<string, unknown>).canary !== "string")
+        typeof (tags as Record<string, unknown>).canary !== "string") ||
+      (Object.hasOwn(tags, CANARY_BACKFILL_TAG) &&
+        typeof (tags as Record<string, unknown>)[CANARY_BACKFILL_TAG] !== "string")
     ) {
       throw new Error(`Registry tags for ${name} are incomplete`);
     }
@@ -329,6 +405,8 @@ export async function readRegistryPackage(
     Array.isArray(json["dist-tags"]) ||
     (json["dist-tags"].latest !== undefined && typeof json["dist-tags"].latest !== "string") ||
     (json["dist-tags"].canary !== undefined && typeof json["dist-tags"].canary !== "string") ||
+    (json["dist-tags"][CANARY_BACKFILL_TAG] !== undefined &&
+      typeof json["dist-tags"][CANARY_BACKFILL_TAG] !== "string") ||
     !json.versions ||
     typeof json.versions !== "object" ||
     Array.isArray(json.versions)
@@ -361,11 +439,13 @@ export async function publishCanaryArtifact(
   targetRegistry = registry,
   timeoutMs = 120_000,
   supplied?: SuppliedCanaryProvenance,
+  distTag: CanaryDistTag = "canary",
 ): Promise<{ status: number; transparencyLogUrl: string; headers: Record<string, string> }> {
   assertCanaryManifest(manifest);
   if (
     !token ||
     tarball.length === 0 ||
+    (distTag !== "canary" && distTag !== CANARY_BACKFILL_TAG) ||
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0 ||
     timeoutMs > 120_000
@@ -386,7 +466,7 @@ export async function publishCanaryArtifact(
       publish(manifest, tarball, {
         registry: targetRegistry,
         forceAuth: { token },
-        defaultTag: "canary",
+        defaultTag: distTag,
         access: "public",
         provenance: !supplied,
         ...(supplied ? { provenanceFile: supplied.file } : {}),
@@ -422,6 +502,8 @@ function assertCanaryManifest(manifest: Record<string, unknown>): void {
     typeof manifest.name !== "string" ||
     typeof manifest.version !== "string" ||
     !/^\d+\.\d+\.\d+-canary\.(0|[1-9]\d*)$/.test(manifest.version) ||
+    (manifest.gitHead !== undefined &&
+      (typeof manifest.gitHead !== "string" || !SOURCE_SHA_PATTERN.test(manifest.gitHead))) ||
     (manifest.tag !== undefined && manifest.tag !== "canary") ||
     (manifest.publishConfig as Record<string, unknown> | undefined)?.access !== "public" ||
     (manifest.publishConfig as Record<string, unknown> | undefined)?.provenance !== true ||
@@ -532,6 +614,7 @@ export async function publishPreparedCanaries(
   publish: typeof libnpmpublish.publish = libnpmpublish.publish,
   timeoutMs = 120_000,
   provenance?: (pkg: FrozenCanaryArtifact) => Promise<SuppliedCanaryProvenance>,
+  distTag: CanaryDistTag = "canary",
 ): Promise<void> {
   for (const pkg of packages) {
     if (
@@ -568,7 +651,7 @@ export async function publishPreparedCanaries(
         artifact: `canary-source-provenance-${process.env.SOURCE_SHA}`,
         meaning: "SIGNED_INPUT_NOT_REGISTRY_WRITE_ACCEPTANCE",
       });
-    const intent = custody.record("WRITE_INTENT", binding);
+    const intent = custody.record("WRITE_INTENT", { ...binding, distTag });
     try {
       const acknowledgement = await publishCanaryArtifact(
         pkg.manifest,
@@ -578,6 +661,7 @@ export async function publishPreparedCanaries(
         registry,
         timeoutMs,
         supplied,
+        distTag,
       );
       custody.record("WRITE_ACKNOWLEDGED", {
         ...binding,
@@ -635,8 +719,11 @@ function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): strin
   }
   // A re-run confirmation can observe a later canary publication's tag; that
   // later publication could only start after this one's writes were accepted.
-  const canary = current["dist-tags"].canary;
-  if (canary !== pkg.version && !(canary !== undefined && isLaterCanary(canary, pkg.version))) {
+  // An older source is published under `canary-backfill` and leaves `canary`
+  // on the newer source, so either tag shows that npm applied the write.
+  const names = (tag: string | undefined) =>
+    tag === pkg.version || (tag !== undefined && isLaterCanary(tag, pkg.version));
+  if (!names(current["dist-tags"].canary) && !names(current["dist-tags"][CANARY_BACKFILL_TAG])) {
     return "canary_tag_pending";
   }
   const dist = current.versions[pkg.version]?.dist;
@@ -905,9 +992,12 @@ export function parseCanaryCohort(
   return value as CanaryCohort;
 }
 
-function writeVersion(pkg: WorkspacePackage, version: string): void {
+function writeVersion(pkg: WorkspacePackage, version: string, source: string): void {
   const json = JSON.parse(readFileSync(pkg.packagePath, "utf8")) as Record<string, unknown>;
   json.version = version;
+  // Records the exact source so the next publication can order itself against
+  // this one, and so `npm view <pkg>@canary gitHead` names the commit.
+  json.gitHead = source;
   writeFileSync(pkg.packagePath, `${JSON.stringify(json, null, 2)}\n`);
 }
 
@@ -980,9 +1070,19 @@ export async function main(): Promise<void> {
     workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT),
   );
   assertCanaryPlan(packages, versions, metadata);
+  const distTag = selectCanaryDistTag(
+    process.env.SOURCE_SHA!,
+    await currentCanarySources(metadata, readRegistryPackage, custody),
+    (ancestor, descendant) => canarySourceDescends(scriptRoot, ancestor, descendant),
+  );
+  process.stdout.write(
+    distTag === "canary"
+      ? "Publishing under dist-tag canary\n"
+      : `This source does not descend from the current canary's source; publishing under dist-tag ${CANARY_BACKFILL_TAG} and leaving canary unchanged\n`,
+  );
   for (const pkg of packages) {
     const next = versions.get(pkg.name)!;
-    writeVersion(pkg, next);
+    writeVersion(pkg, next, process.env.SOURCE_SHA!);
     process.stdout.write(`${pkg.name}@${next}\n`);
   }
   run("bun", ["run", "build:packages"], repoRoot);
@@ -1041,6 +1141,7 @@ export async function main(): Promise<void> {
         ? (pkg: FrozenCanaryArtifact) =>
             signCanarySource(pkg.manifest, pkg.packed, provenanceDirectory)
         : undefined,
+      distTag,
     );
     // npm processes accepted writes asynchronously. The separate confirmation
     // job waits for visibility and can be re-run without publishing again.

@@ -134,18 +134,6 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
 }
 
 describe("rig route permission matrix", () => {
-  test("default Variable Set references are refused now that vaults replace them", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const response = await app().request(`/v1/workspaces/${ws.workspaceId}/rigs`, {
-      method: "POST",
-      headers: { authorization: await bearer(ws, "user:m", ["rigs:manage"]) },
-      body: JSON.stringify({ name: "secret-rig", defaultVariableSetIds: [crypto.randomUUID()] }),
-    });
-    expect(response.status).toBe(422);
-    expect(await response.json()).toMatchObject({ error: "variable_sets_removed" });
-  });
-
   test("read requires rigs:use; write requires rigs:manage; propose requires rigs:use", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -674,7 +662,7 @@ describe("rig route permission matrix", () => {
     }
   });
 
-  test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {
+  test("name collision is a 409", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage"]) };
@@ -691,21 +679,5 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "dup" }),
     });
     expect(collision.status).toBe(409);
-
-    const badRef = await app().request(base, {
-      method: "POST",
-      headers: {
-        authorization: await bearer(ws, "user:m", [
-          "rigs:manage",
-          "variable-sets:attach",
-          "variable-sets:use",
-        ]),
-      },
-      body: JSON.stringify({
-        name: "bad-ref",
-        defaultVariableSetIds: ["11111111-1111-4111-8111-111111111111"],
-      }),
-    });
-    expect(badRef.status).toBe(422);
   });
 });

@@ -1,4 +1,5 @@
 import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
+import { SiteToolConsentProvider } from "@opengeni/react/app/lib/site-tool-consent";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -16,7 +17,7 @@ import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, LockIcon } from "lucide-react";
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -38,6 +39,7 @@ import {
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
+import { useBrowserActorGeneration } from "@/components/browser-actor-generation";
 import { ConsoleMeetingRecorderProvider } from "@/components/meetings/recorder-provider";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import type { SignedOutPitch } from "@/components/signed-out-page";
@@ -236,6 +238,10 @@ export function RootRouteComponent() {
     setCreditRequired,
     mutationBusy,
   } = useAppState(webAppStateHost, { bootstrapSuspended: isPublicDevHarness });
+  // Keys the meeting recorder on the browser-accounts actor (see below).
+  const [browserActorGeneration, handleRecordedBrowserActorTransition] = useBrowserActorGeneration(
+    handleBrowserActorTransition,
+  );
   // "Add AI agents to my product" left its developer setup step unfinished
   // (reload, closed tab, another device): show it again until it is done.
   const [developerSetupRevision, setDeveloperSetupRevision] = useState(0);
@@ -412,6 +418,7 @@ export function RootRouteComponent() {
         )}
         modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
+        activeName={authSession?.user.name ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={completeOrganizationOnboarding}
       />
@@ -426,6 +433,7 @@ export function RootRouteComponent() {
           )}
           modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
+          activeName={authSession?.user.name ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
@@ -468,7 +476,9 @@ export function RootRouteComponent() {
   ) : (
     <AppContext.Provider value={appContext}>
       <ArchiveConfirmationProvider>
-        <Outlet />
+        <SiteToolConsentProvider>
+          <Outlet />
+        </SiteToolConsentProvider>
         <CreditRequiredGate
           creditRequired={creditRequired}
           setCreditRequired={setCreditRequired}
@@ -484,8 +494,10 @@ export function RootRouteComponent() {
   // A meeting being recorded keeps going while the person moves between
   // pages and workspaces, and while a dropped connection or an update shows
   // the waiting panel: the recorder lives above all of them. It ends at once
-  // when they sign out or someone else signs in (the person below), and with
-  // browser accounts the actor gate also replaces it.
+  // when they sign out or someone else signs in (the person below). With
+  // browser accounts it also stays above the accounts loading gate, so
+  // re-signing in or adding an account keeps it, and it is keyed on the
+  // accounts actor, so switching account or signing out remounts it at once.
   const recorderPerson = managedAuthRequired
     ? authSession === undefined
       ? undefined
@@ -493,16 +505,15 @@ export function RootRouteComponent() {
     : keyAuthRequired && !hasAccessKey
       ? null
       : (accessContext?.subjectId ?? undefined);
-  const recordedSurface = isPublicAuthRoute ? (
-    applicationSurface
-  ) : (
+  const recordSurface = (surface: ReactNode, key?: number) => (
     <ConsoleMeetingRecorderProvider
+      key={key}
       workspaceId={routedWorkspace?.id ?? null}
       person={recorderPerson}
       fallbackWorkspaceId={defaultWorkspaceId}
       client={client}
     >
-      {applicationSurface}
+      {surface}
     </ConsoleMeetingRecorderProvider>
   );
 
@@ -514,13 +525,18 @@ export function RootRouteComponent() {
             clientConfig?.managedAuthSessionSetMode === "dual" && Boolean(authSession)
           }
           mutationBusy={mutationBusy}
-          onActorTransition={handleBrowserActorTransition}
+          onActorTransition={handleRecordedBrowserActorTransition}
         >
-          <BrowserAccountsLoadingGate>{recordedSurface}</BrowserAccountsLoadingGate>
+          {recordSurface(
+            <BrowserAccountsLoadingGate>{applicationSurface}</BrowserAccountsLoadingGate>,
+            browserActorGeneration,
+          )}
         </BrowserAccountsRuntime>
       </Suspense>
+    ) : isPublicAuthRoute ? (
+      applicationSurface
     ) : (
-      recordedSurface
+      recordSurface(applicationSurface)
     );
 
   return (

@@ -4455,7 +4455,7 @@ code):
 | `CodexSubscriptionCoreTurn` | `SubscriptionCoreTurn` (alias kept); `subscriptionCoreTurnOf(providerTurn)` for checkpoints and `model_call_facts.connection_id` attribution |
 | `codexCredentialLeaseHolderId` | `subscriptionTurnLeaseHolderId(provider, displayName, input, turnId)` |
 | failure copy builders in `codex-core-errors.ts` | the same builders with an optional display name (default `Codex`, so texts are unchanged) |
-| `subscriptionCoreAcceptedCodexTurnIsFunded` behind `isCodexBilledTurn` | `readSubscriptionCoreRouteFunding` (`subscription-core/route-readiness.ts`) and `coreRoutedSubscriptionFunding` in the `@opengeni/core` limits; `isCodexBilledTurn` is unchanged |
+| `subscriptionCoreAcceptedCodexTurnIsFunded` behind `isCodexBilledTurn` | `readSubscriptionCoreFunding` (`subscription-core/funding-readiness.ts`) and `coreRoutedSubscriptionFunding` in the `@opengeni/core` limits; `isCodexBilledTurn` is unchanged |
 | the Codex turn bearer resolver | `buildSubscriptionCoreTurnTokenResolver` (`subscription-core/turn-token-resolver.ts`); Codex keeps its own binding |
 
 The package index now exports, for the worker and `@opengeni/core`,
@@ -4464,7 +4464,7 @@ The package index now exports, for the worker and `@opengeni/core`,
 `buildSubscriptionCoreTurnTokenResolver`, the route helpers
 (`readSubscriptionCoreProviderRoute`,
 `readSubscriptionCoreProviderRouteForWorkspace`) and route answers
-(`readSubscriptionCoreRouteFunding`, `readSubscriptionCoreRouteReadiness`),
+(`readSubscriptionCoreFunding`, `readSubscriptionCoreReadiness`),
 and the SuperGrok adapter and resolver. This supersedes §5.1.3's "the
 package index exports none of the provider-parameterized entry points".
 

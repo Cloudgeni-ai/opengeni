@@ -139,9 +139,30 @@ export type ThisComputerErrorCode =
   | "unsupported"
   /** Another agent already serves this computer and couldn't be taken over. */
   | "takeover_failed"
+  /**
+   * The server no longer accepts this computer's sign-in and the agent has
+   * stopped trying: connecting it again (turning it on) fixes it.
+   */
+  | "reconnect_required"
   /** Setting up, pausing or resuming is already in progress. */
   | "busy"
   | "unknown";
+
+/**
+ * While on but not yet usable (`reconnecting`), what it is waiting for, so a
+ * screen that has waited long enough can say why.
+ */
+export type ThisComputerWaitingOn =
+  /** The agent isn't running: it is starting, or starting again after it stopped. */
+  | "agent"
+  /** Another copy of the agent on this computer holds it. */
+  | "another_agent"
+  /** The agent runs, but the server doesn't show it online yet. */
+  | "server"
+  /** The server turned down the agent's sign-in; the agent keeps renewing it. */
+  | "sign_in"
+  /** The agent is moving from its background service into the app. */
+  | "handover";
 
 export interface ThisComputerStatus {
   state: ThisComputerState;
@@ -193,6 +214,10 @@ export interface ThisComputerStatus {
    * Absent from older apps.
    */
   reconnecting?: boolean;
+  /** With `reconnecting`: what it waits for. Absent from older apps. */
+  waitingOn?: ThisComputerWaitingOn;
+  /** With `waitingOn`: the agent's own words, when it gave some. */
+  waitingDetail?: string;
   /**
    * Where the system asks for permissions, what it calls the lists and
    * buttons the person looks for, in its own language. Absent elsewhere and
@@ -219,6 +244,10 @@ export interface ThisComputerHost {
   status(workspaceId: string): Promise<ThisComputerStatus>;
   connect(workspaceId: string, options: ThisComputerConnectOptions): Promise<ThisComputerStatus>;
   pause(): Promise<void>;
+  /**
+   * Starts the agent again after a pause. One that is already running is
+   * restarted, so it signs in and connects again right away.
+   */
   resume(): Promise<void>;
   /**
    * Ask for one permission: the system prompt the first time, then its list

@@ -65,3 +65,24 @@ test("history lists every activated version, newest first, in plain words", () =
   ]);
   expect(history[1]?.content).toContain("Link the Linear issue.");
 });
+
+test("history names a saved empty version as clearing the instructions", () => {
+  const response = {
+    revisions: [revision("r1", "Keep updates short."), revision("r2", "")],
+    activeHeads: [],
+    inactiveHeads: [],
+    inactiveHeadsTruncated: false,
+    activationEvents: [
+      event("e1", "r1", 1, "activate", "user:me"),
+      event("e2", "r2", 2, "activate", "user:me"),
+      event("e3", "r1", 3, "rollback", "user:me"),
+    ],
+    deactivationEvents: [],
+    nextAfterRevision: null,
+  } as unknown as WorkspaceInstructionPolicyListResponse;
+  expect(instructionRevisions(response, "user:me").map((each) => each.summary)).toEqual([
+    "Restored an earlier version",
+    "Cleared the instructions",
+    "Created the instructions",
+  ]);
+});

@@ -4,7 +4,7 @@ import {
   type LazyToolTransport,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { openingToolsFromTurnMetadata, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
   configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
@@ -191,6 +191,20 @@ export function lazyToolTransportForTurn(
     return "openai_native";
   }
   return "generic_dispatch";
+}
+
+/**
+ * The opening tools a turn loads before its first model request (a new
+ * session's frozen `openingTools`). Not on Anthropic Messages: there the load
+ * would be an assistant tool_use with no thinking block before it, which
+ * Claude can reject while thinking is on, so the model searches as usual.
+ */
+export function openingToolNamesForTurn(
+  resolvedModel: { provider: { api: ModelProviderApi } } | null,
+  turnMetadata: unknown,
+): string[] {
+  if (resolvedModel?.provider.api === "anthropic-messages") return [];
+  return openingToolsFromTurnMetadata(turnMetadata);
 }
 
 /** Only brand-new lazy-capable turns may overlap non-eager tool preparation. */

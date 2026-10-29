@@ -10,6 +10,7 @@ import {
   DESKTOP_DICTATION_GLOBAL,
   DESKTOP_IPC,
   type DesktopDictation,
+  type DesktopDictationAudio,
   type DesktopDictationHistoryEntry,
   type DesktopDictationRequest,
   type DesktopDictationStatus,
@@ -36,6 +37,11 @@ export function dictationBridge(ipc: IpcRenderer = ipcRenderer): DesktopDictatio
       ipc.invoke(DESKTOP_IPC.dictationHistory) as Promise<DesktopDictationHistoryEntry[]>,
     clearHistory: async () => {
       await ipc.invoke(DESKTOP_IPC.dictationClearHistory);
+    },
+    historyAudio: (id) =>
+      ipc.invoke(DESKTOP_IPC.dictationHistoryAudio, id) as Promise<DesktopDictationAudio | null>,
+    transcribeAgain: async (id) => {
+      await ipc.invoke(DESKTOP_IPC.dictationTranscribeAgain, id);
     },
     onRequest: (listener) => {
       requestListener = listener;

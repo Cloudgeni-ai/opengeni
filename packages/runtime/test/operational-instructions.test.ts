@@ -386,6 +386,20 @@ describe("proportional effort", () => {
     expect(guidance).toContain("instead of rediscovering");
   });
 
+  test("proceeds past routine, reversible blocks instead of ending the turn with a question", () => {
+    // API, scheduled and other headless sessions often have no one to answer, so
+    // a question about a step with a conventional default leaves the work unfinished.
+    const autonomy = section("## Autonomy and persistence");
+    expect(autonomy).toContain(
+      "When a routine, reversible step of the task is blocked, take the conventional default without changing user or machine configuration, say which default you took in your final answer, and continue.",
+    );
+    // Asking stays right for destructive, external or unauthorized steps and for
+    // a choice with no conventional default that changes the result.
+    expect(autonomy).toContain(
+      "End the turn with a question only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result.",
+    );
+  });
+
   test("keeps progress updates short and skips the opening update for quick answers", () => {
     const guidance = section("## Progress updates");
     expect(guidance).not.toContain("If the request requires tools, start with a progress update");

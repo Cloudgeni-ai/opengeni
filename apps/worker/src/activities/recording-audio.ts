@@ -24,6 +24,10 @@ export const RECORDING_TIMELINE_FILTER = "aresample=async=1:first_pts=0";
  * header. Each session becomes one "run"; runs are placed on the recording's
  * timeline by their first chunk's start time.
  *
+ * A chunk boundary can fall inside a header: Chromium sometimes hands out the
+ * first byte of a session on its own when no audio has arrived yet. A chunk
+ * too short to tell is held and judged together with the chunks after it.
+ *
  * A phone writes an ADTS AAC stream: every frame carries its own header, so
  * any chunk concatenates onto the one before. There a run ends where the
  * timeline jumps (a capture that started again after the app was stopped).
@@ -71,6 +75,32 @@ export function startsContainer(bytes: Uint8Array): boolean {
 /** Whether bytes begin with an ADTS frame header (12-bit sync, layer 0). */
 export function startsAdtsFrame(bytes: Uint8Array): boolean {
   return bytes.length >= 7 && bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0;
+}
+
+/** Bytes `startsContainer` needs to recognise every header it knows. */
+const CONTAINER_HEADER_BYTES = 8;
+const EBML_MAGIC = [0x1a, 0x45, 0xdf, 0xa3] as const;
+const OGG_MAGIC = [0x4f, 0x67, 0x67, 0x53] as const;
+
+/**
+ * Whether bytes too short to judge may be the start of a container header
+ * that the next chunk completes. Before any run, anything may be (an MP4 box
+ * starts with its size); within a run only bytes that begin like an EBML or
+ * Ogg header may be.
+ */
+function mayStartContainer(bytes: Uint8Array, inRun: boolean): boolean {
+  if (bytes.length >= CONTAINER_HEADER_BYTES || startsContainer(bytes)) return false;
+  if (!inRun) return true;
+  const beginsLike = (magic: readonly number[]) =>
+    bytes.every((byte, index) => index >= magic.length || byte === magic[index]);
+  return beginsLike(EBML_MAGIC) || beginsLike(OGG_MAGIC);
+}
+
+function joined(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(left.length + right.length);
+  bytes.set(left, 0);
+  bytes.set(right, left.length);
+  return bytes;
 }
 
 /** How far an ADTS chunk may start from where the one before ended and still continue it. */
@@ -186,19 +216,31 @@ export async function prepareRecordingTrackAudio(input: {
     const runs: Array<{ startMilliseconds: number; path: string }> = [];
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     let previous: RecordingAudioChunk | null = null;
+    // Short bytes held until the chunks after them show whether a header starts there.
+    let held: { bytes: Uint8Array; chunk: RecordingAudioChunk } | null = null;
     try {
       for (const chunk of ordered) {
         input.signal?.throwIfAborted();
-        const bytes = await input.readChunk(chunk);
-        if (!bytes) {
+        const read = await input.readChunk(chunk);
+        if (!read) {
           throw new RecordingAudioError(`Chunk ${chunk.chunkNumber} is missing`, "missing_chunk");
         }
-        if (!handle || startsRun(container, bytes, previous, chunk)) {
+        // Held bytes start where their own chunk did.
+        const first: RecordingAudioChunk = held?.chunk ?? chunk;
+        const bytes: Uint8Array = held ? joined(held.bytes, read) : read;
+        held = null;
+        if (container !== "aac" && mayStartContainer(bytes, handle !== null)) {
+          held = { bytes, chunk: first };
+          previous = chunk;
+          input.onProgress?.();
+          continue;
+        }
+        if (!handle || startsRun(container, bytes, previous, first)) {
           const header = container === "aac" ? startsAdtsFrame(bytes) : startsContainer(bytes);
           if (!header) {
             throw new RecordingAudioError(
               container === "aac"
-                ? `Chunk ${chunk.chunkNumber} does not start with an AAC frame`
+                ? `Chunk ${first.chunkNumber} does not start with an AAC frame`
                 : "The first chunk of the track has no container header",
               "invalid_audio",
             );
@@ -206,11 +248,21 @@ export async function prepareRecordingTrackAudio(input: {
           await handle?.close();
           const path = join(directory, `run-${runs.length}.${container}`);
           handle = await open(path, "wx", 0o600);
-          runs.push({ startMilliseconds: chunk.startMilliseconds, path });
+          runs.push({ startMilliseconds: first.startMilliseconds, path });
         }
         await handle.write(bytes);
         previous = chunk;
         input.onProgress?.();
+      }
+      // The track ended on short bytes: the tail of its last run.
+      if (held) {
+        if (!handle) {
+          throw new RecordingAudioError(
+            "The first chunk of the track has no container header",
+            "invalid_audio",
+          );
+        }
+        await handle.write(held.bytes);
       }
     } finally {
       await handle?.close();

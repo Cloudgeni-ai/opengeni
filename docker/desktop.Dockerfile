@@ -701,6 +701,11 @@ RUN set -eux; \
     sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS; \
     bash -n /usr/local/bin/opengeni-record
 
+# The same lowest-precedence commit identity as the sandbox image (see
+# docker/sandbox.Dockerfile): anything a deployment, user or repository sets wins.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
+
 ENV HOME=/workspace
 ENV DISPLAY=:0
 ENV OPENGENI_DESKTOP_STREAM_PORT=6080

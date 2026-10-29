@@ -233,22 +233,19 @@ export function codexSectionVisible(codex: CodexSubscriptions): boolean {
 }
 
 /**
- * The Codex section: how several accounts share work, keeping chats portable,
- * and Turn off Codex last. Which pool new work uses is not a setting here; the
+ * The Codex section: how several accounts share work, Codex Apps, and Turn
+ * off Codex last. Which pool new work uses is not a setting here; the
  * line above the Accounts list says it.
  */
 export function CodexSettingRows({
   codex,
   places,
-  providerSwitch,
   organizationSharing = null,
   onConnectForWorkspace,
   showRotation = true,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
-  /** The "Keep Codex chats portable" row. */
-  providerSwitch: ReactNode;
   /** How the organization's accounts share work, for the people who manage them. */
   organizationSharing?: ReactNode;
   /** Opens Connect Codex for an account owned by this workspace (Codex Apps needs one). */
@@ -310,7 +307,6 @@ export function CodexSettingRows({
           />
         ) : null}
         <CodexAppsRow codex={codex} places={places} onConnectForWorkspace={onConnectForWorkspace} />
-        {providerSwitch}
         {codex.canManage ? (
           <SettingDangerRow
             label="Turn off Codex"
@@ -927,6 +923,7 @@ export function CodexConnectPage({
   footerStart,
   fields,
   blockedReason,
+  scope,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
@@ -936,6 +933,8 @@ export function CodexConnectPage({
   fields?: ReactNode;
   /** Why the sign-in can't start yet (a choice above is incomplete). */
   blockedReason?: string | null;
+  /** "user": the person's own account, kept in their Personal workspace. */
+  scope?: "user" | undefined;
 }) {
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
@@ -949,6 +948,7 @@ export function CodexConnectPage({
 
   return (
     <ModelsFormPage
+      connectStep
       title="Connect Codex"
       description="Sign in with the ChatGPT account whose plan should pay for new work."
       onClose={onClose}
@@ -966,6 +966,7 @@ export function CodexConnectPage({
       onSubmit={async () => {
         if (signingIn) return false;
         await codex.connect({
+          scope,
           onConnected: (accountId) => {
             if (!active.current) return;
             setConnected(true);

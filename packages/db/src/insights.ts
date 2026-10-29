@@ -1,6 +1,7 @@
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { parseModelCallProcessingResidency } from "@opengeni/contracts";
 import type { Database } from "./database";
 import {
   rlsContextForWorkspace,
@@ -1322,6 +1323,9 @@ async function insertModelCallFactFromUsageEvent(
       listOutputCostMicros: capturedClasses ? classValues[3]! : null,
       listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
       ...modelCallTimingColumns(modelCallTimingOrNull(payload.timing)),
+      // The event's recorded route residency; events from before calls
+      // carried one rebuild a null (recorded before), never a guessed value.
+      processingResidency: parseModelCallProcessingResidency(payload.processingResidency),
       occurredAt: event.occurredAt,
       connectionId:
         provider === "codex-subscription"

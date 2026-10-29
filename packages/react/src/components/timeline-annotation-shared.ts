@@ -1,10 +1,13 @@
 import type { TimelineAnnotationSource } from "@opengeni/sdk";
 import { type OpenGeniText } from "../messages/runtime";
-import { occurrenceOffsets } from "../timeline/annotation-model";
+import type { DraftTimelineAnnotation } from "@opengeni/sdk";
+import { renderedSpansForSourceQuote, type TextSpan } from "../timeline/annotation-alignment";
+import { matchingQuoteInSource, occurrenceOffsets } from "../timeline/annotation-model";
 
 export {
   annotationDisplayOrdinal,
   annotationHasNote,
+  annotationQuoteText,
   matchingQuoteInSource,
   occurrenceOffsets,
   truncateAnnotationQuote,
@@ -111,15 +114,61 @@ export function buildQuoteRange(
   return rangeFromOffsets(spans, start, start + quote.length);
 }
 
-export function quoteOccurrenceIndex(sourceEl: HTMLElement, range: Range, quote: string): number {
+/** The rendered text of `sourceEl` before and after `range`. */
+export function renderedTextAround(
+  sourceEl: HTMLElement,
+  range: Range,
+): { before: string; after: string } {
   try {
     const prefix = range.cloneRange();
     prefix.selectNodeContents(sourceEl);
     prefix.setEnd(range.startContainer, range.startOffset);
-    return occurrenceOffsets(prefix.toString(), quote).length;
+    const suffix = range.cloneRange();
+    suffix.selectNodeContents(sourceEl);
+    suffix.setStart(range.endContainer, range.endOffset);
+    return { before: prefix.toString(), after: suffix.toString() };
   } catch {
-    return 0;
+    return { before: "", after: "" };
   }
+}
+
+export function quoteOccurrenceIndex(sourceEl: HTMLElement, range: Range, quote: string): number {
+  return occurrenceOffsets(renderedTextAround(sourceEl, range).before, quote).length;
+}
+
+function renderedQuoteSpans(text: string, quote: string): TextSpan[] {
+  const exact = occurrenceOffsets(text, quote);
+  if (exact.length > 0) return exact.map((start) => ({ start, end: start + quote.length }));
+  const aligned = renderedSpansForSourceQuote(text, quote);
+  if (aligned.length > 0) return aligned;
+  const partial = matchingQuoteInSource(text, quote);
+  if (!partial) return [];
+  return occurrenceOffsets(text, partial).map((start) => ({ start, end: start + partial.length }));
+}
+
+/**
+ * Where an annotation's quote shows in its rendered message. The quote is
+ * source markdown, so it is matched across formatting; among repeats, the one
+ * nearest its source offset wins.
+ */
+export function annotationRangeInSource(
+  sourceEl: HTMLElement,
+  annotation: Pick<DraftTimelineAnnotation, "quote" | "source">,
+): Range | null {
+  if (!annotation.quote) return null;
+  const { text, spans } = annotatableText(sourceEl);
+  const candidates = renderedQuoteSpans(text, annotation.quote);
+  if (candidates.length === 0) return null;
+  let best = candidates[0]!;
+  for (const candidate of candidates) {
+    if (
+      Math.abs(candidate.start - annotation.source.startOffset) <
+      Math.abs(best.start - annotation.source.startOffset)
+    ) {
+      best = candidate;
+    }
+  }
+  return rangeFromOffsets(spans, best.start, best.end);
 }
 
 export function clipRangeToSource(range: Range, sourceEl: HTMLElement): Range | null {

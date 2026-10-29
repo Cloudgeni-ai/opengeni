@@ -405,9 +405,14 @@ export function useApiIntegrationAccounts({
   const accessItems: IntegrationAccessItem[] = accounts.map((account) => ({
     id: account.instanceKey,
     name: account.displayName,
-    meta: account.connected ? undefined : "Needs attention",
+    // An account carried in from another workspace is managed there.
+    meta: account.personalExtension
+      ? `From ${account.personalExtension.originWorkspaceName}`
+      : account.connected
+        ? undefined
+        : "Needs attention",
     status: account.connected ? "ok" : "warn",
-    ...(canManage
+    ...(canManage && !account.personalExtension
       ? {
           actions: [
             ...(account.connected
@@ -422,7 +427,7 @@ export function useApiIntegrationAccounts({
           ],
         }
       : {}),
-    ...(facetCount > 0
+    ...(facetCount > 0 && !account.personalExtension
       ? {
           detail: (
             <Suspense fallback={null}>

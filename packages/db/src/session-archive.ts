@@ -145,6 +145,19 @@ export type SessionArchiveScope = {
 
 export type SessionArchiveObject = { key: string; bytes: number; sha256: string };
 
+/**
+ * Fresh object keys for one archive write. Every write uses a new archive id,
+ * so a published key is never overwritten; the secret history scrub writes
+ * its rewritten objects under new keys the same way.
+ */
+export function sessionArchiveObjectKeys(scope: SessionArchiveScope, archiveId: string) {
+  const prefix = `session-archives/${scope.workspaceId}/${scope.sessionId}/${archiveId}`;
+  return {
+    bundle: `${prefix}/bundle.jsonl.zst`,
+    transcript: `${prefix}/transcript.jsonl.zst`,
+  };
+}
+
 export type SessionArchiveManifest = {
   format: typeof SESSION_ARCHIVE_FORMAT;
   version: typeof SESSION_ARCHIVE_FORMAT_VERSION;

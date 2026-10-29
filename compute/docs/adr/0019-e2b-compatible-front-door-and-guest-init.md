@@ -42,7 +42,10 @@ an init system of its own.
   work. A paused sandbox wakes on resume or connect, and on traffic only
   if it was created with auto-resume; otherwise traffic gets E2B's answer
   for a paused sandbox. At its timeout a sandbox is killed, or with
-  `onTimeout: pause` paused the same way.
+  `onTimeout: pause` paused the same way. Only a sandbox that pauses at
+  its timeout is checkpointed to object storage while it runs. One killed
+  at its timeout is never resumed, so a checkpoint would only stop its
+  programs for nothing; a host that loses it loses it, as on E2B.
 - **The pause and the timeout are durable.** The service writes the
   lifecycle state first (`pausing`, `killing`), then acts, then writes the
   end state. A sweeper in every replica finishes a pause or kill that a

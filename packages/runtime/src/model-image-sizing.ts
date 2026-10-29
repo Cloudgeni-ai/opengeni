@@ -18,6 +18,23 @@ export type ModelImageSizerOptions = {
   jpegQuality?: number;
 };
 
+/**
+ * The raster format the bytes actually are, among the four passive formats
+ * providers accept. Null for anything else (SVG, HEIC, truncated data, ...).
+ * Declared types are often wrong (a JPEG sent as `image/png` by a chat app or
+ * an MCP server), so the bytes decide; a type claim never admits a decoder.
+ */
+export function sniffModelImageType(bytes: Uint8Array): string | null {
+  const signature = Buffer.from(bytes.subarray(0, 12));
+  if (signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+    return "image/png";
+  if (signature[0] === 255 && signature[1] === 216 && signature[2] === 255) return "image/jpeg";
+  if (signature.toString("ascii", 0, 4) === "RIFF" && signature.toString("ascii", 8, 12) === "WEBP")
+    return "image/webp";
+  if (["GIF87a", "GIF89a"].includes(signature.toString("ascii", 0, 6))) return "image/gif";
+  return null;
+}
+
 /** A bounded cache. Image count never changes an image's projection. */
 export function createModelImageSizer(
   maxDimension: number,
@@ -48,27 +65,16 @@ export function createModelImageSizer(
       if (data.length > Math.ceil((64 * 1024 * 1024) / 3) * 4) throw new Error();
       const bytes = Buffer.from(data, "base64");
       // Never admit other Sharp decoders (particularly SVG) through an image
-      // MIME claim. Only the provider's four passive raster formats may enter.
-      const signature = bytes.subarray(0, 12);
-      const matches =
-        (mediaType === "image/png" &&
-          signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) ||
-        (mediaType === "image/jpeg" &&
-          signature[0] === 255 &&
-          signature[1] === 216 &&
-          signature[2] === 255) ||
-        (mediaType === "image/webp" &&
-          signature.toString("ascii", 0, 4) === "RIFF" &&
-          signature.toString("ascii", 8, 12) === "WEBP") ||
-        (mediaType === "image/gif" &&
-          ["GIF87a", "GIF89a"].includes(signature.toString("ascii", 0, 6)));
-      if (!matches) throw new Error();
+      // MIME claim. Only the provider's four passive raster formats may enter,
+      // and the result is labelled with the format the bytes really are.
+      const actualType = sniffModelImageType(bytes);
+      if (!actualType) throw new Error();
       const decoder = sharp(bytes, { limitInputPixels: 64_000_000, failOn: "error" });
       const metadata = await decoder.metadata();
       if (!metadata.width || !metadata.height) throw new Error();
       let result: SizedImage = {
         data,
-        mediaType,
+        mediaType: actualType,
         originalWidth: metadata.width,
         originalHeight: metadata.height,
         width: metadata.width,
@@ -89,7 +95,7 @@ export function createModelImageSizer(
         // Never expand image payloads: that can break a previously valid request
         // at its total byte limit. This budget depends only on the image itself.
         const encodedBudget = Math.min(maxEncodedBytes, data.length);
-        const asJpeg = jpegQuality !== undefined && mediaType === "image/jpeg";
+        const asJpeg = jpegQuality !== undefined && actualType === "image/jpeg";
         let resized = asJpeg
           ? await pipeline
               .clone()

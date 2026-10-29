@@ -1,5 +1,7 @@
 import { signupCreditModelIds } from "@opengeni/config";
 import {
+  ChangeSignupUseCaseRequest,
+  ChangeSignupUseCaseResponse,
   CompleteSelfServiceOrganizationSetupRequest,
   CompleteSelfServiceOrganizationSetupResponse,
   CompleteOrganizationUserSetupRequest,
@@ -12,11 +14,14 @@ import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import {
   completeSelfServiceOrganizationSetup,
   completeOrganizationUserSetup,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   getSelfServiceOrganizationOnboardingState,
   nestedPostgresSqlState,
   preflightOrganizationUserSetup,
   previewOrganizationUserSetup,
+  readOrganizationSignupUseCase,
   recordOrganizationSignupUseCase,
+  setOrganizationSignupUseCase,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -29,7 +34,7 @@ import {
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
-import { parseRequestBody, requestValidationError } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -45,6 +50,52 @@ export function registerManagedOnboardingRoutes(
 ): void {
   const accountSetupLimiter = options.accountSetupLimiter ?? new PublicSetupRateLimiter();
   const hashPassword = options.hashPassword ?? hashManagedAuthPassword;
+  // Back from a later onboarding step, after the organization exists: the
+  // person's new answer becomes their current one, only in an organization
+  // they actively belong to.
+  app.put("/v1/auth/organization-onboarding/use-case", async (context) => {
+    const session = await requireManagedHuman(context, deps);
+    const payload = await parseRequestJson(context, ChangeSignupUseCaseRequest, {
+      status: 422,
+      message: "invalid signup use case",
+    });
+    try {
+      const { organizationMemberships } =
+        await ensureManagedAccessForUserWithOrganizationMemberships(deps.db, {
+          userId: session.user.id,
+          email: session.user.email,
+          name: session.user.name,
+          emailVerified: session.user.emailVerified,
+          provisionFallbackOrganization: false,
+        });
+      if (
+        !organizationMemberships.some(
+          (membership) => membership.organizationId === payload.organizationId,
+        )
+      ) {
+        throw new HTTPException(403, { message: "organization membership is not active" });
+      }
+      return context.json(
+        ChangeSignupUseCaseResponse.parse({
+          useCase: await setOrganizationSignupUseCase(deps.db, {
+            organizationId: payload.organizationId,
+            subjectId: `user:${session.user.id}`,
+            useCase: payload.useCase,
+          }),
+        }),
+      );
+    } catch (error) {
+      const sqlState = nestedPostgresSqlState(error);
+      if (sqlState === "42501") {
+        throw new HTTPException(403, { message: "organization membership is not active" });
+      }
+      if (sqlState === "22023") {
+        throw new HTTPException(422, { message: "invalid signup use case" });
+      }
+      throw error;
+    }
+  });
+
   app.get("/v1/auth/organization-onboarding", async (context) => {
     const session = await requireManagedHuman(context, deps);
     return context.json(
@@ -94,16 +145,26 @@ export function registerManagedOnboardingRoutes(
       recordOrganizationSetupOutcome(deps.observability, "created");
       if (parsed.data.useCase) {
         // The organization is already committed, so a failure to keep the
-        // signup answer must not fail its setup. The first answer wins.
-        await recordOrganizationSignupUseCase(deps.db, {
+        // signup answer must not fail its setup. The first answer is kept
+        // for analytics; the current one is what the app follows.
+        const answer = {
           organizationId: completed.organizationId,
           subjectId: `user:${session.user.id}`,
           useCase: parsed.data.useCase,
-        }).catch((error: unknown) => {
+        };
+        await recordOrganizationSignupUseCase(deps.db, answer).catch((error: unknown) => {
           console.warn("[api] could not record the signup use case", {
             sqlState: nestedPostgresSqlState(error) ?? null,
           });
         });
+        // An idempotent replay of setup keeps an answer changed since.
+        await readOrganizationSignupUseCase(deps.db, answer)
+          .then((current) => (current ? null : setOrganizationSignupUseCase(deps.db, answer)))
+          .catch((error: unknown) => {
+            console.warn("[api] could not keep the current signup use case", {
+              sqlState: nestedPostgresSqlState(error) ?? null,
+            });
+          });
       }
       return context.json(completed);
     } catch (error) {

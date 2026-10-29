@@ -931,7 +931,7 @@ export async function completeSelfServiceOrganizationSetup(input: {
   organizationName: string;
   operationId: string;
   /** The signup answer to "How do you want to use Opengeni?", kept on the organization. */
-  useCase?: "embed" | "cloud";
+  useCase?: "everyday" | "embed" | "cloud";
 }): Promise<{
   status: "complete";
   organizationId: string;
@@ -945,6 +945,21 @@ export async function completeSelfServiceOrganizationSetup(input: {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+/**
+ * The person went Back after their organization exists and chose again: their
+ * new answer becomes the current one, so the new-chat page follows it on every
+ * device.
+ */
+export async function changeSignupUseCase(input: {
+  organizationId: string;
+  useCase: "everyday" | "embed" | "cloud";
+}): Promise<{ useCase: "everyday" | "embed" | "cloud" }> {
+  return await authRequest<{ useCase: "everyday" | "embed" | "cloud" }>(
+    "/organization-onboarding/use-case",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
 }
 
 export async function completeOrganizationUserSetup(input: {
@@ -1295,9 +1310,8 @@ export function showApiUpdateNotice(willReload: boolean): void {
   const notice = existing ?? document.createElement("div");
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
-  // A notice across the top of the app: in the desktop app it is the window's
-  // top row, so it keeps clear of the window controls and moves the window
-  // (apps/web/src/styles.css).
+  // A notice across the top of the app (styled in apps/web/src/styles.css);
+  // in the desktop app it sits below the window bar and also moves the window.
   notice.setAttribute("data-app-notice", "");
   notice.setAttribute("data-window-drag", "");
   const message = document.createElement("span");

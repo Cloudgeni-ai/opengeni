@@ -154,6 +154,44 @@ describe("single-model calls and task usage limits", () => {
     expect(h.settle.mock.calls[0]![2]).not.toHaveProperty("sessionId");
   });
 
+  test("settlement records where the served route ran: its claim, never evidence", async () => {
+    const h = harness({ allowed: true, state: null });
+    spy(runtimeModelCall.MultiProviderModelProvider.prototype, "resolveBinding", () => ({
+      client: {},
+      provider: { id: "offline" },
+      modelId: "scripted-model",
+      residency: {
+        geography: "eu",
+        deploymentType: "azure_data_zone",
+        regions: ["swedencentral"],
+        evidence: {
+          source: "operator_declaration",
+          reference: "internal deployment name",
+          verifiedAt: "2026-10-26",
+        },
+      },
+    }));
+    await call(h.service, "api_key", "req-eu");
+    expect(h.settle.mock.calls[0]![2]).toMatchObject({
+      processingResidency: {
+        geography: "eu",
+        deploymentType: "azure_data_zone",
+        regions: ["swedencentral"],
+      },
+    });
+    expect(
+      (h.settle.mock.calls[0]![2] as { processingResidency: object }).processingResidency,
+    ).not.toHaveProperty("evidence");
+  });
+
+  test("a served route without a readable residency record is recorded as unknown", async () => {
+    const h = harness({ allowed: true, state: null });
+    await call(h.service, "api_key", "req-unknown");
+    expect(h.settle.mock.calls[0]![2]).toMatchObject({
+      processingResidency: { geography: "unknown", regions: [] },
+    });
+  });
+
   test.each(["human_session", "api_key"] as const)(
     "a %s call has no task: no usage-limit read or receipt",
     async (principalKind) => {

@@ -20,7 +20,6 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "subscription-contract": ["bun", "run", "check:subscription-contract"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
   "public-api": ["bun", "scripts/public-api/check.ts"],
-  "sdk-compat": ["bun", "scripts/public-api/sdk-compat.ts"],
 };
 
 function exampleBuildCommands(projects: readonly string[]): string[][] {

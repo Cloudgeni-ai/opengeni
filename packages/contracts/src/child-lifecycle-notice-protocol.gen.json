@@ -1299,7 +1299,7 @@
       ]
     }
   },
-  "revision": 1,
+  "revision": 2,
   "wakeClasses": {
     "child_paused": "deferred",
     "child_progress": "deferred",

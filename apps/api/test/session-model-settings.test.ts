@@ -245,8 +245,14 @@ test("model settings validates input and workspace/provider policy without write
   });
   await expect(call(value.grant, input)).rejects.toThrow("workspace's model policy");
   expect(await shared.admin`select * from sessions where id = ${value.session.id}`).toEqual(before);
-  const locked = await fixture({ frozenCodexCompactionMode: "remote_v2" });
-  await expect(call(locked.grant, request(locked.session.id))).rejects.toThrow("locked to Codex");
+  // A Codex remote-compaction chat switches models in place; its next turn
+  // rebuilds the context for the new model.
+  const remote = await fixture({ frozenCodexCompactionMode: "remote_v2" });
+  await call(remote.grant, request(remote.session.id));
+  expect(await getSession(client.db, remote.grant.workspaceId, remote.session.id)).toMatchObject({
+    model: "scripted-model",
+    codexCompactionMode: "remote_v2",
+  });
 });
 
 test("model settings authorizes the exact target and first-party surface once", async () => {

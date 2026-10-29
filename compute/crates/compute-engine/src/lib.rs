@@ -222,6 +222,16 @@ pub trait Engine: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Bytes of memory its VMs may still take together, if the engine
+    /// limits what they hold together: the limit less what they hold now,
+    /// page cache the host can drop at once left out as in
+    /// [`Engine::resident_bytes`]. A new guest gets no more than this
+    /// however much the host has free, so the host counts it as the most
+    /// that is available. `None` where nothing limits them together.
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
     /// Bytes of host memory the VM holds right now; with huge-page guest
     /// memory, the huge pages it holds. Page cache the host can drop at
     /// once, such as what its disk writes and saved images leave, is not

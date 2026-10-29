@@ -1110,7 +1110,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
   ): PublishedSiteDataViewer =>
-    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest");
+    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest", {
+      access: viewer.kind,
+      email: viewer.email,
+    });
 
   /**
    * Site SQL: run one named query of this Site as the viewer. The query's
@@ -1538,18 +1541,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             null,
           );
       }
-      // Every conversation gets this Site's own data tools, pinned to this
-      // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      // People outside the workspace get this Site's own data tools, pinned
+      // to this Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      // Members chat with their own tools, so they get none here.
       const dataTools =
         viewer.kind === "member"
           ? []
-          : await siteAgentDataToolsForStart(
-              deps,
-              host.scope,
-              host.site.id,
-              viewer.kind,
-              undefined,
-            );
+          : await siteAgentDataToolsForStart(deps, host.scope, host.site.id);
       const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance

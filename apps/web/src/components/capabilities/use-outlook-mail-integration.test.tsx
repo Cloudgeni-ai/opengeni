@@ -220,6 +220,38 @@ describe("useOutlookMailIntegration", () => {
     }
   });
 
+  test("an account carried into Personal from another workspace says where it is managed", async () => {
+    let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
+    const rendered = await render(
+      <Harness
+        permissions={["capabilities:manage"]}
+        instances={[
+          account({ ownership: "personal", instanceKey: "account-own" }),
+          account({
+            ownership: "personal",
+            instanceKey: "account-carried",
+            displayName: "mia@acme.com",
+            personalExtension: {
+              originWorkspaceId: "44444444-4444-4444-8444-444444444444",
+              originWorkspaceName: "Team workspace",
+            },
+          }),
+        ]}
+        onModel={(current) => (model = current)}
+      />,
+    );
+    try {
+      const [own, carried] = model!.access!.items;
+      expect(own?.actions?.map((action) => action.label)).toEqual(["Remove"]);
+      expect(carried?.meta).toBe("From Team workspace");
+      expect(carried?.actions).toBeUndefined();
+      expect(carried?.detail).toBeUndefined();
+      expect(model?.chip).toEqual({ label: "Connected", tone: "ok" });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("zero accounts: idle chip and a Set up footer for an admin", async () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(

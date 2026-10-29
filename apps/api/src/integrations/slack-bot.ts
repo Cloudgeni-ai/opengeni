@@ -6,6 +6,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
   evaluateOpenGeniSlackBotScopes,
+  hasOpenGeniSlackBotIdentityScope,
   hasOpenGeniSlackFileUploadScope,
   hasOpenGeniSlackBotSearchScopes,
   hasOpenGeniSlackReactionScope,
@@ -33,6 +34,7 @@ import {
   completeSlackBotUpdateOperation,
   getScheduledTask,
   getSession,
+  getSessionBotIdentity,
   getSlackBotPostOperation,
   availableSlackBotConnectionMetadata,
   sharedOrganizationSlackBots,
@@ -55,6 +57,7 @@ import {
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import sharp from "sharp";
+import { sessionAvatarImageUrl } from "./session-avatar-image";
 
 const SLACK_API_BASE = "https://slack.com/api/";
 const SLACK_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
@@ -789,12 +792,14 @@ export async function sendSlackBotPost(input: {
     );
   }
   const client = createOpenGeniSlackBotClient(input, target);
+  const identity = await client.sessionIdentity(input.grant.workspaceId, input.sessionId);
   return client.postMessage({
     operationId: message.id,
     channelId: message.channelId,
     ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
     text: message.text,
     requireActiveNonSharedChannel: true,
+    ...(identity ? { identity } : {}),
   });
 }
 
@@ -912,6 +917,7 @@ export async function sendScheduledSlackBotPost(input: {
     },
     target,
   );
+  const identity = await client.sessionIdentity(input.grant.workspaceId, input.sessionId);
   const post = () =>
     client.postMessage({
       operationId: message.id,
@@ -919,6 +925,7 @@ export async function sendScheduledSlackBotPost(input: {
       ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
       text: message.text,
       requireActiveNonSharedChannel: true,
+      ...(identity ? { identity } : {}),
     });
   if (!channelChanged && !botChanged) return await post();
   // The destination moved after this message was prepared, so it is never sent
@@ -989,6 +996,11 @@ export async function verifyScheduledTaskSlackChannel(
     });
   }
 }
+
+/** Slack's limit on a post's custom display name. */
+const SLACK_BOT_USERNAME_MAX = 80;
+
+export type SlackBotPostIdentity = { username: string; iconUrl?: string };
 
 export class OpenGeniSlackBotClient {
   private readonly resolveCredential: ReturnType<typeof buildConnectionTokenResolver>;
@@ -1666,6 +1678,32 @@ export class OpenGeniSlackBotClient {
   }
 
   /**
+   * How a bot chat signs its posts: its name and avatar instead of the app's.
+   * Only a chat with an avatar is a bot here, and only when this Slack app was
+   * granted `chat:write.customize`; otherwise posts stay the app's. Slack still
+   * labels every such post as an app message.
+   */
+  async sessionIdentity(
+    workspaceId: string,
+    sessionId: string | null | undefined,
+  ): Promise<SlackBotPostIdentity | undefined> {
+    if (!sessionId || !hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)) {
+      return undefined;
+    }
+    const bot = await getSessionBotIdentity(this.db, workspaceId, sessionId).catch(() => null);
+    if (!bot?.avatar || !bot.title) return undefined;
+    const username = [...bot.title.replace(/\s+/gu, " ")].slice(0, SLACK_BOT_USERNAME_MAX).join("");
+    const secret = this.settings.slackSigningSecret;
+    const base = this.settings.publicBaseUrl;
+    return {
+      username,
+      ...(secret && base
+        ? { iconUrl: sessionAvatarImageUrl(base, secret, { workspaceId, avatar: bot.avatar }) }
+        : {}),
+    };
+  }
+
+  /**
    * Internal server-owned delivery only. Generic model-facing MCP callers do
    * not have a trustworthy durable logical-delivery identity and must never
    * reach this method with a caller-generated operation ID.
@@ -1678,6 +1716,8 @@ export class OpenGeniSlackBotClient {
     text: string;
     blocks?: SlackMessageBlock[];
     requireActiveNonSharedChannel?: boolean;
+    /** A bot chat's own name and picture, from {@link sessionIdentity}. */
+    identity?: SlackBotPostIdentity;
   }) {
     const operation = "message.post" as const;
     const claimHolderId = crypto.randomUUID();
@@ -1788,6 +1828,12 @@ export class OpenGeniSlackBotClient {
         unfurl_links: "false",
         unfurl_media: "false",
         ...(input.threadTimestamp ? { thread_ts: input.threadTimestamp } : {}),
+        ...(input.identity && hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)
+          ? {
+              username: input.identity.username,
+              ...(input.identity.iconUrl ? { icon_url: input.identity.iconUrl } : {}),
+            }
+          : {}),
       });
       const slackChannelId = requiredSlackString(posted.channel, "channel");
       const slackMessageTimestamp = requiredSlackString(posted.ts, "ts");

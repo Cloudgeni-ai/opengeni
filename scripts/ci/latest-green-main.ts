@@ -1,12 +1,21 @@
 #!/usr/bin/env bun
 import { execFileSync } from "node:child_process";
 
+/** Room for a 100-run page: each run carries its full commit message, and a batch
+ * commit's manifest makes that message large. The default 1 MiB overflowed. */
+export const GH_API_MAX_BUFFER = 64 * 1024 * 1024;
+
+export function ghApiJson(path: string, exec: typeof execFileSync = execFileSync): any {
+  return JSON.parse(
+    exec("gh", ["api", path], { encoding: "utf8", maxBuffer: GH_API_MAX_BUFFER }) as string,
+  );
+}
+
 // Discovery only; release tooling must still verify ancestry, exact-run success,
 // image receipts and its ordinary admission. Never reinterpret queue green as full green.
 export function latestGreenMain(
   repository = "Cloudgeni-ai/opengeni",
-  api: (path: string) => any = (path) =>
-    JSON.parse(execFileSync("gh", ["api", path], { encoding: "utf8" })),
+  api: (path: string) => any = (path) => ghApiJson(path),
   notBefore?: string,
 ) {
   for (let page = 1; page <= 10; page++) {

@@ -1,10 +1,13 @@
 // The desktop app's dictation settings: turning dictation from anywhere on,
 // its shortcuts and their languages, where the text goes, what the system
-// must allow, and the recent dictations kept on this computer.
+// must allow, the words to listen for, and the recent dictations kept on this
+// computer, to copy, play or transcribe again.
 import {
   getDesktopDictation,
   type DesktopDictation,
+  type DesktopDictationAction,
   type DesktopDictationHistoryEntry,
+  type DesktopDictationKeys,
   type DesktopDictationModifier,
   type DesktopDictationOutput,
   type DesktopDictationPasteBlocker,
@@ -16,7 +19,7 @@ import {
   type DesktopDictationStatus,
   type DesktopPlatform,
 } from "@opengeni/sdk/desktop-bridge";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, PlayIcon, RotateCcwIcon, SquareIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { MEETING_LANGUAGES } from "../../meetings/meeting-languages";
@@ -26,8 +29,9 @@ import { Button } from "../../ui/button";
 import { RelativeTime } from "../../ui/relative-time";
 import { Section } from "../../ui/section";
 import { SelectMenu, type SelectOption } from "../../ui/select-menu";
-import { SettingRow, SettingRowLink } from "../../ui/setting-row";
+import { SettingRow } from "../../ui/setting-row";
 import { Switch } from "../../ui/switch";
+import { Textarea } from "../../ui/textarea";
 import { acceleratorFromKey, desktopShortcutLabel, sameDesktopShortcut } from "./shortcuts";
 
 /** At most this many shortcuts, as the app keeps them. */
@@ -49,6 +53,13 @@ const ACCELERATORS = [
   "Control+Alt+D",
 ];
 const CHORD_ORDER: DesktopDictationModifier[] = ["command", "option", "control", "shift", "fn"];
+/** What `recordingFor` holds while the retry or cancel shortcut's keys are recorded. */
+const ACTION_PREFIX = "action:";
+const NONE = "none";
+const KEYS = "keys";
+/** As the app keeps them. */
+const VOCABULARY_MAX = 100;
+const VOCABULARY_TERM_MAX = 50;
 
 export type UseDesktopDictationResult = {
   /** The app's dictation, or null outside a desktop app that offers it. */
@@ -64,6 +75,8 @@ export type UseDesktopDictationResult = {
   update: (change: Partial<DesktopDictationSettings>) => Promise<DesktopDictationStatus | null>;
   requestPermission: (id: DesktopDictationPermissionId) => void;
   clearHistory: () => Promise<void>;
+  /** Transcribe a kept dictation again; null in apps that can't. */
+  transcribeAgain: ((id: string) => void) | null;
 };
 
 /** The app's dictation settings and recent dictations, kept current. */
@@ -131,7 +144,22 @@ export function useDesktopDictation(
     setHistory([]);
   }, [dictation]);
 
-  return { dictation, status, history, saving, error, update, requestPermission, clearHistory };
+  const transcribeAgain = useCallback(
+    (id: string) => void dictation?.transcribeAgain?.(id).catch(() => undefined),
+    [dictation],
+  );
+
+  return {
+    dictation,
+    status,
+    history,
+    saving,
+    error,
+    update,
+    requestPermission,
+    clearHistory,
+    transcribeAgain: typeof dictation?.transcribeAgain === "function" ? transcribeAgain : null,
+  };
 }
 
 export type DesktopDictationSettingsProps = {
@@ -153,10 +181,20 @@ export function DesktopDictationSettings({
   className,
 }: DesktopDictationSettingsProps) {
   const t = useOpenGeniText();
-  const { dictation, status, history, saving, error, update, requestPermission, clearHistory } =
-    useDesktopDictation(given);
+  const {
+    dictation,
+    status,
+    history,
+    saving,
+    error,
+    update,
+    requestPermission,
+    clearHistory,
+    transcribeAgain,
+  } = useDesktopDictation(given);
   const [recordingFor, setRecordingFor] = useState<string | null>(null);
   const [keysError, setKeysError] = useState<{ profileId: string; message: string } | null>(null);
+  const playback = usePlayback(dictation);
   const platform: DesktopPlatform = status?.platform ?? "macos";
   const settings = status?.settings ?? null;
 
@@ -182,11 +220,16 @@ export function DesktopDictationSettings({
       if (!accelerator) return;
       setRecordingFor(null);
       const shortcut: DesktopDictationShortcut = { kind: "accelerator", accelerator };
-      if (usedByAnother(settings.profiles, recordingFor, shortcut)) {
+      if (usedByAnother(settings, recordingFor, shortcut)) {
         setKeysError({
           profileId: recordingFor,
           message: t("desktopDictation.settings.usedByAnother"),
         });
+        return;
+      }
+      if (recordingFor.startsWith(ACTION_PREFIX)) {
+        const action = recordingFor.slice(ACTION_PREFIX.length) as DesktopDictationAction;
+        void update({ [actionKey(action)]: { kind: "accelerator", accelerator } });
         return;
       }
       saveProfiles(
@@ -197,7 +240,7 @@ export function DesktopDictationSettings({
     };
     globalThis.addEventListener("keydown", onKey, true);
     return () => globalThis.removeEventListener("keydown", onKey, true);
-  }, [platform, recordingFor, saveProfiles, settings, t]);
+  }, [platform, recordingFor, saveProfiles, settings, t, update]);
 
   if (!dictation || !status?.supported || !settings) return null;
   const { profiles } = settings;
@@ -413,6 +456,40 @@ export function DesktopDictationSettings({
                   }
                 />
               ) : null}
+              {settings.retryShortcut !== undefined
+                ? (["retry", "cancel"] as const).map((action) => (
+                    <ActionShortcutRow
+                      key={action}
+                      action={action}
+                      keys={settings[actionKey(action)] ?? null}
+                      platform={platform}
+                      saving={saving}
+                      recording={recordingFor === `${ACTION_PREFIX}${action}`}
+                      error={
+                        (keysError?.profileId === `${ACTION_PREFIX}${action}`
+                          ? keysError.message
+                          : null) ??
+                        shortcutProblemMessage(
+                          status.actionShortcutErrors?.find((item) => item.action === action)
+                            ?.problem,
+                          t,
+                        )
+                      }
+                      onRecord={(recording) => {
+                        setKeysError(null);
+                        setRecordingFor(recording ? `${ACTION_PREFIX}${action}` : null);
+                      }}
+                      onClear={() => void update({ [actionKey(action)]: null })}
+                    />
+                  ))
+                : null}
+              {settings.vocabulary !== undefined ? (
+                <VocabularyRow
+                  vocabulary={settings.vocabulary}
+                  saving={saving}
+                  onChange={(vocabulary) => void update({ vocabulary })}
+                />
+              ) : null}
             </>
           ) : null}
         </SettingRow>
@@ -431,7 +508,15 @@ export function DesktopDictationSettings({
           {history.slice(0, 10).map((entry) => (
             <SettingRow
               key={entry.id}
-              label={<span className="line-clamp-2 font-normal break-words">{entry.text}</span>}
+              label={
+                entry.cancelled ? (
+                  <span className="font-normal text-fg-muted">
+                    {t("desktopDictation.settings.cancelledDictation")}
+                  </span>
+                ) : (
+                  <span className="line-clamp-2 font-normal break-words">{entry.text}</span>
+                )
+              }
               description={
                 <>
                   <RelativeTime date={entry.at} focusable={false} />
@@ -439,7 +524,45 @@ export function DesktopDictationSettings({
                 </>
               }
               control={
-                <CopyText text={entry.text} label={t("desktopDictation.settings.copyText")} />
+                <div className="flex items-center gap-0.5">
+                  {entry.audio && dictation.historyAudio ? (
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={t(
+                        playback.playing === entry.id
+                          ? "desktopDictation.settings.stopPlaying"
+                          : "desktopDictation.settings.play",
+                      )}
+                      title={t(
+                        playback.playing === entry.id
+                          ? "desktopDictation.settings.stopPlaying"
+                          : "desktopDictation.settings.play",
+                      )}
+                      onClick={() => playback.toggle(entry.id)}
+                    >
+                      {playback.playing === entry.id ? (
+                        <SquareIcon aria-hidden />
+                      ) : (
+                        <PlayIcon aria-hidden />
+                      )}
+                    </Button>
+                  ) : null}
+                  {entry.audio && transcribeAgain ? (
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={t("desktopDictation.settings.transcribeAgain")}
+                      title={t("desktopDictation.settings.transcribeAgain")}
+                      onClick={() => transcribeAgain(entry.id)}
+                    >
+                      <RotateCcwIcon aria-hidden />
+                    </Button>
+                  ) : null}
+                  {entry.text ? (
+                    <CopyText text={entry.text} label={t("desktopDictation.settings.copyText")} />
+                  ) : null}
+                </div>
               }
             />
           ))}
@@ -477,6 +600,209 @@ function CopyText({ text, label }: { text: string; label: string }) {
       {copied ? <CheckIcon className="text-success" aria-hidden /> : <CopyIcon aria-hidden />}
     </Button>
   );
+}
+
+/** The retry or cancel shortcut: none, or a key combination the person presses. */
+function ActionShortcutRow({
+  action,
+  keys,
+  platform,
+  saving,
+  recording,
+  error,
+  onRecord,
+  onClear,
+}: {
+  action: DesktopDictationAction;
+  keys: DesktopDictationKeys | null;
+  platform: DesktopPlatform;
+  saving: boolean;
+  recording: boolean;
+  error: string | null;
+  onRecord: (recording: boolean) => void;
+  onClear: () => void;
+}) {
+  const t = useOpenGeniText();
+  const label = t(
+    action === "retry"
+      ? "desktopDictation.settings.retryShortcutLabel"
+      : "desktopDictation.settings.cancelShortcutLabel",
+  );
+  const options: SelectOption[] = [
+    { value: NONE, label: t("desktopDictation.settings.noShortcut") },
+    ...(keys ? [{ value: KEYS, label: desktopShortcutLabel(keys, platform) }] : []),
+    {
+      value: CUSTOM,
+      label: t(
+        keys
+          ? "desktopDictation.settings.otherKeyCombination"
+          : "desktopDictation.settings.keyCombination",
+      ),
+      description: t("desktopDictation.settings.keyCombinationDescription"),
+    },
+  ];
+  return (
+    <SettingRow
+      label={label}
+      description={
+        recording
+          ? t("desktopDictation.settings.recordKeys")
+          : t(
+              action === "retry"
+                ? "desktopDictation.settings.retryShortcutDescription"
+                : "desktopDictation.settings.cancelShortcutDescription",
+            )
+      }
+      error={error}
+      controlWidth="select"
+      control={
+        recording ? (
+          <Button size="sm" variant="outline" onClick={() => onRecord(false)}>
+            {t("desktopDictation.settings.cancelRecording")}
+          </Button>
+        ) : (
+          <SelectMenu
+            size="sm"
+            className="w-56"
+            align="end"
+            disabled={saving}
+            aria-label={label}
+            options={options}
+            value={keys ? KEYS : NONE}
+            onValueChange={(value) => {
+              if (value === CUSTOM) onRecord(true);
+              else if (value === NONE) onClear();
+            }}
+          />
+        )
+      }
+    />
+  );
+}
+
+/** The names and words dictation listens for, one per line. */
+function VocabularyRow({
+  vocabulary,
+  saving,
+  onChange,
+}: {
+  vocabulary: string[];
+  saving: boolean;
+  onChange: (vocabulary: string[]) => void;
+}) {
+  const t = useOpenGeniText();
+  const saved = vocabulary.join("\n");
+  const [draft, setDraft] = useState(saved);
+  const editing = useRef(false);
+  // The app's list wins while the person isn't typing in it.
+  useEffect(() => {
+    if (!editing.current) setDraft(saved);
+  }, [saved]);
+  const terms = vocabularyTerms(draft);
+  const tooLong = terms.find((term) => term.length > VOCABULARY_TERM_MAX);
+  const tooMany = terms.length > VOCABULARY_MAX;
+  return (
+    <SettingRow
+      variant="stacked"
+      label={t("desktopDictation.settings.vocabularyLabel")}
+      description={t("desktopDictation.settings.vocabularyDescription")}
+      error={
+        tooLong
+          ? t("desktopDictation.settings.vocabularyTermTooLong", {
+              term: tooLong.slice(0, 20),
+              max: String(VOCABULARY_TERM_MAX),
+            })
+          : tooMany
+            ? t("desktopDictation.settings.vocabularyTooMany", { max: String(VOCABULARY_MAX) })
+            : null
+      }
+      control={
+        <Textarea
+          rows={3}
+          value={draft}
+          disabled={saving && !editing.current}
+          placeholder={t("desktopDictation.settings.vocabularyPlaceholder")}
+          aria-label={t("desktopDictation.settings.vocabularyLabel")}
+          aria-invalid={tooLong || tooMany ? true : undefined}
+          onFocus={() => {
+            editing.current = true;
+          }}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => {
+            editing.current = false;
+            if (tooLong || tooMany) return;
+            if (terms.join("\n") !== saved) onChange(terms);
+            else setDraft(saved);
+          }}
+        />
+      }
+    />
+  );
+}
+
+/** The terms in what the person typed: one per line or between commas, without repeats. */
+export function vocabularyTerms(text: string): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const part of text.split(/[\n,;]/u)) {
+    const term = part.trim().replace(/\s+/gu, " ");
+    const key = term.toLocaleLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+  }
+  return terms;
+}
+
+/** Plays one kept dictation's speech at a time. */
+function usePlayback(dictation: DesktopDictation | null): {
+  playing: string | null;
+  toggle: (id: string) => void;
+} {
+  const [playing, setPlaying] = useState<string | null>(null);
+  const current = useRef<{ id: string; context: AudioContext } | null>(null);
+  const stop = useCallback(() => {
+    const now = current.current;
+    current.current = null;
+    setPlaying(null);
+    void now?.context.close().catch(() => undefined);
+  }, []);
+  useEffect(() => stop, [stop]);
+  const toggle = useCallback(
+    (id: string) => {
+      const wasPlaying = current.current?.id === id;
+      stop();
+      if (wasPlaying || !dictation?.historyAudio) return;
+      const Context =
+        (globalThis as { AudioContext?: typeof AudioContext }).AudioContext ??
+        (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Context) return;
+      const context = new Context();
+      const mine = { id, context };
+      current.current = mine;
+      setPlaying(id);
+      void (async () => {
+        try {
+          const audio = await dictation.historyAudio!(id);
+          if (!audio || current.current !== mine) throw new Error("gone");
+          // A copy: decoding takes the buffer over.
+          const buffer = await context.decodeAudioData(audio.bytes.slice().buffer as ArrayBuffer);
+          if (current.current !== mine) return;
+          const source = context.createBufferSource();
+          source.buffer = buffer;
+          source.connect(context.destination);
+          source.onended = () => {
+            if (current.current === mine) stop();
+          };
+          source.start();
+        } catch {
+          if (current.current === mine) stop();
+        }
+      })();
+    },
+    [dictation, stop],
+  );
+  return { playing, toggle };
 }
 
 function ProfileRows({
@@ -523,13 +849,6 @@ function ProfileRows({
         label={single ? t("desktopDictation.settings.shortcutLabel") : profile.name}
         description={description}
         error={error}
-        hint={
-          single ? undefined : (
-            <SettingRowLink onClick={onRemove} disabled={saving}>
-              {t("desktopDictation.settings.remove")}
-            </SettingRowLink>
-          )
-        }
         controlWidth="select"
         control={
           recording ? (
@@ -537,23 +856,37 @@ function ProfileRows({
               {t("desktopDictation.settings.cancelRecording")}
             </Button>
           ) : (
-            <SelectMenu
-              size="sm"
-              className="w-56"
-              align="end"
-              disabled={saving}
-              aria-label={t("desktopDictation.settings.shortcutLabel")}
-              options={options}
-              value={shortcutValue(shortcut)}
-              onValueChange={(value) => {
-                if (value === CUSTOM) {
-                  onRecord(true);
-                  return;
-                }
-                const next = shortcutFromValue(value);
-                if (next) onShortcut(next);
-              }}
-            />
+            <div className="flex w-full items-center gap-1">
+              <SelectMenu
+                size="sm"
+                className="min-w-0 flex-1"
+                align="end"
+                disabled={saving}
+                aria-label={t("desktopDictation.settings.shortcutLabel")}
+                options={options}
+                value={shortcutValue(shortcut)}
+                onValueChange={(value) => {
+                  if (value === CUSTOM) {
+                    onRecord(true);
+                    return;
+                  }
+                  const next = shortcutFromValue(value);
+                  if (next) onShortcut(next);
+                }}
+              />
+              {single ? null : (
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={saving}
+                  aria-label={t("desktopDictation.settings.remove")}
+                  title={t("desktopDictation.settings.remove")}
+                  onClick={onRemove}
+                >
+                  <Trash2Icon aria-hidden />
+                </Button>
+              )}
+            </div>
           )
         }
       />
@@ -596,7 +929,7 @@ function shortcutOptions(
     candidates.unshift(own);
   }
   const options: SelectOption[] = candidates.map((candidate) => {
-    const taken = usedByAnother(profiles, profile.id, candidate);
+    const taken = usedByAnother({ ...status.settings, profiles }, profile.id, candidate);
     return {
       value: shortcutValue(candidate),
       label: desktopShortcutLabel(candidate, platform),
@@ -642,14 +975,29 @@ function shortcutFromValue(value: string): DesktopDictationShortcut | null {
   return null;
 }
 
+/** Another shortcut (a dictation's, or retry or cancel) uses these keys. */
 function usedByAnother(
-  profiles: DesktopDictationProfile[],
-  profileId: string,
+  settings: DesktopDictationSettings,
+  ownerId: string,
   shortcut: DesktopDictationShortcut,
 ): boolean {
-  return profiles.some(
-    (profile) => profile.id !== profileId && sameDesktopShortcut(profile.shortcut, shortcut),
-  );
+  if (
+    settings.profiles.some(
+      (profile) => profile.id !== ownerId && sameDesktopShortcut(profile.shortcut, shortcut),
+    )
+  ) {
+    return true;
+  }
+  return (["retry", "cancel"] as const).some((action) => {
+    const keys = settings[actionKey(action)];
+    return `${ACTION_PREFIX}${action}` !== ownerId && keys
+      ? sameDesktopShortcut(keys, shortcut)
+      : false;
+  });
+}
+
+function actionKey(action: DesktopDictationAction): "retryShortcut" | "cancelShortcut" {
+  return action === "retry" ? "retryShortcut" : "cancelShortcut";
 }
 
 /** A shortcut no profile uses yet, for a new one. */
@@ -661,7 +1009,11 @@ function freeShortcut(
     ? CHORDS.map((modifiers) => ({ kind: "modifierChord", modifiers }))
     : [];
   for (const accelerator of ACCELERATORS) candidates.push({ kind: "accelerator", accelerator });
-  return candidates.find((candidate) => !usedByAnother(profiles, "", candidate)) ?? null;
+  return (
+    candidates.find(
+      (candidate) => !usedByAnother({ ...status.settings, profiles }, "", candidate),
+    ) ?? null
+  );
 }
 
 function newProfileId(profiles: DesktopDictationProfile[]): string {
