@@ -643,6 +643,12 @@ export type ComposerState = {
   error: Error | null;
   clearError: () => void;
   /**
+   * Whether the person can fix a credit refusal themselves (the
+   * `canBuyCredits` option). Surfaces that word `error` use it to pick the
+   * ask-an-owner text for members.
+   */
+  canBuyCredits?: boolean | undefined;
+  /**
    * True while a send is held because Opengeni is updating or briefly
    * unreachable. The message stays queued here with its idempotency key and
    * is retried automatically; surfaces show a calm "updating" state instead
@@ -3344,6 +3350,7 @@ export function useComposer(
     removeRestoredResource,
     error: identityMatches ? (error ?? draftReadError) : null,
     clearError,
+    canBuyCredits: options.canBuyCredits ?? true,
     reconnecting: identityMatches ? serviceWaiting : false,
   };
 }
