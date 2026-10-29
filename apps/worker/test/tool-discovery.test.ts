@@ -46,6 +46,35 @@ describe("shared deployment decision category", () => {
       "jev/jev-latest",
     );
   });
+  test("an Azure OpenAI decision model can sign in as the deployment identity", () => {
+    const azure = {
+      decisionModelAuth: "deployment_identity" as const,
+      decisionModelProvider: "openai" as const,
+      decisionModelId: "selector-deployment",
+      decisionModelBaseUrl: "https://resource.openai.azure.test/openai/v1",
+    };
+    expect(
+      configuredDecisionModel(
+        testSettings({
+          ...azure,
+          azureTenantId: "tenant-test",
+          azureClientId: "client-test",
+          azureClientSecret: "secret-test",
+        }),
+      )?.id,
+    ).toBe("openai/selector-deployment");
+    let unavailable = 0;
+    expect(
+      configuredToolDecisionModel({
+        settings: testSettings(azure),
+        recordUsage: async () => {},
+        onUnavailable: () => {
+          unavailable++;
+        },
+      }),
+    ).toBeUndefined();
+    expect(unavailable).toBe(1);
+  });
   test("uses the typed endpoint, model and usage hook rather than chat completions", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const usage: DecisionUsage[] = [];

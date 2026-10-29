@@ -18,6 +18,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     teamsBotSetupAdminIds: [],
     signupChallengeEnabled: false,
     signupChallengeHostnames: "",
+    decisionModelAuth: "api_key",
     serviceName: "opengeni",
     officeAddinName: "Opengeni",
     browserExtensionName: "Opengeni Browser",
