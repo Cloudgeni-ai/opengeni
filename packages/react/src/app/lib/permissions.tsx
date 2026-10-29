@@ -414,6 +414,32 @@ export function canManageWorkspaceSettings(
 }
 
 /**
+ * Shared content of a workspace that everyone who works there may change for
+ * everyone, like a shared Skill: its instructions, its name and its custom
+ * model entries. Whoever manages the workspace's settings may; otherwise a
+ * person of the organization who can start chats here (`sessions:create`),
+ * signed in as themselves. Mirrors the API's `requireWorkspaceContributorGrant`.
+ * UI affordance only.
+ */
+export function canContributeWorkspaceContent(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  selfContext: ManagedSelfContext | null,
+): boolean {
+  if (!context || !workspace) return false;
+  if (canManageWorkspaceSettings(context, workspace, selfContext)) return true;
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspace.id);
+  return Boolean(
+    grant &&
+    grant.accountId === workspace.accountId &&
+    (grant.principalKind ?? "human_session") === "human_session" &&
+    context.credential === undefined &&
+    (context.mode === "local" || context.subjectId.startsWith("user:")) &&
+    hasWorkspacePermission(context, workspace.id, "sessions:create"),
+  );
+}
+
+/**
  * A shared workspace's Members surface: the viewer's own members:manage grant,
  * or (in a managed browser session) an active organization owner or admin of
  * the workspace's organization, with or without a grant here. The API applies

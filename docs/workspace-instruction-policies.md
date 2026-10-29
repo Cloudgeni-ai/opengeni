@@ -221,13 +221,23 @@ The API and `OpenGeniClient` expose:
 
 They also expose list/create onboarding proposals below
 `/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals`. Listing
-requires `workspace:read`; creating an inactive proposal requires
-`workspace:admin`.
+requires `workspace:read`; creating an inactive proposal requires the same
+access as editing (below).
 
 The routes live below
 `/v1/workspaces/:workspaceId/instruction-policies`. List, get, and diff require
-`workspace:read`. Draft creation, legacy import, activation, and rollback require
-`workspace:admin`.
+`workspace:read`. Draft creation, legacy import, activation, and rollback are
+open to everyone who may start chats in the workspace (`sessions:create`), like
+shared Skills and Knowledge: workspace admins, the owner of a Personal workspace,
+and Members. A Member must act as themselves: signed in to the app, or through
+their own chat or connected agent within what they allowed. An agent's own
+token, API keys without settings access, services and people from another
+product are refused (`requireWorkspaceContributorGrant` in
+`packages/core/src/access/index.ts`); agents change instructions only through
+agent learning below. Reviewing the agent's proposed instruction changes
+(`/v1/workspaces/:workspaceId/agent-learning/instructions/*`) needs the same
+access. The workspace's learning settings (Off, Review first, Automatic) stay
+with workspace admins and the Personal owner.
 
 The agent-facing `instruction_policy_save` surface is deliberately an edit
 contract rather than a complete-document save. The agent must read the active
