@@ -64,6 +64,24 @@ export const WebhookValueSource = /* @__PURE__ */ defineSchema(() =>
 export type WebhookValueSource = z.infer<typeof WebhookValueSource>;
 
 /**
+ * Several values joined into one text, each a path in the event or a header,
+ * such as an alert's status, fingerprint and start time.
+ */
+export const WebhookJoinedParts = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      parts: z.array(WebhookValueSource).min(2).max(4),
+      separator: z
+        .string()
+        .max(4)
+        .regex(/^[\x21-\x7e]*$/u, "Printable ASCII without spaces")
+        .default("."),
+    })
+    .strict(),
+);
+export type WebhookJoinedParts = z.infer<typeof WebhookJoinedParts>;
+
+/**
  * How a custom webhook proves it came from the app, always over the exact raw
  * body and with the source's secret:
  * - `standard_webhooks`: Standard Webhooks (`webhook-id`, `webhook-timestamp`,
@@ -233,8 +251,12 @@ export const WebhookFormat = /* @__PURE__ */ defineSchema(() =>
       ]),
       /** The delivery's id, so a retried delivery is kept once; else the body's hash. */
       deliveryId: WebhookValueSource.optional(),
-      /** Each event's own id, so an event delivered twice runs automations once. */
-      eventId: WebhookJsonPath.optional(),
+      /**
+       * Each event's own id, so an event delivered twice runs automations
+       * once: a path, or `parts` joined with `separator` (such as an alert's
+       * status, fingerprint and start time). An event missing a part has no id.
+       */
+      eventId: z.union([WebhookJsonPath, WebhookJoinedParts]).optional(),
       /** When it happened: an ISO time or Unix seconds or milliseconds. */
       occurredAt: WebhookJsonPath.optional(),
       /** A one-line description; the event type when absent. */

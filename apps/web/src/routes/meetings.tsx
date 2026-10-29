@@ -3,10 +3,12 @@
 import { useNavigate } from "@tanstack/react-router";
 
 import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
+import { inferenceFeatureRestriction } from "@opengeni/react";
 import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
 import { useRecordingsClient } from "@opengeni/react/recordings";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
 
@@ -22,15 +24,18 @@ function meetingPath(workspaceId: string, recordingId: string): string {
 export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const context = useAppContext();
-  const { workspaces } = context;
+  const { workspaces, clientConfig } = context;
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
+  // EU-only workspace without an EU transcription route: no new recordings.
+  const recordingRestricted = inferenceFeatureRestriction(t, clientConfig, "meeting_transcription");
   return (
     <ContentPage width="standard" className="pt-6">
       <MeetingsListPage
         workspaceId={workspaceId}
         defaultLanguage={settings.language ?? null}
         viewerName={meetingViewerName(context)}
+        recordingOff={recordingRestricted}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}
         onOpen={(recordingId) =>
           void navigate({
