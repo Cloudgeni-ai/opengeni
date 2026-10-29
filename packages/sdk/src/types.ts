@@ -30,6 +30,7 @@ export type {
   InsightsCallsScope,
 } from "./insights-usage";
 import type {
+  ClientModelResidencyV1,
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
@@ -4488,6 +4489,8 @@ export type ClientModel = {
    * is EU-only and this model's route is not EU by its residency record.
    */
   availability?: ModelAvailabilityV1 | undefined;
+  /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+  residency?: ClientModelResidencyV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
