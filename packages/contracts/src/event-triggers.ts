@@ -300,6 +300,11 @@ export const EventSourceMcpBinding = /* @__PURE__ */ defineSchema(() =>
       serverId: z.string().min(1).max(256),
       /** The owner's connection used for every events/* request. */
       connectionId: Uuid.nullable(),
+      /**
+       * Present on a workspace source that listens to a server by URL: its
+       * requests are signed in by the workspace credential provider.
+       */
+      url: z.string().optional(),
     })
     .strict(),
 );
@@ -393,6 +398,19 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
           kind: z.literal("mcp"),
           serverId: z.string().min(1).max(256),
           connectionId: Uuid.optional(),
+          /**
+           * Listen to a server by its HTTPS URL instead of a workspace
+           * connector, as a workspace source: the workspace credential
+           * provider signs its requests in (`purpose: "event_subscription"`).
+           * `serverId` then only names it. A workspace-level caller or a
+           * workspace admin creates it.
+           */
+          url: z
+            .string()
+            .max(2048)
+            .url()
+            .refine((value) => value.startsWith("https://"), "Use an https:// URL")
+            .optional(),
           name: EventSourceName.optional(),
         })
         .strict(),
@@ -408,6 +426,13 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
         .strict(),
     ])
     .superRefine((value, context) => {
+      if (value.kind === "mcp" && value.url !== undefined && value.connectionId !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["connectionId"],
+          message: "A source listening by URL signs in through the credential provider",
+        });
+      }
       if (
         value.kind === "webhook" &&
         value.adapter === "standard" &&

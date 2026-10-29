@@ -45,6 +45,9 @@ export const eventSources = pgTable(
     secretEncrypted: text("secret_encrypted"),
     externalKey: text("external_key"),
     mcpServerId: text("mcp_server_id"),
+    // Migration 1103: a workspace MCP source listens to this URL, signed in
+    // by the workspace credential provider; null for a connector source.
+    mcpServerUrl: text("mcp_server_url"),
     connectionId: uuid("connection_id"),
     lastDeliveryAt: timestamp("last_delivery_at", { withTimezone: true }),
     createdBySubjectId: text("created_by_subject_id").notNull(),

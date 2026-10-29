@@ -208,6 +208,7 @@ import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
+  SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
   scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
@@ -744,7 +745,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true, toolPolicy: true })
+          .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
           .strict()
           .optional(),
         ...(events ? { events: scheduledTaskEventsToolInput() } : {}),

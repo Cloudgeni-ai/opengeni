@@ -101,6 +101,8 @@ export type EventSourceRecord = {
   secretEncrypted: string | null;
   externalKey: string | null;
   mcpServerId: string | null;
+  /** A workspace MCP source's server URL, signed in by the credential provider. */
+  mcpServerUrl: string | null;
   connectionId: string | null;
   /** The webhook URL's route id; null for sources without a URL. */
   routeId: string | null;
@@ -133,6 +135,7 @@ function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
     secretEncrypted: row.secretEncrypted,
     externalKey: row.externalKey,
     mcpServerId: row.mcpServerId,
+    mcpServerUrl: row.mcpServerUrl,
     connectionId: row.connectionId,
     routeId,
     lastDeliveryAt: row.lastDeliveryAt,
@@ -187,6 +190,7 @@ export type CreateEventSourceInput = {
   statusReason?: EventStatusReason | null;
   externalKey?: string | null;
   mcpServerId?: string | null;
+  mcpServerUrl?: string | null;
   connectionId?: string | null;
   /** A GitHub source's routes are keyed with this (see githubInstallationRouteKey). */
   routeSecret?: Uint8Array | null;
@@ -220,6 +224,7 @@ export async function createEventSource(
           : {}),
         externalKey: input.externalKey ?? null,
         mcpServerId: input.mcpServerId ?? null,
+        mcpServerUrl: input.mcpServerUrl ?? null,
         connectionId: input.connectionId ?? null,
         createdBySubjectId: input.createdBySubjectId,
       };

@@ -40,7 +40,7 @@ import {
   type DeliveryOutcome,
 } from "./delivery-intake";
 import { webhookEventTypeCatalog } from "./event-type-catalog";
-import { eventStatusReason } from "./status-reason";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import {
   createGitHubEventSource,
   githubSourceEventTypes,
@@ -57,8 +57,8 @@ import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-
 import { createWorkspaceEventSource } from "./workspace-source";
 import {
   withMcpEventSourceClient,
-  McpEventSourceUnavailableError,
   mcpServerDisplayName,
+  type McpEventSourceClientDeps,
   type McpEventsFetch,
 } from "./mcp-event-source-client";
 import { mcpDeliveryEvents, receiveMcpEventWebhook } from "./mcp-event-subscriptions";
@@ -155,7 +155,11 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
     awaitingSigningSecret: source.kind === "webhook" && source.secretEncrypted === null,
     mcp:
       source.kind === "mcp" && source.mcpServerId
-        ? { serverId: source.mcpServerId, connectionId: source.connectionId }
+        ? {
+            serverId: source.mcpServerId,
+            connectionId: source.connectionId,
+            ...(source.mcpServerUrl ? { url: source.mcpServerUrl } : {}),
+          }
         : null,
     lastDeliveryAt: source.lastDeliveryAt?.toISOString() ?? null,
     createdAt: source.createdAt.toISOString(),
@@ -192,8 +196,10 @@ export async function createEventSourceForViewer(
     const source = await addMcpEventSource({
       ...input,
       ownerSubjectId: input.viewer.subjectId,
+      viewerIsAdmin: input.viewer.admin,
       serverId: request.serverId,
       connectionId: request.connectionId,
+      url: request.url,
       name: request.name,
     });
     return { source: eventSourceForClient(source, input.baseUrl) };
@@ -284,7 +290,11 @@ function assertSecretFitsFormat(secret: string, format: WebhookFormat | null): v
 }
 
 /** Network access for MCP sources; tests replace the transport. */
-export type McpEventSourceNetwork = { fetch?: McpEventsFetch };
+export type McpEventSourceNetwork = {
+  fetch?: McpEventsFetch;
+  /** Replaces the credential provider transport, for tests. */
+  providerFetch?: McpEventSourceClientDeps["providerFetch"];
+};
 
 /**
  * The deployment's GitHub App webhook settings, for GitHub sources. Null when
@@ -298,10 +308,7 @@ export type GitHubEventSourceAccess = { githubApp?: GitHubAppWebhookPort | null 
  */
 export function mcpSourceHttpError(error: unknown, serverName: string): HTTPException {
   if (error instanceof HTTPException) return error;
-  if (
-    error instanceof McpEventSourceUnavailableError ||
-    error instanceof McpServerWithoutEventsError
-  ) {
+  if (error instanceof EventSourceBlockedError) {
     return new HTTPException(422, { message: error.message });
   }
   const message = errorMessage(error);
@@ -314,6 +321,10 @@ export function mcpSourceHttpError(error: unknown, serverName: string): HTTPExce
  * An MCP source listens to one connector with its creator's own sign-in, so
  * it is always private to that person. The server must offer events. Adding
  * it again returns the source the person already has.
+ *
+ * With `url`, it is the workspace's source instead: it listens to that server
+ * signed in by the workspace credential provider, has no owner, and only a
+ * workspace-level caller or an admin adds it.
  */
 export async function addMcpEventSource(
   input: {
@@ -323,15 +334,24 @@ export async function addMcpEventSource(
     workspaceId: string;
     createdBySubjectId: string;
     ownerSubjectId: string | null;
+    viewerIsAdmin?: boolean | undefined;
     serverId: string;
     connectionId?: string | undefined;
+    url?: string | undefined;
     name?: string | undefined;
   } & McpEventSourceNetwork,
 ): Promise<EventSourceRecord> {
-  const owner = input.ownerSubjectId;
-  if (!owner) {
+  const url = input.url ?? null;
+  if (url !== null && input.ownerSubjectId !== null && !input.viewerIsAdmin) {
+    throw new HTTPException(403, {
+      message: "Only a workspace admin can add a workspace MCP source that listens by URL",
+    });
+  }
+  const owner = url === null ? input.ownerSubjectId : null;
+  if (url === null && !owner) {
     throw new HTTPException(422, {
-      message: "An MCP event source listens with a person's own sign-in. Create it as that person.",
+      message:
+        "An MCP event source listens with a person's own sign-in. Create it as that person, or give the server's url.",
     });
   }
   const target = {
@@ -340,12 +360,18 @@ export async function addMcpEventSource(
     workspaceId: input.workspaceId,
     ownerSubjectId: owner,
     mcpServerId: input.serverId,
-    connectionId: input.connectionId ?? null,
+    connectionId: url === null ? (input.connectionId ?? null) : null,
+    mcpServerUrl: url,
   };
   let connection: { name: string; connectionId: string | null };
   try {
     connection = await withMcpEventSourceClient(
-      { db: input.db, settings: input.settings, ...(input.fetch ? { fetch: input.fetch } : {}) },
+      {
+        db: input.db,
+        settings: input.settings,
+        ...(input.fetch ? { fetch: input.fetch } : {}),
+        ...(input.providerFetch ? { providerFetch: input.providerFetch } : {}),
+      },
       target,
       async (client, { server, connectionId }) => {
         const name = mcpServerDisplayName(server);
@@ -358,17 +384,23 @@ export async function addMcpEventSource(
   } catch (error) {
     throw mcpSourceHttpError(error, input.serverId);
   }
-  const { source } = await createEventSource(input.db, {
+  const { source, created } = await createEventSource(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     createdBySubjectId: input.createdBySubjectId,
     kind: "mcp",
     name: input.name ?? connection.name,
     ownerSubjectId: owner,
-    visibility: "private",
+    visibility: url === null ? "private" : "workspace",
     mcpServerId: input.serverId,
+    mcpServerUrl: url,
     connectionId: connection.connectionId,
   });
+  if (!created && url !== null && source.mcpServerUrl !== url) {
+    throw new HTTPException(409, {
+      message: `The workspace already listens to "${input.serverId}" at another URL. Delete that source first.`,
+    });
+  }
   forgetMcpSourceEventTypes(source.id);
   return source;
 }

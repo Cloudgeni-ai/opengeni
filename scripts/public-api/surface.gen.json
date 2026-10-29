@@ -14932,6 +14932,7 @@
         "$|kind=mcp.kind": "const!=[\"\\\"mcp\\\"\"]",
         "$|kind=mcp.name": "string?",
         "$|kind=mcp.serverId": "string!",
+        "$|kind=mcp.url": "string?",
         "$|kind=workspace": "object",
         "$|kind=workspace.kind": "const!=[\"\\\"workspace\\\"\"]",
         "$|kind=workspace.name": "string?"
@@ -15310,6 +15311,7 @@
         "$|1.agentLearning.scope": "ref(ConnectionOwnership)!",
         "$|1.agentLearning.settings": "ref(AgentLearningOverrides)!",
         "$|1.connectionAuthorities": "unknown?",
+        "$|1.creatorLocked": "boolean?",
         "$|1.events": "ref(ScheduledTaskEventsInput)?",
         "$|1.metadata": "object?",
         "$|1.metadata{}": "unknown",
@@ -15541,6 +15543,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.creatorLocked": "boolean?",
         "$.events": "ref(ScheduledTaskEventsInput)?",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
@@ -16386,7 +16389,8 @@
       "shape": {
         "$": "object",
         "$.connectionId": "string! null",
-        "$.serverId": "string!"
+        "$.serverId": "string!",
+        "$.url": "string?"
       }
     },
     "EventSourceStatus": {
@@ -25086,6 +25090,7 @@
         "$.createdBy.subjectId": "string!",
         "$.createdByContext": "object!",
         "$.createdByContext{}": "unknown",
+        "$.creatorLocked": "const?=[\"true\"]",
         "$.events": "ref(ScheduledTaskEvents)?",
         "$.executionDigest": "string!",
         "$.id": "string!",
@@ -25208,6 +25213,7 @@
       "shape": {
         "$": "object",
         "$.agent": "ref(AgentConfigRequest)?",
+        "$.agentAccess": "ref(SessionAgentAccess)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
@@ -25219,6 +25225,9 @@
         "$.machineTarget.targetSandboxId": "string!",
         "$.machineTarget.workingDir": "string?",
         "$.maxNestedAgentDepth": "integer?",
+        "$.mcpServers": "array?",
+        "$.mcpServers[]": "ref(ScheduledTaskMcpServer)",
+        "$.memoryScope": "ref(SessionMemoryScope)?",
         "$.metadata": "object!",
         "$.metadata{}": "unknown",
         "$.model": "string?",
@@ -25230,6 +25239,8 @@
         "$.resources": "array!",
         "$.resources[]": "ref(ResourceRef)",
         "$.sandboxBackend": "ref(SandboxBackend)?",
+        "$.skills": "array?",
+        "$.skills[]": "unknown",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
         "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
@@ -25244,6 +25255,7 @@
       "shape": {
         "$": "object",
         "$.agent": "ref(AgentConfigRequest)?",
+        "$.agentAccess": "ref(SessionAgentAccess)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
@@ -25256,6 +25268,9 @@
         "$.machineTarget.targetSandboxId": "string!",
         "$.machineTarget.workingDir": "string?",
         "$.maxNestedAgentDepth": "integer?",
+        "$.mcpServers": "array?",
+        "$.mcpServers[]": "ref(ScheduledTaskMcpServer)",
+        "$.memoryScope": "ref(SessionMemoryScope)?",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
         "$.model": "string?",
@@ -25264,6 +25279,8 @@
         "$.resources": "array?",
         "$.resources[]": "ref(ResourceRef)",
         "$.sandboxBackend": "ref(SandboxBackend)?",
+        "$.skills": "array?",
+        "$.skills[]": "unknown",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
         "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
@@ -25319,6 +25336,28 @@
         "$.once": "boolean?",
         "$.triggers": "array!",
         "$.triggers[]": "ref(EventTriggerInput)"
+      }
+    },
+    "ScheduledTaskMcpServer": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.allowedTools": "array?",
+        "$.allowedTools[]": "string",
+        "$.cacheToolsList": "boolean?",
+        "$.connectionRef": "ref(McpServerConnectionRef)?",
+        "$.eager": "union?=[\"0\",\"1\"]",
+        "$.eager|0": "boolean",
+        "$.eager|1": "array",
+        "$.eager|1[]": "string",
+        "$.id": "string!",
+        "$.name": "string?",
+        "$.requireApproval": "ref(SessionMcpApprovalPolicy)?",
+        "$.timeoutMs": "integer?",
+        "$.url": "string!"
       }
     },
     "ScheduledTaskOverlapPolicy": {
@@ -25722,6 +25761,15 @@
         "$.reason": "enum!=[\"\\\"database_claim_rejected\\\"\",\"\\\"initiator_membership_required\\\"\",\"\\\"personal_resource_grant_required\\\"\"]",
         "$.retryPolicy": "const!=[\"\\\"explicit_recheck\\\"\"]",
         "$.sqlState": "string! null"
+      }
+    },
+    "SessionAgentAccess": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "SessionAutomationWaitSummary": {
@@ -26497,6 +26545,15 @@
         "$.tools[].toolName": "string!"
       }
     },
+    "SessionMemoryScope": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"off\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
+      }
+    },
     "SessionMessageSearchMatch": {
       "io": [
         "output"
@@ -27121,7 +27178,8 @@
         "$.updatedAt": "string! null",
         "$.usageRevision": "integer!",
         "$.usedMicros": "integer! null",
-        "$.version": "integer!"
+        "$.version": "integer!",
+        "$.window": "ref(SessionUsageLimitWindow)?"
       }
     },
     "SessionUsageLimitHistory": {
@@ -27138,6 +27196,28 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"preparing\\\"\",\"\\\"reached\\\"\",\"\\\"unavailable\\\"\",\"\\\"unlimited\\\"\",\"\\\"within\\\"\"]"
+      }
+    },
+    "SessionUsageLimitWindow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.period": "const!=[\"\\\"day\\\"\"]",
+        "$.resetsAt": "string!",
+        "$.startedAt": "string!",
+        "$.timeZone": "string!"
+      }
+    },
+    "SessionUsageLimitWindowInput": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.period": "const!=[\"\\\"day\\\"\"]",
+        "$.timeZone": "string!"
       }
     },
     "SessionVisibility": {
@@ -27217,7 +27297,8 @@
         "$": "object",
         "$.expectedVersion": "integer!",
         "$.limitMicros": "integer! null",
-        "$.operationId": "string!"
+        "$.operationId": "string!",
+        "$.window": "ref(SessionUsageLimitWindowInput)? null"
       }
     },
     "SetWorkspaceAllowanceRequest": {
@@ -35793,6 +35874,8 @@
       "sessionUsageLimitReachedMessage": "value",
       "SessionUsageLimitReachedRefusal": "type",
       "SessionUsageLimitStatus": "type",
+      "SessionUsageLimitWindow": "type",
+      "SessionUsageLimitWindowInput": "type",
       "setSessionUsageLimit": "value",
       "SetSessionUsageLimitRequest": "type"
     },

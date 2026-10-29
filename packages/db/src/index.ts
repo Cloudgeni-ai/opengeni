@@ -7111,6 +7111,8 @@ export type CreateScheduledTaskInput = {
   metadata: Record<string, unknown>;
   /** Who can see it; `user_private` requires a human owner. Default shared. */
   visibility?: "user_private" | "workspace_shared";
+  /** Only the frozen creator principal may change, run or delete it; never an agent attempt. */
+  creatorLocked?: boolean;
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
 
@@ -19293,6 +19295,7 @@ export async function createScheduledTask(
           ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
           rigId: input.rigId ?? null,
           metadata: input.metadata,
+          ...(input.creatorLocked ? { creatorLocked: true } : {}),
         })
         .returning();
       if (!row) {
@@ -19326,7 +19329,11 @@ export async function createScheduledTask(
   );
 }
 
-/** Trusted mutation seam: verify an exact agent attempt before deriving its human. */
+/**
+ * Trusted mutation seam: verify an exact agent attempt before deriving its
+ * human. A creator-locked task matches only its own creator principal, and
+ * never an agent attempt.
+ */
 export async function scheduledTaskMutationOwnerMatches(
   db: Database,
   input: {
@@ -19340,7 +19347,11 @@ export async function scheduledTaskMutationOwnerMatches(
   return withWorkspaceRls(db, input.workspaceId, async (tx) => {
     const actor = await frozenSessionCreatorForInsert(tx, input);
     const [task] = await tx
-      .select({ owner: schema.scheduledTasks.ownerSubjectId })
+      .select({
+        owner: schema.scheduledTasks.ownerSubjectId,
+        creatorLocked: schema.scheduledTasks.creatorLocked,
+        creatorSubjectId: schema.scheduledTasks.createdBySubjectId,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -19351,6 +19362,9 @@ export async function scheduledTaskMutationOwnerMatches(
       .for("update")
       .limit(1);
     if (!task) return false;
+    if (task.creatorLocked) {
+      return !input.createdByActor && actor.initiator.subjectId === task.creatorSubjectId;
+    }
     const subject =
       actor.initiatingHumanSubjectId ??
       (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
@@ -21708,6 +21722,60 @@ export async function isWorkspaceAgentActivityPaused(
       .from(schema.workspaceInferenceControls)
       .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId));
     return row?.state === "paused";
+  });
+}
+
+/**
+ * Whether the chat of a task's latest earlier run is still working: it has an
+ * active turn, or work queued or waiting in it. A `skip` task that starts a
+ * new chat per run skips an occurrence while this holds. A chat that is idle,
+ * failed, cancelled, gone or only shows an empty queued projection does not
+ * hold it.
+ */
+export async function scheduledTaskPreviousRunSessionBusy(
+  db: Database,
+  input: { workspaceId: string; taskId: string; runId: string },
+): Promise<boolean> {
+  return withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [previous] = await scopedDb
+      .select({
+        sessionId: schema.sessions.id,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+      })
+      .from(schema.scheduledTaskRuns)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.scheduledTaskRuns.workspaceId),
+          eq(schema.sessions.id, schema.scheduledTaskRuns.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+          eq(schema.scheduledTaskRuns.taskId, input.taskId),
+          ne(schema.scheduledTaskRuns.id, input.runId),
+          isNotNull(schema.scheduledTaskRuns.sessionId),
+        ),
+      )
+      .orderBy(desc(schema.scheduledTaskRuns.createdAt))
+      .limit(1);
+    if (!previous) return false;
+    if (previous.activeTurnId !== null) return true;
+    if (
+      previous.status === "idle" ||
+      previous.status === "failed" ||
+      previous.status === "cancelled"
+    ) {
+      return false;
+    }
+    if (previous.status !== "queued") return true;
+    return !(await sessionQueueIsEmptyInTransaction(
+      scopedDb,
+      input.workspaceId,
+      previous.sessionId,
+    ));
   });
 }
 
@@ -91991,6 +92059,8 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     rigId: row.rigId ?? null,
     vaultPolicy: row.vaultPolicy ?? { mode: "all" },
     metadata: row.metadata,
+    // Projected only when set, so unlocked tasks keep their exact shape.
+    ...(row.creatorLocked ? { creatorLocked: true as const } : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

@@ -295,13 +295,21 @@ source.
 
 - **Sources.** An MCP event source is one person's connection to an MCP
   server, so it is always private to that person and is created as them (a
-  workspace API key alone gets 422). Creating it checks that the server
+  workspace API key alone gets 422 unless it gives a `url`, below). Creating it checks that the server
   advertises `io.modelcontextprotocol/events` under `capabilities.extensions`;
   a server without it, or one not added to the workspace, gets 422. The source
   pins the connection it was created with; without one it uses the first
   connection the owner can use for that server. Servers that sign in through
   the embedding app (host authority) cannot be used, because nobody is there
   to sign in when a subscription runs.
+- **Workspace sources by URL.** A workspace-level caller or an admin may
+  instead create an MCP source with the server's `url`. It belongs to the
+  workspace (no owner, `visibility: "workspace"`), needs no connector, and
+  signs in through the workspace credential provider with
+  `purpose: "event_subscription"`; headers are kept until shortly before they
+  expire and asked for again when the server rejects them. Without a provider,
+  or when it doesn't return headers for that URL, the source is blocked with
+  `reconnect`. Each server id has at most one such source per workspace.
 - **Discovery.** Opengeni declares the extension in its client capabilities.
   `events/list` is read in pages (at most 20 pages, 500 types) and cached for
   10 minutes per source. The source's event-types endpoint always reads it
