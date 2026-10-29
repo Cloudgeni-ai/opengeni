@@ -68,6 +68,7 @@ Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-
 | `OPENGENI_TEAMS_BOT_ENABLED` | Broad bot rollout; default false |
 | `OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS` | Explicit pilot/reviewer tenant admission while broad rollout is off |
 | `OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS` | Exact operator-verified standard channels as `tenantId:channelId`; empty denies all channels |
+| `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS` | Exact approved group chats as `tenantId:conversationId`; empty denies all groups, independently of broad rollout |
 | `OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS` | Explicit operator-approved `tenantId:actorObjectId` installer pairs |
 | `OPENGENI_TEAMS_BOT_CLIENT_ID` | Bot's Entra application ID |
 | `OPENGENI_TEAMS_BOT_CLIENT_SECRET` | Server-only bot credential |
@@ -205,11 +206,18 @@ Required acceptance cases:
 5. Duplicate delivery does not create duplicate work. Restart/retry and outbound
    uncertainty preserve truthful receipts. Verify cleanup/revocation and that a
    different tenant, conversation or workspace cannot reuse a stored binding.
-6. Group chats, attachments and invoke activities are ignored by the message
-   normalizer. Verify that behavior. Private/shared channel type is not currently
-   classified automatically: verify each allowed channel is standard. A channel
-   absent from the exact allowlist must be denied even with broad rollout enabled.
-   Remove an entry and verify pending work/replies stop.
+6. Group chats require their exact allowlist entry and an explicit bot mention,
+   even with broad rollout enabled. Verify every participant is linked and has
+   workspace access, group work uses a distinct workspace-visible session, and
+   personal history is never reused. Change membership or unlink a participant;
+   verify old pending replies stop and a newly accepted audience gets fresh history.
+   Verify inline `text/html` representations accompanying canonical `activity.text`
+   are accepted without parsing or fetching HTML. Files, images, URL-backed HTML,
+   mixed attachment arrays and invoke activities remain rejected.
+   Private/shared channel type is not classified automatically: verify each
+   allowed channel is standard. A channel absent from its exact allowlist must
+   be denied even with broad rollout enabled. Remove an entry and verify pending
+   work/replies stop.
 7. Test the same package in a controlled external tenant under its own app
    policy, using a real non-home-tenant user. Verify isolation and expected denial
    for an external tenant not on the pilot allowlist.
