@@ -1,8 +1,8 @@
 //! Sandbox images built from OCI images (ADR 19) under the host agent and
 //! real Firecracker: `compute-guest` as PID 1, envd answering through the
 //! gateway port, each sandbox's own environment and token across sleep,
-//! templates and reboots, the image's command under its user, and a clean
-//! shutdown.
+//! templates and reboots, the image's command under its user, a clean
+//! shutdown, and sandboxes that borrow memory on a host short of it.
 //!
 //! Runs as root when `COMPUTE_TEST_LAB` names a lab directory (see the lab
 //! test) and `COMPUTE_TEST_GUEST` the directory `guest/build.sh` made. The
@@ -32,6 +32,7 @@ use compute_host::protocol::{
 use tokio::time::{Instant, sleep};
 
 mod envd;
+mod memory;
 #[path = "../support/required.rs"]
 mod required;
 #[path = "../support/state.rs"]

@@ -10,6 +10,7 @@ use compute_engine::{Engine, PageSize};
 use tokio::time::Instant;
 
 use crate::cpu_share::ProcessorShare;
+use crate::observe::{Alarm, alarm_event};
 use crate::step::Reading;
 use crate::store::Store;
 
@@ -187,7 +188,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }));
         // Ready sandboxes too, which count against the same budget.
         batch.extend(self.spare_readings());
-        self.check_uncompressed();
+        // How each running VM pages, read with its resident size and
+        // before the host total, which bounds them from it (ADR 24).
+        let use_readings = self.memory_use(&batch);
+        batch.extend(use_readings);
+        self.check_oom_kills();
         if self.memory_policy.is_some()
             && let Some(available) = self.available_memory
         {
@@ -290,13 +295,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
-    /// Warns when a running VM's memory was compressed into zswap between
-    /// two samples: only a paused one may be, so this is a defect, and the
-    /// sandbox would slow down unnoticed while it pages back in.
+    /// Reads how each running VM uses memory beyond its resident size in
+    /// `batch`: what of it is compressed or swapped, and how long all its
+    /// threads stalled on memory lately, for the host's memory rule
+    /// (ADR 24), and keeps the most it used for its summary. On an engine
+    /// that never compresses a running VM, warns when one was compressed
+    /// between two samples anyway: the sandbox would slow down unnoticed
+    /// while it pages back in.
     ///
     /// The reading is kept for the sandbox's summary (see
     /// [`HostAgent::summarize`]).
-    fn check_uncompressed(&mut self) {
+    fn memory_use(&mut self, batch: &[Input]) -> Vec<Input> {
+        let may_compress = self.engine.compresses_running();
+        let resident: std::collections::HashMap<SandboxId, u64> = batch
+            .iter()
+            .filter_map(|input| match input {
+                Input::Resident { sandbox, bytes } => Some((*sandbox, *bytes)),
+                _ => None,
+            })
+            .collect();
+        let mut readings = Vec::new();
         for (id, slot) in &mut self.slots {
             let running = self
                 .core
@@ -309,7 +327,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let Ok(stats) = self.engine.memory_stats(&live.vm) else {
                 continue;
             };
-            if let Some((incarnation, before)) = slot.stats
+            if !may_compress
+                && let Some((incarnation, before)) = slot.stats
                 && incarnation == live.incarnation
                 && stats.zswpout > before.zswpout
             {
@@ -320,8 +339,61 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 );
             }
             slot.stats = Some((live.incarnation, stats));
+            let compressed = stats.compressed.unwrap_or(0);
+            let swapped = stats.swapped.unwrap_or(0);
+            if let Some(bytes) = resident.get(id) {
+                let demand = bytes.saturating_sub(compressed).saturating_add(swapped);
+                slot.peak = slot.peak.max(demand);
+            }
+            readings.push(Input::MemoryUse {
+                sandbox: *id,
+                compressed,
+                swapped,
+                stall: stall_thousandths(stats.pressure_full_avg10),
+                high: stats.high,
+            });
+        }
+        readings
+    }
+
+    /// Raises [`Alarm::OomKilled`] for VM processes the kernel's
+    /// out-of-memory killer ended since the last sample: the memory rule
+    /// exists so that it never does. Each such VM is lost, and its own
+    /// alarm names the sandbox once the agent sees it end.
+    fn check_oom_kills(&mut self) {
+        let kills = match self.engine.oom_kills() {
+            Ok(Some(kills)) => kills,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the VMs' out-of-memory kills");
+                return;
+            }
+        };
+        // Kills before the agent started were before its time.
+        if let Some(before) = self.oom_kills.replace(kills)
+            && kills > before
+        {
+            let ended = kills - before;
+            tracing::error!(
+                processes = ended,
+                "the kernel's out-of-memory killer ended VM processes"
+            );
+            self.observer.alarms(
+                Alarm::OomKilled,
+                ended,
+                alarm_event("the kernel's out-of-memory killer ended VM processes"),
+            );
         }
     }
+}
+
+/// Thousandths of a stall share given in percent, as the core counts it.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn stall_thousandths(percent: Option<f64>) -> u16 {
+    // Clamped first, so the cast neither wraps nor loses a sign.
+    percent.map_or(0, |percent| {
+        (percent * 10.0).round().clamp(0.0, 1000.0) as u16
+    })
 }
 
 /// What the filesystem holding the state root has available to the agent.
@@ -337,4 +409,21 @@ fn read_disk(root: &std::path::Path) -> Option<DiskSpace> {
             stat.f_favail
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stall_thousandths;
+
+    #[test]
+    fn stalls_are_read_in_thousandths() {
+        assert_eq!(stall_thousandths(None), 0);
+        assert_eq!(stall_thousandths(Some(0.0)), 0);
+        assert_eq!(stall_thousandths(Some(1.25)), 13);
+        assert_eq!(stall_thousandths(Some(40.0)), 400);
+        assert_eq!(stall_thousandths(Some(100.0)), 1000);
+        // A kernel's rounding never makes more than all of the time.
+        assert_eq!(stall_thousandths(Some(100.4)), 1000);
+        assert_eq!(stall_thousandths(Some(-1.0)), 0);
+    }
 }

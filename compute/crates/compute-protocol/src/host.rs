@@ -893,11 +893,12 @@ pub struct SandboxStatus {
     /// paused for host memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for_room: Option<u64>,
-    /// Bytes of host memory its VM held when the host paused it, or began
-    /// pausing and saving it, to free memory while it was in use above its
-    /// memory request; set until it wakes again. It loses nothing and
-    /// wakes by itself once there is room; a control plane may rather move
-    /// it to another host.
+    /// Bytes of host memory its VM held when an earlier release paused it,
+    /// or began pausing and saving it, to free memory while it was in use
+    /// above its memory request; set until it wakes again. It loses
+    /// nothing and wakes by itself once there is room; a control plane may
+    /// rather move it to another host. This release never pauses a
+    /// sandbox in use for memory (ADR 24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_for_memory: Option<u64>,
     /// Bytes the host asked its guest to give back through its balloon
@@ -923,8 +924,10 @@ pub struct FailedStep {
     pub error: String,
 }
 
-/// A VM's zswap traffic and memory pressure. A running VM is never
-/// compressed: its `zswpout` grows only while it is paused.
+/// A VM's zswap traffic and memory pressure. A running VM is compressed
+/// only on a host that bounds running sandboxes (ADR 24), and then only
+/// what it holds above its request; elsewhere its `zswpout` grows only
+/// while it is paused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryStatus {
     /// Pages compressed into zswap since the VM process started.

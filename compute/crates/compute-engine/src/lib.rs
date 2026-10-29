@@ -284,9 +284,10 @@ pub trait Engine: Send + Sync + 'static {
         )))
     }
 
-    /// The VM's zswap traffic and memory pressure so far. A running VM is
-    /// never compressed, so its `zswpout` grows only while it is paused.
-    /// Engines that cannot tell report an error.
+    /// The VM's zswap traffic and memory pressure so far, and what of its
+    /// memory is compressed now. A running VM is compressed only on a host
+    /// that lets the kernel do so (ADR 24). Engines that cannot tell
+    /// report an error.
     fn memory_stats(&self, vm: &Self::Vm) -> Result<MemoryStats, EngineError> {
         let _ = vm;
         Err(EngineError::new(
@@ -341,6 +342,38 @@ pub trait Engine: Send + Sync + 'static {
             ErrorKind::Transient,
             "set_memory_limit",
             "this engine cannot change a VM's memory limit",
+        ))
+    }
+
+    /// Whether the kernel may compress running VMs' memory (ADR 24): on
+    /// an engine that does not, a running VM's compressed pages are a
+    /// defect worth a warning.
+    fn compresses_running(&self) -> bool {
+        false
+    }
+
+    /// How many VM processes, VMMs and pagers, the kernel's out-of-memory
+    /// killer ended since the engine took the host: a VM it ends this way
+    /// loses its running programs, which the host's memory rule (ADR 24)
+    /// exists to prevent. `None` where the engine cannot tell.
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
+    /// Bounds the running VM's memory as the host's memory rule asks
+    /// (ADR 24): `low` bytes the kernel keeps it from losing to others,
+    /// and `high` bytes past which it waits on its own allocations while
+    /// the kernel compresses its coldest pages, or no such point for
+    /// `None`. A VM starts, resumes and is adopted with its request as its
+    /// low and no high. Applied in the background, the latest asked
+    /// winning; a pause or a resume drops one not yet applied. Returns at
+    /// once. Engines that cannot bound a VM report an error.
+    fn bound_memory(&self, vm: &Self::Vm, low: u64, high: Option<u64>) -> Result<(), EngineError> {
+        let _ = (vm, low, high);
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "bound_memory",
+            "this engine cannot bound a VM's memory",
         ))
     }
 
