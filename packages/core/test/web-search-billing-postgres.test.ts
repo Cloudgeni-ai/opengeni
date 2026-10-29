@@ -17,6 +17,7 @@ import {
   WEB_SEARCH_DEBIT_TYPE,
   WebSearchBillingRefusedError,
   createWebSearchBilling,
+  settleHostedWebSearchUsage,
   type WebSearchCallScope,
 } from "../src/domain/web-search-billing";
 
@@ -286,5 +287,67 @@ describe("web search credit billing", () => {
     const debits = await shared.admin`select 1 from credit_ledger_entries
         where account_id=${scope.accountId} and type=${WEB_SEARCH_DEBIT_TYPE}`;
     expect(debits).toHaveLength(0);
+  }, 180_000);
+
+  test("hosted searches of a credit-billed response settle one idempotent debit per response", async () => {
+    const { scope, human } = await fixture({ credits: 1_000_000 });
+    const response = {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      turnAttemptId: scope.attemptId,
+      sourceId: `${scope.turnId}:resp_hosted`,
+      model: "scripted-model",
+      requests: 3,
+    };
+    expect(await settleHostedWebSearchUsage(client.db, billed, response)).toEqual({
+      creditMicros: 31_500,
+    });
+    // A retried settlement of the same response never charges twice.
+    await settleHostedWebSearchUsage(client.db, billed, response);
+    // Another response of the same turn is its own charge.
+    await settleHostedWebSearchUsage(client.db, billed, {
+      ...response,
+      sourceId: `${scope.turnId}:resp_hosted_2`,
+      requests: 1,
+    });
+    const ledger = await shared.admin<
+      { amount_micros: string; source_id: string; metadata: Record<string, unknown> }[]
+    >`select amount_micros, source_id, metadata from credit_ledger_entries
+        where account_id=${scope.accountId} and type=${WEB_SEARCH_DEBIT_TYPE}
+        order by amount_micros`;
+    expect(ledger.map((row) => [Number(row.amount_micros), row.source_id])).toEqual([
+      [-31_500, `hosted:${scope.turnId}:resp_hosted`],
+      [-10_500, `hosted:${scope.turnId}:resp_hosted_2`],
+    ]);
+    expect(ledger[0]!.metadata).toMatchObject({
+      turnId: scope.turnId,
+      initiatingHumanSubjectId: human,
+      provider: "hosted",
+      requests: 3,
+      providerCostMicros: 30_000,
+      marginBps: 500,
+      basis: "list_price",
+    });
+    const usage = await shared.admin<{ event_type: string; quantity: string }[]>`
+        select event_type, quantity from usage_events where account_id=${scope.accountId}
+          and source_resource_type='web_search' order by event_type, quantity`;
+    expect(usage.map((row) => [row.event_type, Number(row.quantity)])).toEqual([
+      ["web_search.cost", 10_500],
+      ["web_search.cost", 31_500],
+      ["web_search.search_requests", 1],
+      ["web_search.search_requests", 3],
+    ]);
+    // Billing off: nothing is recorded or charged.
+    const off = await fixture();
+    await settleHostedWebSearchUsage(
+      client.db,
+      testSettings({ billingMode: "disabled", usageLimitsMode: "none" }),
+      { ...response, ...off.scope, turnAttemptId: off.scope.attemptId },
+    );
+    const offRows = await shared.admin`select 1 from usage_events
+        where account_id=${off.scope.accountId} and source_resource_type='web_search'`;
+    expect(offRows).toHaveLength(0);
   }, 180_000);
 });

@@ -4,6 +4,7 @@ import {
   WEB_SEARCH_PROVIDER_CATALOG,
   WEB_SEARCH_PROVIDER_IDS,
   getSettings,
+  hostedWebSearchCharge,
   resolveWebSearchProvider,
   webSearchCallPricing,
   webSearchCreditMicros,
@@ -316,9 +317,57 @@ describe("web search tool plan", () => {
       ),
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
   });
+
+  test("a credit-billed model while billing is active swaps hosted search for provider tools", () => {
+    const billed: WebSearchSettings = {
+      ...base,
+      billingMode: "stripe",
+      webSearchProvider: "tinyfish,parallel",
+      webSearchProviderCredentials: keys({ tinyfish: "t", parallel: "p" }),
+    };
+    expect(webSearchToolPlan(billed, { hostedWebSearch: true, creditBilledModel: true })).toEqual({
+      hostedWebSearch: false,
+      providerTools: ["web_search", "web_fetch"],
+    });
+    // Other cost classes and billing-off deployments are unchanged.
+    expect(webSearchToolPlan(billed, { hostedWebSearch: true, creditBilledModel: false })).toEqual({
+      hostedWebSearch: true,
+      providerTools: [],
+    });
+    expect(
+      webSearchToolPlan(
+        { ...billed, billingMode: "disabled" },
+        { hostedWebSearch: true, creditBilledModel: true },
+      ),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    // Hosted search stays when the turn cannot get a provider web_search.
+    expect(
+      webSearchToolPlan(
+        { ...billed, webSearchProvider: "parallel" },
+        { hostedWebSearch: true, creditBilledModel: true, creditsDisabled: true },
+      ),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    expect(
+      webSearchToolPlan(
+        { ...base, billingMode: "stripe" },
+        { hostedWebSearch: true, creditBilledModel: true },
+      ),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+  });
 });
 
 describe("web search pricing", () => {
+  test("hosted searches are charged at $10 per 1,000 plus the web-search margin", () => {
+    expect(hostedWebSearchCharge({}, 1)).toEqual({
+      providerMicros: 10_000,
+      creditMicros: 10_500,
+      marginBps: 500,
+    });
+    expect(hostedWebSearchCharge({ creditMarginBpsOverride: 0 }, 3).creditMicros).toBe(30_000);
+    expect(hostedWebSearchCharge({}, 0).creditMicros).toBe(0);
+    expect(() => hostedWebSearchCharge({}, -1)).toThrow();
+  });
+
   test("list prices come from the catalog and keyless calls are free", () => {
     const config = webSearchProviderConfig({
       ...base,

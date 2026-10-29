@@ -60,6 +60,7 @@ import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
+  hostedToolsBillCreditsForTurn,
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
@@ -85,6 +86,8 @@ export type GovernanceModelDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  /** The claim's billing class: the accepted model is billed in Opengeni credits. */
+  chargesOpenGeniCredits: boolean;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
     artifactId: string;
@@ -116,6 +119,12 @@ export type GovernanceModelOk = {
   structuredWorkspacePolicyActive: boolean;
   /** False when the workspace turned Opengeni credits off (model policy). */
   workspaceCreditModelsAllowed: boolean;
+  /**
+   * Provider-hosted paid tools would run on Opengeni's bill this turn
+   * ({@link hostedToolsBillCreditsForTurn}); tool preparation and agent
+   * construction both read this one value.
+   */
+  hostedToolsBillCredits: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
@@ -378,9 +387,17 @@ export async function prepareGovernanceAndModel(
   // on every attempt, so recovery never adds a tool mid-turn.
   const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
+  const hostedToolsBillCredits = hostedToolsBillCreditsForTurn(
+    capabilitySettings,
+    deps.chargesOpenGeniCredits,
+  );
   const nativeImageProviderBinding =
     providerApi === "responses"
-      ? openAiHostedImageProviderBindingForTurn(capabilitySettings, resolvedModel)
+      ? openAiHostedImageProviderBindingForTurn(
+          capabilitySettings,
+          resolvedModel,
+          hostedToolsBillCredits,
+        )
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
@@ -540,6 +557,7 @@ export async function prepareGovernanceAndModel(
       workspaceGovernance,
       structuredWorkspacePolicyActive,
       workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
+      hostedToolsBillCredits,
       workspaceMemory,
       buildCompanyBrainContributionReceiptFor,
       logicalSandboxSettings,

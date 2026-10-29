@@ -210,6 +210,8 @@ export type PrepareTurnToolRuntimeDeps = {
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
   workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  /** Hosted paid tools would run on Opengeni's bill; provider web tools replace hosted search. */
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -325,6 +327,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolvedModel,
     lazyToolTransport,
     workspaceCreditModelsAllowed,
+    hostedToolsBillCredits,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -827,12 +830,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     hasSkills: skillCatalog.length > 0,
   });
   // Provider web search: only where the turn has no hosted search (or the
-  // operator chose `replace`), only when a provider is configured, and only
-  // when the session's agent configuration allows web search (filtered below).
+  // operator chose `replace`, or hosted search would run on Opengeni's bill),
+  // only when a provider is configured, and only when the session's agent
+  // configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
-      .providerTools,
+    tools: turnWebSearchPlan(
+      resolvedModel,
+      runSettings,
+      workspaceCreditModelsAllowed,
+      hostedToolsBillCredits,
+    ).providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

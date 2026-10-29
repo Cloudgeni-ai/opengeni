@@ -8,6 +8,7 @@ import { openingToolsFromTurnMetadata, type TurnExecutionPolicyV1 } from "@openg
 import {
   configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
+  webSearchCreditBillingActive,
   type ModelProviderApi,
   type ResolvedModelProvider,
   type Settings,
@@ -262,6 +263,25 @@ export function hostedWebSearchForTurn(
 }
 
 /**
+ * Whether paid tools the model provider hosts (its own web search and image
+ * generation) would run on Opengeni's bill on this turn: the accepted model
+ * is billed in Opengeni credits (cost class `credits`, the same class the
+ * claim bills) and credit billing is active (`OPENGENI_BILLING_MODE=stripe`
+ * or `OPENGENI_USAGE_LIMITS_MODE=managed`). Such a turn gets Opengeni's
+ * metered tools instead, or is charged for what the provider reports.
+ * Turns on the user's own keys or subscriptions, free models and
+ * billing-off deployments are false and keep their hosted tools unchanged.
+ * Derived from the frozen accepted policy's cost class, so every recovery
+ * attempt of a turn gets the same answer.
+ */
+export function hostedToolsBillCreditsForTurn(
+  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
+  chargesOpenGeniCredits: boolean,
+): boolean {
+  return chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
+}
+
+/**
  * Image generation is an optional connected-account capability. A delegated
  * subscription may still authorize the text model without carrying the local
  * credential identity required for paid image operations; that must narrow the
@@ -276,7 +296,13 @@ export function connectedSubscriptionImageGenerationAuthority<T>(
   return { credentialContext, credentialId };
 }
 
-/** Direct OpenAI hosted image IDs are reusable only by the exact API credential. */
+/**
+ * Direct OpenAI hosted image IDs are reusable only by the exact API credential.
+ * Hosted image generation on the deployment's own OpenAI key has no image
+ * charge, so a turn whose hosted tools bill credits never gets it: the turn
+ * falls through to the priced Gateway image tool when one is available, and
+ * otherwise has no image tool.
+ */
 export function openAiHostedImageProviderBindingForTurn(
   settings: Pick<Settings, "openaiProvider" | "openaiApiKey" | "openaiBaseUrl">,
   resolvedModel: {
@@ -292,7 +318,9 @@ export function openAiHostedImageProviderBindingForTurn(
       };
     };
   } | null,
+  hostedToolsBillCredits: boolean,
 ): { providerId: string; providerBindingHash: string } | null {
+  if (hostedToolsBillCredits) return null;
   if (!resolvedModel?.configured.capabilities.hostedTools.imageGeneration.runnable) return null;
   const providerId = resolvedModel.provider.id;
   const isDirectOpenAi =

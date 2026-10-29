@@ -1,4 +1,8 @@
-import { webSearchCreditBillingActive, type Settings } from "@opengeni/config";
+import {
+  hostedWebSearchCharge,
+  webSearchCreditBillingActive,
+  type Settings,
+} from "@opengeni/config";
 import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import {
   applyCreditDebitAfterUse,
@@ -183,3 +187,88 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
 }
 
 export type WebSearchBilling = ReturnType<typeof createWebSearchBilling>;
+
+/** Usage source prefix for hosted searches, distinct from provider tool calls. */
+export const HOSTED_WEB_SEARCH_SOURCE_PREFIX = "hosted";
+
+/**
+ * Charge the searches a model provider ran with its own hosted search tool
+ * on one credit-billed model response, at the hosted list price plus the
+ * web-search margin. This is a separate debit from the response's model
+ * debit, keyed by the same durable response identity (`sourceId`), so a
+ * retried settlement never charges twice. The caller decides that the
+ * response is credit-billed, billing is active and its cost was not
+ * reported by a Gateway (whose reported cost already includes search).
+ */
+export async function settleHostedWebSearchUsage(
+  db: Database,
+  settings: Settings,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId?: string | null;
+    /** The model response's durable source identity (`${turnId}:${sourceKey}`). */
+    sourceId: string;
+    /** Product model id of the response, recorded on the debit. */
+    model: string;
+    requests: number;
+  },
+): Promise<{ creditMicros: number }> {
+  if (!webSearchCreditBillingActive(settings) || input.requests <= 0) return { creditMicros: 0 };
+  const charge = hostedWebSearchCharge(settings, input.requests);
+  const shared = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    ...(input.turnAttemptId ? { turnAttemptId: input.turnAttemptId } : {}),
+    sourceResourceType: WEB_SEARCH_SOURCE_TYPE,
+    sourceResourceId: `${HOSTED_WEB_SEARCH_SOURCE_PREFIX}:${input.sourceId}`,
+  };
+  await recordUsageEvent(db, {
+    ...shared,
+    eventType: "web_search.search_requests",
+    quantity: input.requests,
+    unit: "request",
+    idempotencyKey: `usage:web_search.search_requests:${shared.sourceResourceId}`,
+  });
+  if (charge.creditMicros <= 0) return { creditMicros: 0 };
+  const attribution = await creditDebitAttributionForTurn(db, input);
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      await recordUsageEvent(tx, {
+        ...shared,
+        eventType: "web_search.cost",
+        quantity: charge.creditMicros,
+        unit: "usd_micros",
+        idempotencyKey: `usage:web_search.cost:${shared.sourceResourceId}`,
+        initiator: { kind: "service", subjectId: WEB_SEARCH_BILLING_INITIATOR },
+        initiatorContext: { creditDebitAttribution: attribution },
+      });
+      await applyCreditDebitAfterUse(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        type: WEB_SEARCH_DEBIT_TYPE,
+        amountMicros: charge.creditMicros,
+        sourceType: WEB_SEARCH_SOURCE_TYPE,
+        sourceId: shared.sourceResourceId,
+        idempotencyKey: `credit:${WEB_SEARCH_DEBIT_TYPE}:${shared.sourceResourceId}`,
+        metadata: {
+          ...creditDebitAttributionMetadata(attribution),
+          provider: HOSTED_WEB_SEARCH_SOURCE_PREFIX,
+          operation: "search",
+          model: input.model,
+          requests: input.requests,
+          providerCostMicros: charge.providerMicros,
+          marginBps: charge.marginBps,
+          basis: "list_price",
+        },
+      });
+    },
+  );
+  return { creditMicros: charge.creditMicros };
+}

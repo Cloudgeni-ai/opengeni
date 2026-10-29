@@ -397,6 +397,7 @@ export async function processModelResponseTerminalEvent(input: {
         usage: responseUsage.usage,
         normalizedUsage,
         gatewayBilling: responseUsage.gatewayBilling,
+        webSearchRequests: responseUsage.webSearchRequests,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
@@ -575,6 +576,7 @@ export async function processCompactionModelUsageEvent(input: {
         usage: input.usage.usage,
         normalizedUsage,
         gatewayBilling: input.usage.gatewayBilling,
+        webSearchRequests: input.usage.webSearchRequests,
         sourceKey,
         observability: input.observability,
         metricProvider: input.provider,
@@ -886,6 +888,8 @@ export async function recordModelUsageAndDebitCredits(
     countsTowardTokenCap?: boolean;
     creditPolicyRevision?: number | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+    /** Hosted provider searches the response reported; charged on credit-billed turns. */
+    webSearchRequests?: number | undefined;
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
@@ -908,6 +912,7 @@ export async function recordModelUsageAndDebitCredits(
     countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
     creditPolicyRevision: input.creditPolicyRevision,
     ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
+    ...(input.webSearchRequests ? { hostedWebSearchRequests: input.webSearchRequests } : {}),
     normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
     sourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,

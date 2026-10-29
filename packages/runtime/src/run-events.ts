@@ -739,13 +739,40 @@ function thinkingBlocksDroppedFromResponse(response: unknown): Record<string, nu
   return parsePromptCacheObservation({ thinkingBlocksDropped: value })?.thinkingBlocksDropped;
 }
 
-/** Claude reports its billed server-side searches; the transport keeps the count. */
+const MAX_WEB_SEARCH_REQUESTS = 10_000;
+
+/**
+ * Provider-run (hosted) web searches of one response. Claude reports its
+ * billed server-side searches and the transport keeps that count; its output
+ * also carries the search blocks, so they are never counted again. OpenAI
+ * Responses bills each `web_search_call` output item: the raw terminal
+ * response carries them as `web_search_call`, the SDK's `response_done` as a
+ * `hosted_tool_call` named `web_search_call`. A failed call is not counted.
+ */
 function webSearchRequestsFromResponse(response: unknown): number | undefined {
-  const value = (response as { providerData?: { anthropic?: { webSearchRequests?: unknown } } })
-    ?.providerData?.anthropic?.webSearchRequests;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 10_000
-    ? value
-    : undefined;
+  const anthropic = (response as { providerData?: { anthropic?: unknown } } | null)?.providerData
+    ?.anthropic;
+  if (anthropic && typeof anthropic === "object") {
+    const value = (anthropic as { webSearchRequests?: unknown }).webSearchRequests;
+    return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      value <= MAX_WEB_SEARCH_REQUESTS
+      ? value
+      : undefined;
+  }
+  const output = (response as { output?: unknown } | null)?.output;
+  if (!Array.isArray(output)) return undefined;
+  let count = 0;
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as { type?: unknown; name?: unknown; status?: unknown };
+    const searchCall =
+      record.type === "web_search_call" ||
+      (record.type === "hosted_tool_call" && record.name === "web_search_call");
+    if (searchCall && record.status !== "failed") count += 1;
+  }
+  return count > 0 ? Math.min(count, MAX_WEB_SEARCH_REQUESTS) : undefined;
 }
 
 function modelResponseIdFromResponse(response: unknown): string | undefined {

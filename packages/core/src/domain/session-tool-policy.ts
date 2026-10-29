@@ -466,12 +466,14 @@ export function sessionEffectiveToolProjectionInput(
     model?.model.api === "responses" && model.model.capabilities.inputModalities.includes("image");
   const hostedToolNames: AgentFunctionToolName[] = [];
   // Same plan the worker applies: provider web_search/web_fetch where the
-  // model has no hosted search (or the operator chose `replace`).
+  // model has no hosted search (or the operator chose `replace`, or the
+  // model is credit-billed while billing is active).
   const webSearchPlan = context
     ? webSearchToolPlan(context.settings, {
         hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
         transportHostedSearch: model?.provider.kind === "xai-subscription",
         creditsDisabled: !workspaceSettingsAllowCreditModels(context.workspaceSettings),
+        creditBilledModel: model?.model.cost === "credits",
       })
     : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {

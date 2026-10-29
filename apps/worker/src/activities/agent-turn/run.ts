@@ -772,6 +772,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
           });
           if ("exit" in governance) return governance.exit;
@@ -792,6 +793,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             buildCompanyBrainContributionReceiptFor,
             logicalSandboxSettings,
@@ -1776,6 +1778,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             lazyToolTransport,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             turnTools,
             connectionScope,
             sandboxArtifactRuntime,
@@ -1837,6 +1840,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             rigVersion,
             rigName,

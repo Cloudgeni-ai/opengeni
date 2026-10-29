@@ -48,7 +48,9 @@ import { errorMessage } from "@opengeni/contracts/values";
 /**
  * Which web search one turn gets: the provider's hosted tool, Opengeni's
  * provider tools, or neither. Tool preparation and agent construction both
- * call this with the same accepted model and settings, so they agree.
+ * call this with the same accepted model, settings and billing class, so
+ * they agree. A turn whose hosted tools bill credits gets the provider tools
+ * instead of hosted search whenever it can be offered them.
  */
 export function turnWebSearchPlan(
   resolvedModel: {
@@ -57,6 +59,7 @@ export function turnWebSearchPlan(
   } | null,
   settings: WebSearchSettings,
   workspaceCreditModelsAllowed: boolean,
+  hostedToolsBillCredits: boolean,
 ) {
   return webSearchToolPlan(settings, {
     hostedWebSearch: hostedWebSearchForTurn(resolvedModel, settings.webSearchEnabled),
@@ -65,6 +68,9 @@ export function turnWebSearchPlan(
     transportHostedSearch: resolvedModel?.provider.kind === "xai-subscription",
     // A workspace with Opengeni credits off is offered only free providers.
     creditsDisabled: !workspaceCreditModelsAllowed,
+    // Hosted search on a deployment-paid model is replaced by the metered
+    // provider tools when the turn gets them.
+    creditBilledModel: hostedToolsBillCredits,
   });
 }
 

@@ -70,15 +70,15 @@ describe("turn web search plan", () => {
   });
 
   test("models with hosted search keep it; others get provider tools", () => {
-    expect(turnWebSearchPlan(model(true), settings, true)).toEqual({
+    expect(turnWebSearchPlan(model(true), settings, true, false)).toEqual({
       hostedWebSearch: true,
       providerTools: [],
     });
-    expect(turnWebSearchPlan(model(false), settings, true)).toEqual({
+    expect(turnWebSearchPlan(model(false), settings, true, false)).toEqual({
       hostedWebSearch: false,
       providerTools: ["web_search", "web_fetch"],
     });
-    expect(turnWebSearchPlan(model(false), testSettings(), true)).toEqual({
+    expect(turnWebSearchPlan(model(false), testSettings(), true, false)).toEqual({
       hostedWebSearch: false,
       providerTools: [],
     });
@@ -86,13 +86,13 @@ describe("turn web search plan", () => {
 
   test("credits off withholds only the provider tools that would spend credits", () => {
     const billed = { ...settings, billingMode: "stripe" as const };
-    expect(turnWebSearchPlan(model(false), billed, false)).toEqual({
+    expect(turnWebSearchPlan(model(false), billed, false, false)).toEqual({
       hostedWebSearch: false,
       providerTools: [],
     });
     // Replace mode hands hosted search back when the provider tool is withheld.
     expect(
-      turnWebSearchPlan(model(true), { ...billed, webSearchProviderMode: "replace" }, false),
+      turnWebSearchPlan(model(true), { ...billed, webSearchProviderMode: "replace" }, false, false),
     ).toEqual({ hostedWebSearch: true, providerTools: [] });
     // Keyless (free) providers and unbilled deployments keep their tools.
     const keyless = testSettings({
@@ -101,11 +101,11 @@ describe("turn web search plan", () => {
       webSearchBaseUrl: "http://searxng.internal",
       webFetchProvider: "jina",
     });
-    expect(turnWebSearchPlan(model(false), keyless, false).providerTools).toEqual([
+    expect(turnWebSearchPlan(model(false), keyless, false, false).providerTools).toEqual([
       "web_search",
       "web_fetch",
     ]);
-    expect(turnWebSearchPlan(model(false), settings, false).providerTools).toEqual([
+    expect(turnWebSearchPlan(model(false), settings, false, false).providerTools).toEqual([
       "web_search",
       "web_fetch",
     ]);
@@ -113,14 +113,45 @@ describe("turn web search plan", () => {
 
   test("replace mode never touches SuperGrok's native search", () => {
     const replace = { ...settings, webSearchProviderMode: "replace" };
-    expect(turnWebSearchPlan(model(true), replace, true).providerTools).toEqual([
+    expect(turnWebSearchPlan(model(true), replace, true, false).providerTools).toEqual([
       "web_search",
       "web_fetch",
     ]);
-    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace, true)).toEqual({
+    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace, true, false)).toEqual({
       hostedWebSearch: true,
       providerTools: [],
     });
+  });
+
+  test("a credit-billed turn while billing is active gets the metered provider tools instead of hosted search", () => {
+    const both = { hostedWebSearch: false, providerTools: ["web_search", "web_fetch"] };
+    for (const billing of [{ billingMode: "stripe" }, { usageLimitsMode: "managed" }] as const) {
+      const billed = { ...settings, ...billing };
+      expect(turnWebSearchPlan(model(true), billed, true, true)).toEqual(both);
+      // Externally billed (own key or subscription) and free-policy turns keep hosted search.
+      expect(turnWebSearchPlan(model(true), billed, true, false)).toEqual({
+        hostedWebSearch: true,
+        providerTools: [],
+      });
+    }
+    // Billing off: unchanged, whatever the model's cost class.
+    expect(turnWebSearchPlan(model(true), settings, true, true)).toEqual({
+      hostedWebSearch: true,
+      providerTools: [],
+    });
+    // No provider configured: hosted search stays and settlement charges it.
+    expect(
+      turnWebSearchPlan(model(true), testSettings({ billingMode: "stripe" }), true, true),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
+    // SuperGrok's transport search is never replaced.
+    expect(
+      turnWebSearchPlan(
+        model(true, "xai-subscription"),
+        { ...settings, billingMode: "stripe" },
+        true,
+        true,
+      ),
+    ).toEqual({ hostedWebSearch: true, providerTools: [] });
   });
 });
 
