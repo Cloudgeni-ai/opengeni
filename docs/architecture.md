@@ -3278,9 +3278,12 @@ do not remove it. See `docs/local-development.md`.
 
 Teams admission uses an internal durable inbox proof at native session/message commit
 (`packages/core/src/application/teams-private-session.ts` and `packages/db/src/teams-private-session.ts`). It binds the exact installation generation, actor, linked human, route, message,
-and current lease. Personal Teams conversations may create private sessions in an authorized
-shared workspace under the existing organization privacy policy; this does not mint managed-browser authority or permit Personal workspace binding, visibility changes, forks, or
-approvals.
+and current lease. Personal Teams conversations create private sessions in the sender's own
+Personal workspace when they have one and Personal workspaces are on (the route's
+`session_workspace_id`, migration 1097), otherwise in the authorized shared workspace under the
+existing organization privacy policy. The route, inbox, outbox and link stay in the installation's
+workspace; the proof verifies them there. This does not mint managed-browser authority or permit
+installation in a Personal workspace, visibility changes, forks, or approvals.
 
 Teams reply discovery uses a content-free sequence wake on relevant durable session events.
 An invoker-rights trigger updates the reserved route in the event transaction; delivery still
