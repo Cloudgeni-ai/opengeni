@@ -12986,6 +12986,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.avatar": "ref(SessionAvatar)! null",
         "$.createdAt": "string!",
         "$.createdBy": "string! null",
         "$.description": "string! null",
@@ -14831,6 +14832,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
         "$.name": "string!"
       }
@@ -29434,6 +29436,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string? null",
         "$.name": "string?",
         "$.pinned": "boolean?"

@@ -28,7 +28,7 @@ import { requireUsableSessionAvatar } from "../routes/session-avatar";
 export const SESSION_PROFILE_TOOL_GUIDANCE =
   'When a person or a bot template chose the name (a bot\'s name), keep it unless the person asks for a new one. Every field is optional. description and avatar are shown to people next to the name and are not added to your context; set them when the person asks you to change your name or look, or when setup instructions say so. description: one line about what the chat does (an empty string clears it). avatar: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue}, {kind:"letters",letters,hue} (one or two letters or digits), with hue 0-359, or {kind:"image",artifactId} for an image file, such as one you generated. If other people can open this chat, publish the image so they can open it too first.';
 
-const AvatarInput = z4
+export const AvatarInput = z4
   .object({
     kind: z4.enum(["emoji", "icon", "letters", "image"]),
     emoji: z4.string().min(1).max(32).optional(),
@@ -45,10 +45,28 @@ export const sessionProfileToolInputShape = {
   avatar: AvatarInput,
 };
 
+/** A project's avatar: the same shapes as a chat's. */
+export const PROJECT_AVATAR_TOOL_GUIDANCE =
+  'avatar is shown to people instead of the project\'s folder icon and is not added to your context: null clears it; otherwise {kind:"emoji",emoji,hue}, {kind:"icon",icon,hue}, {kind:"letters",letters,hue} (one or two letters or digits), with hue 0-359, or {kind:"image",artifactId} for an image file shared with the workspace, since everyone in the workspace sees the project.';
+
+/**
+ * A project avatar from the tool's flat input, checked like a chat's in a
+ * shared chat: projects are visible to the whole workspace.
+ */
+export async function projectAvatarFromToolInput(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  avatar: AvatarInputValue,
+): Promise<SessionAvatar | null | undefined> {
+  const exact = avatarFromToolInput(avatar);
+  await requireUsableSessionAvatar(deps, grant, exact, { sharedWithWorkspace: true });
+  return exact;
+}
+
 type AvatarInputValue = z4.infer<typeof AvatarInput>;
 
 /** The tool's flat avatar object as the contract's exact avatar, or a clear refusal. */
-function avatarFromToolInput(avatar: AvatarInputValue): SessionAvatar | null | undefined {
+export function avatarFromToolInput(avatar: AvatarInputValue): SessionAvatar | null | undefined {
   if (avatar === undefined || avatar === null) return avatar;
   const parsed = SessionAvatar.safeParse(
     Object.fromEntries(Object.entries(avatar).filter(([, value]) => value !== undefined)),

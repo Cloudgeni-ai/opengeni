@@ -69,6 +69,7 @@ import { toast } from "../lib/toast";
 
 import { BillingClassMark } from "../components/billing-class-mark";
 import { ChannelCreateDialog } from "../components/rail/channel-create-dialog";
+import { ProjectGlyph } from "../components/rail/project-glyph";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "../components/new-session-draft-sync-notice";
@@ -2466,7 +2467,7 @@ function SessionFolderPicker({
           title={label}
           className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
         >
-          <FolderIcon className="size-3.5 shrink-0" />
+          <ProjectGlyph project={selected} />
           <span className="min-w-0 truncate">{label}</span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
@@ -2480,7 +2481,7 @@ function SessionFolderPicker({
         </DropdownMenuItem>
         {channels.map((channel) => (
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <FolderIcon />
+            <ProjectGlyph project={channel} className="size-4" />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
             <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>

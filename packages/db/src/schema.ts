@@ -5194,6 +5194,9 @@ export const channels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    // The project's avatar (1065), the same shape and bounds as a chat's.
+    // Display metadata for people only.
+    avatar: jsonb("avatar").$type<SessionAvatar>(),
     pinned: boolean("pinned").notNull().default(false),
     // Explicit user order within the pinned and unpinned project groups.
     sortOrder: integer("sort_order").notNull().default(0),

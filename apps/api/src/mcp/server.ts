@@ -190,7 +190,10 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import {
+  AvatarInput,
+  PROJECT_AVATAR_TOOL_GUIDANCE,
   SESSION_PROFILE_TOOL_GUIDANCE,
+  projectAvatarFromToolInput,
   registerBotTemplateTools,
   sessionProfileToolInputShape,
   setSessionProfileFromTool,
@@ -7000,7 +7003,7 @@ function registerProjectTools(
       "project_get",
       {
         description:
-          "Read one workspace project: name, description, pin state and order. Use sessions_list with projectId to find its visible sessions.",
+          "Read one workspace project: name, description, avatar, pin state and order. Use sessions_list with projectId to find its visible sessions.",
         inputSchema: { projectId: projectIdSchema },
       },
       async ({ projectId }) => {
@@ -7014,35 +7017,45 @@ function registerProjectTools(
     server.registerTool(
       "project_create",
       {
-        description:
-          "Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration.",
-        inputSchema: { name: nameSchema, description: descriptionSchema.optional() },
+        description: `Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration. ${PROJECT_AVATAR_TOOL_GUIDANCE}`,
+        inputSchema: {
+          name: nameSchema,
+          description: descriptionSchema.optional(),
+          avatar: AvatarInput,
+        },
       },
-      async ({ name, description }) =>
-        json({
+      async ({ name, description, avatar }) => {
+        const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             name,
             description: description ?? null,
+            avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
           }),
-        }),
+        });
+      },
     );
     server.registerTool(
       "project_update",
       {
-        description:
-          "Rename, describe or pin/unpin a workspace project. Pin state is shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description.",
+        description: `Rename, describe, set the avatar of, or pin/unpin a workspace project. Its name, description, avatar and pin state are shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description. ${PROJECT_AVATAR_TOOL_GUIDANCE}`,
         inputSchema: {
           projectId: projectIdSchema,
           name: nameSchema.optional(),
           description: descriptionSchema.nullable().optional(),
+          avatar: AvatarInput,
           pinned: z4.boolean().optional(),
         },
       },
-      async ({ projectId, ...update }) => {
-        const project = await updateChannel(deps.db, grant.workspaceId, projectId, update);
+      async ({ projectId, avatar, ...update }) => {
+        const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        const project = await updateChannel(deps.db, grant.workspaceId, projectId, {
+          ...update,
+          ...(exactAvatar !== undefined ? { avatar: exactAvatar } : {}),
+        });
         if (!project) throw new Error("Project not found");
         return json({ project });
       },

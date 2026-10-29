@@ -8117,6 +8117,11 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  /**
+   * Shown to people instead of the folder icon, like a chat's avatar. Absent
+   * from servers that predate project profiles.
+   */
+  avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
   createdBy: string | null;
@@ -8127,11 +8132,14 @@ export type Channel = {
 export type CreateChannelRequest = {
   name: string;
   description?: string;
+  avatar?: SessionAvatar | null;
 };
 
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  /** null clears it; omitted keeps it. */
+  avatar?: SessionAvatar | null;
   pinned?: boolean;
 };
 

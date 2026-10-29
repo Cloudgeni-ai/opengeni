@@ -153,6 +153,63 @@ describe("project MCP tools", () => {
     await callMcpTool(server, "project_delete", { projectId: b.project.id });
   });
 
+  test("agents set a project's avatar and description like a chat's profile", async () => {
+    if (!available) return;
+    const server = buildOpenGeniMcpServer(
+      deps(new FakeWorkflowClient()),
+      grant(["sessions:read", "sessions:create"]),
+    );
+    type ProjectResult = {
+      project: { id: string; name: string; description: string | null; avatar: unknown };
+    };
+    const created = await callMcpTool<ProjectResult>(server, "project_create", {
+      name: "Research",
+      description: "Papers and benchmarks",
+      avatar: { kind: "emoji", emoji: "🔭", hue: 215 },
+    });
+    expect(created.project.avatar).toEqual({ kind: "emoji", emoji: "🔭", hue: 215 });
+    const id = created.project.id;
+
+    // Only the avatar changes; the name and description stay.
+    const iconed = await callMcpTool<ProjectResult>(server, "project_update", {
+      projectId: id,
+      avatar: { kind: "icon", icon: "telescope", hue: 245 },
+    });
+    expect(iconed.project).toMatchObject({
+      name: "Research",
+      description: "Papers and benchmarks",
+      avatar: { kind: "icon", icon: "telescope", hue: 245 },
+    });
+    // Omitting the avatar keeps it.
+    const renamed = await callMcpTool<ProjectResult>(server, "project_update", {
+      projectId: id,
+      name: "Research notes",
+    });
+    expect(renamed.project.avatar).toEqual({ kind: "icon", icon: "telescope", hue: 245 });
+    expect(
+      (await callMcpTool<ProjectResult>(server, "project_get", { projectId: id })).project.avatar,
+    ).toEqual({ kind: "icon", icon: "telescope", hue: 245 });
+
+    // An incomplete avatar or an image that isn't in the workspace is refused
+    // and leaves the project as it was.
+    await expect(
+      callMcpTool(server, "project_update", { projectId: id, avatar: { kind: "emoji", hue: 1 } }),
+    ).rejects.toThrow();
+    await expect(
+      callMcpTool(server, "project_update", {
+        projectId: id,
+        avatar: { kind: "image", artifactId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow();
+
+    const cleared = await callMcpTool<ProjectResult>(server, "project_update", {
+      projectId: id,
+      avatar: null,
+    });
+    expect(cleared.project.avatar).toBeNull();
+    await callMcpTool(server, "project_delete", { projectId: id });
+  });
+
   test("filing, paginated discovery and deletion preserve sessions", async () => {
     if (!available) return;
     const server = buildOpenGeniMcpServer(

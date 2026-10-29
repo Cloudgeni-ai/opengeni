@@ -233,4 +233,103 @@ describe("channel routes", () => {
     expect(unfiled.status).toBe(200);
     expect(((await unfiled.json()) as { channelId: string | null }).channelId).toBeNull();
   });
+
+  test("a project's profile: avatar and description round-trip under rename's permission", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const writer = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, "user:w", ["sessions:read", "sessions:create"]),
+    };
+    const reader = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, "user:r", ["sessions:read"]),
+    };
+    const base = `/v1/workspaces/${ws.workspaceId}/channels`;
+    const created = await app().request(base, {
+      method: "POST",
+      headers: writer,
+      body: JSON.stringify({
+        name: "Design",
+        description: "Interface polish",
+        avatar: { kind: "emoji", emoji: "🎨", hue: 275 },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const project = (await created.json()) as Channel;
+    expect(project.avatar).toEqual({ kind: "emoji", emoji: "🎨", hue: 275 });
+    expect(project.description).toBe("Interface polish");
+
+    // A project without an avatar reads back as null, not missing.
+    const plain = (await (
+      await app().request(base, {
+        method: "POST",
+        headers: writer,
+        body: JSON.stringify({ name: "Plain" }),
+      })
+    ).json()) as Channel;
+    expect(plain.avatar).toBeNull();
+
+    // Read-only members can't change the profile, exactly like a rename.
+    expect(
+      (
+        await app().request(`${base}/${project.id}`, {
+          method: "PATCH",
+          headers: reader,
+          body: JSON.stringify({ avatar: { kind: "icon", icon: "rocket", hue: 215 } }),
+        })
+      ).status,
+    ).toBe(403);
+
+    // An avatar alone changes only the avatar.
+    const iconed = await app().request(`${base}/${project.id}`, {
+      method: "PATCH",
+      headers: writer,
+      body: JSON.stringify({ avatar: { kind: "icon", icon: "rocket", hue: 215 } }),
+    });
+    expect(iconed.status).toBe(200);
+    const iconedBody = (await iconed.json()) as Channel;
+    expect(iconedBody.avatar).toEqual({ kind: "icon", icon: "rocket", hue: 215 });
+    expect(iconedBody.name).toBe("Design");
+    expect(iconedBody.description).toBe("Interface polish");
+
+    // Malformed avatars and images that aren't in the workspace are refused.
+    expect(
+      (
+        await app().request(`${base}/${project.id}`, {
+          method: "PATCH",
+          headers: writer,
+          body: JSON.stringify({ avatar: { kind: "icon", icon: "not-an-icon", hue: 1 } }),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app().request(`${base}/${project.id}`, {
+          method: "PATCH",
+          headers: writer,
+          body: JSON.stringify({ avatar: { kind: "image", artifactId: crypto.randomUUID() } }),
+        })
+      ).status,
+    ).toBe(422);
+
+    // Clearing the avatar brings back the folder; the list carries it too.
+    const cleared = await app().request(`${base}/${project.id}`, {
+      method: "PATCH",
+      headers: writer,
+      body: JSON.stringify({ avatar: null }),
+    });
+    expect(((await cleared.json()) as Channel).avatar).toBeNull();
+    await app().request(`${base}/${project.id}`, {
+      method: "PATCH",
+      headers: writer,
+      body: JSON.stringify({ avatar: { kind: "letters", letters: "UX", hue: 0 } }),
+    });
+    const listed = (await (await app().request(base, { headers: reader })).json()) as Channel[];
+    expect(listed.find((row) => row.id === project.id)?.avatar).toEqual({
+      kind: "letters",
+      letters: "UX",
+      hue: 0,
+    });
+  });
 });

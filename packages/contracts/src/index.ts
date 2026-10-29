@@ -11896,6 +11896,9 @@ export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Pure organizational metadata: filing a session into a
 // channel never affects execution, authority, memory, or history.
+// A project's description and avatar are its profile, the same display
+// metadata a chat carries (see ./bots): shown to people in the sidebar and
+// never part of an agent's context.
 export const Channel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -11903,6 +11906,8 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     workspaceId: primitives.uuid,
     name: primitives.string,
     description: primitives.nullableString,
+    /** Shown instead of the folder icon; absent from servers that predate it. */
+    avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
     createdBy: primitives.nullableString,
@@ -11916,6 +11921,7 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
+    avatar: SessionAvatar.nullable().optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -11924,6 +11930,8 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80).optional(),
     description: z.string().max(2000).nullable().optional(),
+    /** null clears it; omitted keeps it. */
+    avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
   }),
 );
