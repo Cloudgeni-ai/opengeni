@@ -1,3 +1,9 @@
+import {
+  isSitePermission,
+  type SitePermission,
+  type SitePermissionSetting,
+} from "./site-permissions";
+
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const NATIVE_HOST_NAME = "ai.opengeni.browser" as const;
 
@@ -100,7 +106,19 @@ export type BridgeCommand =
   /** Where Chrome saved completed downloads of `url` (before or after
    * redirects) that started at or after `startedAfter`, oldest first. A
    * controlled tab's download events name the download but not its file. */
-  | { type: "downloads.find"; url: string; startedAfter: string };
+  | { type: "downloads.find"; url: string; startedAfter: string }
+  /** Sets one permission for one exact site (`https://example.com`), which
+   * the tab `tabId` must show under the attachment `debugger.attach`
+   * reported. Extensions that answer `ping` with `sitePermissions: true`
+   * know it. */
+  | {
+      type: "permissions.set";
+      tabId: string;
+      attachment: number;
+      origin: string;
+      permission: SitePermission;
+      setting: SitePermissionSetting;
+    };
 
 export type FoundDownload = {
   id: number;
@@ -301,6 +319,30 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
         throw new Error("download start time is invalid");
       }
       return { type: command.type, url: boundedUrl(command.url), startedAfter };
+    }
+    case "permissions.set": {
+      exactKeys(command, ["type", "tabId", "attachment", "origin", "permission", "setting"]);
+      // Whether the origin is one Chrome can be given is the extension's
+      // answer (`unsupported_site`), not a malformed request.
+      const origin = boundedString(command.origin, 1, 2_048, "site permission origin");
+      if (!isSitePermission(command.permission)) {
+        throw new Error("site permission is unsupported");
+      }
+      if (
+        command.setting !== "granted" &&
+        command.setting !== "denied" &&
+        command.setting !== "prompt"
+      ) {
+        throw new Error("site permission setting is invalid");
+      }
+      return {
+        type: command.type,
+        tabId: requireTabId(command.tabId),
+        attachment: boundedInteger(command.attachment, 1, Number.MAX_SAFE_INTEGER),
+        origin,
+        permission: command.permission,
+        setting: command.setting,
+      };
     }
     default:
       throw new Error("bridge command type is unsupported");

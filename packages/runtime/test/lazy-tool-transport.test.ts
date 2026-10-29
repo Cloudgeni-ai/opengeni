@@ -674,7 +674,7 @@ describe("query-independent tool discovery", () => {
           type: "function_call",
           callId: "wrong-prefix",
           name: "tool_list",
-          arguments: '{"namePrefix":"weather."}',
+          arguments: '{"namePrefix":"forecast."}',
         },
       ],
       [{ type: "function_call", callId: "browse", name: "tool_list", arguments: "{}" }],
@@ -1644,6 +1644,50 @@ describe("generic lazy tool dispatch", () => {
     ).toContain("skill_save");
   });
 
+  test("a search for a tool every request carries says it is already in the tool list", async () => {
+    const human = firstPartyTool(
+      "request_human_input",
+      "Pause this turn and request structured human input from the person",
+    );
+    const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+    const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
+    const agent = new Agent({
+      name: "visible-search",
+      instructions: "Use tools.",
+      model: "scripted",
+      tools: [human, exec, skillSave],
+    });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const visible = await agent.getAllTools(undefined as never);
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+    const named = JSON.parse(
+      (await runtime.prepareSearch({ query: "", names: ["request_human_input"] })).output,
+    ) as { tools: unknown[]; unavailable: string[]; alreadyAvailable?: string };
+    expect(named.tools).toEqual([]);
+    expect(named.unavailable).toEqual([]);
+    expect(named.alreadyAvailable).toBe(
+      "request_human_input is already in your tool list; call it directly.",
+    );
+
+    const ranked = JSON.parse(
+      (await runtime.prepareSearch({ query: "request structured human input from the person" }))
+        .output,
+    ) as { alreadyAvailable?: string };
+    expect(ranked.alreadyAvailable).toBe(
+      "request_human_input is already in your tool list; call it directly.",
+    );
+
+    // A deferred tool still loads as before, with no notice.
+    const deferred = JSON.parse(
+      (await runtime.prepareSearch({ query: "", names: ["skill_save"] })).output,
+    ) as { tools: Array<{ name: string }>; alreadyAvailable?: string };
+    expect(deferred.tools.map((entry) => entry.name)).toEqual(["skill_save"]);
+    expect(deferred).not.toHaveProperty("alreadyAvailable");
+  });
+
   test("searches, restores provider history, and executes the real tool pipeline", async () => {
     let approvalChecks = 0;
     let executions = 0;
@@ -2100,20 +2144,24 @@ describe("generic lazy tool dispatch", () => {
       JSON.stringify({ query: "weather capability", limit: 20 }),
       undefined as never,
     );
-    const parsed = JSON.parse(String(output)) as { tools: unknown[] };
-    expect(parsed.tools.length).toBeGreaterThan(0);
-    expect(parsed.tools.length).toBe(tools.length);
+    // A tie loads the top candidate and lists the others compactly.
+    const parsed = JSON.parse(String(output)) as { tools: unknown[]; suggestions: unknown[] };
+    expect(parsed.tools.length).toBe(1);
+    expect(parsed.tools.length + parsed.suggestions.length).toBe(tools.length);
     expect(Buffer.byteLength(String(output))).toBeLessThan(3_000);
     expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
       MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
     );
 
-    const item = { type: "function_call_result", callId: "search-1", output };
+    // An unmarked historical search replays its compact ranked listing.
+    const args = JSON.stringify({ query: "weather capability", limit: 20 });
+    const historical = runtime.genericSearchOutput(args);
+    expect(Buffer.byteLength(historical)).toBeLessThan(3_000);
+    const item = { type: "function_call_result", callId: "search-1", output: historical };
     const truncated = boundModelToolOutputItem(item, 100) as typeof item;
-    expect(truncated.output).not.toBe(output);
+    expect(truncated.output).not.toBe(historical);
     expect(String(truncated.output)).toContain("tokens truncated");
 
-    const args = JSON.stringify({ query: "weather capability", limit: 20 });
     const marked = transformGenericDispatchResponse(
       {
         usage: new Usage(),
@@ -2142,7 +2190,7 @@ describe("generic lazy tool dispatch", () => {
       (candidate) => candidate.type === "function_call_result",
     );
     expect(providerCall?.providerData).toBeUndefined();
-    expect(providerResult?.output).toBe(output);
+    expect(providerResult?.output).toBe(historical);
     expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 

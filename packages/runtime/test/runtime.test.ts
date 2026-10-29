@@ -3384,12 +3384,15 @@ describe("runtime event normalization", () => {
         }
         await result.completed;
         const searchOutput = JSON.stringify(model.requests[1]!.input);
-        // Two accounts' identical tools tie, so the search lists compact
-        // candidates; the notice still names the account it left out.
-        expect(searchOutput).toContain('\\"schemasLoaded\\":false');
+        // Two accounts' identical tools tie: the first is loaded, the other is
+        // listed by name, and the notice names the account it left out.
+        expect(searchOutput).toContain('\\"schemasLoaded\\":true');
         const reached = searchOutput.includes("Personal: alice@example.test")
           ? ["alice", "bob"]
           : ["bob", "alice"];
+        expect(searchOutput).toMatch(
+          /\\"suggestions\\":\[\{\\"name\\":\\"mcp_[0-9a-f]+__search_documents/,
+        );
         expect(searchOutput).toContain(
           `These tools reach Documents (${reached[0]}@example.test). Also connected: Documents (${reached[1]}@example.test). If the request could mean those accounts too`,
         );

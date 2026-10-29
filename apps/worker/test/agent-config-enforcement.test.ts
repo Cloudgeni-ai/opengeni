@@ -1228,10 +1228,10 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
       ],
     });
     expect(captured.modelVisibleSkillCatalogText).toContain(
-      '- {"id":"77777777-7777-4777-8777-777777777777","name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian."}',
+      '- {"name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian."}',
     );
     expect(captured.modelVisibleSkillCatalogText).toContain(
-      '- {"id":"88888888-8888-4888-8888-888888888888","name":"' +
+      '- {"name":"' +
         SKILL_SENTINEL +
         '","description":"Installed test Skill"}',
     );

@@ -242,6 +242,13 @@ struct ServeArgs {
     /// A step concurrency limit such as `restore=32`; repeatable.
     #[arg(long = "limit", value_parser = parse_limit)]
     limits: Vec<(Step, u32)>,
+    /// Host memory the sandboxes may use at most, on a host that shares
+    /// its memory with VMs or services beside compute: the capacity, the
+    /// watermarks and the most the VMs may ever hold together come from
+    /// it in place of the host's memory, so they never take what the
+    /// others were promised. Defaults to all of the host's memory.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    memory_total_mib: Option<u64>,
     /// Push idle sandboxes deeper when available memory drops below this,
     /// then ask sandboxes in use above their request to give memory back.
     /// Given with `--memory-high-mib` or not at all. Defaults on 4 KiB
@@ -767,7 +774,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
-    let engine = limit_vm_memory(engine, memory_profile, &policy)?;
+    let engine = limit_vm_memory(engine, memory_profile, &policy, args.memory_total_mib)?;
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
     readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);

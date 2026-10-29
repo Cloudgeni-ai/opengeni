@@ -11,12 +11,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::supervise::Children;
 use super::vsock::Stream;
-use super::{agent, log, sys, system};
+use super::{agent, log, shrink, sys, system};
 use crate::ENVD_PORT;
 use crate::envd::{self, AgentInit, InitData};
 use crate::gateway::{self, Header};
 use crate::given::{self, GIVEN_FILE, Given};
-use crate::notice::{self, Notice, Orders};
+use crate::notice::{self, Notice, Orders, Shrink};
 
 /// Longest a notice or an `init` waits for envd to be up.
 const ENVD_WAIT: Duration = Duration::from_secs(10);
@@ -342,7 +342,7 @@ impl Guest {
     /// at a time, on the listener's thread, and so is the host's
     /// `activity` question. Its `sync` request gets a thread of its own:
     /// a flush and trim can take a while, and must not hold up the notices
-    /// after them, such as a restore's clock.
+    /// after them, such as a restore's clock; so does its `shrink`.
     pub fn notice(&self, mut stream: Stream) {
         let _ = stream.set_read_timeout(Some(LINE_LIMIT));
         let Ok((line, _)) = read_line(&mut stream, notice::MAX_LINE) else {
@@ -361,6 +361,17 @@ impl Guest {
                 sys::sync();
                 trim_root();
                 let _ = stream.write_all(notice::SYNCED);
+            });
+            return;
+        }
+        if let Some(Shrink { free, keep }) = Shrink::parse(&line) {
+            // What PID 1 supervises keeps the sandbox reachable, and a
+            // runner able to report its job: never ended.
+            let protected = self.children.pids();
+            super::spawn("shrink", move || {
+                let shrunk = shrink::shrink(free, keep, &protected);
+                let answer = notice::shrunk_answer(shrunk.freed, shrunk.spent, &shrunk.ended);
+                let _ = stream.write_all(answer.as_bytes());
             });
             return;
         }

@@ -1,7 +1,9 @@
 import {
   compareModelPickerOrder,
+  modelLabelDistinctions,
   modelPickerBillingClassFor,
   type ModelPickerBillingClass,
+  type ModelLabelGeography,
 } from "@opengeni/sdk/model-picker-order";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
@@ -362,7 +364,7 @@ export function projectPickerRows(
   t: OpenGeniText,
   models: WorkspaceModelCatalogModel[],
 ): PickerModelRow[] {
-  return models
+  const rows = models
     .filter((catalog) => (catalog.credentialReadiness?.status ?? "ready") === "ready")
     .map((catalog) => {
       const billingClass = billingClassForModel(catalog);
@@ -390,6 +392,7 @@ export function projectPickerRows(
         catalog,
       };
     });
+  return withDistinctLabels(t, rows);
 }
 
 /**
@@ -401,7 +404,7 @@ export function projectClientModelRows(
   t: OpenGeniText,
   models: ClientModel[],
 ): PickerModelRow<ClientModel>[] {
-  return models.map((catalog) => {
+  const rows = models.map((catalog) => {
     const billingClass = billingClassForModel(catalog);
     const regionRestricted = regionRestrictedText(t, catalog.availability?.reason);
     return {
@@ -415,6 +418,59 @@ export function projectClientModelRows(
       provider: catalog.provider,
       providerLabel: catalog.providerLabel,
       catalog,
+    };
+  });
+  return withDistinctLabels(t, rows);
+}
+
+const GEOGRAPHY_LABELS = (t: OpenGeniText): Record<ModelLabelGeography, string> => ({
+  eu: t("modelPolicy.geographyEu"),
+  us: t("modelPolicy.geographyUs"),
+  global: t("modelPolicy.geographyGlobal"),
+});
+
+/**
+ * Rows shown under the same name in the same group say what differs, from the
+ * route's residency record or provider: "GPT-6.1 Sol" and "GPT-6.1 Sol (EU)".
+ * Rows with a unique name keep it unchanged, and organization and workspace
+ * copies of one model, which the picker shows as one choice, count once.
+ */
+export function withDistinctLabels<TCatalog extends ClientModel>(
+  t: OpenGeniText,
+  rows: PickerModelRow<TCatalog>[],
+): PickerModelRow<TCatalog>[] {
+  const choiceId = (row: PickerModelRow<TCatalog>) => {
+    // Older Site hosts list bare `{ id }` rows without a provider.
+    const identity = row.provider ? scopeFreeIdentity(row) : null;
+    return identity === null ? `model\u0000${row.id}` : `scope\u0000${identity}`;
+  };
+  const choices = new Map<string, PickerModelRow<TCatalog>>();
+  for (const row of rows) if (!choices.has(choiceId(row))) choices.set(choiceId(row), row);
+  const distinctions = modelLabelDistinctions(
+    [...choices].map(([id, row]) => ({
+      id,
+      label: row.label,
+      group: row.billingClassLabel,
+      providerLabel: row.providerLabel,
+      residency: row.catalog.residency,
+    })),
+  );
+  if (distinctions.size === 0) return rows;
+  const geographies = GEOGRAPHY_LABELS(t);
+  return rows.map((row) => {
+    const distinction = distinctions.get(choiceId(row));
+    if (!distinction) return row;
+    const suffix = ` (${[
+      distinction.geography ? geographies[distinction.geography] : undefined,
+      // A scope copy names its own connection.
+      distinction.providerLabel ? row.providerLabel : undefined,
+    ]
+      .filter(Boolean)
+      .join(", ")})`;
+    return {
+      ...row,
+      label: `${row.label}${suffix}`,
+      ...(row.shortLabel ? { shortLabel: `${row.shortLabel}${suffix}` } : {}),
     };
   });
 }

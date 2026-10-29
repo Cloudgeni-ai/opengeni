@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Tool } from "@openai/agents";
+import { Agent, run as runAgent, type Tool } from "@openai/agents";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   LEAN_EXEC_COMMAND_DEFAULTS,
   LEAN_EXEC_COMMAND_PARAMETERS,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
   canonicalizeLeanExecCommandInput,
   withLeanExecCommandArguments,
 } from "../src/sandbox/lean-exec-arguments";
@@ -95,13 +97,57 @@ describe("withLeanExecCommandArguments", () => {
       yield_time_ms: 10_000,
     });
   });
+
+  test("names write_stdin in the tty hint only when the same list offers it", () => {
+    const exec = {
+      type: "function",
+      name: "exec_command",
+      description: "original",
+      parameters: { type: "object", properties: {}, required: [] },
+      strict: true,
+      invoke: async () => "ok",
+    } as unknown as Tool<unknown>;
+    const stdin = {
+      type: "function",
+      name: "write_stdin",
+      description: "untouched",
+      parameters: { type: "object" },
+      strict: true,
+      invoke: async () => "stdin",
+    } as unknown as Tool<unknown>;
+    const [withStdin] = withLeanExecCommandArguments([exec, stdin]) as FunctionTool[];
+    const [withoutStdin] = withLeanExecCommandArguments([exec]) as FunctionTool[];
+    expect(withStdin!.parameters as unknown).toBe(LEAN_EXEC_COMMAND_PARAMETERS);
+    expect(withoutStdin!.parameters as unknown).toBe(
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+    );
+    // The two schemas differ only in that one hint; every other byte is shared.
+    expect(JSON.stringify(LEAN_EXEC_COMMAND_PARAMETERS.properties.tty)).toBe(
+      '{"type":"boolean","description":"Allocate a TTY (needed to interrupt the process later with Ctrl-C through write_stdin). Omit for the default of false."}',
+    );
+    expect(JSON.stringify(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties.tty)).toBe(
+      '{"type":"boolean","description":"Allocate a TTY. Omit for the default of false."}',
+    );
+    expect(
+      JSON.stringify({
+        ...LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+        properties: { ...LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties, tty: null },
+      }),
+    ).toBe(
+      JSON.stringify({
+        ...LEAN_EXEC_COMMAND_PARAMETERS,
+        properties: { ...LEAN_EXEC_COMMAND_PARAMETERS.properties, tty: null },
+      }),
+    );
+  });
 });
 
 describe("composed shell capability", () => {
-  async function execTool(
+  async function shellTools(
     lean: boolean,
     options: Parameters<typeof buildAgentCapabilities>[2] = {},
-  ): Promise<FunctionTool> {
+    sessionOverrides: Record<string, unknown> = {},
+  ): Promise<Tool<unknown>[]> {
     const settings = testSettings({
       sandboxBackend: "local",
       webSearchEnabled: false,
@@ -112,17 +158,48 @@ describe("composed shell capability", () => {
     };
     const session = await client.create({});
     sessions.push(session);
+    Object.assign(session, sessionOverrides);
     const capability = buildAgentCapabilities(settings, [], options).find(
       (cap) => cap.type === "shell",
     )!;
-    const tools = capability
+    return capability
       .clone()
       .bind(session as never)
       .tools();
+  }
+
+  async function execTool(
+    lean: boolean,
+    options: Parameters<typeof buildAgentCapabilities>[2] = {},
+  ): Promise<FunctionTool> {
+    const tools = await shellTools(lean, options);
     return tools.find(
       (tool): tool is FunctionTool => tool.type === "function" && tool.name === "exec_command",
     )!;
   }
+
+  /** The tool block one provider request carries for these tools. */
+  async function requestToolBlock(tools: Tool<unknown>[]): Promise<string> {
+    const model = new ScriptedModel("done");
+    await runAgent(new Agent({ name: "turn", model, tools }), "hi");
+    return JSON.stringify(model.requests[0]!.tools);
+  }
+
+  test("a session without write_stdin sends a tool block that never names it", async () => {
+    const interactive = await requestToolBlock(await shellTools(true));
+    const noStdin = await requestToolBlock(
+      await shellTools(true, {}, { supportsPty: () => false }),
+    );
+    expect(interactive).toContain('"name":"write_stdin"');
+    expect(interactive).toContain("Ctrl-C through write_stdin");
+    expect(noStdin).not.toContain("write_stdin");
+    expect(noStdin).toContain('"description":"Allocate a TTY. Omit for the default of false."');
+    // Every later request of the same placement repeats the block byte for byte.
+    expect(await requestToolBlock(await shellTools(true, {}, { supportsPty: () => false }))).toBe(
+      noStdin,
+    );
+    expect(await requestToolBlock(await shellTools(true))).toBe(interactive);
+  });
 
   test("disabled keeps the strict SDK schema that requires every argument", async () => {
     const exec = await execTool(false);

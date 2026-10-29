@@ -80,7 +80,10 @@ html:is([data-desktop="macos"], [data-desktop="windows"])::before {
   position: fixed;
   inset: 0 0 auto;
   /* Above the page, below full-window layers and dialogs (z-index 50), whose
-     backdrops dim it like the rest of the window. */
+     backdrops dim it like the rest of the window. The macOS app's own bar
+     controls (`[data-window-bar-controls]`, the sidebar toggle) sit one above
+     it at 46, from 84px: clear of the traffic lights and of the wider badge
+     macOS shows while the window is shared or recorded. */
   z-index: 45;
   height: var(--og-window-bar-height);
   background-color: var(--og-color-bg);
@@ -88,10 +91,10 @@ html:is([data-desktop="macos"], [data-desktop="windows"])::before {
   app-region: drag;
 }
 
-/* On macOS it is the rail's material: the window's sidebar glass through the
-   app's background. */
+/* On macOS the bar is part of the window frame (below) and draws nothing of
+   its own. */
 html[data-desktop="macos"]::before {
-  background-color: color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+  background-color: transparent;
 }
 
 /* In a short window a tall dialog or a menu can reach over the bar; it stays
@@ -135,17 +138,102 @@ html:is([data-desktop="macos"], [data-desktop="windows"]) [data-window-layer] {
   max-height: none;
 }
 
-html[data-desktop="macos"],
-html[data-desktop="macos"] body {
+/* macOS: one window frame, as in native Mac apps. The bar, the rails and the
+   margin around the main pane are a single surface: the window's sidebar
+   glass through the app's background, with the rail's quiet glow. The main
+   pane (the canvas next to a rail) sits on it as an inset, rounded panel,
+   and the sidebar toggle sits in the bar beside the traffic lights. */
+html[data-desktop="macos"] {
+  --og-window-panel-gap: 4px;
+  --og-window-panel-border: color-mix(in srgb, var(--og-color-border) 60%, transparent);
   background-color: transparent;
 }
 
+html[data-desktop="macos"] body {
+  background:
+    radial-gradient(ellipse 26rem 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
+    radial-gradient(ellipse 30rem 45% at 0 100%, var(--og-glow-peach-quiet), transparent 85%),
+    color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+}
+
+html[data-desktop="macos"] [data-window-frame] {
+  background-color: transparent;
+}
+
+html[data-desktop="macos"] [data-canvas] {
+  margin: 0 var(--og-window-panel-gap) var(--og-window-panel-gap);
+  border: 1px solid var(--og-window-panel-border);
+  border-radius: 10px;
+}
+
+html[data-desktop="macos"] [data-shell-rail] {
+  border-right-color: transparent;
+}
+
+html[data-desktop="macos"] [data-shell-rail] + [data-canvas] {
+  margin-left: 0;
+}
+
+/* On a chat (`data-window-bar-row`, set by the session shell) the chat's
+   header is the bar's row, beside the traffic lights and the sidebar toggle,
+   and the canvas, the rounded panel, starts under the bar as on every other
+   page. The header is fixed in the bar from the canvas's left edge
+   (`--og-window-bar-row-left`, kept by the shell) and one above it (46), so
+   its buttons take clicks and its empty space moves the window like the bar.
+   It never starts before --og-window-bar-row-start: past the sidebar toggle
+   (84px + 32px) and a small gap, so neither the toggle nor the traffic lights
+   are ever under it (beside the collapsed rail, or with no rail). Its two
+   lines for a sub-chat (16px + 28px) fit the bar. */
+html[data-desktop="macos"] {
+  --og-window-bar-row-start: 120px;
+}
+
+html[data-desktop="macos"] [data-window-bar-row] > [data-titlebar] {
+  position: fixed;
+  top: 0;
+  left: max(var(--og-window-bar-row-left, 0px), var(--og-window-bar-row-start));
+  right: var(--og-window-panel-gap);
+  z-index: 46;
+  height: var(--og-window-bar-height);
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-width: 0;
+  background-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* A full-window layer (`data-window-layer-open`) covers the chat, so the
+   chat's header steps out of the bar with it, as the sidebar toggle does:
+   not drawn, its buttons neither clickable nor focusable. (Not visibility:
+   the buttons' own transitions would keep them clickable for a moment.) */
+html[data-desktop="macos"][data-window-layer-open] [data-window-bar-row] > [data-titlebar] {
+  display: none;
+}
+
+/* Layers that fill the window's content (a full-window Site or artifact, the
+   maximized workspace) are the same inset panel, over the rail. The sidebar
+   toggle has nothing to show or hide under them: while one is open the layer
+   marks the document (`data-window-layer-open`) and the toggle steps aside. */
+html[data-desktop="macos"] :is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer] {
+  inset: var(--og-window-bar-height) var(--og-window-panel-gap) var(--og-window-panel-gap);
+  width: auto;
+  height: auto;
+  border: 1px solid var(--og-window-panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+html[data-desktop="macos"][data-window-layer-open] [data-window-bar-controls] {
+  display: none;
+}
+
 @layer components {
-  html[data-desktop="macos"] .og-rail-glow {
-    background:
-      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
-      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach-quiet), transparent 85%),
-      color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+  /* The docked rails are part of the window frame, which carries the glow.
+     A rail in a sheet (a narrow window) keeps its own. */
+  html[data-desktop="macos"] [data-shell-rail] .og-rail-glow {
+    background: transparent;
   }
 }
 

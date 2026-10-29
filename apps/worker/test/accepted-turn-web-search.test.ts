@@ -15,7 +15,10 @@ const capabilities = (webSearch: ModelCapabilitiesV1["hostedTools"]["webSearch"]
   return { ...current, hostedTools: { ...current.hostedTools, webSearch } };
 };
 
-function settingsWith(webSearch: ModelCapabilitiesV1["hostedTools"]["webSearch"]) {
+function settingsWith(
+  webSearch: ModelCapabilitiesV1["hostedTools"]["webSearch"],
+  contextSize?: "low" | "medium" | "high",
+) {
   return {
     ...base,
     modelProvidersJson: JSON.stringify([
@@ -31,6 +34,7 @@ function settingsWith(webSearch: ModelCapabilitiesV1["hostedTools"]["webSearch"]
             upstreamModelId: "upstream-model",
             capabilities: capabilities(webSearch),
             hostedWebSearch: webSearch.runnable,
+            ...(contextSize === undefined ? {} : { hostedWebSearchContextSize: contextSize }),
           },
         ],
       },
@@ -69,6 +73,13 @@ describe("accepted turn hosted web search after catalog enablement", () => {
     const resolved = resolveAcceptedTurnModel(runtime, after, accepted);
     expect(resolved?.configured).toEqual(resolveTurnModel(after, input.modelId)!.configured);
     expect(hostedWebSearchForTurn(resolved, false)).toBe(true);
+  });
+
+  test("resolved accepted route retains its configured search context size", () => {
+    const configured = settingsWith({ upstream: "supported", runnable: true }, "low");
+    const accepted = resolveTurnExecutionPolicyV1(configured, input);
+    const resolved = resolveAcceptedTurnModel(runtime, configured, accepted);
+    expect(resolved?.configured.hostedWebSearchContextSize).toBe("low");
   });
 
   test("an unresolved model keeps the legacy deployment gate", () => {
