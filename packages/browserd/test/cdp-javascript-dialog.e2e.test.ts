@@ -233,6 +233,78 @@ e2e(
   60_000,
 );
 
+// A dialog the page opens on its own, before anything debugs its tab.
+const EARLY_DIALOG_PAGE = `data:text/html,${encodeURIComponent(`<!doctype html><title>waiting</title>
+<script>setTimeout(() => { document.title = confirm("Leave this page?") ? "accepted" : "dismissed" }, 500)</script>
+<button onclick="document.title = confirm('Delete it?') ? 'deleted' : 'kept'">Delete</button>`)}`;
+
+e2e(
+  "a dialog a tab in front opened before attaching is dismissed, and later ones show",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-dialog-early-");
+    const chrome = Bun.spawn(
+      [
+        process.env.OPENGENI_BROWSER_EXECUTABLE ?? "chromium",
+        "--headless=new",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${join(directory, "profile")}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ],
+      { stdout: "ignore", stderr: "pipe" },
+    );
+    const browser = await CdpConnection.connect(await devtoolsEndpoint(chrome.stderr));
+    const bridge = new ChromeDebuggerBridge(browser);
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    const driver = createAttachedChromeDriver(
+      { browserSessionId: randomUUID(), controllerGeneration: `fixture-${randomUUID()}` },
+      { connection, runner: new AttachedChromeRunner(bridge, connection) },
+    );
+    try {
+      await driver.start("data:text/html,<title>other</title>");
+      // The person's tab, in front, opens a dialog while nothing debugs it.
+      const { tab } = await bridge.request<{ tab: { id: string } }>({
+        type: "tabs.create",
+        url: EARLY_DIALOG_PAGE,
+      });
+      await bridge.request({ type: "tabs.activate", tabId: tab.id });
+      await Bun.sleep(1_500);
+
+      const started = Date.now();
+      const observation = await driver.observe(tab.id);
+      expect(Date.now() - started).toBeLessThan(20_000);
+      // Chrome cancelled it, as it does for a tab sent to the background.
+      expect(await bridge.evaluate(tab.id, "document.title")).toBe("dismissed");
+      expect(observation.dialog).toBeNull();
+      expect(driver.takeTabNotice(tab.id)).toStartWith("This tab's page was blocked");
+      expect(driver.takeTabNotice(tab.id)).toBeNull();
+
+      // A dialog it opens now shows, and handle_dialog answers it.
+      const asked = await driver.dispatch({
+        ...command(observation, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Delete" },
+        }),
+        observationMode: "full",
+      } as BrowserActionCommand);
+      expect(asked?.dialog).toMatchObject({ type: "confirm", message: "Delete it?" });
+      await driver.dispatch(command(asked!, { type: "handle_dialog", response: "accept" }));
+      expect(await bridge.evaluate(tab.id, "document.title")).toBe("deleted");
+    } finally {
+      await driver.close().catch(() => undefined);
+      browser.close();
+      chrome.kill();
+      await chrome.exited;
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
 /** The Opengeni Chrome extension's bridge, over a real Chromium: tabs are page
  * targets, chrome.debugger is a flattened CDP session per tab, and debugger
  * events reach browserd only by polling, as they do from the extension. */
@@ -270,6 +342,7 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
       }
       case "tabs.activate":
         await this.browser.send("Target.activateTarget", { targetId: this.target(payload.tabId) });
+        this.activeTabId = String(payload.tabId);
         return {} as T;
       case "tabs.close":
         await this.browser.send("Target.closeTarget", { targetId: this.target(payload.tabId) });
@@ -320,6 +393,8 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
   close(): void {}
 
   private held: Promise<void> | null = null;
+  /** The tab last brought to the front; every tab is in one window. */
+  private activeTabId: string | null = null;
 
   /** Holds page reads until released, as a busy page would. */
   holdPageReads(): () => void {
@@ -372,7 +447,8 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
         id: this.tabId(target.targetId),
         title: target.title || "Untitled",
         url: target.url,
-        active: false,
+        active: this.tabId(target.targetId) === this.activeTabId,
+        windowId: 1,
         controllable: true,
       }));
   }

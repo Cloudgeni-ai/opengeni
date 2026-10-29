@@ -243,10 +243,10 @@ test("a tab a relaunch reopened has its reload notice to give once, and actions 
     });
     await observing.driver.targetState("old-prior");
     expect((await observing.driver.observe("old-prior")).target.id).toBe("old-prior");
-    expect(observing.driver.takeReloadedTabNotice("old-prior")).toBe(
+    expect(observing.driver.takeTabNotice("old-prior")).toBe(
       "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
     );
-    expect(observing.driver.takeReloadedTabNotice("old-prior")).toBeNull();
+    expect(observing.driver.takeTabNotice("old-prior")).toBeNull();
   } finally {
     await observing.driver.detach();
   }
@@ -272,7 +272,7 @@ test("a tab a relaunch reopened has its reload notice to give once, and actions 
     expect(
       acting.calls.slice(sent).filter((call) => call.method === "Input.dispatchKeyEvent").length,
     ).toBeGreaterThan(0);
-    expect(acting.driver.takeReloadedTabNotice("old-prior")).toBe(
+    expect(acting.driver.takeTabNotice("old-prior")).toBe(
       "This browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
     );
   } finally {

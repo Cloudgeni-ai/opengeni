@@ -381,10 +381,11 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * reopened tab keeps its earlier ID, and calls naming an earlier tab that
    * did not reopen say why it is gone. */
   noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
-  /** The plain notice that a relaunch reloaded this tab's page, for the
-   * first result about it that reaches the caller; null when there is none
-   * or it was already given. */
-  takeReloadedTabNotice?(tabId: string): string | null;
+  /** The plain notice of what happened to this tab that its page cannot
+   * show (a relaunch reloaded it, or a dialog nobody could read was
+   * dismissed), for the first result about it that reaches the caller; null
+   * when there is none or it was already given. */
+  takeTabNotice?(tabId: string): string | null;
   /** The http(s) URL a tab showing the browser's error page failed to load:
    * the address the browser reopens it at after a relaunch. Null when it
    * can't be read. */
@@ -3118,17 +3119,15 @@ export class BrowserSupervisor {
     this.rememberTarget(runtime, observation.target);
   }
 
-  /** An observation for a caller that asked for notices says, once, that a
-   * relaunch reloaded its tab's page. Other callers (a person's viewer, auth
+  /** An observation for a caller that asked for notices says, once, what
+   * happened to its tab that its page cannot show. Other callers (a person's viewer, auth
    * checks, API clients) neither see the notice nor use it up. */
   private reported(
     runtime: Runtime,
     observation: BrowserObservation,
     options: BrowserObservationNoticeOptions,
   ): BrowserObservation {
-    const notice = options.notices
-      ? runtime.driver.takeReloadedTabNotice?.(observation.target.id)
-      : null;
+    const notice = options.notices ? runtime.driver.takeTabNotice?.(observation.target.id) : null;
     return notice ? { ...observation, notice } : observation;
   }
 

@@ -42,6 +42,13 @@ const MAX_EVENT_LISTENERS = 16_384;
 // Chrome reports the debugger detach that ends a refused navigation on its own
 // event stream, usually just before or after the failed command's reply.
 const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
+// A page command's deadline when its caller sets none, as on a direct CDP
+// connection: a page that stops answering (a dialog it opened before the
+// debugger attached blocks it) must fail the command, not hold it forever.
+const PAGE_COMMAND_TIMEOUT_MS = 30_000;
+// A live page answers attaching in well under a second; one that has not
+// answered after this is blocked or hung.
+const ATTACH_TIMEOUT_MS = 10_000;
 // Retry bounds while the event stream is re-established after it broke.
 const RESYNC_RETRY_MIN_MS = 100;
 const RESYNC_RETRY_MAX_MS = 5_000;
@@ -96,6 +103,8 @@ type AttachedTab = {
   url: string | null;
   active: boolean;
   controllable: boolean;
+  /** Null when the extension does not say. */
+  windowId: number | null;
 };
 
 type BridgeDebuggerEvent = {
@@ -286,6 +295,11 @@ export function createAttachedChromeDriver(
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
+    // A dialog a page opened before Chrome's debugger attached blocks it and
+    // can be neither read nor answered; dismiss it the way Chrome would.
+    attachTimeoutMs: ATTACH_TIMEOUT_MS,
+    dismissUnreadableDialog: async (tabId) =>
+      await transport.connection.dismissUnreadableDialog(tabId),
     ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
     // Chrome saves downloads in the person's own downloads folder; the
     // session keeps a copy of each one its tabs start.
@@ -580,11 +594,67 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.markActive();
     this.inFlight += 1;
     try {
-      return await this.sendNow<T>(method, params, options);
+      const sent = this.sendNow<T>(method, params, options);
+      if (!options.sessionId) return await sent;
+      return await withPageDeadline(
+        sent,
+        method,
+        options.sessionId,
+        options.timeoutMs ?? PAGE_COMMAND_TIMEOUT_MS,
+      );
     } finally {
       this.inFlight -= 1;
       this.lastActivityAt = Date.now();
     }
+  }
+
+  /**
+   * Unblock a tab in front whose page does not answer, as when it opened a
+   * dialog (alert, confirm, prompt) while nothing debugged it: Chrome lets no
+   * extension read or answer that dialog, and holds every page command until
+   * someone does. Chrome dismisses such a dialog when its tab goes to the
+   * background with no debugger attached, so release the debugger and show
+   * another tab of the same window for a moment (a new blank one, closed
+   * again, when the window has no other). Returns whether it did; a tab in
+   * the background, or one another session here is debugging, is left be.
+   */
+  async dismissUnreadableDialog(tabId: string): Promise<boolean> {
+    if (this.stopped || this.failure || this.debuggerHeldElsewhere(tabId)) return false;
+    const listed = requireTabs(
+      (await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" })).tabs,
+    );
+    const tab = listed.find((entry) => entry.id === tabId);
+    if (!tab?.active || tab.windowId === null) return false;
+    let other = listed.find((entry) => entry.id !== tabId && entry.windowId === tab.windowId);
+    let created: string | null = null;
+    if (!other) {
+      const result = await this.bridge.request<{ tab: unknown }>({
+        type: "tabs.create",
+        url: "data:text/html,",
+      });
+      const blank = requireTab(result.tab);
+      created = blank.id;
+      if (blank.windowId !== tab.windowId) {
+        await this.bridge.request({ type: "tabs.close", tabId: blank.id }).catch(() => undefined);
+        return false;
+      }
+      other = blank;
+    }
+    try {
+      if (this.attachedTabs.has(tabId)) {
+        await this.bridge.request({ type: "debugger.detach", tabId });
+        this.forgetReleasedAttachment(tabId);
+      }
+      try {
+        await this.bridge.request({ type: "tabs.activate", tabId: other.id });
+      } finally {
+        await this.bridge.request({ type: "tabs.activate", tabId });
+      }
+    } finally {
+      if (created !== null)
+        await this.bridge.request({ type: "tabs.close", tabId: created }).catch(() => undefined);
+    }
+    return true;
   }
 
   private async sendNow<T>(
@@ -1410,6 +1480,7 @@ function requireTab(value: unknown): AttachedTab {
     url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
+    windowId: Number.isSafeInteger(tab.windowId) ? (tab.windowId as number) : null,
   };
 }
 
@@ -1735,6 +1806,30 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
     throw new CdpTransportError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+/** A page command's result, or CdpCommandTimeoutError once its deadline
+ * passes; a late result is dropped. */
+async function withPageDeadline<T>(
+  sent: Promise<T>,
+  method: string,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new CdpCommandTimeoutError(method, sessionId)),
+      boundedTimeout(timeoutMs),
+    );
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([sent, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void sent.catch(() => undefined);
+  }
 }
 
 async function delay(milliseconds: number): Promise<void> {

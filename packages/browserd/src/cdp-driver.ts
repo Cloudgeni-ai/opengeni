@@ -829,6 +829,15 @@ export type AgentBrowserDriverOptions = {
   permissionControl?: boolean;
   /** Experimental ephemeral context lease. Never a durable browser profile. */
   browserContextId?: string;
+  /** How long attaching to a tab waits for its page to answer before the tab
+   * counts as not responding. Unbounded beyond each command's own deadline
+   * when unset. */
+  attachTimeoutMs?: number;
+  /** Unblock a tab whose page did not answer while attaching, as a dialog
+   * (alert, confirm, prompt) the page opened before anything debugged it
+   * blocks it: the browser lets no debugger read or answer that dialog.
+   * Returns whether it acted, so attaching is worth one more try. */
+  dismissUnreadableDialog?: (browserTargetId: string) => Promise<boolean>;
   /** Headless shell has no chrome://version page. Read its real Client Hints
    * from a controller-intercepted secure-origin document instead. */
   userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
@@ -992,6 +1001,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * has not been told of yet, by tab ID. The next observation the agent's
    * tools receive for one says so. */
   private readonly reloadedTabs = new Map<string, ReloadedBrowserTab>();
+  /** Tabs whose unreadable dialog attaching dismissed, by tab ID, until the
+   * agent is told. */
+  private readonly dismissedDialogTabs = new Set<string>();
   /** Tabs a close-tab call of this driver is closing. */
   private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
@@ -1006,6 +1018,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
   private readonly browserContextId: string | undefined;
+  private readonly attachTimeoutMs: number | undefined;
+  private readonly dismissUnreadableDialog:
+    | ((browserTargetId: string) => Promise<boolean>)
+    | undefined;
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
@@ -1130,6 +1146,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
+    this.attachTimeoutMs = options.attachTimeoutMs;
+    this.dismissUnreadableDialog = options.dismissUnreadableDialog;
     this.targetAutoAttach = options.targetAutoAttach ?? this.engine === "chromium";
     this.passkeys = options.passkeys ?? null;
     this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
@@ -3700,7 +3718,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async attachTarget(info: TargetInfo): Promise<TargetState> {
+  private async attachTarget(info: TargetInfo, dismissedDialog = false): Promise<TargetState> {
     const connection = await this.ensureConnection();
     const authorityGeneration = this.targetPhysicalGeneration(info.targetId);
     const attached = await connection.send<{ sessionId?: unknown }>("Target.attachToTarget", {
@@ -3724,6 +3742,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let frame: MainFrame;
     let loadingRestored = false;
     const viewport = this.viewportFor(info.targetId);
+    let attachTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const initialized = (async () => {
         await Promise.all([
@@ -3747,7 +3766,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (viewport) await this.applyViewport(connection, sessionId, viewport);
         return await this.mainFrame(sessionId);
       })();
-      const outcome = await Promise.race([initialized, crashed]);
+      const attachTimeoutMs = this.attachTimeoutMs;
+      const outcome = await Promise.race([
+        initialized,
+        crashed,
+        ...(attachTimeoutMs === undefined
+          ? []
+          : [
+              new Promise<never>((_resolve, reject) => {
+                attachTimer = setTimeout(() => {
+                  void initialized.catch(() => undefined);
+                  reject(new CdpCommandTimeoutError("Page.enable", sessionId));
+                }, attachTimeoutMs);
+                attachTimer.unref?.();
+              }),
+            ]),
+      ]);
       if (!outcome) {
         // Detaching below ends the enables still waiting on the dead renderer.
         void initialized.catch(() => undefined);
@@ -3794,10 +3828,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await delay(RESTORED_TAB_ATTACH_INTERVAL_MS);
         return await this.attachTarget(info);
       }
-      if (error instanceof CdpCommandTimeoutError && error.sessionId)
+      if (error instanceof CdpCommandTimeoutError && error.sessionId) {
+        // A dialog the page opened before anything debugged it blocks the
+        // page, and the browser lets no debugger read or answer it. Unblock
+        // the tab once where the transport can, and tell the agent.
+        if (
+          !dismissedDialog &&
+          this.dismissUnreadableDialog &&
+          (await this.dismissUnreadableDialog(info.targetId).catch(() => false))
+        ) {
+          const state = await this.attachTarget(info, true);
+          this.dismissedDialogTabs.add(this.tabIdOf(info.targetId));
+          return state;
+        }
         throw tabNotRespondingError(error);
+      }
       throw error;
     } finally {
+      if (attachTimer !== undefined) clearTimeout(attachTimer);
       stopCrashWatch();
       if (this.attachingSessions.get(info.targetId) === sessionId)
         this.attachingSessions.delete(info.targetId);
@@ -9935,6 +9983,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private rememberGoneTarget(tabId: string, gone: GoneBrowserTarget): void {
     this.reloadedTabs.delete(tabId);
+    this.dismissedDialogTabs.delete(tabId);
     this.goneTargets.delete(tabId);
     this.goneTargets.set(tabId, gone);
     while (this.goneTargets.size > MAX_GONE_TARGETS) {
@@ -9943,11 +9992,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** The notice for an observation of this tab the agent receives, when a
-   * relaunch reloaded its page and the agent was not told yet; said once. */
-  takeReloadedTabNotice(tabId: string): string | null {
+   * relaunch reloaded its page or attaching dismissed a dialog the agent
+   * could not see, and the agent was not told yet; said once. */
+  takeTabNotice(tabId: string): string | null {
     const reloaded = this.reloadedTabs.get(tabId) ?? null;
     this.reloadedTabs.delete(tabId);
-    return reloaded ? reloadedTabNotice(reloaded) : null;
+    const dismissed = this.dismissedDialogTabs.delete(tabId);
+    const notices = [
+      ...(reloaded ? [reloadedTabNotice(reloaded)] : []),
+      ...(dismissed ? [DISMISSED_UNREADABLE_DIALOG_NOTICE] : []),
+    ];
+    return notices.length > 0 ? notices.join(" ") : null;
   }
 
   /**
@@ -10336,6 +10391,11 @@ const RESTORED_TAB_ATTACH_INTERVAL_MS = 100;
  * for the tab the session was using before it opens a new one instead. A
  * live page answers in well under a second. */
 const REBIND_TIMEOUT_MS = 5_000;
+
+/** The observation notice for a tab whose blocking dialog attaching
+ * dismissed. */
+export const DISMISSED_UNREADABLE_DIALOG_NOTICE =
+  "This tab's page was blocked, most likely by a dialog (alert, confirm or prompt) it opened while nothing controlled the tab. Chrome lets no extension read or answer such a dialog, so it was dismissed, as Chrome does when a tab goes to the background. If a step needed that dialog, do the step again: its dialogs now show in observations and handle_dialog answers them.";
 
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";
