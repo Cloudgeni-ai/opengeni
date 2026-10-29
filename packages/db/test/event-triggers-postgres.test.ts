@@ -44,6 +44,7 @@ import {
   pruneEventIntake,
   recordEventDelivery,
   recordEventOccurrenceStartFailure,
+  markEventSourceAutomationsApiBilled,
   rearmScheduledTaskEvents,
   resolveEventIngressRoute,
   retireExhaustedScheduledTask,
@@ -591,6 +592,18 @@ describe("deliveries and matching", () => {
     // An API caller's: only the automation it fired becomes API use.
     expect((await send("api")).matchedTaskIds).toEqual([fired.id]);
     expect(await origins()).toEqual({ [fired.id]: "api", [quiet.id]: null });
+    // An API caller taking over the source (a new secret it can sign with)
+    // makes every automation listening on it API use.
+    const other = await task(space);
+    await markEventSourceAutomationsApiBilled(client.db, { ...space, sourceId: source.id });
+    expect(await origins()).toEqual({ [fired.id]: "api", [quiet.id]: "api" });
+    const [untouched] = await withWorkspaceRls(client.db, space.workspaceId, (scoped) =>
+      rawRows<{ billing_origin: string | null }>(
+        scoped,
+        sql`select billing_origin from scheduled_tasks where id = ${other.id}::uuid`,
+      ),
+    );
+    expect(untouched?.billing_origin).toBeNull();
   });
 
   test("matching queues events for active automations whose owner can see the source", async () => {

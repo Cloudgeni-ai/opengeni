@@ -37,7 +37,8 @@ inherit the origin of the chat they run in, never the credential's.
   source's test event or a replayed delivery, it is API from then on
   (`markScheduledTaskApiBilled`, and in the delivery's own transaction for
   events), so a key cannot spend plan credit through a schedule or automation
-  set up in the app. The pause endpoints leave it alone (a status change
+  set up in the app. An API caller rotating a webhook source's secret makes
+  every automation listening on it API use first. The pause endpoints leave it alone (a status change
   through an ordinary update counts as an edit), and a task is never turned
   back into app. A manual run is checked at the edge as API when the caller or
   the task is API (`manualScheduledTaskTriggerBillingOrigin`). If a manual run
@@ -144,6 +145,9 @@ way. Processes install it at boot (`configureBillingLegacyAccounts`).
 ## Rollout
 
 Migration 1100 is rolling: three nullable columns with `NOT VALID` checks,
-two triggers, same-signature function bodies, one new private helper and two
-widened `NOT VALID` billing-record checks. The previous release
+two triggers with their private functions, new private helpers,
+same-signature replacements of existing function bodies (plan balances and
+expiry, and the scheduled-task execution digest and personal-resource fence,
+which now ignore `billing_origin`) and two widened `NOT VALID` billing-record
+checks. The previous release
 never writes the columns; null keeps today's behaviour.

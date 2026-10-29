@@ -142,7 +142,7 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial, fundedBillingOrigin } from "@opengeni/core";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -1251,12 +1251,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
           initiatingHumanSubjectId: causalHumanSubjectId,
           // Runs are billed as whoever set the task up.
-          billingOrigin: () =>
-            readScheduledTaskBillingOrigin(db, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              taskId: task.id,
-            }),
+          // CloudGeni's legacy account stays app even for a task it can't see.
+          billingOrigin: async () =>
+            fundedBillingOrigin(
+              task.accountId,
+              await readScheduledTaskBillingOrigin(db, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                taskId: task.id,
+              }),
+            ),
         },
       );
       if (admissionDenial) {

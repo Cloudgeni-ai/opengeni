@@ -490,11 +490,30 @@ test("an API caller's edit or manual run makes a schedule set up in the app API 
       );
       return { digest: row!.execution_digest, revision: Number(row!.authority_revision) };
     });
+  // A personal-resource task: the fence advances its authority revision on
+  // any execution change, which would leave it without a snapshot.
   const before = await execution();
+  const [membership] = await shared.admin<{ id: string }[]>`
+    insert into organization_memberships (account_id, subject_id)
+    values (${ref.accountId}::uuid, ${grant.subjectId}) returning id`;
+  await shared.admin`
+    insert into scheduled_task_personal_resource_authorities (
+      task_id, task_authority_revision, account_id, workspace_id, initiating_human_subject_id,
+      owner_organization_membership_id, membership_authorization_revision, session_visibility,
+      execution_digest, resource_count
+    ) values (
+      ${ref.taskId}::uuid, ${before.revision}, ${ref.accountId}::uuid, ${ref.workspaceId}::uuid,
+      ${grant.subjectId}, ${membership!.id}::uuid, 1, 'workspace_shared', ${before.digest}, 1
+    )`;
   await markScheduledTaskApiBilled(client.db, ref);
   expect(await readScheduledTaskBillingOrigin(client.db, ref)).toBe("api");
   // Who pays is billing, not execution: the digest and authority revision stay.
   expect(await execution()).toEqual(before);
+  // Control: a real execution change still advances the revision.
+  await shared.admin`
+    update scheduled_tasks set agent_config = agent_config || '{"prompt":"Run again"}'::jsonb
+    where workspace_id = ${ref.workspaceId}::uuid and id = ${ref.taskId}::uuid`;
+  expect((await execution()).revision).toBe(before.revision + 1);
   // Every later run, including a person's, is API use.
   expect(
     await manualScheduledTaskRunBillingOrigin(client.db, { ...ref, callerOrigin: "app" }),

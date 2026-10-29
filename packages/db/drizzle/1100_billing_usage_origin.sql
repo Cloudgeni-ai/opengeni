@@ -9,9 +9,10 @@
 -- records may carry the origin. See docs/billing-origin.md.
 --
 -- Rolling: three nullable columns (catalog-only; their checks are NOT VALID
--- and only constrain new writes) and two same-signature function bodies. The
--- previous release never writes the columns, and null keeps today's
--- behaviour: null origin is billed as app and counts against the plan.
+-- and only constrain new writes), new private trigger functions and helper,
+-- and same-signature replacements of existing function bodies. The previous
+-- release never writes the columns, and null keeps today's behaviour: null
+-- origin is billed as app and counts against the plan.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 

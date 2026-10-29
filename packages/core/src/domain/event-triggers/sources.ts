@@ -24,6 +24,7 @@ import {
   getScheduledTask,
   listMcpEventStreamKeys,
   listRecentEventTypes,
+  markEventSourceAutomationsApiBilled,
   recordEventDelivery,
   resolveEventIngressRoute,
   updateEventSource,
@@ -543,10 +544,20 @@ export async function rotateEventSourceSecret(input: {
   db: Database;
   settings: Settings;
   source: EventSourceRecord;
+  /** Who rotates: an API caller makes the automations listening on it API use. */
+  billingOrigin?: BillingOrigin;
 }): Promise<{ signingSecret: string }> {
   if (input.source.kind !== "webhook" || input.source.adapter !== "standard") {
     throw new HTTPException(422, {
       message: "Only standard webhook sources have a secret Opengeni makes",
+    });
+  }
+  // Before the new secret exists, so nothing it signs runs on plan credit.
+  if (input.billingOrigin === "api") {
+    await markEventSourceAutomationsApiBilled(input.db, {
+      accountId: input.source.accountId,
+      workspaceId: input.source.workspaceId,
+      sourceId: input.source.id,
     });
   }
   const signingSecret = generateStandardWebhookSecret();

@@ -170,9 +170,14 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/event-sources/:sourceId/rotate-secret", async (c) => {
-    const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
-    const rotated = await rotateEventSourceSecret({ db, settings: deps.settings, source });
+    const rotated = await rotateEventSourceSecret({
+      db,
+      settings: deps.settings,
+      source,
+      billingOrigin: await resolveTurnBillingOrigin(db, { grant }),
+    });
     c.header("cache-control", "private, no-store");
     return c.json(RotateEventSourceSecretResponse.parse(rotated));
   });

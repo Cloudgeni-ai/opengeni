@@ -526,6 +526,28 @@ export async function updateEventSource(
  * Delete a source and its history. A source automations still use is kept:
  * the result names them so the caller can say which to change first.
  */
+/**
+ * An API caller that takes over a source (a new webhook secret it can sign
+ * with) makes every automation listening on it API use, so deliveries it
+ * signs never pay from plan credit.
+ */
+export async function markEventSourceAutomationsApiBilled(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sourceId: string },
+): Promise<void> {
+  await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
+    scoped.execute(
+      sql`UPDATE scheduled_tasks task SET billing_origin = 'api'
+        WHERE task.account_id = ${input.accountId}::uuid
+          AND task.workspace_id = ${input.workspaceId}::uuid
+          AND task.billing_origin IS DISTINCT FROM 'api'
+          AND EXISTS (SELECT 1 FROM event_triggers trigger
+            WHERE trigger.workspace_id = task.workspace_id AND trigger.task_id = task.id
+              AND trigger.source_id = ${input.sourceId}::uuid)`,
+    ),
+  );
+}
+
 export async function deleteEventSource(
   db: Database,
   workspaceId: string,
