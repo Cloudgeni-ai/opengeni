@@ -60,6 +60,28 @@ describe("tool search meaning ranking", () => {
     ).toBeUndefined();
   });
 
+  test("the deployment identity signs the Knowledge embedder in for tool search too", () => {
+    const identity = {
+      documentEmbeddingProvider: "openai" as const,
+      documentEmbeddingAuth: "deployment_identity" as const,
+      documentEmbeddingBaseUrl: "https://resource.openai.azure.com/openai/v1",
+    };
+    expect(
+      configuredToolMeaningRanker({
+        settings: testSettings({
+          ...identity,
+          azureTenantId: "tenant",
+          azureClientId: "client",
+          azureClientSecret: "secret",
+        }),
+      }),
+    ).toBeFunction();
+    // Without the identity nothing signs in, and no other key is tried.
+    expect(
+      configuredToolMeaningRanker({ settings: testSettings({ ...identity, openaiApiKey: "key" }) }),
+    ).toBeUndefined();
+  });
+
   test("turns with the same embedding setup share one ranker and its tool vectors", async () => {
     const settings = testSettings({
       documentEmbeddingProvider: "openai",
