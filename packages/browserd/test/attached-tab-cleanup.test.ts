@@ -28,6 +28,8 @@ const TRANSPORT = {
 };
 const BLANK = "data:text/html,";
 const MINUTE = 60_000;
+/** A caller that can take a continued session with no tab (null). */
+const NO_OBSERVATION_OK = { acceptsNoObservation: true } as const;
 
 type FakeTab = { url: string; title: string };
 
@@ -352,11 +354,8 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
 
       // Any later call, even a read of the tab list, continues the session:
       // it still has no tab, and none appears in the person's window.
-      const recovered = await supervisor.createSession({
-        ...session,
-        headed: true,
-        transport: TRANSPORT,
-      });
+      const continued = { ...session, headed: true, transport: TRANSPORT };
+      const recovered = await supervisor.createSession(continued, NO_OBSERVATION_OK);
       expect(recovered.observation).toBeNull();
       expect(chrome.requests.filter((request) => request.type === "tabs.create")).toHaveLength(
         tabsBefore,
@@ -367,10 +366,57 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       expect(listed.some((target) => target.selected)).toBe(false);
       // The person's tab was not taken over either.
       expect(chrome.attached.size).toBe(0);
+      // Nor by a repeated create, or two at once, which find the session
+      // running with no tab of its own.
+      const repeated = await Promise.all([
+        supervisor.createSession(continued, NO_OBSERVATION_OK),
+        supervisor.createSession(continued, NO_OBSERVATION_OK),
+      ]);
+      expect(repeated.map((again) => again.observation)).toEqual([null, null]);
+      expect(chrome.attached.size).toBe(0);
+      expect(chrome.requests.filter((request) => request.type === "tabs.create")).toHaveLength(
+        tabsBefore,
+      );
+      // A caller from before such sessions cannot take one without a tab: it
+      // gets a new tab of the session's own, never the person's.
+      const older = await supervisor.createSession(continued);
+      expect(older.observation!.target.id).not.toBe("1");
+      expect(chrome.tabs.has(older.observation!.target.id)).toBe(true);
+      expect(chrome.attached.has("1")).toBe(false);
 
       // Opening a tab when the agent asks for one still works.
       const opened = await supervisor.openTarget(session);
       expect(chrome.tabs.has(opened.target.id)).toBe(true);
+      await supervisor.endSession(session);
+    });
+  });
+
+  test("a caller from before sessions without a tab gets a new tab when the session continues with none", async () => {
+    await withChrome(async ({ chrome, clock, open }) => {
+      const supervisor = await open();
+      const session = reference(33);
+      const created = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      const work = created.observation!.target.id;
+      chrome.tabs.get(work)!.url = "https://work.example.test/";
+      await supervisor.closeTarget(session, work);
+      clock.now += 11 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+
+      // An older API parses every create's observation, so it is given a
+      // tab of the session's own, as before, and never the person's tab.
+      const recovered = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      const tab = recovered.observation!.target.id;
+      expect(tab).not.toBe("1");
+      expect(chrome.tabs.get(tab)?.url).toBe(BLANK);
+      expect(chrome.attached.has("1")).toBe(false);
       await supervisor.endSession(session);
     });
   });
@@ -596,11 +642,10 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       // The restarted controller recovers the session without opening a tab
       // in the person's window; the session opens one when it needs one.
       const successor = await open();
-      const recovered = await successor.createSession({
-        ...session,
-        headed: true,
-        transport: TRANSPORT,
-      });
+      const recovered = await successor.createSession(
+        { ...session, headed: true, transport: TRANSPORT },
+        NO_OBSERVATION_OK,
+      );
       expect(recovered.observation).toBeNull();
       expect([...chrome.tabs.keys()]).toEqual(["1"]);
       const opened = await successor.openTarget(session);

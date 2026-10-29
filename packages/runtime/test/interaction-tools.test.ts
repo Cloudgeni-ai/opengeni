@@ -2260,6 +2260,73 @@ describe("interaction attempt tools", () => {
     expect(await run()).toBe("API 404: browser target does not exist");
   });
 
+  test.each(["attached_device", "sandbox_group"] as const)(
+    "a tab gone after the browser continued, with only another tab left (%s)",
+    async (placement) => {
+      // The agent was working in its own tab "10". The browser continued
+      // without it, leaving one tab ("20") that is not selected: in the
+      // person's own browser that tab is theirs, in a managed one it is the
+      // browser's only tab.
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      if (placement === "attached_device")
+        session.placement = { kind: "attached_device", deviceId: randomUUID() };
+      const own = { ...browserTarget(), id: "10" };
+      const other = { ...browserTarget(), id: "20", selected: false };
+      let targets = [own];
+      const observed: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: [session] }) as never,
+          getBrowserSession: async () => session,
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets,
+          }),
+          observeBrowserTarget: async (_workspace, _id, targetId) => {
+            observed.push(targetId ?? "default");
+            const target = targets.find((candidate) => candidate.id === targetId);
+            if (!target) {
+              throw new OpenGeniApiError(
+                404,
+                `browser target ${JSON.stringify(targetId)} does not exist; list the current targets and use one of their ids`,
+              );
+            }
+            return browserObservation(target);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_observe"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const observe = async () =>
+        (
+          await definitions[0]!.execute(
+            {},
+            { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+          )
+        ).structuredContent as { error?: { message: string } };
+      expect((await observe()).error).toBeUndefined();
+      targets = [other];
+      const gone = await observe();
+      const next = await observe();
+      if (placement === "attached_device") {
+        const noTab =
+          "This browser session has no tab of its own in the person's browser. Open one with browser_tabs operation=open, or pass targetId to use one of the person's tabs.";
+        expect(gone.error?.message).toBe(noTab);
+        expect(next.error?.message).toBe(noTab);
+        expect(observed).toEqual(["10", "10"]);
+      } else {
+        // Unchanged: the managed browser's only tab is used.
+        expect(gone.error?.message).toContain('browser target "10" does not exist');
+        expect(next.error).toBeUndefined();
+        expect(observed).toEqual(["10", "10", "20"]);
+      }
+    },
+  );
+
   test("computer tools with a mistyped ComputerSession id list this chat's open ComputerSessions", async () => {
     const open = discoveredComputerSession(randomUUID(), sessionId);
     open.lifecycle = "active";

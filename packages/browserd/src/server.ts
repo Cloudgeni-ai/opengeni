@@ -12,6 +12,7 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
   COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
@@ -1134,6 +1135,8 @@ export class BrowserControlServer {
 
   private async createSession(request: Request): Promise<Response> {
     const body = parseCreateSession(await readJsonObject(request));
+    const acceptsNoObservation =
+      new URL(request.url).searchParams.get(BROWSER_SESSION_NO_OBSERVATION_PARAMETER) === "1";
     try {
       return await this.withLifecycleLock(body.browserSessionId, async () => {
         const controlDigest = tokenDigest(body.controlToken);
@@ -1191,7 +1194,9 @@ export class BrowserControlServer {
             ? { browserExecutablePath: this.browserExecutablePath }
             : {}),
         };
-        const created = await this.supervisor.createSession(sessionOptions);
+        const created = await this.supervisor.createSession(sessionOptions, {
+          acceptsNoObservation,
+        });
         // The tab inventory rides along so the caller can show the opened
         // browser without another round trip. It is a read-only convenience:
         // a failed listing leaves the created session intact.

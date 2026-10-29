@@ -14,6 +14,7 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
@@ -804,7 +805,7 @@ export class BrowserControlClient {
     try {
       data = await this.requestJson({
         method: "POST",
-        path: "/v1/browser-sessions",
+        path: `/v1/browser-sessions?${BROWSER_SESSION_NO_OBSERVATION_PARAMETER}=1`,
         token: this.adminToken,
         body: {
           ...reference,

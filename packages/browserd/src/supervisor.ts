@@ -229,6 +229,14 @@ export type BrowserSessionReference = {
   controllerGeneration: string;
 };
 
+/** About the caller of one createSession, not the session itself. */
+export type BrowserSupervisorCreation = {
+  /** The caller can take a session with no observation (null): one that
+   * continued in the person's own browser with no tab of its own. Callers
+   * from before such sessions omit it and get a new tab instead. */
+  acceptsNoObservation?: boolean;
+};
+
 export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
   initialUrl?: string;
   headed: boolean;
@@ -1023,12 +1031,15 @@ export class BrowserSupervisor {
     optionsInput: BrowserSupervisorSessionOptions & {
       transport?: Exclude<BrowserSupervisorTransport, { kind: "attached_chrome" }>;
     },
+    creation?: BrowserSupervisorCreation,
   ): Promise<BrowserSupervisorSession & { observation: BrowserObservation }>;
   async createSession(
     optionsInput: BrowserSupervisorSessionOptions,
+    creation?: BrowserSupervisorCreation,
   ): Promise<BrowserSupervisorSession>;
   async createSession(
     optionsInput: BrowserSupervisorSessionOptions,
+    creation: BrowserSupervisorCreation = {},
   ): Promise<BrowserSupervisorSession> {
     this.assertOpen();
     const options = validateSessionOptions(optionsInput);
@@ -1042,7 +1053,7 @@ export class BrowserSupervisor {
         "ephemeral browser contexts are disabled by the operator",
       );
     }
-    const request = this.createValidatedSession(options);
+    const request = this.createValidatedSession(options, creation.acceptsNoObservation === true);
     this.creationRequests.add(request);
     try {
       return await request;
@@ -1354,6 +1365,7 @@ export class BrowserSupervisor {
 
   private async createValidatedSession(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<BrowserSupervisorSession> {
     await this.retireTerminalSessions();
     // A handed-off browser being stopped for idleness is never adopted while
@@ -1374,7 +1386,7 @@ export class BrowserSupervisor {
       return {
         ...binding(active),
         ...displayOf(active),
-        observation: await this.currentObservation(active),
+        observation: await this.currentObservation(active, acceptsNoObservation),
       };
     }
     const pending = this.creating.get(options.browserSessionId);
@@ -1385,7 +1397,7 @@ export class BrowserSupervisor {
       return {
         ...binding(runtime),
         ...displayOf(runtime),
-        observation: await this.currentObservation(runtime),
+        observation: await this.currentObservation(runtime, acceptsNoObservation),
       };
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
@@ -1394,7 +1406,7 @@ export class BrowserSupervisor {
         `This machine is already running its limit of ${this.maxSessions} managed browsers. End browser sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
-    const creation = this.buildRuntime(options);
+    const creation = this.buildRuntime(options, acceptsNoObservation);
     this.creating.set(options.browserSessionId, creation);
     try {
       const runtime = await creation;
@@ -1423,7 +1435,9 @@ export class BrowserSupervisor {
       this.sessions.set(options.browserSessionId, runtime);
       const observation =
         runtime.creationObservation ??
-        (runtime.startedWithoutTab ? null : await this.currentObservation(runtime));
+        (runtime.startedWithoutTab
+          ? null
+          : await this.currentObservation(runtime, acceptsNoObservation));
       runtime.creationObservation = null;
       runtime.startedWithoutTab = false;
       // The browser opened even if its first page did not load; say why in
@@ -2181,12 +2195,15 @@ export class BrowserSupervisor {
    * move the directory meanwhile. An adoption that owns the directory, and
    * is not one this launch's authority carries forward, refuses the launch;
    * the launch never falls back to anything else. */
-  private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
+  private async buildRuntime(
+    options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
+  ): Promise<Runtime> {
     try {
       return await this.withOwnedWorkingDirectory(
         "launch",
         options,
-        async () => await this.buildOwnedRuntime(options),
+        async () => await this.buildOwnedRuntime(options, acceptsNoObservation),
       );
     } catch (error) {
       throw browserLaunchFailure(error);
@@ -2195,6 +2212,7 @@ export class BrowserSupervisor {
 
   private async buildOwnedRuntime(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<Runtime> {
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const profileDirectory = join(sessionDirectory, "profile");
@@ -2564,9 +2582,11 @@ export class BrowserSupervisor {
           // The browser opens even when its first page fails to load: the tab
           // shows the browser's error page, which names the failure.
           // A session continuing in the person's browser carries on in a
-          // tab it left there, and opens none when it has none left.
+          // tab it left there, and opens none when it has none left. A
+          // caller that cannot take a session without an observation (one
+          // from before such sessions) gets a new tab, as before.
           const observation =
-            options.initialUrl === undefined && driver.resume
+            options.initialUrl === undefined && driver.resume && acceptsNoObservation
               ? await driver.resume()
               : await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
@@ -3207,12 +3227,21 @@ export class BrowserSupervisor {
     );
   }
 
-  private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
+  /** The selected tab's observation. In the person's own browser, its other
+   * tabs are theirs, not this session's: with no tab selected the session
+   * has none, and it is given none when the caller can take that (null), or
+   * else a new tab of its own. */
+  private async currentObservation(
+    runtime: Runtime,
+    acceptsNoObservation: boolean,
+  ): Promise<BrowserObservation | null> {
     const targets = await this.readWithRecovery(runtime, async () => {
       return await runtime.driver.listTargets();
     });
     this.rememberTargets(runtime, targets);
-    const selected = targets.find((target) => target.selected) ?? targets[0];
+    const personsBrowser = runtime.options.transport.kind === "attached_chrome";
+    const selected =
+      targets.find((target) => target.selected) ?? (personsBrowser ? undefined : targets[0]);
     if (selected) {
       const observation = await this.readWithRecovery(runtime, async () => {
         return await runtime.controller.observe(selected.id);
@@ -3220,6 +3249,7 @@ export class BrowserSupervisor {
       this.rememberObservation(runtime, observation);
       return observation;
     }
+    if (personsBrowser && acceptsNoObservation) return null;
     const observation = await this.mutateWithRecovery(runtime, async () => {
       return await runtime.driver.openTarget();
     });
