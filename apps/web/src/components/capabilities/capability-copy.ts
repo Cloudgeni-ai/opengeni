@@ -65,9 +65,12 @@ export function catalogConnectAccess(
   item: CapabilityCatalogItem,
   grant: SetupGrant | null | undefined,
   workspaceKind: "personal" | "shared" | null | undefined,
+  /** The person is alone in this workspace: there is nobody to share with. */
+  nobodyToShareWith = false,
 ): CatalogConnectAccess {
   const fixedPersonal =
     workspaceKind === "personal" ||
+    nobodyToShareWith ||
     personalOnlyCapability(item) ||
     (item.enabled && item.connectionRef?.subjectScope === "subject");
   if (!grant || item.kind !== "mcp" || item.enabled)

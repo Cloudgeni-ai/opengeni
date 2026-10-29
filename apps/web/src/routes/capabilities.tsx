@@ -139,6 +139,7 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Notice } from "@opengeni/react/ui/notice";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useNobodyToShareWith } from "@opengeni/react/app/lib/workspace-sharing";
 import {
   capabilityConnectPlan,
   capabilityErrorToast,
@@ -280,6 +281,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const context = useAppContext();
 
   const client = context.client;
+  // Alone in this workspace: connections are the person's own, with no choice to make.
+  const nobodyToShareWith = useNobodyToShareWith(client, workspaceId);
   // Where event triggers run, pull-request review is an automation.
   const eventTriggersEnabled = context.clientConfig.eventTriggers?.enabled === true;
   const onRuntimeChanged = useCallback(
@@ -834,6 +837,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         selectedItem,
         context.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === workspaceId),
         currentWorkspace?.kind,
+        nobodyToShareWith,
       )
     : null;
   const selectedSetupUnavailable = selectedItem
