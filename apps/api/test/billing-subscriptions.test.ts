@@ -851,10 +851,10 @@ describe("default-off and billing authority", () => {
     } as Parameters<typeof requireSelectedAccount>[0];
     expect(requireSelectedAccount(context, undefined, "billing:read")).toBe(accountId);
     expect(() => requireSelectedAccount(context, undefined, "billing:manage")).toThrow(
-      "missing permission",
+      "You don't have permission to manage billing.",
     );
     expect(() => requireSelectedAccount(context, crypto.randomUUID(), "billing:read")).toThrow(
-      "missing permission",
+      "You don't have permission to view billing.",
     );
   });
 });

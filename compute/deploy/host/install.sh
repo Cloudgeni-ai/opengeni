@@ -3,7 +3,8 @@
 # systemd Linux machine with KVM (Ubuntu 24.04 and Debian 13 are tested).
 # Run as root from the unpacked bundle:
 #
-#   ./install.sh --config host.env [--authority ca.pem] [--state-device /dev/nvme0n1] [--no-start]
+#   ./install.sh --config host.env [--authority ca.pem] [--state-device /dev/nvme0n1]
+#                [--units-installed] [--no-start]
 #
 #   --config FILE        the host's configuration (see host.env.example),
 #                        installed as /etc/compute/host.env; without it the
@@ -16,6 +17,12 @@
 #                        at /var/lib/compute, unless a state volume is
 #                        already recorded for this host; without it
 #                        /var/lib/compute must already be a mount point
+#   --units-installed    the machine's own configuration installs this
+#                        bundle's systemd units and enables them, as NixOS
+#                        does from the unit files of the bundle it names:
+#                        install.sh checks that the units in place are this
+#                        bundle's (with the shared machine's drop-in where
+#                        COMPUTE_MACHINE=shared) and does not write them
 #   --no-start           install and check, but leave the services alone,
 #                        and get no certificate
 #
@@ -23,8 +30,9 @@
 #   - checks this bundle against its SHA256SUMS
 #   - installs the packages the agent runs (iproute2, nftables, e2fsprogs,
 #     xfsprogs) and its certificate script needs (curl, jq, openssl)
-#   - installs this release under /opt/compute/releases/<version> and
-#     points /opt/compute/current at it
+#   - installs this release under /opt/compute/releases/<version>, checks
+#     that its agent binary runs on this host, and points
+#     /opt/compute/current at it
 #   - downloads the Firecracker release, jailer and guest kernel that
 #     pins.env names, checking each SHA-256, under /opt/compute; Firecracker
 #     binaries of earlier releases stay, and the agent keeps running memory
@@ -37,6 +45,10 @@
 #     the host its certificate from the control service if it has none
 #     current (compute-host-certificate), then starts the setup and the
 #     guard if they are not running, and restarts the agent
+#   - on a machine the host shares (COMPUTE_MACHINE=shared in host.env,
+#     ADR 26), installs the guard's settings for it: systemd's watchdog of
+#     the guard's service instead of the machine's, and the stop hook that
+#     kills the VMs
 #
 # An upgrade is the same command with a newer bundle. Restarting the agent
 # leaves its VMs running (ADR 9); a guard running another binary is handed
@@ -48,12 +60,14 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 config=
 authority=
 state_device=
+units_installed=
 start=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --config) config=$2; shift 2 ;;
     --authority) authority=$2; shift 2 ;;
     --state-device) state_device=$2; shift 2 ;;
+    --units-installed) units_installed=1; shift ;;
     --no-start) start=; shift ;;
     *) echo "install.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -109,6 +123,12 @@ if [ ! -x "$release/compute-host" ] || ! cmp -s "$here/compute-host" "$release/c
   rm -rf "$release"
   mv "$release.part" "$release"
 fi
+# A binary that cannot run here (built for another C library or processor,
+# or damaged) must be refused before anything starts it: the guard handed
+# over to it below would not start, and the watchdog would reset the host,
+# ending every VM on it.
+"$release/compute-host" --help >/dev/null 2>&1 ||
+  fail "$release/compute-host does not run on this host; the running release is left as it is"
 ln -sfn "$release" /opt/compute/current.part
 mv -T /opt/compute/current.part /opt/compute/current
 
@@ -215,17 +235,51 @@ if [ "$(cat /var/lib/compute/base.ref 2>/dev/null)" != "$base_id" ] || [ ! -f /v
   echo "$base_id" >/var/lib/compute/base.ref
 fi
 
-log "systemd units"
-for unit in compute-host-setup.service compute-guard.service compute-host.service \
-  compute-host-certificate.service compute-host-certificate.timer; do
-  install -m 644 "$here/$unit" "/etc/systemd/system/$unit"
-done
-# Releases before the control service issued certificates renewed them
-# with a script of their own.
-rm -f /usr/local/sbin/compute-host-certificate
-systemctl daemon-reload
-systemctl enable -q compute-host-setup.service compute-guard.service compute-host.service \
-  compute-host-certificate.timer
+units="compute-host-setup.service compute-guard.service compute-host.service
+  compute-host-certificate.service compute-host-certificate.timer"
+machine=${COMPUTE_MACHINE:-dedicated}
+case "$machine" in
+  dedicated | shared) ;;
+  *) fail "COMPUTE_MACHINE must be dedicated or shared, not $machine" ;;
+esac
+if [ -n "$units_installed" ]; then
+  log "systemd units, as the machine's configuration installs them"
+  systemctl daemon-reload
+  for unit in $units; do
+    fragment=$(systemctl show -p FragmentPath --value "$unit")
+    if [ -z "$fragment" ] || ! cmp -s "$here/$unit" "$fragment"; then
+      fail "$unit is not this bundle's unit${fragment:+ ($fragment differs)}: the machine's configuration installs the units of the bundle it runs"
+    fi
+  done
+  # The shared machine's drop-in is in place exactly where this is one.
+  shared_dropin=
+  for dropin in $(systemctl show -p DropInPaths --value compute-guard.service); do
+    cmp -s "$here/compute-guard-shared.conf" "$dropin" && shared_dropin=$dropin
+  done
+  case "$machine:$shared_dropin" in
+    shared:) fail "compute-guard.service has no drop-in of this bundle's compute-guard-shared.conf on this shared machine" ;;
+    dedicated:?*) fail "compute-guard.service has the shared machine's drop-in ($shared_dropin) on a dedicated one" ;;
+  esac
+else
+  log "systemd units"
+  for unit in $units; do
+    install -m 644 "$here/$unit" "/etc/systemd/system/$unit"
+  done
+  case "$machine" in
+    shared)
+      install -d -m 755 /etc/systemd/system/compute-guard.service.d
+      install -m 644 "$here/compute-guard-shared.conf" \
+        /etc/systemd/system/compute-guard.service.d/shared-machine.conf
+      ;;
+    dedicated) rm -f /etc/systemd/system/compute-guard.service.d/shared-machine.conf ;;
+  esac
+  # Releases before the control service issued certificates renewed them
+  # with a script of their own.
+  rm -f /usr/local/sbin/compute-host-certificate
+  systemctl daemon-reload
+  systemctl enable -q compute-host-setup.service compute-guard.service compute-host.service \
+    compute-host-certificate.timer
+fi
 
 if [ -n "$start" ]; then
   log "certificate"
@@ -240,14 +294,19 @@ if [ -n "$start" ]; then
   # it at whatever moment that is, so it runs on until the host starts
   # again or is replaced. Files are told apart by device and inode, which a
   # replaced binary's path does not change. The agent, restarted with the
-  # guard, joins once the new guard is ready.
+  # guard, joins once the new guard is ready. On a shared machine the guard
+  # feeds systemd's watchdog, and the hand-over is marked first, so that
+  # the guard's stop hook leaves the VMs to the new guard (ADR 26).
   if ! systemctl is-active -q compute-guard.service; then
     systemctl start compute-guard.service
   else
     guard_pid=$(systemctl show -p MainPID --value compute-guard.service)
     guard_runs=$(stat -L -c %d:%i "/proc/$guard_pid/exe" 2>/dev/null || true)
     if [ "$guard_runs" != "$(stat -L -c %d:%i /opt/compute/current/compute-host)" ]; then
-      if [ "$(systemctl show -p NFileDescriptorStore --value compute-guard.service)" -ge 1 ] 2>/dev/null; then
+      if [ "$machine" = shared ]; then
+        log "handing the guard over to release $version"
+        /opt/compute/current/compute-host hand-over-guard
+      elif [ "$(systemctl show -p NFileDescriptorStore --value compute-guard.service)" -ge 1 ] 2>/dev/null; then
         log "handing the guard over to release $version"
         systemctl restart compute-guard.service
       else

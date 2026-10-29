@@ -49,6 +49,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { retryWhileMissing } from "@opengeni/storage";
 import { measureTurnStartupPhase } from "../../observability-metrics";
 import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
+import { assertTurnModelInferenceResidency } from "./inference-residency-gate";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -452,6 +453,14 @@ export async function prepareGovernanceAndModel(
         organizationModelDefaults,
       )
     : runSettings;
+  // EU-ONLY INFERENCE — the attempt's settings were narrowed right after the
+  // claim (settingsWithTurnInferenceResidency), so resolution above already
+  // refused a non-EU route; refuse an unresolved one too, before any model call.
+  assertTurnModelInferenceResidency({
+    settings: capabilitySettings,
+    resolvedModel,
+    productModelId: turnExecutionPolicy.productModelId,
+  });
   // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
   // after resolution and BEFORE any model call (the compaction summarizer
   // and the main run both come later in this scope), so a blocked

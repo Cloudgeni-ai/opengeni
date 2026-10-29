@@ -56,6 +56,8 @@ describe("session-only entry", () => {
     // Refusal copy and the controller's model labels/order are explicit pure
     // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
+      // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
+      "@opengeni/contracts/values",
       "@opengeni/sdk",
       "@opengeni/sdk/allowance-refusal",
       "@opengeni/sdk/learning-refusal",
@@ -67,6 +69,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/secret-use-approval",
       // The timeline's task usage-limit stop: a zod-free refusal leaf.
       "@opengeni/sdk/session-usage-limits",
+      // Timeline ordering shared with server-side conversation snapshots.
+      "@opengeni/sdk/timeline-order",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);
@@ -98,6 +102,7 @@ describe("session-only entry", () => {
             "@opengeni/sdk",
             "@opengeni/sdk/allowance-refusal",
             "@opengeni/sdk/learning-refusal",
+            "@opengeni/sdk/timeline-order",
           ],
         },
       },
@@ -194,7 +199,14 @@ describe("session-only entry", () => {
     expect(
       reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
     ).toBe(true);
-    expect(reactSources.length).toBe(60);
+    // Pure region-restriction reason helper the model policy reads; types only.
+    expect(reactSources.some((id) => id.endsWith("/src/inference-region.ts"))).toBe(true);
+    // Pure parser for a question the person handed to the agent to decide.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-delegation.ts"))).toBe(true);
+    // Pure send-destination and run-control rules shared with the console and
+    // native screens (a turn parked on a usage limit does not hold a Send).
+    expect(reactSources.some((id) => id.endsWith("/src/session-status-model.ts"))).toBe(true);
+    expect(reactSources.length).toBe(63);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

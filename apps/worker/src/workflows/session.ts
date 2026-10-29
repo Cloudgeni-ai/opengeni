@@ -5,6 +5,7 @@ import {
   condition,
   continueAsNew,
   defineSignal,
+  deprecatePatch,
   isCancellation,
   patched,
   setHandler,
@@ -487,20 +488,20 @@ export type SessionWorkflowInput = {
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  // Existing histories recorded the v1 WAIT_CANCELLATION_COMPLETED command
-  // order and workflow-side idempotent fallback. Keep that exact replay path;
-  // every new run records v2 and uses the activity-owned receipt contract.
-  const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
-  const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
+  // Deprecated patches: every open run recorded them (or started after they
+  // shipped), so only their new branches remain. Remove these calls once no
+  // open run carries their non-deprecated markers.
+  deprecatePatch("session-attempt-quiescence-v2");
+  deprecatePatch("session-attempt-writer-set-quiescence-v1");
   const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
-  const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
-  const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
+  deprecatePatch("session-control-stale-wake-v1");
+  deprecatePatch("session-unclaimed-attempt-recovery-v1");
   let durableAdmissionBlocking = false;
   // PR #2208 changed a typed-cancelled result from a plain re-peek into a
   // recoverDispatch activity. Version that new command so histories which
   // already recorded the legacy re-peek remain deterministic on replay.
   const cancelledAttemptRecovery = patched("session-cancelled-attempt-recovery-v1");
-  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
+  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
   let wakeups = 0;
@@ -644,7 +645,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // already-due waiter. Spread those reconciliations too. A later wake
         // does not cut the pause short (that would re-synchronize the herd); a
         // queued prompt stays behind the blocked turn either way, so only an
-        // interruption (Pause/Steer/Cancel) wins immediately.
+        // interruption (Pause/Steer/Cancel, including a person's Send, which
+        // admission turns into a Steer of the parked turn) wins immediately.
         const wakeJitterMs = capacityWakeJitterMs(
           "wake",
           Math.random(),
@@ -846,16 +848,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "cancellation-wait") {
       // The receipt wake can arrive while reconciliation returns an older pending result.
       const beforeReconciliationSignalVersion = signalVersion;
-      if (writerSetQuiescenceRecovery) {
-        const reconciliation = await activity.reconcileSessionAttemptQuiescence({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          attemptId: peek.attemptId,
-          workflowId,
-        });
-        if (reconciliation.action === "quiesced") continue;
-      }
+      const reconciliation = await activity.reconcileSessionAttemptQuiescence({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: peek.attemptId,
+        workflowId,
+      });
+      if (reconciliation.action === "quiesced") continue;
       // Logical settlement is complete, but the exact predecessor activity has
       // not yet durably proved sandbox/tool quiescence. Wait only briefly for
       // its transactional queueChanged wake. If provider/tool cancellation is
@@ -1164,37 +1164,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         outcome = observedOutcome;
         break;
       }
-      if (!receiptGatedCancellation) {
-        // Replay-only v1 command order. New histories always take the v2 path
-        // below. The current runAgentTurn still owns and writes the truthful
-        // hard-fence receipt; this call remains an idempotent history command.
-        scope.cancel();
-        const settlement = await activity.settleSessionInterruptions({
-          accountId,
-          workspaceId,
-          sessionId,
-          attemptId,
-          workflowId: workflowInfo().workflowId,
-        });
-        const termination = await turn.then(
-          () => ({ kind: "completed" as const }),
-          (error: unknown) => ({ kind: "failed" as const, error }),
-        );
-        const physicalStopConfirmed =
-          termination.kind === "completed" || isTurnActivityFenceCancellation(termination.error);
-        if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
-          await activity.settleSessionInterruptions({
-            accountId,
-            workspaceId,
-            sessionId,
-            attemptId,
-            workflowId: workflowInfo().workflowId,
-            phase: "attempt_quiesced",
-          });
-        }
-        if (!physicalStopConfirmed) throw termination.error;
-        return settlement.action !== "paused";
-      }
       const observedInterruptionWakeups = interruptionWakeups;
       const settlement = await activity.settleSessionInterruptions({
         accountId,
@@ -1203,7 +1172,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      if (staleControlSignalIsOnlyWakeHint && settlement.action === "stale") {
+      if (settlement.action === "stale") {
         // sessionControl is replaceable transport, not authority. Keep
         // observing the same activity when no durable interruption exists.
         // Preserve signals received while settlement was in flight so a real
@@ -1283,145 +1252,43 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // truth when the bounded redispatch ceiling was exceeded.
         return false;
       }
-      const postDispatchRetryWakeBaseline: SessionWakeCounters = {
-        wakeups,
-        interruptionWakeups,
-        approvalWakeups,
-        capacityWakeups,
-      };
-      if (!unclaimedAttemptRecovery) {
-        // Replay compatibility: histories recorded before v2 scheduled this
-        // exact argument shape and treated the activity as void. Preserve the
-        // completed-history tail during replay, but keep a still-open legacy
-        // history alive after its activity completes. The nested patch marker
-        // is recorded only when an old history reaches this previously absent
-        // tail on a live workflow task; already-completed histories replay the
-        // original close without emitting a new timer command.
-        const legacyFailure: activities.FailSessionAttemptResult | undefined =
-          await activity.failSessionAttempt({
-            accountId,
-            workspaceId,
-            sessionId,
-            attemptId,
-            error: workflowFailureMessage(outcome.error),
-          });
-        if (!patched("session-legacy-unclaimed-attempt-tail-v1")) {
-          return false;
-        }
-        if (legacyFailure?.action === "failed" || legacyFailure?.action === "terminal") {
-          return false;
-        }
-        const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
-        // Histories that already recorded the legacy tail used a post-control
-        // two-signal baseline. Preserve that exact condition on replay; an old
-        // open history reaching this tail for the first time can adopt the
-        // pre-dispatch four-signal contract.
-        const upgradedLegacySignalBaseline = patched("session-legacy-preclaim-signal-baseline-v1");
-        const retryWakeBaseline = upgradedLegacySignalBaseline
-          ? preDispatchRetryWakeBaseline
-          : {
-              wakeups,
-              interruptionWakeups,
-              approvalWakeups,
-              capacityWakeups,
-            };
-        unclaimedAttemptFailures += 1;
-        await condition(() => {
-          const current = {
-            wakeups,
-            interruptionWakeups,
-            approvalWakeups,
-            capacityWakeups,
-          };
-          return upgradedLegacySignalBaseline
-            ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
-            : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
-                current.wakeups !== retryWakeBaseline.wakeups;
-        }, retryDelayMs);
-        return true;
-      }
       const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
       const admissionFailure = preClaimFailureDetail(outcome.error);
       const admissionFailureDisposition = admissionFailure?.disposition;
-      const classifiedPostClaimDatabaseRecovery = patched("session-postclaim-database-recovery-v1");
-      const postClaimDatabaseRecovery = classifiedPostClaimDatabaseRecovery
-        ? postClaimDatabaseRecoveryDetail(outcome.error)
-        : null;
-      // Keep this marker immediately adjacent to the changed command. A
-      // history that already recorded the v3 activity replays the old shape;
-      // an open history that has never reached this branch can record v4.
-      const classifiedPreClaimFailure = patched("session-preclaim-failure-classification-v1");
-      const retryWakeBaseline =
-        classifiedPostClaimDatabaseRecovery || classifiedPreClaimFailure
-          ? preDispatchRetryWakeBaseline
-          : postDispatchRetryWakeBaseline;
-      const failure: activities.FailSessionAttemptResult | undefined =
-        await activity.failSessionAttempt(
-          classifiedPostClaimDatabaseRecovery
-            ? {
-                accountId,
-                workspaceId,
-                sessionId,
-                attemptId,
-                workflowId: workflowInfo().workflowId,
-                retryDelayMs,
-                ...(admissionFailureDisposition
-                  ? { preClaimFailureDisposition: admissionFailureDisposition }
-                  : {}),
-                ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
-                ...(durableAdmissionBlocking && admissionFence ? { admissionFence } : {}),
-                ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
-                trigger,
-                error: workflowFailureMessage(outcome.error),
-              }
-            : classifiedPreClaimFailure
-              ? {
-                  accountId,
-                  workspaceId,
-                  sessionId,
-                  attemptId,
-                  workflowId: workflowInfo().workflowId,
-                  retryDelayMs,
-                  ...(admissionFailureDisposition
-                    ? { preClaimFailureDisposition: admissionFailureDisposition }
-                    : {}),
-                  trigger,
-                  error: workflowFailureMessage(outcome.error),
-                }
-              : {
-                  // Replay the exact v2 command shape. Adding optional fields to
-                  // a Temporal activity argument still changes command history.
-                  accountId,
-                  workspaceId,
-                  sessionId,
-                  attemptId,
-                  workflowId: workflowInfo().workflowId,
-                  retryDelayMs,
-                  error: workflowFailureMessage(outcome.error),
-                },
-        );
-      // During a rolling deploy an upgraded workflow worker can schedule this
-      // activity on a legacy control worker whose wire result was void. Treat
-      // that unknown commit outcome like an unclaimed attempt: wait, then
-      // re-read durable state. A legacy worker that settled the failure leaves
-      // an idle turn; one that no-op'd before claim leaves recoverable work.
-      // Neither path replays model or tool side effects speculatively.
-      if (!failure || failure.action === "unclaimed" || failure.action === "recovering") {
+      deprecatePatch("session-postclaim-database-recovery-v1");
+      const postClaimDatabaseRecovery = postClaimDatabaseRecoveryDetail(outcome.error);
+      // Keep this marker immediately adjacent to the changed command.
+      deprecatePatch("session-preclaim-failure-classification-v1");
+      const failure = await activity.failSessionAttempt({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId,
+        workflowId: workflowInfo().workflowId,
+        retryDelayMs,
+        ...(admissionFailureDisposition
+          ? { preClaimFailureDisposition: admissionFailureDisposition }
+          : {}),
+        ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
+        ...(durableAdmissionBlocking && admissionFence ? { admissionFence } : {}),
+        ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
+        trigger,
+        error: workflowFailureMessage(outcome.error),
+      });
+      // An unclaimed or recovering attempt leaves recoverable work: wait, then
+      // re-read durable state. Neither path replays model or tool side effects
+      // speculatively.
+      if (failure.action === "unclaimed" || failure.action === "recovering") {
         unclaimedAttemptFailures += 1;
         await condition(
-          () => {
-            const current = {
+          () =>
+            unclaimedAttemptWakeChanged(preDispatchRetryWakeBaseline, {
               wakeups,
               interruptionWakeups,
               approvalWakeups,
               capacityWakeups,
-            };
-            return classifiedPreClaimFailure
-              ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
-              : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
-                  current.wakeups !== retryWakeBaseline.wakeups;
-          },
-          failure?.action === "recovering"
+            }),
+          failure.action === "recovering"
             ? (failure.continueDelayMs ?? retryDelayMs)
             : retryDelayMs,
         );

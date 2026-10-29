@@ -216,7 +216,6 @@ async function acceptanceFixture(
       tools: [],
       mcpServers: [],
       metadata: {},
-      variableSetId: null,
     } as Awaited<ReturnType<typeof db.requireSession>>),
     spyOn(db, "requireWorkspace").mockResolvedValue({ settings: {} } as Awaited<
       ReturnType<typeof db.requireWorkspace>

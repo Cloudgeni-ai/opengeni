@@ -14,12 +14,15 @@ import type {
   ScheduledTask,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskScheduleSpec,
+  SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePasswordFileOptions,
   databasePoolOptions,
+  observeDatabaseCredentialEvents,
   defaultDatabasePreparedStatements,
   eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
@@ -53,7 +56,13 @@ import {
   WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
-import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import {
+  createAppComposition,
+  type AppDependencies,
+  type DocumentIndexClient,
+  type SessionWorkflowClient,
+} from "./app";
+import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
@@ -163,19 +172,6 @@ export async function createTemporalWorkflowClient(
     },
   });
   const client: SessionWorkflowClient = {
-    triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
-      try {
-        await temporal.workflow.start("automationRunWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `automation-run:${runId}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [{ accountId, workspaceId, runId }],
-        });
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },
@@ -433,12 +429,32 @@ export async function createTemporalWorkflowClient(
   };
 }
 
-export async function startApi(
-  options: {
-    settings?: ReturnType<typeof getSettings>;
-    observability?: Observability;
-  } = {},
-) {
+export type StartApiOptions = {
+  settings?: ReturnType<typeof getSettings>;
+  observability?: Observability;
+  /**
+   * Embedding-host session ACL (`AppDependencies.sessionAuthorization`) for a
+   * host that runs this entry instead of mounting `createApp(deps)`. Once bound,
+   * every session-addressed surface fails closed on an unavailable or invalid
+   * host decision, exactly as through `createApp`.
+   */
+  sessionAuthorization?: SessionAuthorizationPort | null;
+};
+
+/**
+ * The composition override contributed by `StartApiOptions.sessionAuthorization`.
+ * Unset forwards nothing, so a standalone start keeps its dependencies exactly;
+ * `null` and a port are forwarded as given.
+ */
+export function startApiSessionAuthorizationOverride(
+  options: Pick<StartApiOptions, "sessionAuthorization">,
+): Pick<AppDependencies, "sessionAuthorization"> {
+  return options.sessionAuthorization === undefined
+    ? {}
+    : { sessionAuthorization: options.sessionAuthorization };
+}
+
+export async function startApi(options: StartApiOptions = {}) {
   const settings = options.settings ?? getSettings();
   const observability =
     options.observability ?? createObservability(settings, { component: "api" });
@@ -457,6 +473,9 @@ export async function startApi(
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
     ...databasePoolOptions(settings),
+    // Runtime login only: the files rotate this URL's password in place.
+    ...databasePasswordFileOptions(settings),
+    onCredentialEvent: observeDatabaseCredentialEvents("api", observability),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
@@ -551,7 +570,8 @@ export async function startApi(
       throw error;
     }
   }
-  const { app, routeDeps } = createAppComposition({
+  const { app, routeDeps, renewBrowserHolds } = createAppComposition({
+    ...startApiSessionAuthorizationOverride(options),
     settings,
     db: dbClient.db,
     bus,
@@ -684,6 +704,7 @@ export async function startApi(
     observability,
   });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopBrowserHoldRenewalPump = startBrowserHoldRenewalPump(renewBrowserHolds, observability);
   const stopEventSubscriptionPump = startEventSubscriptionPump({
     db: dbClient.db,
     settings,
@@ -711,6 +732,7 @@ export async function startApi(
       db: dbClient.db,
       bus,
       observability,
+      wakeSessionWorkflow: workflowClient.client.wakeSessionWorkflow,
       agentUpdates: createAutomaticAgentUpdater({
         db: dbClient.db,
         bus,
@@ -771,6 +793,7 @@ export async function startApi(
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopEventIntakePrunePump();
+      await stopBrowserHoldRenewalPump();
       await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();

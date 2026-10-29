@@ -123,8 +123,11 @@ describe("ComputerDriver", () => {
           expect(transport.dispatched?.action).toEqual(continuation.action);
           expect(transport.dispatched?.operationId).toBe(continuation.operationId);
         } else {
+          // The refusal names the action that does double-click here.
           await expect(driver.validate(continuation)).rejects.toMatchObject({
             code: "unsupported",
+            message:
+              'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
           });
           await expect(driver.dispatch(continuation)).rejects.toMatchObject({
             code: "unsupported",
@@ -340,6 +343,53 @@ describe("ComputerDriver", () => {
       transport.observationFrameId = "frame-2";
       await expect(driver.observe("window-1")).resolves.toMatchObject({ frameId: "frame-2" });
       expect(transport.captures).toBe(1);
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("keeps a still captured beside an observation the newest frame", async () => {
+    // The runtime captures a still while it observes, and hands the still's
+    // frame on. A native helper lets only the newest frame keep authority.
+    const transport = new NewestFrameTransport();
+    transport.observeDelayMs = 30;
+    transport.stillDelayMs = 5;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      // The helper has no frame (an action cleared it); the still lands while
+      // the observation is still being read.
+      const still = driver.capture("window-1");
+      const observed = await driver.observe("window-1");
+      const frame = await still;
+      expect(observed.frameId).toBe(frame.frameId);
+      expect(transport.frames.at(-1)).toBe(frame.frameId);
+      expect(transport.primers).toBe(0);
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("lands a still requested during a frame primer after the primer", async () => {
+    const transport = new NewestFrameTransport();
+    transport.primerDelayMs = 30;
+    transport.stillDelayMs = 1;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      const observing = driver.observe("window-1");
+      await Bun.sleep(5);
+      const frame = await driver.capture("window-1");
+      const observed = await observing;
+      expect(transport.primers).toBe(1);
+      expect(observed.frameId).not.toBe(frame.frameId);
+      expect(transport.frames.at(-1)).toBe(frame.frameId);
     } finally {
       await driver.close();
     }
@@ -610,7 +660,7 @@ describe("ComputerDriver", () => {
     expect(transport.stoppedCaptures).toBe(1);
   });
 
-  test("pastes text the native keymap refused before typing any key", async () => {
+  test("pastes text the native keymap refused before typing any key, restoring the clipboard", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
       computerSessionId,
@@ -621,12 +671,12 @@ describe("ComputerDriver", () => {
     await expect(driver.dispatch(typing)).resolves.toMatchObject({
       observationId: "observation-2",
     });
+    // The Linux helper's paste carries its text and puts the previous
+    // clipboard back once the target has read it.
     expect(transport.calls).toEqual([
       ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ–π密" }],
-      ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
-      ["validate", { type: "clipboard", operation: "paste" }],
-      ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
-      ["dispatch", { type: "clipboard", operation: "paste" }],
+      ["validate", { type: "clipboard", operation: "paste", text: "ÆØÅ–π密" }],
+      ["dispatch", { type: "clipboard", operation: "paste", text: "ÆØÅ–π密" }],
     ]);
     expect(transport.dispatched).toMatchObject({
       operationId: typing.operationId,
@@ -634,6 +684,45 @@ describe("ComputerDriver", () => {
       expectedTargetGeneration: typing.expectedTargetGeneration,
       expectedObservationId: typing.expectedObservationId,
     });
+  });
+
+  test("writes then pastes through a helper without the restoring paste, or another backend", async () => {
+    const older = new UntypeableTextTransport();
+    // An older Linux helper accepts text only on a clipboard write.
+    older.refuseRestoringPaste = new ComputerBackendError(
+      "invalid_action",
+      "native clipboard text is required exactly for write",
+      false,
+      false,
+    );
+    const other = new UntypeableTextTransport();
+    Object.defineProperty(other, "identity", {
+      value: { adapterId: "opengeni.cua.linux.v1", platform: "linux" },
+    });
+    for (const [transport, refused] of [
+      [older, true],
+      [other, false],
+    ] as const) {
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      await expect(driver.dispatch(typeCommand("ÆØÅ"))).resolves.toMatchObject({
+        observationId: "observation-2",
+      });
+      const restoring: UntypeableTextTransport["calls"] = refused
+        ? [["validate", { type: "clipboard", operation: "paste", text: "ÆØÅ" }]]
+        : [];
+      expect(transport.calls).toEqual([
+        ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ" }],
+        ...restoring,
+        ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ" }],
+        ["validate", { type: "clipboard", operation: "paste" }],
+        ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ" }],
+        ["dispatch", { type: "clipboard", operation: "paste" }],
+      ]);
+    }
   });
 
   test("never pastes after possible input, for keys with their own effect, or without a clipboard", async () => {
@@ -771,6 +860,70 @@ describe("ComputerDriver", () => {
     expect(transport.calls).toEqual([
       ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
     ]);
+  });
+
+  test("a secret the layout cannot type is refused without naming a character or the clipboard", async () => {
+    const raw = ["{{", "secret:Desk/password", "}}"].join("");
+    const untypeable =
+      "the desktop keyboard layout cannot type every character of this secret, and secrets are never pasted; nothing was typed, so ask the person to enter it";
+    const refusals: Array<[ComputerBackendError, string]> = [
+      [
+        new ComputerBackendError(
+          "unsupported",
+          "X11 keymap cannot type Unicode scalar U+00F8; use clipboard paste",
+          false,
+          false,
+        ),
+        untypeable,
+      ],
+      [
+        new ComputerBackendError(
+          "unsupported",
+          "the active keyboard layout cannot type U+00F8; use clipboard paste",
+          false,
+          false,
+        ),
+        untypeable,
+      ],
+      [
+        new ComputerBackendError(
+          "timeout",
+          "the keyboard layout is not ready yet; retry, or use clipboard paste",
+          true,
+          false,
+        ),
+        "the keyboard layout is not ready yet; retry",
+      ],
+    ];
+    for (const [refusal, message] of refusals) {
+      const transport = new UntypeableTextTransport();
+      transport.refusal = refusal;
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      const error = await driver
+        .dispatch({
+          ...typeCommand(raw),
+          secretValues: { [referenceKey(parseSecretReference(raw))]: "Søren1!" },
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught as Error,
+        );
+      expect(error).toMatchObject({
+        name: "InteractionDefiniteDriverError",
+        code: refusal.code,
+        retryable: refusal.retryable,
+        message,
+      });
+      expect(error?.message).not.toContain("U+");
+      expect(error?.message).not.toContain("clipboard");
+      expect(transport.calls).toEqual([
+        ["dispatch", { type: "keyboard", action: "type", value: "Søren1!" }],
+      ]);
+    }
   });
   test("redacts a typed secret from later observations of the field that holds it", async () => {
     const transport = new EchoingFieldTransport();
@@ -969,8 +1122,19 @@ class UntypeableTextTransport extends FixtureNativeTransport {
     false,
   );
 
+  refuseRestoringPaste: ComputerBackendError | null = null;
+
   override async validate(nativeCommand: ComputerBackendActionCommand): Promise<void> {
     this.calls.push(["validate", nativeCommand.action]);
+    const action = nativeCommand.action;
+    if (
+      this.refuseRestoringPaste &&
+      action.type === "clipboard" &&
+      action.operation === "paste" &&
+      action.text !== undefined
+    ) {
+      throw this.refuseRestoringPaste;
+    }
     await super.validate(nativeCommand);
   }
 
@@ -1010,5 +1174,38 @@ class EchoingFieldTransport extends FixtureNativeTransport {
     if (nativeCommand.action.type === "keyboard" && nativeCommand.action.action === "type")
       this.typed = nativeCommand.action.value;
     return this.field("observation-2");
+  }
+}
+
+/** Numbers frames when a capture lands, like the native helpers, whose newest
+ * frame of a target alone keeps its authority. Starts with no frame, as after
+ * an action. */
+class NewestFrameTransport extends FixtureNativeTransport {
+  frames: string[] = [];
+  primers = 0;
+  observeDelayMs = 0;
+  primerDelayMs = 0;
+  stillDelayMs = 0;
+
+  override async observe() {
+    const latest = this.frames.at(-1) ?? null;
+    await Bun.sleep(this.observeDelayMs);
+    return { ...observation("observation-1"), frameId: latest };
+  }
+
+  override async capture(targetId: string, options?: ComputerBackendCaptureOptions) {
+    this.primers += 1;
+    return await this.land(this.primerDelayMs, targetId, options);
+  }
+
+  override async captureStill(targetId: string, options: ComputerBackendCaptureOptions) {
+    return await this.land(this.stillDelayMs, targetId, options);
+  }
+
+  private async land(delayMs: number, targetId: string, options?: ComputerBackendCaptureOptions) {
+    await Bun.sleep(delayMs);
+    const frameId = `frame-${this.frames.length + 1}`;
+    this.frames.push(frameId);
+    return { ...(await super.capture(targetId, options)), frameId };
   }
 }

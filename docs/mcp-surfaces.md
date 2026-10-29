@@ -109,11 +109,6 @@ workspace, or selected ones). The connection then acts as that person:
   one way a route validates input, so an invalid request answers 400 or 422
   with `validation_failed`, a message naming each bad field
   (`Invalid Skill request: stableKey: …; scope: …`) and `details.issues`.
-- A route retired in favour of another answers 410 with code `gone` and
-  `details.replacement` (`routeRetired` in `apps/api/src/http/deprecation.ts`).
-  Its action is marked `retired`: search never returns it, and describe or
-  call names the replacement action without running anything. App actions in
-  chat count it as a read, so it never asks the person for a confirmation.
 - A call result holds at most 256 KiB. A JSON list larger than that keeps as
   many whole items as fit (a top-level array, or the largest array in the
   top-level object) with `truncated` counts and a hint naming the `offset`,
@@ -271,8 +266,10 @@ OAuth consent grants MCP access; it does not silently satisfy a tool's separate
 one-shot human-approval classification. HTTP/SDK approval capabilities bind a
 private provider-authority revision as well as the public catalog identity and
 arguments. Their connection preflight never refreshes credentials or records
-provider usage, and an approval-required connection-backed adapter without that
-seam is omitted until it can fail before capability issuance. An unconsumed
+provider usage. The current-human gateway gives every connection-backed server
+that seam (an exact, non-refreshing credential lookup), so an approval-required
+connection tool stays listed and fails before capability issuance when its
+connection needs attention. An unconsumed
 capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
@@ -288,6 +285,15 @@ under a versioned hash domain. A mismatch returns `tool_definition_stale` before
 approval admission or execution. A selected MCP server may still need its own
 paginated `tools/list`; no provider revision atomicity is promised between that
 listing and its physical call.
+
+Site calls that need approval are confirmed by the viewer in the Opengeni frame:
+`tools/invoke` answers 409 (`tool_gateway_approval_required`,
+`site_tool_account_required` or `site_tool_connection_required`), the host reads
+`POST tools/site-consent` for the viewer's own accounts and the provider's own
+review of the exact arguments (for Gmail, the message as it would be sent), then mints
+`tools/target-approvals` (optionally `rememberForSite`) and retries the same
+operation. See "Host-native consent" in
+`docs/design/workspace-html-sites-2026-09-01.md`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and
@@ -403,7 +409,7 @@ authority. `Server-Timing` (`gw-prepare`, `gw-call`) and
 `opengeni_tool_gateway_preparation_duration_seconds` expose the
 preparation/execution split without content.
 
-First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins, order and profiles (description and avatar, see [Bots](bots.md#project-profiles)) are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/projects/SKILL.md) explains the sidebar model. Projects need no ownership model of their own.
 
 For lossless scheduled-task model edits, use
 `scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
@@ -471,16 +477,27 @@ query clause; ranking is not certainty. Native Responses routes retain hosted
 client `tool_search` and real loaded function definitions. Generic routes return
 compact alternatives in `suggestions`. Exact ties, operation-only queries and
 no matches return no loaded schemas; generic results still include compact candidates.
+Native search outputs carry only loaded definitions, so when a search neither
+names a tool nor matches one clearly, its close candidates (compact name and
+description preview) and any requested names no tool has follow the result as
+a developer note, frozen on the search call like its selection.
 An optional decision model selects from a wider shortlist for ambiguous searches;
 strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
 means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
 inference. Past results and schema snapshots are frozen and
 never rerun, so catalog changes do not alter any earlier prompt item.
+Exact names and named query tokens resolve a tool by its full model name, its
+dotted form (`server.tool_name`), or the name its server publishes
+(`projects.search` or `projects_search` for a digest-aliased
+`mcp_<digest>__projects_search`); the published name selects the exact tool
+even where aliases shortened two names to the same part.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
 pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
-view, group and optional literal `namePrefix` filter. An invalid cursor requires restarting
+view, group and optional `namePrefix` filter, which matches the full name or the
+part after the server separator (`projects.` or `projects_`). Digest aliases sort by
+that readable part. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
 

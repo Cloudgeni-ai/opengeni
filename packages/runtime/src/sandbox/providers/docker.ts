@@ -229,6 +229,7 @@ export const dockerProvider: ProviderRegistration = {
     preserveWorkspaceForDiscard: preserveDockerWorkspaceForDiscard,
   },
   descriptor: CAPABILITY_DESCRIPTORS.docker,
+  sessionSupportsPty: true,
   // Local dev container — no credentials. (The dockerNetwork decoration is
   // applied by the factory, not here: it wraps the constructed client.)
   validateCredentials(settings) {

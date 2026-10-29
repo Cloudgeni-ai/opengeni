@@ -91,6 +91,56 @@ widens the model-visible tool policy. Runtime authorization is rechecked before
 each Apps request; ownership and mutation rules are detailed in
 [`mcp-surfaces.md`](mcp-surfaces.md).
 
+### Personal workspace extension
+
+A Personal workspace extends its owner's organization for that one person. In
+the owner's Personal workspace, agents and the Connections page also get the
+MCP connectors behind the owner's own active **Only me** (subject-scoped)
+connections made in other workspaces of the same organization. Nothing is
+copied: `personalWorkspaceExtensionMcpServers`
+(`packages/core/src/domain/personal-workspace-connectors.ts`) derives them on
+every catalog read, session create, approval-policy read and worker claim.
+
+- A curated catalog connector uses its catalog definition; the origin
+  workspace's installation config does not follow. A custom MCP uses the
+  origin workspace's enabled capability whose connection reference matches the
+  connection, including that workspace's tool settings for it (allowed tools,
+  timeout, caching and approvals). Workspace-held credential headers and
+  host-authority references never follow; the carried server always binds the
+  owner's own subject-scoped account.
+- It applies only in the subject's canonical Personal workspace, only to that
+  subject's own active subject-scoped connections in the same account, and only
+  while the owner is still a live member of the origin workspace (rechecked
+  each time, so removing the connection or the membership leaves nothing).
+  Workspace-scoped connections and other people's connections never follow.
+- Personal's own installation of the same capability, enabled or disabled,
+  wins. The organization integration policy must allow each connector under
+  the key the owner's own setup of it in Personal would check: a dedicated
+  adapter's key (`gmail`, `google-drive`, `google-calendar`, `slack-personal`)
+  for those curated connectors, `custom:mcp` for other catalog connectors, and
+  `custom:mcp` (plus any dedicated key) for workspace-defined custom servers.
+  Shared workspaces are unchanged.
+- The Connections page lists a carried connector as connected, labelled
+  **From <workspace>**; it is managed in the origin workspace. Its owner can
+  still set its approvals in Personal, stored for the Personal workspace like
+  any of its own connectors.
+
+API Integrations follow the same rules
+(`personalWorkspaceExtensionApiIntegrations`): a curated definition (for
+example Outlook, OneDrive or Teams) or a workspace's own OpenAPI or GraphQL
+service installed in the origin workspace is carried when its instance is
+bound to one of the owner's own active **Only me** accounts there. An API
+Integration holds one instance per account, so Personal's own instances sit
+beside carried ones; only an instance Personal already has for the same
+account, or a server id it already serves, wins. The policy key is the curated
+definition's id, or `custom:<protocol>` for a workspace-authored one. The
+integrations list (`GET /v1/workspaces/:id/integrations`) marks a carried
+instance with `personalExtension`; the Connections page labels its account
+**From <workspace>** and leaves Reconnect, Remove and its settings to that
+workspace.
+
+MCP event sources are not carried yet.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:
@@ -131,7 +181,7 @@ separate work. See
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
 flow. Curated Integration Definitions cover Microsoft
-Outlook Mail/Calendar/Contacts/OneDrive; Gmail and Google Drive use catalog MCP
+Outlook Mail/Calendar/Contacts, OneDrive, SharePoint and Teams; Gmail and Google Drive use catalog MCP
 connections. For other APIs, a general OpenAPI URL, GraphQL endpoint,
 or auto-detected URL creates a workspace Definition through the same contracts. Preview performs
 bounded, pinned source discovery, compiles stable tool identities and safety
@@ -585,7 +635,7 @@ and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.
 
 **Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
-Outlook Calendar, Outlook Contacts, and OneDrive. These integrations receive
+Outlook Calendar, Outlook Contacts, OneDrive, SharePoint, and Microsoft Teams. These integrations receive
 events, post as Opengeni, or hold their own identity in the other product.
 Previous Google Drive and Atlassian connections retain historical cleanup
 surfaces; their native source setup is retired. Every integration's page renders through the same component
@@ -594,12 +644,13 @@ surfaces; their native source setup is retired. Every integration's page renders
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
 `use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
 `use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
-`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`) maps
+`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`,
+`use-sharepoint-integration.tsx`) maps
 that provider's data onto the view-model and picks the content for the
 viewer's role. There is exactly one row per provider, never one row per
 account and never a separate control center: the shared multi-account layer
 (`use-api-integration-accounts.tsx`) folds every curated `IntegrationDefinition`
-instance a provider has (Outlook Mail/Calendar/Contacts and OneDrive) into that
+instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive and SharePoint) into that
 one row's rolled-up state. The page contains no provider-specific
 branch; every account/provider difference lives in the adapters.
 
@@ -788,10 +839,10 @@ sends an ordinary human message carrying the composer picker's repository
 resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
 
 The deployment's reviewed API integrations (Outlook Mail, Outlook Calendar,
-Outlook Contacts, OneDrive and, where the Teams rollout allows it, Microsoft
-Teams) are also search results for agents, as `api:integration:<definition id>`
+Outlook Contacts, OneDrive, SharePoint and, where the Teams rollout allows it,
+Microsoft Teams) are also search results for agents, as `api:integration:<definition id>`
 entries tagged only with names that mean Microsoft (Outlook, Hotmail, MSN,
-Exchange, OneDrive, Teams), so generic requests such as "send an email" or
+Exchange, OneDrive, SharePoint, Teams), so generic requests such as "send an email" or
 "schedule a meeting" keep finding Gmail or Google Calendar. They are offered
 only when the definition is available in the workspace and the deployment's
 OAuth client and encryption are configured. Their setup state is per person:

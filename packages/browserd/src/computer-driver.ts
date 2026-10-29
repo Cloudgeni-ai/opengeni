@@ -23,6 +23,7 @@ import {
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
+  COMPUTER_UNCONFIRMED_INPUT_TRACE,
   type ComputerInteractionDriver,
   type InteractionDispatchTrace,
 } from "@opengeni/interaction";
@@ -49,6 +50,7 @@ import {
 const MAX_FRAME_PROFILES_PER_TARGET = 8;
 const MAX_FRAME_SUBSCRIBERS_PER_TARGET = 32;
 const FRAME_INTERVAL_MS = 100;
+const MAX_REMEMBERED_STILLS = 64;
 
 type TargetFrameProfile = {
   key: string;
@@ -97,6 +99,15 @@ export class ComputerDriver implements ComputerInteractionDriver {
   /** The target last observed or acted on, listed as current (see
    * ComputerTarget.current). */
   private current: string | null = null;
+  /** The tail of each target's frame-making captures (see inFrameOrder). */
+  private readonly frameOrder = new Map<string, Promise<void>>();
+  /** Each target's last still capture, numbered so that an observation can
+   * tell one that finished after it began from an older one. */
+  private readonly stills = new Map<
+    string,
+    { sequence: number; frameId: string; targetGeneration: string }
+  >();
+  private stillSequence = 0;
 
   /** Secret values typed in this session; redacted from everything it returns,
    * since desktop accessibility trees and window titles show field values. */
@@ -136,6 +147,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async observe(targetId: string): Promise<ComputerObservationValue> {
     this.assertOpen();
     try {
+      const since = this.stillSequence;
       const observation = await this.readWithRecovery(async (client) => {
         const observed = await client.observe(targetId);
         if (observed.frameId !== null || observed.target.kind === "app") return observed;
@@ -150,18 +162,35 @@ export class ComputerDriver implements ComputerInteractionDriver {
         // making its first pointer action impossible. Prime one frame only for
         // that cold path; an active viewer already keeps frameId populated and
         // pays no additional capture cost.
-        const frame = await client.capture(targetId);
-        if (
-          frame.targetId !== observed.target.id ||
-          frame.targetGeneration !== observed.target.targetGeneration
-        ) {
-          throw new InteractionControllerError(
-            "target_stale",
-            "computer target changed while establishing its frame fence",
-            true,
-          );
-        }
-        return { ...observed, frameId: frame.frameId };
+        //
+        // A native helper lets only the newest frame of a target keep its
+        // authority. Callers capture a still beside an observation (the
+        // screenshot they show) and hand on the still's frame; a primer landing
+        // after it would make that frame expire. So a still that finished
+        // after this observation began is the fence, and a primer otherwise
+        // runs in frame order, before any still requested after it.
+        const frameId = await this.inFrameOrder(targetId, async () => {
+          const still = this.stills.get(targetId);
+          if (
+            still &&
+            still.sequence > since &&
+            still.targetGeneration === observed.target.targetGeneration
+          )
+            return still.frameId;
+          const frame = await client.capture(targetId);
+          if (
+            frame.targetId !== observed.target.id ||
+            frame.targetGeneration !== observed.target.targetGeneration
+          ) {
+            throw new InteractionControllerError(
+              "target_stale",
+              "computer target changed while establishing its frame fence",
+              true,
+            );
+          }
+          return frame.frameId;
+        });
+        return { ...observed, frameId };
       });
       this.current = observation.target.id;
       return this.typedSecrets.redact(this.projectObservation(observation));
@@ -244,21 +273,22 @@ export class ComputerDriver implements ComputerInteractionDriver {
       ? (item: ComputerBackendRoleStandIn) =>
           trace.record(redactInteractionSecretValues(item, secretValues))
       : undefined;
+    const unconfirmed = trace ? () => trace.record(COMPUTER_UNCONFIRMED_INPUT_TRACE) : undefined;
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
       this.assertActionBatch(command, client);
       const native = nativeCommand(materialized);
-      const observation = await client.dispatch(native, standIn).catch(async (error: unknown) => {
-        // A pasted value stays on the seat clipboard, where clipboard reads
-        // would expose it; text with resolved secrets is never pasted.
-        const text =
-          this.capabilities.clipboard && command.secretValues === undefined
-            ? untypeableText(materialized, error)
-            : null;
-        if (text === null) throw error;
-        return await pasteText(client, native, text);
-      });
+      const observation = await client
+        .dispatch(native, standIn, unconfirmed)
+        .catch(async (error: unknown) => {
+          // A pasted value stays on the seat clipboard, where clipboard reads
+          // would expose it; text with resolved secrets is never pasted.
+          if (command.secretValues !== undefined) throw secretInputError(error);
+          const text = this.capabilities.clipboard ? untypeableText(materialized, error) : null;
+          if (text === null) throw error;
+          return await pasteText(client, native, text);
+        });
       // An action that opened a window returns that window, and leaves the
       // computer in it.
       this.current = observation?.target.id ?? command.targetId;
@@ -289,8 +319,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
     this.assertOpen();
     const normalized = normalizeComputerFrameStreamOptions(options);
     try {
-      return this.projectFrame(
-        await this.readWithRecovery(
+      const frame = await this.inFrameOrder(targetId, async () => {
+        const still = await this.readWithRecovery(
           async (client) =>
             await client.captureStill(targetId, {
               format: normalized.format,
@@ -298,11 +328,40 @@ export class ComputerDriver implements ComputerInteractionDriver {
               maxWidth: normalized.maxWidth,
               maxHeight: normalized.maxHeight,
             }),
-        ),
-        0,
-      );
+        );
+        this.rememberStill(targetId, still.frameId, still.targetGeneration);
+        return still;
+      });
+      return this.projectFrame(frame, 0);
     } catch (error) {
       throw predispatchError(error, this.typedSecrets.merged());
+    }
+  }
+
+  /** Runs one frame-making capture of a target after the ones requested before
+   * it, so the helper's newest frame is the one requested last. */
+  private async inFrameOrder<T>(targetId: string, capture: () => Promise<T>): Promise<T> {
+    const previous = this.frameOrder.get(targetId) ?? Promise.resolve();
+    const run = previous.then(capture);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.frameOrder.set(targetId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.frameOrder.get(targetId) === tail) this.frameOrder.delete(targetId);
+    }
+  }
+
+  private rememberStill(targetId: string, frameId: string, targetGeneration: string): void {
+    this.stills.delete(targetId);
+    this.stills.set(targetId, { sequence: ++this.stillSequence, frameId, targetGeneration });
+    // Oldest first: a Map iterates in insertion order.
+    for (const key of this.stills.keys()) {
+      if (this.stills.size <= MAX_REMEMBERED_STILLS) break;
+      this.stills.delete(key);
     }
   }
 
@@ -458,7 +517,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     ) {
       throw new ComputerBackendError(
         "unsupported",
-        "computer click continuation is unavailable",
+        'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
         false,
         false,
       );
@@ -817,6 +876,35 @@ function materializeNativeCommandSecrets(command: ComputerNativeCommand): Comput
 }
 
 const UNTYPEABLE_CHARACTER = /keymap cannot type Unicode scalar U\+[0-9A-F]+; use clipboard paste/u;
+/** Every layout refusal that names a character; for a secret, that character
+ * is part of the secret. */
+const UNTYPEABLE_ANY_CHARACTER =
+  /cannot type (?:Unicode scalar )?U\+[0-9A-F]+; use clipboard paste/u;
+const LAYOUT_NOT_READY = ", or use clipboard paste";
+const UNTYPEABLE_SECRET =
+  "the desktop keyboard layout cannot type every character of this secret, and secrets are never pasted; nothing was typed, so ask the person to enter it";
+
+/** A refusal of text that carries a resolved secret, without the character it
+ * stopped at and without suggesting the clipboard. */
+function secretInputError(error: unknown): unknown {
+  if (!(error instanceof ComputerBackendError) || error.dispatched) return error;
+  if (error.code === "unsupported" && UNTYPEABLE_ANY_CHARACTER.test(error.message)) {
+    const refusal = new ComputerBackendError("unsupported", UNTYPEABLE_SECRET, false, false);
+    refusal.details = error.details;
+    return refusal;
+  }
+  if (error.message.includes(LAYOUT_NOT_READY)) {
+    const refusal = new ComputerBackendError(
+      error.code,
+      error.message.replace(LAYOUT_NOT_READY, ""),
+      error.retryable,
+      false,
+    );
+    refusal.details = error.details;
+    return refusal;
+  }
+  return error;
+}
 
 /** Text the native keymap refused before emitting any key, so all of it is
  * still untyped. Line breaks and tabs are keys with their own effect (submit,
@@ -842,13 +930,39 @@ function untypeableText(command: ComputerActionCommand, error: unknown): string 
   return text;
 }
 
-/** Types `text` by writing the seat clipboard and pasting it into the same
- * target. Both steps are validated before the clipboard changes. */
+/** The Linux helper's paste that carries its own text: it pastes `text` into
+ * the target and then puts the person's previous clipboard text back once the
+ * target has read it. */
+const RESTORING_PASTE_ADAPTER = "opengeni.native.linux.v1";
+
+/** Types `text` by pasting it into the same target. The Linux helper restores
+ * the previous clipboard afterwards; elsewhere, or with an older helper that
+ * refuses text on a paste, the seat clipboard is written and keeps the text.
+ * Every step is validated before the clipboard changes. */
 async function pasteText(
   client: ComputerBackend,
   command: ComputerBackendActionCommand,
   text: string,
 ): Promise<ComputerBackendObservation | null> {
+  if (client.identity.adapterId === RESTORING_PASTE_ADAPTER) {
+    const restoring = {
+      ...command,
+      action: { type: "clipboard", operation: "paste", text },
+    } as const;
+    const supported = await client.validate(restoring).then(
+      () => true,
+      (error: unknown) => {
+        if (
+          error instanceof ComputerBackendError &&
+          (error.code === "invalid_action" || error.code === "unsupported")
+        ) {
+          return false;
+        }
+        throw error;
+      },
+    );
+    if (supported) return await client.dispatch(restoring);
+  }
   const write = { ...command, action: { type: "clipboard", operation: "write", text } } as const;
   const paste = { ...command, action: { type: "clipboard", operation: "paste" } } as const;
   await client.validate(write);

@@ -54,7 +54,6 @@ import {
   type ToolbarFilterValue,
 } from "../../../ui/toolbar";
 import { useAppContext } from "../../app-context";
-import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";
@@ -78,7 +77,7 @@ import {
   type ArtifactView,
 } from "../../lib/artifact-library-view";
 import { cn } from "../../lib/utils";
-import type { ArtifactReturnSearch } from "../../lib/routes";
+import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
@@ -121,7 +120,7 @@ function onlyMe(item: ArtifactCatalogItem): boolean {
 
 /**
  * Share or limit a file from its row, with the same confirmation as its
- * page. Only its owner sees the choice, and never in a Personal workspace.
+ * page. Only its owner sees the choice.
  */
 function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) {
   const context = useAppContext();
@@ -131,7 +130,6 @@ function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) 
     item.ownedByViewer &&
     item.visibility &&
     item.status === "active" &&
-    !isPersonalWorkspace(workspace, context.managedSelfContext) &&
     hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
   );
   const audience = useArtifactAudience({
@@ -330,10 +328,13 @@ function useArtifactOpen({
     onSelect
       ? onSelect(item)
       : item.kind === "site"
-        ? // A Site opens in the Site view, with its chat beside it.
+        ? // A Site opens in the Site view, with its chat beside it. From the
+          // Artifacts page it carries that page's query, so the Site view's
+          // Back returns to the page as it was.
           void navigate({
             to: "/workspaces/$workspaceId/sites/$siteId",
             params: { workspaceId, siteId: item.id },
+            ...(browseSearch ? { search: siteViewArtifactsReturn(browseSearch) } : {}),
           })
         : void navigate({
             to: artifactRoute(item.kind),
@@ -399,10 +400,11 @@ function useArtifactOpen({
     link: onSelect
       ? null
       : {
-          href:
-            browseSearch && item.kind !== "site"
-              ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
-              : artifactPath(workspaceId, item, sessionId),
+          href: browseSearch
+            ? `${artifactPath(workspaceId, item)}${stringifySearch(
+                item.kind === "site" ? siteViewArtifactsReturn(browseSearch) : browseSearch,
+              )}`
+            : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();

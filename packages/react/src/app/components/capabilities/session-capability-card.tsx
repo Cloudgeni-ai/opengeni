@@ -8,6 +8,7 @@ import {
 } from "./attach-session-capability";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard } from "../../../components/session-mcp-capability-card";
+import { showsMcpServerLabel } from "../../../components/mcp-server-label";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
 import { SessionIntegrationCapabilityCard } from "../../../components/session-integration-capability-card";
 import "../../../../styles/connect.css";
@@ -30,12 +31,15 @@ import {
 } from "../../lib/capabilities";
 import { userErrorText } from "../../../ui/api-error";
 import { hasWorkspacePermission } from "../../lib/permissions";
-import { personalIntegrationSetupAccess } from "@opengeni/contracts/personal-integration-setup";
+import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import { AuthNeededRow } from "../../../components/auth-needed-row";
 import type { CapabilityCatalogItem, ResourceRef } from "../../types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
+import { useNobodyToShareWith } from "../../lib/workspace-sharing";
+import { SessionPluginCapabilityCard } from "./session-plugin-card";
 import { usePage } from "../../lib/navigation";
 import {
   OPENGENI_UPDATING_NOTICE,
@@ -138,6 +142,27 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
+  const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
+  const grant = context.accessContext?.workspaceGrants.find(
+    (entry) => entry.workspaceId === props.workspaceId,
+  );
+  // The same rule the agent's setup tool and the embedded chat card use, so
+  // this card never offers a connection the agent was told isn't possible.
+  // Until the grant has loaded, offer the card; the API still enforces access.
+  const setup =
+    capability && grant ? inChatCapabilitySetup(grant, capability.id, resolved) : undefined;
+  if (setup?.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
+  if (capability?.kind === "plugin") {
+    return (
+      <SessionPluginCapabilityCard
+        key={`${props.workspaceId}:${capability.id}`}
+        item={item}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   if (capability && integrationDefinitionIdFromCapabilityId(capability.id)) {
     return (
       <SessionIntegrationCapabilityCard
@@ -152,16 +177,15 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
-  const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
-    const grant = context.accessContext?.workspaceGrants.find(
-      (entry) => entry.workspaceId === props.workspaceId,
-    );
     return (
       <SessionMcpCapabilityCard
-        // Members without integration admin rights connect their own account.
+        // Members without integration admin rights connect their own account,
+        // and everything connected in a Personal workspace is its owner's alone.
         personalOnly={
-          grant !== undefined && personalIntegrationSetupAccess(grant, resolved) === "personal"
+          (setup?.kind === "card" && setup.personalOnly) ||
+          context.workspaces.find((workspace) => workspace.id === props.workspaceId)?.kind ===
+            "personal"
         }
         client={context.client}
         workspaceId={props.workspaceId}
@@ -199,6 +223,9 @@ function ScopedSessionCapabilityCard({
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
+  // Read with the card rather than the dialog, so the answer is known before
+  // the person opens setup and the sharing question never flashes.
+  const nobodyToShareWith = useNobodyToShareWith(context.client, workspaceId);
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card
@@ -232,9 +259,23 @@ function ScopedSessionCapabilityCard({
       subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
       logo={logo}
       typeLabel={
-        skill ? "Skill" : excel ? "Add-in" : recommendation.kind === "mcp" ? "MCP server" : "API"
+        skill
+          ? "Skill"
+          : excel
+            ? "Add-in"
+            : recommendation.kind === "mcp"
+              ? showsMcpServerLabel(catalogItem)
+                ? "MCP server"
+                : ""
+              : "API"
       }
-      description={catalogItem?.description || recommendation.rationale}
+      badge={
+        !skill && !excel && recommendation.kind === "mcp" && showsMcpServerLabel(catalogItem)
+          ? "MCP server"
+          : undefined
+      }
+      description={recommendation.rationale || catalogItem?.description || ""}
+      clampDescription={Boolean(recommendation.rationale)}
       skill={skill}
       expanded={expanded}
       complete={complete}
@@ -285,6 +326,7 @@ function ScopedSessionCapabilityCard({
           sessionId={sessionId}
           onClose={close}
           onComplete={finish}
+          nobodyToShareWith={nobodyToShareWith}
         />
       )}
     </SessionCapabilityFrame>
@@ -301,6 +343,7 @@ function SessionCapabilitySetup({
   sessionId,
   onClose,
   onComplete,
+  nobodyToShareWith,
 }: {
   busy: boolean;
   setBusy: (busy: boolean) => void;
@@ -311,6 +354,7 @@ function SessionCapabilitySetup({
   sessionId: string;
   onClose: () => void;
   onComplete: () => void;
+  nobodyToShareWith: boolean;
 }) {
   const page = usePage();
   const context = useAppContext();
@@ -622,6 +666,7 @@ function SessionCapabilitySetup({
             "capabilities:manage",
           )}
           onAction={(action) => void act(action)}
+          nobodyToShareWith={nobodyToShareWith}
           onRetryAuthInspection={
             needsAuthInspection
               ? () => {

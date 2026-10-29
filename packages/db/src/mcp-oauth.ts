@@ -5,7 +5,12 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
-import { rawRows, type Database, withWorkspaceSubjectRls } from "./database";
+import { rawRows, type Database, withRlsContext, withWorkspaceSubjectRls } from "./database";
+import {
+  CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  insertDisconnectAuditEventInScope,
+  type DisconnectAuditActor,
+} from "./disconnect-audit";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
@@ -626,19 +631,61 @@ export async function updateOrganizationMcpConnectionAccess(
 /** Disconnect: every token of the connection is refused from now on. */
 export async function revokeOrganizationMcpConnection(
   db: Database,
-  input: { accountId: string; connectionId: string },
+  input: {
+    accountId: string;
+    connectionId: string;
+    /** Who disconnected the agent: audited in the same transaction. */
+    audit?: DisconnectAuditActor | null;
+  },
 ): Promise<boolean> {
   return await db.transaction(async (tx) => {
-    const [row] = await rawRows<{ family_id: string }>(
+    const [row] = await rawRows<{
+      family_id: string;
+      client_name: string | null;
+      subject_id: string;
+    }>(
       tx,
-      sql`select family_id from mcp_oauth_refresh_tokens
-        where family_id = ${input.connectionId}::uuid
-          and account_id = ${input.accountId}
-          and organization_access is not null
+      sql`select token.family_id, client.client_name, token.subject_id
+        from mcp_oauth_refresh_tokens token
+        left join mcp_oauth_clients client on client.client_id = token.client_id
+        where token.family_id = ${input.connectionId}::uuid
+          and token.account_id = ${input.accountId}
+          and token.organization_access is not null
         limit 1`,
     );
     if (!row) return false;
+    // Locked, so a concurrent or repeated disconnect sees this one's
+    // revocation and is not recorded again.
+    const family = input.audit
+      ? await rawRows<{ live: boolean }>(
+          tx,
+          sql`select revoked_at is null as live from mcp_oauth_refresh_tokens
+            where family_id = ${row.family_id}::uuid
+            for update`,
+        )
+      : [];
     await revokeMcpOAuthRefreshFamily(tx, row.family_id);
+    if (input.audit && family.some((token) => token.live)) {
+      const audit = input.audit;
+      // The token tables carry no RLS; the audit row is written in the
+      // organization's own scope, still inside this transaction.
+      await withRlsContext(tx, { accountId: input.accountId, workspaceId: null }, (scoped) =>
+        insertDisconnectAuditEventInScope(scoped, {
+          accountId: input.accountId,
+          workspaceId: null,
+          action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+          actor: audit,
+          // The connector is the Opengeni organization MCP server itself;
+          // the outside client is named in the details.
+          target: {
+            type: "organization_mcp_connection",
+            id: row.family_id,
+            provider: "opengeni_mcp",
+          },
+          details: { clientName: row.client_name, connectedBySubjectId: row.subject_id },
+        }),
+      );
+    }
     return true;
   });
 }

@@ -83,6 +83,7 @@ import {
   resolveSiteOutsideModel,
   siteCreditModelIds,
   siteCreditModelSelections,
+  siteOutsideModelUnfundedReason,
 } from "../site-publishing/agent-model";
 import { projectWorkspaceModelCatalog } from "../model-catalog";
 import {
@@ -138,6 +139,7 @@ import {
   siteReservationRefused,
   siteClientAddressPrincipal,
   siteNotAvailableForViewer,
+  siteOutsiderUnfundedRefusal,
   siteRuntimeBudgetKey,
   siteRuntimeBudgetLimits,
   siteViewerCapabilities,
@@ -984,8 +986,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   /**
    * What this viewer can use, from the same checks the routes enforce: the
    * agent also needs the platform brake open for people outside the
-   * workspace who are not invited, and a credit-billed model for anyone
-   * outside the workspace. Page tools are independent of the assistant.
+   * workspace who are not invited, and a credit-billed model the workspace
+   * can pay for, for anyone outside the workspace. Page tools are
+   * independent of the assistant.
    */
   const viewerCapabilities = async (
     host: SiteRuntimeHost,
@@ -1008,6 +1011,15 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         agentModel: host.publication.agent.model,
       }).catch(() => null);
       agent = choice !== null && choice.kind !== "unavailable";
+      // A model the workspace can't pay for (no credits, or its allowance
+      // used up) would only refuse: report the assistant unavailable rather
+      // than offer it. Other refusals, such as a static monthly cap, and a
+      // failed check leave it offered; the turn's own admission decides.
+      if (agent && choice && choice.kind !== "unavailable")
+        agent = await siteOutsideModelUnfundedReason(deps, host.scope, choice.model).then(
+          (reason) => reason === null,
+          () => true,
+        );
     }
     const version = host.site.currentVersionId
       ? await getPublishedSiteVersion(deps.db, host.scope, host.site.id, host.site.currentVersionId)
@@ -1098,7 +1110,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
   ): PublishedSiteDataViewer =>
-    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest");
+    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest", {
+      access: viewer.kind,
+      email: viewer.email,
+    });
 
   /**
    * Site SQL: run one named query of this Site as the viewer. The query's
@@ -1355,7 +1370,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       body?: unknown,
     ) => {
       const response = await send(method, path, body);
-      if (!response.ok) return siteRuntimeForwardedResponse(response);
+      if (!response.ok) {
+        const unfunded = await siteOutsiderUnfundedRefusal(viewer, response);
+        if (unfunded) throw unfunded;
+        return siteRuntimeForwardedResponse(response);
+      }
       return context.json(view(await response.json()) as object, response.status as 200);
     };
     const notFound = () =>
@@ -1522,18 +1541,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             null,
           );
       }
-      // Every conversation gets this Site's own data tools, pinned to this
-      // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      // People outside the workspace get this Site's own data tools, pinned
+      // to this Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      // Members chat with their own tools, so they get none here.
       const dataTools =
         viewer.kind === "member"
           ? []
-          : await siteAgentDataToolsForStart(
-              deps,
-              host.scope,
-              host.site.id,
-              viewer.kind,
-              undefined,
-            );
+          : await siteAgentDataToolsForStart(deps, host.scope, host.site.id);
       const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
@@ -1659,6 +1673,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (created.status !== 202) {
         await releaseUnstarted(host.scope, requestedSessionId);
+        const unfunded = await siteOutsiderUnfundedRefusal(viewer, created);
+        if (unfunded) throw unfunded;
         return siteRuntimeForwardedResponse(created);
       }
       const session = (await created.json().catch(() => null)) as { id?: unknown } | null;

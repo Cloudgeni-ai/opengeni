@@ -5,6 +5,7 @@ import type {
 } from "./codex-realtime-controller";
 import { withoutAudioTags } from "./realtime-transcript";
 import type { RealtimeWebsocketProtocol } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 type RealtimeClientEvent = Record<string, unknown> & { type: string };
 type RealtimeServerEvent = Record<string, unknown> & { type: string };
 
@@ -837,10 +838,6 @@ async function waitForWebSocketOpen(websocket: WebSocket, signal: AbortSignal): 
     websocket.addEventListener("close", onClose, { once: true });
     signal.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function stringValue(value: unknown): string | null {

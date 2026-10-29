@@ -9,11 +9,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
+use compute_core::MemoryLevels;
 use compute_core::{Failure, Level, Outcome, Step};
 // Every way a step ends, and the classes durations are kept by, as named
 // on events and metrics.
 use compute_protocol::host_metrics::{
-    DIRECTIONS, HEALTH, OUTCOME_CLASSES, PRESSURES, SIGNALS, STEP_OUTCOMES as OUTCOMES,
+    ACTIVITIES, DIRECTIONS, HEALTH, OUTCOME_CLASSES, PRESSURES, SIGNALS, STALLS,
+    STEP_OUTCOMES as OUTCOMES,
 };
 
 use crate::protocol::ErrorCode;
@@ -80,17 +82,26 @@ pub enum Alarm {
     /// A sandbox's running programs were lost: it boots fresh from its
     /// disk.
     ProgramsLost,
+    /// The host ended a sandbox's running VM for memory: the host was
+    /// short with every running sandbox held to its request and its guest
+    /// could not be shrunk (ADR 24).
+    EndedForMemory,
+    /// The kernel's out-of-memory killer ended a VM process: the memory
+    /// rule (ADR 24) did not keep the VMs below their wall.
+    OomKilled,
 }
 
 impl Alarm {
     /// Every alarm.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::OnlyCopyKept,
         Self::VerificationFailed,
         Self::Quarantined,
         Self::CopyLost,
         Self::Broken,
         Self::ProgramsLost,
+        Self::EndedForMemory,
+        Self::OomKilled,
     ];
 
     /// Its name on events and metrics.
@@ -103,6 +114,34 @@ impl Alarm {
             Self::CopyLost => "copy_lost",
             Self::Broken => "broken",
             Self::ProgramsLost => "programs_lost",
+            Self::EndedForMemory => "ended_for_memory",
+            Self::OomKilled => "oom_killed",
+        }
+    }
+}
+
+/// How a guest asked to shrink for host memory answered (ADR 24).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShrinkOutcome {
+    /// It freed memory and may free more.
+    Freed,
+    /// It has nothing more it may end above its request.
+    Spent,
+    /// It could not be asked, did not answer, or cannot shrink.
+    Failed,
+}
+
+impl ShrinkOutcome {
+    /// Every outcome.
+    pub const ALL: [Self; 3] = [Self::Freed, Self::Spent, Self::Failed];
+
+    /// Its name on metrics.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Freed => "freed",
+            Self::Spent => "spent",
+            Self::Failed => "failed",
         }
     }
 }
@@ -135,13 +174,15 @@ pub enum RequestKind {
     /// From the control service: build a sandbox image from an OCI image,
     /// unless the store holds it.
     Prepare,
+    /// From the control service: store a saved sandbox's disk as an image.
+    Capture,
     /// A request that could not be read.
     Invalid,
 }
 
 impl RequestKind {
     /// Every kind.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Create,
         Self::Remove,
         Self::Touch,
@@ -154,6 +195,7 @@ impl RequestKind {
         Self::Adopt,
         Self::HandOff,
         Self::Prepare,
+        Self::Capture,
         Self::Invalid,
     ];
 
@@ -173,6 +215,7 @@ impl RequestKind {
             Self::Adopt => "adopt",
             Self::HandOff => "hand_off",
             Self::Prepare => "prepare",
+            Self::Capture => "capture",
             Self::Invalid => "invalid",
         }
     }
@@ -436,6 +479,34 @@ pub struct Gauges {
     pub transfers_foreground: Option<u64>,
     /// Background object-storage transfers running now.
     pub transfers_background: Option<u64>,
+    /// Memory running sandboxes requested together, in bytes.
+    pub memory_requested: u64,
+    /// Host memory running sandboxes hold uncompressed above their
+    /// requests, in bytes: what they borrowed.
+    pub memory_borrowed: u64,
+    /// Host memory running sandboxes' compressed pages take, in bytes.
+    pub memory_compressed: u64,
+    /// Memory of running sandboxes out of RAM, at its original size, in
+    /// bytes: compressed or on swap.
+    pub memory_swapped: u64,
+    /// Running sandboxes by how much of the last ten seconds all their
+    /// threads stalled on memory, in [`STALLS`] order.
+    pub memory_stalled: [u64; 4],
+    /// The borrowed memory running sandboxes may keep, where the host
+    /// bounds it (ADR 24).
+    pub memory_levels: Option<MemoryLevels>,
+}
+
+/// The index in [`Gauges::memory_stalled`] of a sandbox that stalled on
+/// memory `stall` thousandths of the last ten seconds.
+#[must_use]
+pub fn stall_index(stall: u16) -> usize {
+    match stall {
+        0..10 => 0,
+        10..100 => 1,
+        100..400 => 2,
+        _ => 3,
+    }
 }
 
 /// The resources pressure stall information covers, in
@@ -457,6 +528,9 @@ pub struct Metrics {
     canary_time: [Histogram; CanaryPath::ALL.len()],
     canary_last_ms: [AtomicU64; CanaryPath::ALL.len()],
     dropped: [[AtomicU64; DropReason::ALL.len()]; 2],
+    shrinks: [AtomicU64; ShrinkOutcome::ALL.len()],
+    shrink_freed: AtomicU64,
+    processes_ended: AtomicU64,
     gauges: Mutex<Gauges>,
 }
 
@@ -476,6 +550,9 @@ impl Default for Metrics {
             canary_time: std::array::from_fn(|_| Histogram::default()),
             canary_last_ms: zeros(),
             dropped: from_fn(|_| zeros()),
+            shrinks: zeros(),
+            shrink_freed: AtomicU64::new(0),
+            processes_ended: AtomicU64::new(0),
             gauges: Mutex::new(Gauges::default()),
         }
     }
@@ -519,7 +596,26 @@ impl Metrics {
 
     /// Counts an alarm.
     pub(crate) fn alarm(&self, alarm: Alarm) {
-        self.alarms[index_of(&Alarm::ALL, &alarm)].fetch_add(1, Relaxed);
+        self.alarm_times(alarm, 1);
+    }
+
+    /// Counts an alarm `times` over.
+    pub(crate) fn alarm_times(&self, alarm: Alarm, times: u64) {
+        self.alarms[index_of(&Alarm::ALL, &alarm)].fetch_add(times, Relaxed);
+    }
+
+    /// Counts a guest's answer to a shrink: `freed` bytes and `ended`
+    /// processes.
+    pub(crate) fn shrink(&self, outcome: ShrinkOutcome, freed: u64, ended: u32) {
+        self.shrinks[index_of(&ShrinkOutcome::ALL, &outcome)].fetch_add(1, Relaxed);
+        self.shrink_freed.fetch_add(freed, Relaxed);
+        self.processes_ended.fetch_add(u64::from(ended), Relaxed);
+    }
+
+    /// How many shrinks ended with `outcome`.
+    #[must_use]
+    pub fn shrinks(&self, outcome: ShrinkOutcome) -> u64 {
+        self.shrinks[index_of(&ShrinkOutcome::ALL, &outcome)].load(Relaxed)
     }
 
     /// Counts a canary run that ended at `unix_ms`.
@@ -674,6 +770,7 @@ impl Metrics {
                 count.load(Relaxed),
             );
         }
+        self.visit_shrinks(each);
         self.visit_canary(each);
         for (signal, reasons) in SIGNALS.iter().zip(&self.dropped) {
             for (reason, count) in DropReason::ALL.iter().zip(reasons) {
@@ -688,6 +785,28 @@ impl Metrics {
             }
         }
         visit_gauges(&self.gauges(), each);
+    }
+
+    fn visit_shrinks(&self, each: &mut impl Visitor) {
+        // Zero included, as alarms: a shrink is rare, and a graph of how
+        // often it happens needs a value from the start.
+        for (outcome, count) in ShrinkOutcome::ALL.iter().zip(&self.shrinks) {
+            each.sum(
+                "compute.memory.shrink.count",
+                &[("compute.outcome", outcome.name())],
+                count.load(Relaxed),
+            );
+        }
+        each.sum(
+            "compute.memory.shrink.freed",
+            &[],
+            self.shrink_freed.load(Relaxed),
+        );
+        each.sum(
+            "compute.memory.processes.ended",
+            &[],
+            self.processes_ended.load(Relaxed),
+        );
     }
 
     fn visit_canary(&self, each: &mut impl Visitor) {
@@ -799,6 +918,32 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
             each.gauge(name, &[], value);
         }
     }
+    let memory = [
+        ("compute.memory.requested", gauges.memory_requested),
+        ("compute.memory.borrowed", gauges.memory_borrowed),
+        ("compute.memory.compressed", gauges.memory_compressed),
+        ("compute.memory.swapped", gauges.memory_swapped),
+    ];
+    for (name, value) in memory {
+        each.gauge(name, &[], value);
+    }
+    for (stall, count) in STALLS.iter().zip(gauges.memory_stalled) {
+        each.gauge("compute.memory.stalled", &[("compute.stall", stall)], count);
+    }
+    if let Some(levels) = gauges.memory_levels {
+        let [idle, busy] = ACTIVITIES;
+        for (activity, level, held_back) in [
+            (idle, levels.idle, levels.idle_held_back),
+            (busy, levels.busy, levels.held_back),
+        ] {
+            let labels = [("compute.activity", activity)];
+            each.gauge("compute.memory.level", &labels, level);
+            each.gauge("compute.memory.held_back", &labels, held_back);
+        }
+        each.gauge("compute.memory.shortfall", &[], levels.shortfall);
+        each.gauge("compute.memory.relief", &[], levels.relief);
+        each.gauge("compute.memory.over_bound", &[], levels.over_bound);
+    }
     for (resource, kinds) in PRESSURE_RESOURCES.iter().zip(&gauges.pressure) {
         for (kind, total) in PRESSURES.iter().zip(kinds) {
             if let Some(total) = total {
@@ -853,6 +998,10 @@ mod tests {
         assert_eq!(names(&Cause::ALL.map(Cause::name)), listed::CAUSES);
         assert_eq!(names(&Alarm::ALL.map(Alarm::name)), listed::ALARMS);
         assert_eq!(
+            names(&ShrinkOutcome::ALL.map(ShrinkOutcome::name)),
+            listed::SHRINK_OUTCOMES
+        );
+        assert_eq!(
             names(&RequestKind::ALL.map(RequestKind::name)),
             listed::REQUESTS
         );
@@ -893,6 +1042,27 @@ mod tests {
         assert_eq!(reading.buckets[6], 1, "80 ms is in (50 ms, 100 ms]");
         assert_eq!(reading.buckets[BOUNDS.len()], 1, "600 s overflows");
         assert!((reading.sum_seconds - 600.0815).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stalls_land_in_the_bucket_their_share_of_time_names() {
+        // Below 1 %, 1 to 10 %, 10 to 40 %, and 40 % up.
+        let buckets = [0, 9, 10, 99, 100, 399, 400, 1000].map(stall_index);
+        assert_eq!(buckets, [0, 0, 1, 1, 2, 2, 3, 3]);
+        assert_eq!(STALLS.len(), Gauges::default().memory_stalled.len());
+    }
+
+    #[test]
+    fn shrinks_count_what_guests_freed_and_ended() {
+        let metrics = Metrics::default();
+        metrics.shrink(ShrinkOutcome::Freed, 3 << 30, 2);
+        metrics.shrink(ShrinkOutcome::Spent, 1 << 30, 1);
+        metrics.shrink(ShrinkOutcome::Failed, 0, 0);
+        assert_eq!(metrics.shrinks(ShrinkOutcome::Freed), 1);
+        assert_eq!(metrics.shrinks(ShrinkOutcome::Spent), 1);
+        assert_eq!(metrics.shrinks(ShrinkOutcome::Failed), 1);
+        assert_eq!(metrics.shrink_freed.load(Relaxed), 4 << 30);
+        assert_eq!(metrics.processes_ended.load(Relaxed), 3);
     }
 
     #[test]

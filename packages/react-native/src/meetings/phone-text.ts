@@ -60,11 +60,14 @@ export function phoneUploadLine(msg: OpenGeniText, recorder: MeetingRecorder): s
   return msg("meetings.recorderPanel.savingTheRestOfTheAudio");
 }
 
-/** The live preview is billed on top of the transcript, so say so where it's switched on. */
+/**
+ * What the live preview adds to the bill, where it's switched on; empty when
+ * this workspace isn't charged by the hour for it.
+ */
 export function liveCostHint(msg: OpenGeniText, usdPerHour: number | null): string {
   return usdPerHour !== null
     ? msg("native.meetings.phoneText.itAddsAboutPerHour", { value: usdPerHour.toFixed(2) })
-    : msg("native.meetings.phoneText.itUsesExtraTranscriptionCredit");
+    : "";
 }
 
 /** The live preview's status line, or null when it is streaming normally. */

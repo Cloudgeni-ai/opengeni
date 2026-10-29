@@ -22,16 +22,45 @@ Site HTML never sends SQL:
    `audience`: `everyone` (guests of public Sites too), `signed_in` (default;
    viewers signed in as a person) or `managers` (never from the page).
 
-`:viewer` (the viewer's stable id, such as `user:<id>` or `guest:<visitor>`),
-`:viewer_kind` and `:viewer_signed_in` are bound by the host from the signed-in
-viewer. Use `:viewer` for ownership and per-person rows; never take a person's
-identity from a page parameter, and never pass `viewer*` params from the page
-(they are refused):
+`:viewer` (the viewer's stable, opaque id: for a person, `user:` followed by
+their subject id, such as `user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`, or
+`guest:<visitor>` for a guest) and these values are bound by the host from
+the verified viewer:
+
+- `:viewer_access`: how the viewer reaches the Site: `member` (workspace
+  member), `invited`, `user` (anyone signed in to a public Site) or `guest`.
+- `:viewer_email`: the viewer's verified email address in lowercase, or NULL
+  (guests, and people without a verified address). Use it to match a person
+  to a list kept by email, such as admins or staff.
+- `:viewer_signed_in`: 1 or 0.
+- `:viewer_kind`: the kind of `:viewer` (`user` for every signed-in person,
+  invited or member alike; `guest`). Use `:viewer_access` to tell people apart.
+
+Use `:viewer` for ownership and per-person rows instead of building an id;
+never take a person's identity from a page parameter, and never pass `viewer*`
+params from the page (they are refused):
 
 ```sql
 -- cast_vote, audience signed_in
 INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
 ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
+
+-- is_admin, audience signed_in
+SELECT count(*) AS admin FROM admins WHERE email = :viewer_email
+```
+
+A link that must work for someone who never signs in (unsubscribe, an RSVP,
+a one-off form) carries a random token instead: store an unguessable token
+per row (for example 32 random bytes from `crypto.getRandomValues`, as hex),
+put it in the link (`https://<site>/unsubscribe?t=<token>`), read it with
+`(await site.location)?.params.get("t")` and pass it to an `everyone` query
+that touches only the row with that token:
+
+```sql
+-- unsubscribe_by_token, audience everyone
+UPDATE subscribers SET unsubscribed_at = datetime('now')
+WHERE token = :token AND unsubscribed_at IS NULL
+RETURNING email
 ```
 
 ```ts

@@ -56,7 +56,6 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
-  rawRows,
   setSubjectRlsContext,
   type Database,
   type SessionActivityDatabase,
@@ -97,6 +96,7 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
+import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { autoResumeGoalPausedByCapInTransaction } from "./session-goal-pacing";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -116,6 +116,7 @@ import {
 } from "./subscription-core-acceptance-authority";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
+import { maskSecretValuesForStorage } from "./secret-value-masking";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -149,12 +150,11 @@ export class QueueCommandConflictError extends Error {
 }
 
 /**
- * A session that keeps personal memory (a private session, a user-scoped
- * memory session, or any session in a personal workspace) can only run work
- * caused by a verified human: its owner for a private session. Every turn
- * resolves that owner before the model runs, so admitting a prompt without
- * one only produces a turn that fails on start. Refuse it at admission with a
- * reason the caller can act on.
+ * A session that keeps personal memory (a private session or a user-scoped
+ * memory session) can only run work caused by a verified human: its owner for
+ * a private session. Every turn resolves that owner before the model runs, so
+ * admitting a prompt without one only produces a turn that fails on start.
+ * Refuse it at admission with a reason the caller can act on.
  */
 export class PersonalSessionInitiatorRequiredError extends Error {
   readonly name = "PersonalSessionInitiatorRequiredError";
@@ -167,29 +167,24 @@ export class PersonalSessionInitiatorRequiredError extends Error {
   }
 }
 
-/** Mirrors the personal-destination guard every agent attempt applies on start. */
-async function assertPersonalSessionInitiatorInTransaction(
-  db: SessionActivityDatabase,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
-    initiatingHumanSubjectId: string | null;
-  },
-): Promise<void> {
+/**
+ * Mirrors the personal-destination guard every agent attempt applies on start
+ * (`knowledge_resolve_actor` / `knowledge_learning_for_turn`, migration 0868).
+ * A personal workspace alone is not personal memory without a human: work
+ * there with no initiating human (a published Site's visitor, other service
+ * work) starts in the Workspace destination with learning off, so its
+ * follow-up prompts are admitted like its first one.
+ */
+function assertPersonalSessionInitiator(input: {
+  session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
+  initiatingHumanSubjectId: string | null;
+}): void {
   const subject = input.initiatingHumanSubjectId;
   const ownerMismatch =
     input.session.visibility === "user_private" && input.session.ownerSubjectId !== subject;
   if (subject && !ownerMismatch) return;
-  let personal =
+  const personal =
     input.session.visibility === "user_private" || input.session.memoryScope === "user";
-  if (!personal) {
-    const [row] = await rawRows<{ kind: string | null }>(
-      db,
-      sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
-    );
-    personal = row?.kind === "personal";
-  }
   if (personal) throw new PersonalSessionInitiatorRequiredError();
 }
 
@@ -2188,6 +2183,16 @@ async function promptCausalHuman(
   );
 }
 
+/**
+ * Session statuses whose active turn waits with no live attempt and that an
+ * ordinary human Send takes over (Steer semantics) instead of queueing behind:
+ * a pending decision, or a turn parked on provider capacity such as a used-up
+ * subscription. See `submitHumanPromptInTransaction`.
+ */
+export function sendTakesOverActiveWait(status: string): boolean {
+  return status === "requires_action" || status === "waiting_capacity";
+}
+
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2262,6 +2267,7 @@ export async function submitHumanPromptInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<SubmitHumanPromptResult> {
+  input = maskSecretValuesForStorage(input, "message");
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   // Send is inert queue admission while paused; Steer deliberately resumes.
   // Tell the lock helper which path may need the exclusive control prefix.
@@ -2372,7 +2378,26 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  // The canonical prefix already holds the session semantic lock and its
+  // event cursor through this transaction. Receipt reservation and control
+  // projection above do not mutate either row. Keep the late Site and RLS
+  // visibility checks, but reuse the validated row instead of fetching its
+  // full payload and locking the same event cursor again.
+  await lockSiteRuntimeAdmission(db, input.workspaceId, [input.sessionId]);
+  const [visibleSession] = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .for("no key update");
+  if (!visibleSession || !promptTarget) {
+    throw new Error(`Session not found: ${input.sessionId}`);
+  }
+  const storedSession = promptTarget;
   const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
@@ -2423,12 +2448,17 @@ export async function submitHumanPromptInTransaction(
 
   // A normal Send received while the active branch is waiting in
   // `requires_action` is the human choosing to continue conversationally
-  // instead of through the pending decision surface. Promote only that active
-  // wait to Steer semantics so the frozen wait is cancelled and the new prompt
-  // runs next. A queue-edit submission preserves the identity and placement of
-  // already accepted queued work, so it must never cancel an unrelated active
-  // wait. An explicitly paused branch remains inert until Resume or an explicit
-  // Steer; running, recovering, and capacity-waiting work also retain ordinary
+  // instead of through the pending decision surface. A turn parked in
+  // `waiting_capacity` (a usage limit, an account that needs reconnecting)
+  // has no live attempt either: the person already saw it stop, and their new
+  // message, often on another model, must not sit behind a wait that can last
+  // until a quota resets. Promote only those ownerless active waits to Steer
+  // semantics so the wait is cancelled (a capacity waiter goes with its
+  // superseded turn) and the new prompt runs next on its own accepted model.
+  // A queue-edit submission preserves the identity and placement of already
+  // accepted queued work, so it must never cancel an unrelated active wait. An
+  // explicitly paused branch remains inert until Resume or an explicit Steer;
+  // running and recovering work, and agent or machine input, retain ordinary
   // queue semantics.
   const effectiveDelivery = waitsForMachineOwner
     ? "send"
@@ -2436,7 +2466,7 @@ export async function submitHumanPromptInTransaction(
         (input.actor.type === "human" || input.actor.type === "operator") &&
         !isQueueEditSubmission &&
         before.state === "active" &&
-        session.status === "requires_action" &&
+        sendTakesOverActiveWait(session.status) &&
         !session.admissionBlock &&
         session.activeTurnId !== null
       ? "steer"
@@ -2604,9 +2634,7 @@ export async function submitHumanPromptInTransaction(
   ) {
     throw new SessionControlInvariantError("Prompt sender changed during admission");
   }
-  await assertPersonalSessionInitiatorInTransaction(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
+  assertPersonalSessionInitiator({
     session: storedSession,
     initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
   });
@@ -3293,6 +3321,7 @@ export async function sendAgentMessageInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
+  input = maskSecretValuesForStorage(input, "message");
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
@@ -3588,6 +3617,7 @@ export async function steerAgentSessionInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
+  input = maskSecretValuesForStorage(input, "message");
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,

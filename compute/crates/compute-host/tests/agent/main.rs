@@ -13,7 +13,7 @@ use std::time::Duration;
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
-    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    MemorySource, MemoryStats, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -28,12 +28,14 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;
 mod fleet;
 mod images;
 mod link;
+mod memory;
 mod observe;
 mod pool;
 mod ready;
@@ -157,6 +159,12 @@ struct World {
     unreadable_cpu: AtomicBool,
     /// While set, no VM's traffic can be read.
     unreadable_io: AtomicBool,
+    /// Bytes, calls and dirtied pages every VM counts as written, as its
+    /// VMM's writes and discards to its disk; the tests that change a disk
+    /// file as its guest would add to them.
+    written: Mutex<Writes>,
+    /// While set, no VM's writes ever return; see [`Engine::settle_writes`].
+    unsettled: AtomicBool,
     /// While set, every pause moves a burst of data, as a VMM writing a
     /// snapshot does: work the host does, not the guest.
     transition_traffic: AtomicBool,
@@ -168,14 +176,23 @@ struct World {
     guarantees: Mutex<Vec<(String, u32, u16)>>,
     /// While set, no VM can be given new guarantees.
     refuse_guarantees: AtomicBool,
+    /// What the VMs may still take together, as an engine that limits
+    /// what they hold together reports it; `None` for no such limit.
+    memory_room: Mutex<Option<u64>>,
     /// Each VM started: its name and the memory limit it started under.
     started_limits: Mutex<Vec<(String, Option<u64>)>>,
     /// Each VM started: its name and the processor weight it started at.
     started_weights: Mutex<Vec<(String, u16)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
+    /// Each time a VM was told its drives grew: which VM, how long its
+    /// writable drives' files were then, and whether it was paused.
+    drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
     /// Times a guest was asked to write its disks out.
     syncs: AtomicUsize,
+    /// While set, a guest asked to write its disks out answers only once
+    /// it is cleared, as one still trimming its disk.
+    syncs_held: AtomicBool,
     /// While set, a paused VM's guest takes no connection, as with a real
     /// VMM, whose guest's processors do not run while it is paused.
     paused_take_nothing: AtomicBool,
@@ -194,6 +211,24 @@ struct World {
     /// While set, no guest takes a connection, as when the guard froze
     /// every VM on the host.
     frozen: AtomicBool,
+    /// What each VM holds of host memory as the fake reports it; 100 MiB
+    /// unless set.
+    resident: Mutex<Option<u64>>,
+    /// How each running VM pages as the fake reports it; nothing read
+    /// unless set.
+    paging: Mutex<Option<MemoryStats>>,
+    /// Whether the kernel may compress running VMs.
+    compresses_running: AtomicBool,
+    /// Memory bounds asked of VMs: which VM, its low and its high.
+    bounds: Mutex<Vec<(String, u64, Option<u64>)>>,
+    /// VM processes the kernel's out-of-memory killer ended, as the engine
+    /// reports it; `None` for an engine that cannot tell.
+    oom_kills: Mutex<Option<u64>>,
+    /// What a guest answers a shrink with; `None` for a guest of a release
+    /// before shrinking, which answers it as any line it does not know.
+    shrink_answer: Mutex<Option<String>>,
+    /// Every shrink a guest was asked, as the line it read.
+    shrinks: Mutex<Vec<String>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -274,6 +309,10 @@ struct Work {
     /// Until when the guest takes no connection, as one far behind on a
     /// busy host.
     stalled_until: Option<Instant>,
+    /// Whether its console's last words are its kernel saying it halted,
+    /// as a real guest's are once it halts or powers off. This VM
+    /// process's console: a restored one starts a new one.
+    said_halted: bool,
 }
 
 /// Time a fake VM spent on one kind of work.
@@ -446,10 +485,13 @@ impl Fake {
 /// notice this VM process was given, if any, as well as the latest one its
 /// memory has applied (`applied`, which images carry).
 ///
-/// After `halt` it has stopped, as a real guest that powers off does: its
-/// VM runs on, but its kernel takes no connection. That is in its memory
-/// ([`STOPPED`]), so every image saved since carries the stopped guest;
-/// only a boot from its disk starts it again.
+/// After `halt` it has stopped without a word, as a guest whose kernel
+/// hangs: its VM runs on, but its kernel takes no connection. That is in
+/// its memory ([`STOPPED`]), so every image saved since carries the
+/// stopped guest; only a boot from its disk starts it again. After
+/// `poweroff` it has stopped the same way and said it halted, as a real
+/// guest that halts or powers off does on x86 Firecracker; `say-halted`
+/// only says it, and the guest runs on.
 async fn guest(listener: UnixListener, state: GuestState) {
     while let Ok((stream, _)) = listener.accept().await {
         let state = state.clone();
@@ -472,6 +514,12 @@ async fn guest(listener: UnixListener, state: GuestState) {
             }
             let mut flood = None;
             while let Ok(Some(line)) = lines.next_line().await {
+                if line == "sync" {
+                    state.world.syncs.fetch_add(1, Ordering::SeqCst);
+                    while state.world.syncs_held.load(Ordering::SeqCst) {
+                        sleep(Duration::from_millis(5)).await;
+                    }
+                }
                 let Some(reply) = state.answer(&line, &mut flood) else {
                     break;
                 };
@@ -587,6 +635,15 @@ impl GuestState {
                 STOPPED.clone_into(&mut memory.lock().unwrap());
                 "ok".into()
             }
+            ("poweroff", _) => {
+                STOPPED.clone_into(&mut memory.lock().unwrap());
+                work.lock().unwrap().said_halted = true;
+                "ok".into()
+            }
+            ("say-halted", _) => {
+                work.lock().unwrap().said_halted = true;
+                "ok".into()
+            }
             ("stall", millis) => {
                 let until = Instant::now() + Duration::from_millis(millis.parse().unwrap());
                 work.lock().unwrap().stalled_until = Some(until);
@@ -629,10 +686,17 @@ impl GuestState {
                 "ok".into()
             }
             ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
-            ("sync", _) => {
-                world.syncs.fetch_add(1, Ordering::Relaxed);
-                "synced".into()
+            // As a guest asked to free memory for the host answers, or one
+            // older than that, which does not know the line.
+            ("shrink", _) => {
+                world.shrinks.lock().unwrap().push(line.to_owned());
+                match world.shrink_answer.lock().unwrap().clone() {
+                    Some(answer) => answer,
+                    None => "unknown shrink".into(),
+                }
             }
+            // Counted, and held while the world says, as it is asked.
+            ("sync", _) => "synced".into(),
             (other, _) => format!("unknown {other}"),
         })
     }
@@ -966,7 +1030,38 @@ impl Engine for Fake {
     }
 
     fn resident_bytes(&self, _: &FakeVm) -> Result<u64, EngineError> {
-        Ok(100 << 20)
+        Ok(self.world.resident.lock().unwrap().unwrap_or(100 << 20))
+    }
+
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.memory_room.lock().unwrap())
+    }
+
+    fn memory_stats(&self, _: &FakeVm) -> Result<MemoryStats, EngineError> {
+        self.world.paging.lock().unwrap().ok_or_else(|| {
+            EngineError::new(
+                ErrorKind::Transient,
+                "memory_stats",
+                "no paging set for the fake",
+            )
+        })
+    }
+
+    fn compresses_running(&self) -> bool {
+        self.world.compresses_running.load(Ordering::SeqCst)
+    }
+
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.oom_kills.lock().unwrap())
+    }
+
+    fn bound_memory(&self, vm: &FakeVm, low: u64, high: Option<u64>) -> Result<(), EngineError> {
+        self.world
+            .bounds
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), low, high));
+        Ok(())
     }
 
     fn set_guarantees(
@@ -999,6 +1094,26 @@ impl Engine for Fake {
         Ok(())
     }
 
+    fn resize_drives(
+        &self,
+        vm: &FakeVm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let lengths = spec
+            .drives
+            .iter()
+            .filter(|drive| !drive.read_only)
+            .map(|drive| std::fs::metadata(&drive.path).map_or(0, |found| found.len()))
+            .collect();
+        let paused = *vm.paused.lock().unwrap();
+        self.world
+            .drives_resized
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), lengths, paused));
+        ready(Ok(()))
+    }
+
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
         if self.world.unreadable_cpu.load(Ordering::SeqCst) {
             return Err(EngineError::new(
@@ -1008,6 +1123,14 @@ impl Engine for Fake {
             ));
         }
         Ok(vm.work.lock().unwrap().cpu.total())
+    }
+
+    fn halted(
+        &self,
+        vm: &FakeVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        let work = Arc::clone(&vm.work);
+        async move { Ok(work.lock().unwrap().said_halted) }
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
@@ -1025,6 +1148,23 @@ impl Engine for Fake {
         }
         let streamed = vm.work.lock().unwrap().io.total();
         Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
+    }
+
+    fn writes(&self, _: &FakeVm) -> Result<Writes, EngineError> {
+        Ok(*self.world.written.lock().unwrap())
+    }
+
+    fn settle_writes(
+        &self,
+        _: &FakeVm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let unsettled = self.world.unsettled.load(Ordering::SeqCst);
+        async move {
+            if unsettled {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
     }
 
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {
@@ -1047,6 +1187,9 @@ struct Lab {
     handle: Handle,
 }
 
+// A lab takes its host policy by value as tests build it, once per test:
+// copying it costs nothing worth the references at every call.
+#[allow(clippy::large_types_passed_by_value)]
 impl Lab {
     /// Unix socket paths are short, so labs live directly under /tmp. The
     /// root is removed when the test process exits.
@@ -1186,6 +1329,8 @@ impl Lab {
 
     async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,

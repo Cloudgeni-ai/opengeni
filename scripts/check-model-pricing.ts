@@ -51,6 +51,12 @@ const AUDIT_MODELS: Array<{
     longMinimumInputTokens: 272_001,
   },
   {
+    productId: "gpt-6.1-terra",
+    shortId: "gpt-6.1-terra",
+    longId: "gpt-6.1-terra-272k",
+    longMinimumInputTokens: 272_001,
+  },
+  {
     productId: "gpt-6-luna",
     shortId: "gpt-6-luna",
     longId: "gpt-6-luna-272k",

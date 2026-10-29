@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { BrowserSupervisor, CdpConnection } from "../src";
+import { offscreenBrowserNotice } from "../src/supervisor";
 
 const e2e =
   process.env.OPENGENI_BROWSERD_E2E === "1" && process.platform === "darwin" ? test : test.skip;
@@ -13,6 +14,12 @@ const linuxWithoutDisplayE2e =
   process.platform === "linux" &&
   !process.env.DISPLAY &&
   !process.env.WAYLAND_DISPLAY
+    ? test
+    : test.skip;
+const linuxWithDisplayE2e =
+  process.env.OPENGENI_BROWSERD_E2E === "1" &&
+  process.platform === "linux" &&
+  Boolean(process.env.DISPLAY)
     ? test
     : test.skip;
 
@@ -68,6 +75,9 @@ e2e(
       });
       const profileDirectory = join(root, "sessions", reference.browserSessionId, "profile");
       const [pid] = profileBrowserPids(profileDirectory);
+      // The caller is told the browser has no window, never that it is headed.
+      expect(created.display).toBe("offscreen");
+      expect(created.notice).toContain(offscreenBrowserNotice("darwin"));
       expect(pid).toBeGreaterThan(0);
       // A background-only application has no Dock icon, no menu bar and no
       // windows the person can see, and it can never become frontmost.
@@ -172,6 +182,8 @@ linuxWithoutDisplayE2e(
           : {}),
         initialUrl: `http://127.0.0.1:${server.port}/`,
       });
+      expect(created.display).toBe("offscreen");
+      expect(created.notice).toContain(offscreenBrowserNotice("linux"));
       const profileDirectory = join(root, "sessions", reference.browserSessionId, "profile");
       const [port, path] = (await readFile(join(profileDirectory, "DevToolsActivePort"), "utf8"))
         .trim()
@@ -216,6 +228,33 @@ linuxWithoutDisplayE2e(
       server.stop(true);
       await rm(root, { recursive: true, force: true });
       await rm(sockets, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+linuxWithDisplayE2e(
+  "a headed managed browser on a Linux host with a display reports its window",
+  async () => {
+    const root = await mkdtemp("/tmp/og-ow-");
+    const supervisor = await BrowserSupervisor.open({ rootDirectory: root });
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: randomUUID() };
+    try {
+      const created = await supervisor.createSession({
+        ...reference,
+        headed: true,
+        transport: { kind: "managed", engine: "chromium" },
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+      });
+      expect(created.display).toBe("window");
+      expect(created.notice ?? "").not.toContain("offscreen");
+      await supervisor.endSession(reference, { removeState: true });
+    } finally {
+      await supervisor.endSession(reference, { removeState: true }).catch(() => undefined);
+      await supervisor.close();
+      await rm(root, { recursive: true, force: true });
     }
   },
   60_000,

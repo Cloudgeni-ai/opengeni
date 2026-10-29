@@ -142,7 +142,6 @@ import {
   writeScheduledTaskEvents,
 } from "./event-triggers/automation-events";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
-import { variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -171,6 +170,7 @@ import {
   recordScheduledTaskAccountChoiceChanges,
   scheduledTaskAccountChoiceChanges,
 } from "./scheduled-task-account-audit";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Whether a raw scheduled-task payload explicitly set agentConfig.tools.
@@ -361,14 +361,11 @@ export async function createValidatedScheduledTask(input: {
   /** Reads event sources (MCP servers and Gmail) while checking triggers; for tests. */
   eventSourceFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTask> {
-  // Variable Sets were replaced by vaults (RM-1).
-  if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
   if (input.payload.runMode === "existing_session") {
     const target = await validateScheduledTaskTarget({
       ...input,
       targetSessionId: input.payload.targetSessionId,
       runMode: "existing_session",
-      variableSetId: input.payload.variableSetId,
       rigId: input.payload.rigId,
       agentConfig: input.payload.agentConfig,
     });
@@ -386,7 +383,6 @@ export async function createValidatedScheduledTask(input: {
       payload: {
         ...input.payload,
         agentConfig: scheduledSessionMessageConfig(input.payload.agentConfig),
-        variableSetId: null,
         rigId: null,
       },
     };
@@ -478,7 +474,6 @@ export async function createValidatedScheduledTask(input: {
     grant: input.grant,
     targetSessionId: input.payload.targetSessionId,
     runMode: input.payload.runMode,
-    variableSetId: input.payload.variableSetId,
     rigId: input.payload.rigId,
     // An omitted Sandbox Environment adopts the target session's own one below.
     agentConfig,
@@ -491,10 +486,8 @@ export async function createValidatedScheduledTask(input: {
       message: "Personal source tasks create a private session for each run",
     });
   if (learning) {
-    const workspace = await requireWorkspace(input.db, input.grant.workspaceId);
     const destination =
       knowledgeAction?.destination.kind === "personal" ||
-      workspace.kind === "personal" ||
       target?.tenancy?.visibility === "private" ||
       target?.memoryScope === "user"
         ? "personal"
@@ -692,7 +685,6 @@ export async function createValidatedScheduledTask(input: {
         claudeProviderAccountAuthoritySnapshot,
         creatorPolicy,
         targetSessionId: target?.id ?? null,
-        variableSetId: input.payload.variableSetId ?? null,
         ...("vaultPolicy" in input.payload && input.payload.vaultPolicy
           ? { vaultPolicy: scheduledVaultPolicy(input.payload.vaultPolicy) }
           : {}),
@@ -1075,7 +1067,6 @@ export async function validateScheduledTaskTarget(input: {
   grant: AccessGrant;
   targetSessionId: string | null | undefined;
   runMode: ScheduledTask["runMode"];
-  variableSetId: string | null | undefined;
   rigId: string | null | undefined;
   agentConfig: ScheduledTaskAgentConfig;
   missingTargetStatus?: 404 | 422;
@@ -1144,6 +1135,10 @@ export async function validateScheduledTaskTarget(input: {
 
 export const PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE =
   "Your personal machine can only run schedules that only you can see. Set Who can see it to Only me, or pick a shared machine.";
+
+/** Following a default never counts as consent to run unattended on a personal machine. */
+export const WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE =
+  "The workspace default is a personal machine, which runs only automations it is chosen on. Choose the machine for this automation instead of the workspace default.";
 
 /**
  * A schedule's audience is resolved after its machine is validated, and can be
@@ -1258,7 +1253,9 @@ export async function validateScheduledTaskMachineTarget(input: {
     });
   }
   if (sandbox.scope === "user" && followsWorkspace) {
-    throw new HTTPException(422, { message: "The workspace default must be a shared machine" });
+    throw new HTTPException(422, {
+      message: WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
+    });
   }
   if (sandbox.scope === "user" && input.audience !== "user_private") {
     throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
@@ -1326,15 +1323,11 @@ export function scheduledTaskAuthorityUpdateForGrant(
  * caller's choice. An omitted value is resolved once, here, and frozen on the
  * task, the way session create resolves an omitted rigId:
  * - an existing-session task keeps its target session's own environment;
- * - a Connected Machine task stores none: environment setup and Variable Set
- *   injection never reach a machine, so a binding would only add a fire-time
- *   failure mode;
+ * - a Connected Machine task stores none: environment setup never reaches a
+ *   machine, so a binding would only add a fire-time failure mode;
  * - otherwise the workspace default, when the creator can see it and it has an
  *   active version. A stale default degrades to none, like session create.
- * The default's own Variable Sets must be attachable by the creator, exactly
- * as session create requires, so a workspace default never gives a task
- * secrets its creator could not attach. Later changes to the workspace default
- * do not move an existing task.
+ * Later changes to the workspace default do not move an existing task.
  */
 async function resolveScheduledTaskCreateRigId(input: {
   settings: Settings;
@@ -1565,7 +1558,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       ...input,
       runMode: "existing_session",
       targetSessionId: input.payload.targetSessionId ?? input.existing.targetSessionId,
-      variableSetId: null,
       rigId: null,
       agentConfig: scheduledSessionMessageConfig(config),
     });
@@ -1590,21 +1582,17 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
             runMode: "existing_session",
             targetSessionId: previousTargetSessionId,
             departingTarget: true,
-            variableSetId: null,
             rigId: null,
             agentConfig: scheduledSessionMessageConfig(input.existing.agentConfig),
           })
         : null;
-    // Variable Sets were replaced by vaults; only an environment change needs review.
-    const removedVariableSetIds: string[] = [];
+    // Only an environment change needs review.
     const previousRigId = previousTarget ? previousTarget.rigId : input.existing.rigId;
     const changedRig = retargeting && previousRigId && previousRigId !== target?.rigId;
-    if ((removedVariableSetIds.length || changedRig) && !input.payload.adoptSessionSettings) {
+    if (changedRig && !input.payload.adoptSessionSettings) {
       const detail = {
         code: "scheduled_target_access_change",
         targetSessionId: target!.id,
-        removedVariableSetIds,
-        removedVariableSetCount: removedVariableSetIds.length,
         removedRigId: changedRig ? previousRigId : null,
         resolution:
           "Review the destination's access, then retry with adoptSessionSettings=true and the reviewed expectedExecutionDigest to use that chat's attachments.",
@@ -1629,7 +1617,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
                 prompt: input.payload.agentConfigPatch?.prompt ?? config.prompt,
               }),
               agentConfigPatch: undefined,
-              variableSetId: null,
               rigId: null,
             }
           : {}),
@@ -1743,9 +1730,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   if (input.payload.vaultPolicy !== undefined) {
     update.vaultPolicy = scheduledVaultPolicy(input.payload.vaultPolicy);
   }
-  if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
-  // Clearing a legacy selection stays allowed.
-  if (input.payload.variableSetId === null) update.variableSetId = null;
   if (input.payload.rigId !== undefined) {
     if (materializedReusable && input.payload.rigId !== input.existing.rigId) {
       throw new HTTPException(409, {
@@ -1921,8 +1905,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   const authorityTargetChanged =
     nextRunMode !== input.existing.runMode ||
     nextTargetSessionId !== input.existing.targetSessionId ||
-    (input.payload.variableSetId !== undefined &&
-      input.payload.variableSetId !== input.existing.variableSetId) ||
     (input.payload.rigId !== undefined && input.payload.rigId !== input.existing.rigId);
   const materialExecutionChange =
     authorityTargetChanged ||
@@ -1993,10 +1975,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       grant: input.grant,
       targetSessionId: nextTargetSessionId,
       runMode: nextRunMode,
-      variableSetId:
-        input.payload.variableSetId !== undefined
-          ? input.payload.variableSetId
-          : input.existing.variableSetId,
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
@@ -2109,8 +2087,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     update.clonePersonalResourceAuthorityFromRevision === undefined
   ) {
     // Administrative lifecycle/name edits preserve the exact revision-bound
-    // causal human. They must not silently re-authorize retained Variable Set,
-    // Rig, Connection, or xAI authority under the manager performing the edit.
+    // causal human. They must not silently re-authorize retained Rig,
+    // Connection, or xAI authority under the manager performing the edit.
     update.clonePersonalResourceAuthorityFromRevision = input.existing.authorityRevision;
   }
   if (
@@ -2125,7 +2103,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       targetSessionId: existingTarget,
       departingTarget: true,
       runMode: "existing_session",
-      variableSetId: input.existing.variableSetId,
       rigId: input.existing.rigId,
       agentConfig: input.existing.agentConfig,
     });
@@ -2137,10 +2114,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     grant: input.grant,
     targetSessionId: nextTargetSessionId,
     runMode: nextRunMode,
-    variableSetId:
-      input.payload.variableSetId !== undefined
-        ? input.payload.variableSetId
-        : input.existing.variableSetId,
     rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
     agentConfig: update.agentConfig ?? input.existing.agentConfig,
   });
@@ -2223,7 +2196,6 @@ export async function restoreScheduledTask(
     ...(task.runMode === "existing_session"
       ? { targetSessionId: task.targetSessionId }
       : { reusableSessionId: task.reusableSessionId }),
-    variableSetId: task.variableSetId,
     rigId: task.rigId,
     metadata: task.metadata,
     clonePersonalResourceAuthorityFromRevision: task.authorityRevision,
@@ -2295,7 +2267,7 @@ export class ScheduledTaskSyncError extends Error {
   readonly persistenceRestored: boolean;
 
   constructor(cause: unknown, persistenceRestored: boolean) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    super(errorMessage(cause), { cause });
     this.name = "ScheduledTaskSyncError";
     this.persistenceRestored = persistenceRestored;
   }
@@ -2658,7 +2630,6 @@ async function validateScheduledTaskAgentConfig(input: {
           )
         : null;
     const privateDestination =
-      workspace.kind === "personal" ||
       (target?.visibility === "user_private" &&
         target.ownerSubjectId === fileActor.privateFileOwnerSubjectId) ||
       (target?.memoryScope === "user" &&
@@ -2698,7 +2669,7 @@ async function validateScheduledTaskAgentConfig(input: {
       !hasPermission(input.grant.permissions, "workspace:admin")
     ) {
       throw new HTTPException(403, {
-        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; workspace:admin is required to increase it`,
+        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; only a workspace admin can raise it`,
       });
     }
   }
@@ -2794,16 +2765,16 @@ export function validateIncidentTelemetryPreflightSelection(
       message: "incidentTelemetryPreflight.dataSource.route must use a selected first-party tool",
     });
   }
-  if (route.kind === "variable_set") {
-    const declaredSets = new Set(preflight.requiredVariableSetNames);
-    const declaredVariables = new Set(preflight.requiredVariableNames);
+  if (route.kind === "vault") {
+    const declaredVaults = new Set(preflight.requiredVaultNames);
+    const declaredSecrets = new Set(preflight.requiredSecretNames);
     if (
-      !declaredSets.has(route.variableSetName) ||
-      route.variableNames.some((name) => !declaredVariables.has(name))
+      !declaredVaults.has(route.vaultName) ||
+      route.secretNames.some((name) => !declaredSecrets.has(name))
     ) {
       throw new HTTPException(422, {
         message:
-          "incidentTelemetryPreflight.dataSource.route variable metadata must be declared as required",
+          "incidentTelemetryPreflight.dataSource.route vault metadata must be declared as required",
       });
     }
   }

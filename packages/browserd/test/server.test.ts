@@ -39,6 +39,28 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("tells the supervisor whether a create's caller can take a session with no observation", async () => {
+    await withServer(async ({ server, reference }) => {
+      const supervisor = (server as unknown as { supervisor: BrowserSupervisor }).supervisor;
+      const create = supervisor.createSession.bind(supervisor);
+      const creations: unknown[] = [];
+      supervisor.createSession = (async (options: never, creation?: unknown) => {
+        creations.push(creation);
+        return await create(options, creation as never);
+      }) as typeof supervisor.createSession;
+      for (const path of ["/v1/browser-sessions?acceptsNoObservation=1", "/v1/browser-sessions"]) {
+        const created = await request(server, path, {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBeLessThan(300);
+      }
+      // An older caller, which sends no parameter, is told apart.
+      expect(creations).toEqual([{ acceptsNoObservation: true }, { acceptsNoObservation: false }]);
+    });
+  });
+
   test("fences new controller work atomically and releases only the owning update", async () => {
     await withServer(async ({ server, reference }) => {
       const operationId = randomUUID();
@@ -186,6 +208,15 @@ describe("BrowserControlServer", () => {
       error: new CdpSessionDetachedError("Page.getFrameTree"),
     },
     {
+      // The target state route is as read-only as an observation.
+      operation: "targetState" as const,
+      label: "observation",
+      suffix: "/state",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
+    {
       operation: "listTargets" as const,
       label: "target inventory",
       suffix: "",
@@ -254,6 +285,126 @@ describe("BrowserControlServer", () => {
       );
     },
   );
+
+  test("classifies a page read whose tab debugging ended as a retryable observation failure", async () => {
+    let failing = false;
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/dom-read`;
+        const body = {
+          kind: "count",
+          selector: "button",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          expectedFrameId: "frame-1",
+        };
+        failing = true;
+        const failed = await request(server, path, { method: "POST", token: viewToken, body });
+        expect(failed.status).toBe(503);
+        expect(((await failed.json()) as { error: unknown }).error).toEqual({
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        });
+        expect(attempts).toBe(1);
+        failing = false;
+        expect(
+          (await request(server, path, { method: "POST", token: viewToken, body })).status,
+        ).toBe(200);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (failing && name === "readDom") {
+            attempts++;
+            throw new CdpSessionDetachedError("DOM.resolveNode");
+          }
+        },
+      },
+    );
+  });
+
+  test("gives a tab's notice only to a caller that asks for it, once", async () => {
+    // A person's viewer, an auth check or an API client reading the tab first
+    // leaves the notice for the agent, whose tools ask for it.
+    const notices: string[] = [];
+    await withServer(
+      async ({ server, reference }) => {
+        expect(
+          (
+            await request(server, "/v1/browser-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            })
+          ).status,
+        ).toBe(201);
+        const tab = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}`;
+        const observed = async (path: string, init: Parameters<typeof request>[2]) => {
+          const response = await request(server, path, init);
+          expect(response.status).toBe(200);
+          const body = await json(response);
+          return (body.data.observation ?? body.data) as BrowserObservation;
+        };
+        const reloaded = "This tab's page reloaded.";
+
+        // Readers that do not ask see no notice and leave it in place.
+        notices.push(reloaded);
+        expect((await observed(`${tab}/observation`, { token: viewToken })).notice).toBeUndefined();
+        expect(
+          (await observed(`${tab}/select`, { method: "POST", token: controlToken, body: {} }))
+            .notice,
+        ).toBeUndefined();
+        const created = await observed(`${tab}/observation`, { token: viewToken });
+        expect(
+          (
+            await observed(`/v1/browser-sessions/${reference.browserSessionId}/actions`, {
+              method: "POST",
+              token: controlToken,
+              body: command(created),
+            })
+          ).notice,
+        ).toBeUndefined();
+        expect(notices).toEqual([reloaded]);
+        // The agent's observation receives it, once.
+        expect((await observed(`${tab}/observation?notices=1`, { token: viewToken })).notice).toBe(
+          reloaded,
+        );
+        expect(
+          (await observed(`${tab}/observation?notices=1`, { token: viewToken })).notice,
+        ).toBeUndefined();
+
+        // A tab selection and an action's receipt carry it the same way.
+        notices.push(reloaded);
+        expect(
+          (
+            await observed(`${tab}/select?notices=1`, {
+              method: "POST",
+              token: controlToken,
+              body: {},
+            })
+          ).notice,
+        ).toBe(reloaded);
+        notices.push(reloaded);
+        expect(
+          (
+            await observed(
+              `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptNotes=2&notices=1`,
+              { method: "POST", token: controlToken, body: command(created) },
+            )
+          ).notice,
+        ).toBe(reloaded);
+        expect(notices).toEqual([]);
+      },
+      { reloadedTabNotices: notices },
+    );
+  });
 
   test("metadata-only opening keeps exact control authority and the default observation response", async () => {
     const calls: string[] = [];
@@ -325,7 +476,7 @@ describe("BrowserControlServer", () => {
   });
 
   test("passkey sync is control-only, bound to the session path and validated", async () => {
-    await withServer(async ({ server, reference }) => {
+    await withServer(async ({ server, reference, supervisor }) => {
       expect(
         (
           await request(server, "/v1/browser-sessions", {
@@ -371,6 +522,57 @@ describe("BrowserControlServer", () => {
       expect(synced.status).toBe(200);
       // The fake driver hosts no page authenticators; the manager still answers.
       expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+      const negotiated = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(negotiated)).data).toEqual({
+        ...reference,
+        authenticators: 0,
+        events: [],
+        supportsBackupFlags: true,
+      });
+      const credential = {
+        rpId: "localhost",
+        credentialId: "Y3JlZA==",
+        userHandle: null,
+        userName: null,
+        userDisplayName: null,
+        privateKey: "a2V5",
+        signCount: 0,
+      };
+      const event = {
+        type: "registered" as const,
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        targetId: "target-1",
+        origin: "http://localhost",
+        credential: { ...credential, backupEligibility: true, backupState: true },
+      };
+      supervisor.passkeySync = async () => ({ ...reference, authenticators: 1, events: [event] });
+      const legacyRegistration = await request(server, path, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(legacyRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [{ ...event, credential }],
+      });
+      const modernRegistration = await request(server, `${path}?backupFlags=1`, {
+        method: "POST",
+        token: controlToken,
+        body,
+      });
+      expect((await json(modernRegistration)).data).toEqual({
+        ...reference,
+        authenticators: 1,
+        events: [event],
+        supportsBackupFlags: true,
+      });
+      expect(event.credential.backupEligibility).toBe(true);
     });
   });
 
@@ -469,7 +671,7 @@ describe("BrowserControlServer", () => {
   test("browser and computer actions run without the idle timeout, then restore it", async () => {
     const source = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
     for (const run of [
-      "async () => await this.supervisor.action(command)",
+      "async () => await this.supervisor.action(command, observationNotices(url))",
       "async () => await supervisor.action(command)",
     ]) {
       const at = source.indexOf(run);
@@ -943,6 +1145,7 @@ describe("BrowserControlServer", () => {
       );
       expect(screenshot.status).toBe(200);
       expect(screenshot.headers.get("content-type")).toBe("image/png");
+      expect(screenshot.headers.get("x-opengeni-browser-frame-note")).toBeNull();
       expect(
         decodeBrowserFrameMetadataHeader(screenshot.headers.get("x-opengeni-browser-frame")!),
       ).toMatchObject({
@@ -1407,6 +1610,40 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a failed frame producer closes the viewer socket with a terminal error", async () => {
+    let subscription: LatestBrowserFrameSubscription | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        await websocketMessage(websocket);
+        const closed = websocketClosed(websocket);
+        subscription!.fail(new Error("browser target closed"));
+        expect(await closed).toMatchObject({
+          code: 1011,
+          reason: "frame stream unavailable: browser target closed",
+        });
+      },
+      {
+        onFrameSubscription: (value) => {
+          subscription = value;
+        },
+      },
+    );
+  });
+
   test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1445,6 +1682,71 @@ describe("BrowserControlServer", () => {
       ).toBe(200);
       websocket.close(1000, "done");
       await websocketClosed(websocket);
+    });
+  });
+
+  test("a wait hold is admin-only, exact-generation and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`;
+      const until = new Date(Date.now() + 30 * 60_000).toISOString();
+      const hold = async (token: string, body: unknown) =>
+        await request(server, path, { method: "POST", token, body });
+      // Nothing is running yet: the hold never launches a browser.
+      const before = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect(before.status).toBe(200);
+      expect((await json(before)).data).toEqual({ held: false });
+      await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(
+        (await hold(controlToken, { controllerGeneration: reference.controllerGeneration, until }))
+          .status,
+      ).toBe(401);
+      const held = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect((await json(held)).data).toEqual({ held: true });
+      const stale = await hold(adminToken, { controllerGeneration: "controller-stale", until });
+      expect((await json(stale)).data).toEqual({ held: false });
+      // A hold only extends: an earlier time leaves it held.
+      const earlier = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until: new Date().toISOString(),
+      });
+      expect((await json(earlier)).data).toEqual({ held: true });
+      // Only the generation and the time are accepted.
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            endsWaitUntil: until,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until: "tomorrow",
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            extra: true,
+          })
+        ).status,
+      ).toBe(400);
     });
   });
 
@@ -1562,6 +1864,7 @@ describe("BrowserControlServer", () => {
 async function withServer(
   callback: (fixture: {
     server: BrowserControlServer;
+    supervisor: BrowserSupervisor;
     reference: { browserSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
   options: {
@@ -1570,8 +1873,16 @@ async function withServer(
     failStart?: boolean;
     screenshotError?: Error;
     closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1583,6 +1894,8 @@ async function withServer(
     };
     onBrowserContext?: (context: BrowserSupervisorDriverContext) => void;
     onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+    /** Notices the driver gives, each once, for its tab. */
+    reloadedTabNotices?: string[];
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-server-");
@@ -1626,6 +1939,7 @@ async function withServer(
   try {
     await callback({
       server,
+      supervisor,
       reference: {
         browserSessionId: randomUUID(),
         controllerGeneration: "controller-1",
@@ -1645,9 +1959,18 @@ function fakeDriver(
     failStart?: boolean;
     screenshotError?: Error;
     closeError?: Error;
+    onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
+    reloadedTabNotices?: string[];
   },
 ): BrowserSupervisorDriver {
   const target: BrowserTarget = {
@@ -1710,6 +2033,9 @@ function fakeDriver(
     async selectTarget() {
       return observation();
     },
+    takeReloadedTabNotice(tabId) {
+      return tabId === target.id ? (options.reloadedTabNotices?.shift() ?? null) : null;
+    },
     async closeTarget() {
       if (options.closeError) throw options.closeError;
       return [];
@@ -1719,6 +2045,7 @@ function fakeDriver(
       return observation();
     },
     async targetState() {
+      options.beforeDriverOperation?.("targetState");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1729,6 +2056,7 @@ function fakeDriver(
       };
     },
     async readDom(_targetId, domRequest) {
+      options.beforeDriverOperation?.("readDom");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1781,6 +2109,7 @@ function fakeDriver(
     },
     async subscribeFrames() {
       const subscription = new LatestBrowserFrameSubscription(async () => undefined);
+      options.onFrameSubscription?.(subscription);
       queueMicrotask(() => subscription.push(frame(context, target)));
       return subscription;
     },

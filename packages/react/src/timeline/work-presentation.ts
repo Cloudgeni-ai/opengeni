@@ -18,13 +18,17 @@ export function durationBetween(startedAt: string, endedAt: string): number | un
   return ended - started;
 }
 
-/** Compaction landmarks among a fold's groups (secondary summary facet). */
+/**
+ * Compaction landmarks among a fold's groups (secondary summary facet). The
+ * one-time rebuild for a new model has its own note and is not counted.
+ */
 export function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
   return groups.filter(
     (group) =>
       group.kind === "item" &&
       group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
+      group.item.phase === "compacted" &&
+      group.item.implementation !== "portable_model_switch",
   ).length;
 }
 

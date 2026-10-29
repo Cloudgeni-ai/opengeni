@@ -686,7 +686,8 @@ export function NativeInboxList({
     if (item.kind === "question") parts.push(t("native.timeline.inbox.question"));
     if (item.kind === "goal_paused") parts.push(t("native.timeline.inbox.goalPaused"));
     if (item.kind === "reply") parts.push(t("native.timeline.inbox.reply"));
-    if (item.kind === "approval" && !item.body) parts.push(t("native.timeline.inbox.approval"));
+    // An approval's title says what it does; its body says where ("Gmail").
+    if (item.kind === "approval") parts.push(item.body || t("native.timeline.inbox.approval"));
     if (item.sessionAvailable !== false)
       parts.push(item.sessionTitle ?? t("native.timeline.inbox.untitledSession"));
     const workspace = spansWorkspaces ? workspaceNames?.get(item.workspaceId) : undefined;
@@ -859,30 +860,7 @@ export function NativeInboxList({
               >
                 {item.title}
               </Text>
-              {item.body && item.kind === "approval" ? (
-                <View
-                  style={{
-                    alignSelf: "flex-start",
-                    maxWidth: "100%",
-                    marginTop: 4,
-                    paddingHorizontal: 6,
-                    paddingVertical: 2,
-                    borderRadius: 6,
-                    backgroundColor: c["surface-2"],
-                  }}
-                >
-                  <Text
-                    numberOfLines={1}
-                    style={{
-                      fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
-                      fontSize: 12,
-                      color: c.fg,
-                    }}
-                  >
-                    {item.body}
-                  </Text>
-                </View>
-              ) : item.kind === "notification" ? (
+              {item.kind === "notification" ? (
                 <NotificationContent item={item} />
               ) : item.kind === "reply" && item.body ? (
                 <Text

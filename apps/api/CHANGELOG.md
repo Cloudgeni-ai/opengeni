@@ -1,5 +1,231 @@
 # @opengeni/api-router
 
+## 5.5.1
+
+### Minor Changes
+
+- 1908715: Dictation listens for a vocabulary, and dictation from anywhere keeps each dictation's speech to play and transcribe again.
+
+  - A dictation recording's `transcription` takes `keyterms` as well as `language`. The worker passes them to the voice input model when it takes keyterms: ElevenLabs Scribe and Azure Speech as keyterms, OpenAI and Azure OpenAI as the prompt (their text models now report `keyterms: true`, so meetings on them listen for keyterms too).
+  - `useVoiceInput` takes `keyterms` and `onAudio`, which hands over each dictation's microphone audio with its text, and returns `transcribe(blob)` to transcribe audio kept earlier as a new dictation.
+  - `@opengeni/sdk/recordings`: `uploadRecordingAudio()` uploads finished audio as a one-track recording.
+  - `@opengeni/desktop/dictation`: settings gain `vocabulary`, `retryShortcut` (transcribes the last dictation again and types it) and `cancelShortcut`; the status reports `actionShortcutErrors`. The history keeps each dictation's speech on the computer (private to the person, deleted with the history), and `historyAudio(id)` and `transcribeAgain(id)` play and re-transcribe it. While dictation is on, the app opens at login.
+  - `DesktopDictationSettings` offers the vocabulary, the retry and cancel shortcuts, and Play and Transcribe again on each recent dictation.
+
+### Patch Changes
+
+- fa7516a: A full-page browser screenshot no longer changes the page's layout. Chromium hides classic scrollbars for a capture beyond the viewport, so content used to widen by the scrollbar's width while it was captured, right-aligned elements moved, and the change stayed after the capture; the image was also narrower than the tab's viewport. The capture now keeps each scrollbar's space with a temporary inspector stylesheet that page scripts cannot see, re-evaluates scrollbars afterwards, and is as wide as the tab's viewport. Screenshot scale now comes from the emulated device scale factor instead of the image width, which excluded the scrollbar. When some scrollbars cannot be kept (horizontal ones, ones inside shadow trees), the browser_screenshot result and Code Mode screenshot metadata carry a short `note` saying so, and the SDK frame has `inexactScrollbars: true`.
+- 093b9e2: Rotating the runtime database password no longer fails operations when many connections log in at the moment a pool switches passwords. Each refused login (SQLSTATE `28P01`) is now attributed to the password that login actually used, captured when it asked for its password, instead of to the password the operation saw when it started. A refusal of a password the pool has already replaced (a stale refusal) never moves the pool. An operation is retried whenever the pool then selects another password than the refused login used (a stale refusal, or a fresh one that moved the pool on, including back to a password a rollback made valid again), under a hard cap of five attempts; a single configured password still fails fast. The five-second straggler grace is removed, so a pool switches back at once when the password it switched to is refused (for example during a rollback); `DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS` (now 0) and the `staleFailureGraceMs`/`now` options remain only as ignored, deprecated compatibility shims. `RotatingDatabasePassword.password(login)` records the position per login, `reportAuthenticationFailure` returns whether the refusal was stale, the `candidate_refused` event gains a `stale` flag and `candidates_exhausted` a `reason` (`every_candidate_refused` or `attempt_cap`). The session-list LISTEN connection retries a newly selected password at once at most four times until it listens again or the files change.
+
+  Credential events now reach structured logs with their pool and facts: they are logged under the reviewed public fields `databasePool`, `credentialIndex`, `credentialFromIndex`, `credentialToIndex`, `credentialCandidates`, `credentialStale`, `credentialFile`, `credentialFileErrorCode` and `reason` (previously the public log projection dropped `pool` and the index fields). Refusals are logged too; repeated refusal, switch and exhaustion lines of one pool are rate-limited (once per 10 seconds per kind, with `suppressedCount`). The exhaustion message is now "database credential retries exhausted". New Prometheus counters, labelled by `pool`: `opengeni_database_credential_refusals_total` (`index`, `refusal` = `stale`|`fresh`), `opengeni_database_credential_switches_total` (`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total` (`index`, `reason`) and `opengeni_database_credential_reloads_total` (`candidates`). `observeDatabaseCredentialEvents(pool, observability)` wires both; `databaseCredentialEventAttributes` and `DATABASE_CREDENTIAL_METRICS` are exported.
+
+- a4b57e6: In-chat connection requests now read the same to the person and to the agent, and the sign-in window ends cleanly in embedded chats. When the person in the chat can't connect the requested integration from the card (their access doesn't allow it), `capability_authorization_request` now tells the agent so, instead of the generic "posted for confirmation" message, so it no longer asks them to use a card that can't help them. Results for people who can connect are unchanged. The card and the server share one rule for this decision (`inChatCapabilitySetup` in contracts), and the server applies it to the same access the person's chat has: what their sign-in could do when they sent the turn's message, or their latest message in that chat for a turn the platform started for them, such as a wake-up, a child's result or a goal continuation (an embed token narrows it, and their own workspace counts without a membership). Without such a message it falls back to their membership (`readTurnSenderAccess` in db). The console's chat card uses the same rule, so it no longer offers Connect to a member the agent was told can't connect.
+
+  In-chat connect cards also start sign-in with a new optional `finishInPopup: true` flag on `POST /v1/workspaces/:workspaceId/connect/attempts`. The provider's callback then lands on a small server page that closes the sign-in window (or tells the person they can close it) instead of loading a second copy of the host page in the popup. Without the flag the return URL behaves as before. Against an older server that rejects the unknown field, `ConnectController.begin` starts again without it, so sign-in keeps working and returns to the host page as before. Browser cards set it, because they sign in through a popup. Phone cards don't, because the system sign-in browser returns to the app.
+
+  Reviewed catalog integrations no longer carry an "MCP server" label on their connection cards and dialogs, on the web and on the phone. They read as the service itself, with its name and provider. Servers someone added by hand, and registry entries nobody reviewed, keep the label (`showsMcpServerLabel` in `@opengeni/react/in-chat-connect-model`).
+
+- 8382bdb: Buying credits from a chat now takes one answer. When an agent opens a payment page through the app actions (`createBillingCheckout`, `createSubscriptionCheckout` and the two billing portals), the chat shows it as a card with one button that opens the exact page in a new tab, so nobody copies a long link by hand. For credits the card confirms the payment in place, with the new balance, once the person pays, in the web app and in `OpenGeniChat` alike; it checks only after the button was used, backs off from every 2 s to every 15 s and stops after 30 minutes. Links nobody opened show as expired once they lapse. The card is primary output like a presented image: conversation-first history keeps these calls (one classification shared by the client and the database filter), so it stays visible after a reload. Opening a checkout charges nothing, so the two checkouts no longer ask for a confirmation and also run in read-only chats; the billing portals, whose links can change the payment method or plan, keep a plain confirmation ("Open your billing page? It can change your payment method or plan.") and stay unavailable in read-only chats. The agent's result says what is true for each kind of page, including that test-mode pages are expected on deployments that take test payments. Action search now finds buying credits and the balance in everyday words. A checkout created without return URLs now returns to `/checkout-complete.html`, a small page that sends the person back and needs no sign-in, and the web app's `/billing` return opens organization billing instead of the general settings. The SDK session proxy now forwards `GET billing/checkout/:id` as the person, pinned to the workspace's organization and gated on `billing:read`. New contract exports: `PAYMENT_PAGE_ACTIONS`, `appActionPaymentPage`, `appActionNeedsConfirmation`, `appActionCallNeedsConfirmation`, `SESSION_EVENT_PRESENTED_APP_ACTIONS`, `SESSION_EVENT_PRESENTED_APP_ACTION_NAMES`, `SESSION_EVENT_APP_ACTION_ID_SPACE`, `presentedAppActionId`, `PresentedAppActionId`, `PresentedAppActionPage` and `isPresentedSessionToolCall` (also from the SDK); new React exports: `PaymentPageActivityProvider` and `PaymentPageActivity`.
+- 83bd1e4: Closes several trust-boundary gaps reported by Vasu Bansal (#2664). The stream relay now enforces the viewer token's mode: a watch-only token can no longer type into or close a terminal, or send desktop input, and every input or close must name the viewer's own stream. Dropped messages are counted in `opengeni_relay_unauthorized_drops_total`. A connection replaced by a reconnect can no longer act on its successor. Terminal tokens for viewers with terminal access carry input authority, independent of desktop control. Approving a tool call that needs a person's approval now requires a person: an organization API key acting as itself gets 403 and must approve on behalf of a verified external actor (`x-opengeni-external-actor`), after the host shows its own approval UI. Managed sign-in no longer fails when the API host's clock runs ahead of the database, and the device-enrollment rate limiter no longer grows without bound.
+- 18c7cfa: Opengeni's own tools that store text or pass it to other work (creating sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, artifacts, notifications, built-in Slack and social posts, and any first-party tool added later) now keep secret references as text and never receive a resolved value. The session, scheduled run or goal continuation that gets the text resolves the reference when it runs something, under its own vault policy. Escaped references still arrive as plain reference text, and a missing or malformed reference no longer fails these calls. Connectors, Codex apps, shell commands, `run_on`, browser and desktop typing and `excel_run` still receive values. An `admin_action_call` gets a value only in a request field its action marks as a credential (and in a vault item it creates or updates); the rest of its body keeps reference text. Before, a reference written into a new session's first message was resolved and the value was stored in that session.
+- b1673ab: When a setting blocks what the person asked for, the agent now offers to change it in the chat instead of describing where the setting is. The modular system prompt's blocked-tool rule names `admin_actions_search` and `admin_action_call` whenever those tools may be available; a change still waits for the person's confirmation in the chat unless the session has full access. Tool approval actions (`getConnectorToolPermissions`, `updateConnectorToolPermissions` and the chat MCP server equivalents) gain plain-language descriptions, and their confirmation reads, for example, "Let send_message run without asking in this workspace?" instead of "Update connector tool permissions in this workspace?". The `sites` Skill says a tool set to Ask can't run from a Site's own tool calls, so the agent offers to set it to Allow in the chat.
+- 010e1e6: `startApi` accepts a `sessionAuthorization` option, so an embedding host that runs the packaged API entry instead of mounting `createApp(deps)` can bind its `SessionAuthorizationPort`. Unset keeps standalone startup unchanged. Contributed by Ali Ozaltin (Botel AI) in #2539.
+- Updated dependencies [a6b3a97]
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [1908715]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [b2e3119]
+- Updated dependencies [c09ae08]
+- Updated dependencies [729329e]
+- Updated dependencies [5729b13]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [9e8fb2f]
+- Updated dependencies [83bd1e4]
+- Updated dependencies [45eec8d]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [d450fe5]
+- Updated dependencies [5eb6eb8]
+- Updated dependencies [f980186]
+- Updated dependencies [22fa944]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/runtime@5.5.0
+  - @opengeni/codemode@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/db@5.5.0
+  - @opengeni/observability@5.5.0
+  - @opengeni/interaction@5.5.0
+  - @opengeni/core@5.5.0
+  - @opengeni/config@5.5.0
+  - @opengeni/agent-proto@5.5.0
+  - @opengeni/artifact-tool@5.5.0
+  - @opengeni/tool-gateway@5.5.0
+  - @opengeni/capabilities@5.5.0
+  - @opengeni/codex@5.5.0
+  - @opengeni/documents@5.5.0
+  - @opengeni/events@5.5.0
+  - @opengeni/github@5.5.0
+  - @opengeni/storage@5.5.0
+  - @opengeni/vaults@5.5.0
+  - @opengeni/vaults-bitwarden@5.5.0
+  - @opengeni/vaults-keeper@5.5.0
+  - @opengeni/vaults-onepassword@5.5.0
+  - @opengeni/vaults-protonpass@5.5.0
+  - @opengeni/network@5.5.0
+  - @opengeni/xai-subscription@5.5.0
+
+## 5.4.2
+
+### Minor Changes
+
+- 931325b: Agents operating Opengeni through the organization MCP actions (and admin access) can now see what each action takes and recover from mistakes. `admin_action_describe` and `opengeni_action_describe` show a `requestSchema` for every action whose route validates its body with a contract (including session events, steering, Skill saves and vault actions) and a new `queryParameters` list. An invalid request answers 400 or 422 with code `validation_failed`, a message that names each bad field, and `details.issues`; invalid query parameters that used to answer 500 or an unnamed error now do the same. Every 410 now has the new error code `gone`, and a retired route also returns `details.replacement`; retired actions are hidden from action search, and describe or call names their replacement. A JSON list too large for one action result keeps as many whole items as fit, with item counts and a hint naming the paging parameters to call again with, instead of being cut mid-item. New contract exports: `SaveWorkspaceSkillRequest`, `ApplyWorkspaceSkillRevisionRequest` and `RemoveWorkspaceSkillRequest`.
+- 5aa883b: Automations have a new overlap choice, `overlapPolicy: "steer"`, and it is the default for new automations. When an automation that continues a chat gets its next run while its own earlier run is still working there, the run reaches that turn at its next model step, the way a person's Steer does: the step's tool calls finish, and the agent then reads the new run together with the work so far instead of waiting for the whole turn. A turn anyone else started (a person, a goal continuation, another automation) still finishes first, and the run follows it; a run waiting on a person's approval keeps waiting. Runs that each start a new chat never overlap, so the choice changes nothing for them.
+
+  Creating an automation without `overlapPolicy` now gives `steer` (previously `allow_concurrent`, or `buffer_one` for a message scheduled into a chat). Existing automations keep their stored choice. Pass `buffer_one` to keep waiting for the whole turn. The automation form offers Steer, Queue and Skip, starting on Steer; the reusable automation panel creates chat automations with the default; and the agent tools now explain every overlap choice, including that `allow_concurrent` and `buffer_one` both wait in a chat.
+
+  A turn whose steer watch had noticed a waiting Steer that was then withdrawn (or whose automation was paused) no longer has every later model request cut short; it listens again and keeps working.
+
+- 3cd4985: Passkeys kept in a connected password manager now work for agents. A Bitwarden or Vaultwarden login with a passkey, a Keeper login record with a passkey, or a Proton Pass login with a passkey shows `hasPasskey`, matches a `passkey` search, and signs in through the agent's managed browser like a hosted passkey. Only which items hold a passkey is mirrored (credential id, site, account name); the private key is read live from the provider when a browser needs it and is never stored. After a sign-in the signature counter is written back to Bitwarden and Keeper unless the vault is linked read-only; for Proton Pass, whose CLI cannot edit items, Opengeni keeps the count itself. Providers implement the new optional `readPasskeys` and `updatePasskeySignCount`, and `capabilities().passkeys` becomes a boolean. 1Password's SDK does not expose passkeys, so 1Password passkeys stay unusable. Items that need approval for each use are no longer loaded into a browser, hosted passkeys included.
+
+### Patch Changes
+
+- 23e7e1e: Installing or updating the Connected Machine agent no longer leaves a machine worse off. Both installers stage the new binary and refuse one that cannot start on the machine (exit code 8, naming its exit code, for example `0xC0000135` STATUS_DLL_NOT_FOUND on Windows) before it replaces a working agent, and report a refused machine connection as exit code 9 with the agent's exit code, leaving the running agent untouched. On Windows, an upgrade whose new agent then fails to start in the background restores and restarts the previous agent. The agent's own Windows self-update now checks the staged binary before the swap, as on Linux and macOS. Windows machines report real CPU, memory and disk metrics instead of zeros. `OPENGENI_AGENT_STABLE_VERSION` is now optional: unset, `/agent/latest/*`, the stable update manifest and automatic updates use the agent release of the control plane's own source tree (`agent/Cargo.toml`) instead of the fixed, long-outdated `0.1.54`; an API that cannot name a release answers 404 and requests no updates.
+- d649005: An open chat's artifact list no longer reads the catalog once per sub-session. `GET /v1/workspaces/:workspaceId/artifact-catalog` takes `includeSubSessions=true` with `sourceSessionId`. The server then lists that chat and the sub-sessions its lineage lists (depth 5, 200 at most) in one keyset-paged query. It authorizes those sessions in one batch and skips any the caller may not read, and each item keeps its own `sourceSessionId`. The session dock now makes two paged reads per refresh (active, then archived) however many sub-agents the chat started, with no lineage read or per-sub-session cache. It keeps at most one refresh in flight and runs one more afterwards if new tool output arrived meanwhile. Before, a chat with about 50 running sub-agents re-read up to about 100 catalog pages on every turn end and overlapped those reads on a busy chat. Rolling migration 0991 lets the published-file listing routine accept a bounded `sourceSessionIds` list. The previous release's single `sourceSessionId` keeps its meaning.
+- 2408444: Stopping a browser recording no longer fails when object storage shows the freshly made video or action log a few seconds late, as storage that replicates in the background can. The save reads both back with the usual short visibility retry, keeps answering 202 so the client asks again for up to a minute after the video was made, and only then fails with a 503 `upstream_unavailable` whose message says the video was made but could not be read back, nothing was saved, and stopping again before the browser session ends saves it, with `details.code` `browser_recording_output_unreadable`. The minute is measured on the database's clock (`getBrowserRecordingVideo` now returns `readyForMilliseconds`) plus the API's monotonic clock for its own retries, so clock skew between them does not matter. Before, a single missed read answered a 503 with the generic "temporarily unavailable" text and ended the save.
+- d21b12f: Explain the existing compact session-page query in organization and admin action discovery, so chat scans can avoid full per-session tool and agent projections. HTTP defaults and dispatch remain unchanged.
+- 0b76a0a: A background command on a Connected Machine no longer stays "running" forever after the machine was offline. When the reconciler could not reach the machine, it left the command to the machine's own reports, but the machine reports only operations it knows, so a command whose start never reached it was never settled. Now the machine's next inventory report makes those commands due again; the reconciler asks the machine, and one it does not know settles lost (never as a success), while one it runs continues as before. Migration 0984 adds the private function behind this, with its runtime grant withheld for one release so the previous release stays ready, and makes commands already stuck this way due once. Until a later migration grants it, a report skips the re-arm. Compute sandboxes are unaffected: their running commands are still never polled.
+- 7ba1be6: A Browser, Computer, Terminal or Files request that arrives while a chat's sandbox is still starting now waits for that start, as a turn does, instead of failing with "sandbox lease is not attachable". A fresh chat's first Browser or Computer open no longer needs a retry. The API and the worker share one wait for a starting sandbox.
+- 995c16f: App actions in a chat driven by someone who uses Opengeni through another product (an external user, such as a person in an embedded chat) now work. Every call used to fail with 403 `invalid delegated human authorization`, because the person proof accepted only native accounts. These calls now run as that person in the chat's workspace only, with their live access there capped by the access frozen with their message, and no organization-level authority, so reads such as `getMyUsage` answer at once. Action search offers such a person only actions that can succeed for them: that workspace's actions, only reads unless their message allows changes, nothing that carries a secret, and only actions whose first access check their access passes (each catalog entry now records that permission as `permission` when its handler shows one). With full access, such a person can do everything they can in that one workspace, and every path (search, a call, a session tool reaching another workspace) gives the same answer. A call outside that workspace is refused before anything runs, with a plain message that names the one workspace they can use. Refusals and 403 hints for them no longer point to Opengeni app pages. The exact-workspace person proof used by published Sites is now also exported as `stampWorkspacePersonAuthorization`, and it also covers an external person's own workspace, as their active organization membership names it (`externalPersonPersonalWorkspaceId`).
+- 53e1fe5: Agents now find and open any of the person's computers in one call.
+
+  - interaction_discover lists the person's Connected Machines this chat can use (`machines`: name, OS, online state, whether it has a screen, the placement to open it with, and which one the chat is on). The model's view leaves out browser and computer sessions on machines listed as offline, and says how many it left out; Code Mode still receives every record.
+  - computer_open and browser_open with a Connected Machine placement the chat is not on move the chat there first, exactly as sandbox_swap would, instead of failing and asking for a separate swap, and the result says the chat moved. A personal machine whose owner has not allowed the chat yet shows the card to allow that machine in the same call. An open that names a Connected Machine placement runs in model order with the other calls of a response, like sandbox_swap; other opens still run in parallel.
+  - tool_search loads a tool by its exact name without the server prefix (`sandboxes_list` loads `opengeni__sandboxes_list`). When several servers share that name, Opengeni's own tool (else the first) loads and the others are listed as suggestions.
+  - An agent's swap and machine list through the API act for the person who started its turn when it moves or lists its own chat, as sandbox_swap and sandboxes_list do, so that person's Only me machines are in reach. Repointing another chat it may control works as before. An agent attempt may list its own chat's machines with the session read permission sandboxes_list needs.
+  - Moving a chat to a machine that has not reported its workspace root (or with an invalid working directory) is a typed refusal from the swap API, not a 500.
+  - A computer or browser request while the chat's current machine is offline or no longer usable is a 409 that says so, not a 500. Asking for another machine in that state gets the wrong-placement answer.
+
+- db28f4f: A GitHub App created from Opengeni's manifest now sends its webhooks to `OPENGENI_WEBHOOK_BASE_URL` when that is set, instead of the console's address. Deployments whose console is reachable only on a private network previously got an App whose webhook GitHub couldn't reach, so GitHub event triggers never fired until the webhook URL was fixed by hand.
+- 5b9feb9: A meeting recorded with computer or tab audio now names its microphone after the person recording. Each new transcript version gives the microphone speaker the owner's person in the speaker directory, added for them if they have none, as "It's me" does, with `source: "track"` and no confidence, so it doesn't read as a voice suggestion. A name someone gave that speaker carries over through every later version instead (before, one that had already carried over once could be replaced), and a microphone alone stays diarized as Speaker 1, 2…. The naming enrolls nobody's voice: it gives no agreement, and an unconfirmed `track` speaker never teaches a voiceprint. Starting such a recording adds the owner to the directory, so the live preview shows the microphone under the owner's name to everyone watching (the person recording sees their own) and the computer or tab audio as "Others". New exports: `recordingMicrophoneIsOwner` (contracts), `ownerLiveLaneName` (react), `workspaceMemberDisplayName` and the `TrackSpeaker` type (db); `MeetingsListPage` and `RecorderPanel` take an optional `viewerName`, and `createRecording` an optional `ownerName`.
+- 5769285: Meetings transcribe with a model the workspace can use. When nothing names a model, a meeting runs the deployment's default if this workspace can use it, else the first model in the provider order that serves meetings and is usable here, so a workspace signed in to a ChatGPT or SuperGrok subscription, or holding its own key, no longer fails with "No transcription provider is connected". `meetingModelFor` resolves it, and `GET …/recording-models` reports it as `default`.
+- 57cfc37: Embedded meetings are transcribed in the workspace's meeting language. `GET …/recording-models` now returns the workspace's `language` (null detects), and the meetings list's recorder starts on it when the host passes no `defaultLanguage`. Until it is known, starting a meeting names no language, so the server uses the workspace's. Before, an embedding that passed no language asked every meeting to detect it, which overrode the workspace setting and could return Norwegian as Danish or Swedish.
+- e4eaded: The runtime database password can now be rotated without restarting pods or failing requests and turns. New optional settings `OPENGENI_DATABASE_PASSWORD_FILE` and `OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE` name files with the runtime login's current and previous password. Every pool that logs in as the runtime role (the API and worker pools, the session-list LISTEN connection, the managed-auth pool and the runtime CLIs) re-reads them on each new connection, starts on the previous password and switches to the current one after a single refused login (SQLSTATE `28P01`). A pool query or transaction start refused with `28P01` is retried on the newly selected password, only while another distinct password exists and at most once per password. With a single password a refused login still fails fast, and unset or missing files keep today's behavior: the password in `OPENGENI_DATABASE_URL`. `createDb` accepts the same files as `passwordFiles` (with `databasePasswordFileOptions(settings)`) and reports content-free `onCredentialEvent` events; embedders that do not pass them are unaffected. The Helm chart's new `runtimeDatabasePasswordFiles.enabled` mounts the optional runtime Secret keys `OPENGENI_DATABASE_PASSWORD` and `OPENGENI_DATABASE_PREVIOUS_PASSWORD` as files into the api, worker-control and worker-turns pods. See docs/deployment.md, "Rotating the runtime database password".
+- 54c2f9e: A session with full access now reaches a chat in another workspace of the person who gave it with the ordinary session tools: session_get, session_events, session_wait, session_send_message, session_steer, session_pause and session_resume take an optional workspaceId and run there as that person, through the same authority as admin_action_call. Without full access the tools say plainly that they reach only this workspace's chats; a chat that doesn't exist and a workspace the person can't use read the same. session_wait and session_steer now also serve sessionless callers (a sessionless steer is a human/API steer), and admin_actions_search also names reading, messaging or managing chats in another workspace with full access, so tool search finds it.
+
+  Session tools also return each chat's canonical link (`chatUrl`), built from the deployment's web base URL (falling back to the public base URL) and the chat's own workspace: on every sessions_list row, session_get (including an agent's self read) and session_create's receipt facts. A chat in another workspace gets its link there. It is omitted when no base URL is configured.
+
+- Updated dependencies [931325b]
+- Updated dependencies [23e7e1e]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [f884a9b]
+- Updated dependencies [a57cfa8]
+- Updated dependencies [484a6ff]
+- Updated dependencies [8a13aa9]
+- Updated dependencies [9db3491]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [2408444]
+- Updated dependencies [2a181e7]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [3708369]
+- Updated dependencies [38f5eb2]
+- Updated dependencies [4024f23]
+- Updated dependencies [57e4bee]
+- Updated dependencies [bed99c5]
+- Updated dependencies [bd8e4b4]
+- Updated dependencies [a345601]
+- Updated dependencies [0b76a0a]
+- Updated dependencies [801743c]
+- Updated dependencies [b85edfc]
+- Updated dependencies [d562814]
+- Updated dependencies [01188c9]
+- Updated dependencies [7ba1be6]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [db28f4f]
+- Updated dependencies [f0e8083]
+- Updated dependencies [f721495]
+- Updated dependencies [3532517]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [1e015c1]
+- Updated dependencies [a8b429e]
+- Updated dependencies [5769285]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [e74e3db]
+- Updated dependencies [1ed80fb]
+- Updated dependencies [51915c3]
+- Updated dependencies [d3d8ccf]
+- Updated dependencies [cf22870]
+- Updated dependencies [1d2b021]
+- Updated dependencies [82a9da9]
+- Updated dependencies [5f332c1]
+- Updated dependencies [3cd4985]
+- Updated dependencies [fd43805]
+- Updated dependencies [47a0e5b]
+- Updated dependencies [bd71666]
+- Updated dependencies [ba4c9dc]
+- Updated dependencies [e4eaded]
+- Updated dependencies [24b71c6]
+- Updated dependencies [50989e2]
+- Updated dependencies [47a0e5b]
+- Updated dependencies [7f9c06b]
+- Updated dependencies [1320698]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [616950d]
+- Updated dependencies [f5b8289]
+- Updated dependencies [7a02989]
+- Updated dependencies [b833bfc]
+- Updated dependencies [30b9cd2]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/config@5.4.0
+  - @opengeni/db@5.4.0
+  - @opengeni/core@5.4.0
+  - @opengeni/runtime@5.4.0
+  - @opengeni/network@5.4.0
+  - @opengeni/codemode@5.4.0
+  - @opengeni/interaction@5.4.0
+  - @opengeni/capabilities@5.4.0
+  - @opengeni/github@5.4.0
+  - @opengeni/observability@5.4.0
+  - @opengeni/vaults@5.4.0
+  - @opengeni/vaults-bitwarden@5.4.0
+  - @opengeni/vaults-keeper@5.4.0
+  - @opengeni/vaults-protonpass@5.4.0
+  - @opengeni/storage@5.4.0
+  - @opengeni/artifact-tool@5.4.0
+  - @opengeni/codex@5.4.0
+  - @opengeni/documents@5.4.0
+  - @opengeni/events@5.4.0
+  - @opengeni/tool-gateway@5.4.0
+  - @opengeni/vaults-onepassword@5.4.0
+  - @opengeni/xai-subscription@5.4.0
+  - @opengeni/agent-proto@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

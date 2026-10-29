@@ -4,7 +4,6 @@ import {
   buildSubscriptionCoreCodexConnectionTokenResolver,
   buildSubscriptionCoreCodexOperationFetch,
   listSubscriptionCoreCodexServingConnections,
-  readCodexCutoverDisposition,
   subscriptionCoreCodexConnectionAllowsModel,
   recordSubscriptionCoreCodexModelCatalog,
   SUBSCRIPTION_MODEL_CATALOG_TTL_MS,
@@ -45,7 +44,6 @@ export type WorkspaceCodexCatalogReadiness = {
 
 type CatalogDependencies = {
   recordModels: typeof recordSubscriptionCoreCodexModelCatalog;
-  disposition: typeof readCodexCutoverDisposition;
   listServing: typeof listSubscriptionCoreCodexServingConnections;
   fetchModels: typeof fetchCodexModels;
   getCoreToken: (
@@ -61,7 +59,6 @@ const CATALOG_SERVICE_SUBJECT = "service:subscription-core";
 
 const defaultCatalogDependencies = (): CatalogDependencies => ({
   recordModels: recordSubscriptionCoreCodexModelCatalog,
-  disposition: readCodexCutoverDisposition,
   listServing: listSubscriptionCoreCodexServingConnections,
   fetchModels: fetchCodexModels,
   // A connection-level read (no operation lease), like live usage: the 0671
@@ -235,8 +232,6 @@ export async function refreshCoreCodexModelEntitlements(
   options: { refreshCredentials?: boolean } = {},
 ): Promise<number> {
   const idleExpiry = Date.now() + CATALOG_CACHE_MS;
-  if ((await deps.disposition(db, context.accountId, context.workspaceId)) !== "core")
-    return idleExpiry;
   const connections = await deps.listServing(db, context);
   const observations = await Promise.all(
     connections
@@ -285,8 +280,6 @@ export async function loadWorkspaceCodexCatalogReadiness(
   const observe = options.observeAvailability !== false;
   // Codex disabled for the deployment: never ready, nothing read.
   if (!activeSettings.codexSubscriptionEnabled) return { active: false, observations: {} };
-  const disposition = await deps.disposition(db, context.accountId, context.workspaceId);
-  if (disposition === "maintenance") return { active: false, observations: {} };
   const serving = await deps.listServing(db, context);
   if (!observe || !settings.codexSubscriptionEnabled || serving.length === 0) {
     return { active: serving.length > 0, observations: {} };

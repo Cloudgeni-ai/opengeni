@@ -64,6 +64,8 @@ import {
   filterWorkspacesByName,
   initialsOf,
   joinNames,
+  memberEmail,
+  memberEmailDetail,
   memberName,
   withArticle,
   workspaceMemberName,
@@ -362,7 +364,7 @@ function accessMembers(
     return {
       id: member.membershipId,
       name: workspaceMemberName(member, you),
-      email: member.email,
+      email: memberEmail(member),
       initials: initialsOf(workspaceMemberName(member, you)),
       kind: service ? "service" : "person",
       isYou: member.subjectId === directory.identity.subjectId,
@@ -421,7 +423,7 @@ function AddPeople({
       options={candidates.map((member) => ({
         value: member.id,
         label: memberName(member),
-        meta: member.email && member.email !== memberName(member) ? member.email : undefined,
+        meta: memberEmailDetail(member, memberName(member)),
         leading: (
           <Avatar size="sm" aria-hidden="true">
             <AvatarFallback className="bg-surface-2 text-2xs font-semibold text-fg-muted">

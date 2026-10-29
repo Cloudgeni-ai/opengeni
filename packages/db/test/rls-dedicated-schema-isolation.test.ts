@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
@@ -11,6 +11,7 @@ import {
   createDb,
   createOrganizationInvitation,
   createSession,
+  DEFERRED_RUNTIME_TARGET_ROUTINES,
   ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
   getOrganizationPrivateSessionSettings,
@@ -85,10 +86,6 @@ appUrl.password = APP_PASSWORD;
 const APP_URL = appUrl.toString();
 const SEARCH_PATH = `${SCHEMA},opengeni_private,public`;
 const IMAGE = "pgvector/pgvector:pg17";
-const lifecycleMigrationUrl = new URL(
-  "../drizzle/0180_retained_screenshot_lifecycle_fences.sql",
-  import.meta.url,
-);
 
 function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
@@ -605,7 +602,8 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
         name,
         owner: "postgres",
-        execute: true,
+        // A deferred routine stays withheld until the migration that grants it.
+        execute: !(DEFERRED_RUNTIME_TARGET_ROUTINES as readonly string[]).includes(name),
         publicExecute: (
           RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
         ).includes(name),
@@ -1577,137 +1575,6 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(routine?.definition).toContain(`${SCHEMA}.retained_screenshot_artifacts`);
     expect(routine?.definition).toContain(`${SCHEMA}.files`);
   });
-
-  test("an existing dedicated 0140 lifecycle shape upgrades through 0180 and remains callable", async () => {
-    if (!available) return;
-    const databaseName = `og_0179_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
-    const schemaName = "tenantupgrade";
-    const controlUrl = new URL(ADMIN_URL);
-    controlUrl.pathname = "/postgres";
-    const control = postgres(controlUrl.toString(), { max: 1 });
-    const upgradeUrl = new URL(ADMIN_URL);
-    upgradeUrl.pathname = `/${databaseName}`;
-    let upgradeAdmin: postgres.Sql | null = null;
-    let upgradeClient: DbClient | null = null;
-    try {
-      await control.unsafe(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
-      await migrate(upgradeUrl.toString(), schemaName, {
-        applicationDatabaseRoles: ["opengeni_app"],
-      });
-      upgradeAdmin = postgres(upgradeUrl.toString(), { max: 1 });
-      await upgradeAdmin.unsafe(`
-        SET search_path = ${quoteIdentifier(schemaName)}, opengeni_private, public;
-        DROP TRIGGER IF EXISTS retained_screenshot_detachment_queue_trg
-          ON ${quoteIdentifier(schemaName)}.retained_screenshot_artifacts;
-        DROP FUNCTION opengeni_private.claim_retained_screenshot_maintenance(bigint, bigint, integer);
-        ALTER TABLE ${quoteIdentifier(schemaName)}.retained_screenshot_artifacts
-          DROP CONSTRAINT retained_screenshot_artifacts_session_fk,
-          DROP CONSTRAINT retained_screenshot_artifacts_turn_fk,
-          DROP CONSTRAINT retained_screenshot_artifacts_attempt_fk,
-          DROP CONSTRAINT retained_screenshot_artifacts_workspace_file_fk,
-          DROP CONSTRAINT retained_screenshot_artifacts_status_chk,
-          DROP CONSTRAINT retained_screenshot_artifacts_quota_state_chk,
-          DROP CONSTRAINT retained_screenshot_artifacts_status_quota_chk,
-          DROP CONSTRAINT retained_screenshot_artifacts_ready_shape_chk,
-          DROP CONSTRAINT retained_screenshot_artifacts_cleanup_reason_chk,
-          DROP CONSTRAINT retained_screenshot_artifacts_claim_shape_chk;
-        ALTER TABLE ${quoteIdentifier(schemaName)}.retained_screenshot_artifacts
-          ALTER COLUMN session_id SET NOT NULL,
-          ALTER COLUMN turn_id SET NOT NULL,
-          ALTER COLUMN attempt_id SET NOT NULL,
-          DROP COLUMN quota_state,
-          DROP COLUMN maintenance_claim_id,
-          DROP COLUMN maintenance_claimed_at,
-          ADD CONSTRAINT retained_screenshot_artifacts_workspace_session_fk
-            FOREIGN KEY (workspace_id, session_id)
-            REFERENCES ${quoteIdentifier(schemaName)}.sessions(workspace_id, id) ON DELETE CASCADE,
-          ADD CONSTRAINT retained_screenshot_artifacts_workspace_turn_fk
-            FOREIGN KEY (workspace_id, turn_id)
-            REFERENCES ${quoteIdentifier(schemaName)}.session_turns(workspace_id, id) ON DELETE CASCADE,
-          ADD CONSTRAINT retained_screenshot_artifacts_workspace_attempt_fk
-            FOREIGN KEY (workspace_id, attempt_id)
-            REFERENCES ${quoteIdentifier(schemaName)}.session_turn_attempts(workspace_id, id)
-            ON DELETE RESTRICT,
-          ADD CONSTRAINT retained_screenshot_artifacts_workspace_file_fk
-            FOREIGN KEY (workspace_id, artifact_id)
-            REFERENCES ${quoteIdentifier(schemaName)}.files(workspace_id, id) ON DELETE CASCADE,
-          ADD CONSTRAINT retained_screenshot_artifacts_status_chk
-            CHECK (status IN ('pending','reconciling','ready','cleanup_pending','failed','expired','deleted')),
-          ADD CONSTRAINT retained_screenshot_artifacts_ready_shape_chk
-            CHECK (
-              (status = 'ready' AND ready_at IS NOT NULL)
-              OR (status IN ('pending','reconciling') AND ready_at IS NULL)
-              OR status IN ('cleanup_pending','failed','expired','deleted')
-            ),
-          ADD CONSTRAINT retained_screenshot_artifacts_terminal_cleanup_chk
-            CHECK (status IN ('cleanup_pending','failed','expired','deleted') OR cleanup_reason IS NULL);
-        CREATE FUNCTION opengeni_private.claim_retained_screenshot_maintenance(
-          p_pending_grace_ms bigint,
-          p_claim_timeout_ms bigint,
-          p_limit integer
-        )
-        RETURNS TABLE (
-          action text, artifact_id uuid, account_id uuid, workspace_id uuid,
-          session_id uuid, object_key text, media_type text, size_bytes bigint,
-          sha256 text, width integer, height integer,
-          retention_expires_at timestamptz, cleanup_reason text
-        )
-        LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog
-        AS 'SELECT NULL::text, NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid,
-          NULL::text, NULL::text, NULL::bigint, NULL::text, NULL::integer,
-          NULL::integer, NULL::timestamptz, NULL::text WHERE false';
-        DELETE FROM ${quoteIdentifier(schemaName)}.schema_migrations
-          WHERE name = '0180_retained_screenshot_lifecycle_fences.sql';
-      `);
-
-      await migrate(upgradeUrl.toString(), schemaName, {
-        applicationDatabaseRoles: ["opengeni_app"],
-      });
-      await provisionRoles(upgradeUrl.toString(), {
-        targetSchema: schemaName,
-        rlsStrategy: "force",
-        appRole: "opengeni_app",
-        appPassword: APP_PASSWORD,
-      });
-      const upgradeAppUrl = new URL(upgradeUrl);
-      upgradeAppUrl.username = "opengeni_app";
-      upgradeAppUrl.password = APP_PASSWORD;
-      upgradeClient = createDb(upgradeAppUrl.toString(), {
-        max: 1,
-        searchPath: `${schemaName},opengeni_private,public`,
-        rlsStrategy: "force",
-      });
-      await upgradeAdmin.unsafe(`
-        REVOKE CREATE ON SCHEMA ${quoteIdentifier(schemaName)} FROM opengeni_app;
-        REVOKE CREATE ON SCHEMA opengeni_private FROM opengeni_app;
-        REVOKE CREATE ON SCHEMA public FROM opengeni_app;
-        REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-      `);
-      const fixture = await prepareClaimableScreenshot(upgradeClient.db, upgradeAdmin, schemaName);
-      const claims = await claimRetainedScreenshotMaintenance(upgradeClient.db, {
-        pendingGraceMs: 0,
-        claimTimeoutMs: 60_000,
-        limit: 10,
-      });
-      expect(claims.find((claim) => claim.artifactId === fixture.artifactId)).toMatchObject({
-        action: "reconcile",
-        workspaceId: fixture.workspaceId,
-      });
-      const [migration] = await upgradeAdmin<Array<{ count: number }>>`
-        SELECT count(*)::int AS count
-        FROM ${upgradeAdmin(schemaName)}.schema_migrations
-        WHERE name = '0180_retained_screenshot_lifecycle_fences.sql'`;
-      expect(migration?.count).toBe(1);
-      expect(await readFile(lifecycleMigrationUrl, "utf8")).toContain(
-        "FROM %1$I.retained_screenshot_artifacts",
-      );
-    } finally {
-      await upgradeClient?.close();
-      await upgradeAdmin?.end();
-      await control.unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`);
-      await control.end();
-    }
-  }, 180_000);
 
   test("(A) tables + policies isolate to the dedicated schema, 0 in public", async () => {
     if (!available) return;

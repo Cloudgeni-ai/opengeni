@@ -60,7 +60,10 @@ export type MeetingsListProps = {
   externalRef?: string | null;
   /** Offer the live transcript preview where the workspace has a live model. Default: true. */
   liveTranscript?: boolean;
-  /** Whether the live preview starts switched on. Default: false. */
+  /**
+   * Whether the live preview starts switched on. By default the workspace's
+   * setting, from the server.
+   */
   liveTranscriptDefault?: boolean;
   /**
    * Shown instead of the recorder, for a host where recording is turned off.
@@ -74,6 +77,11 @@ export type MeetingsListProps = {
    * the list refreshes when the person comes back to it.
    */
   focused?: boolean;
+  /**
+   * Refresh your own state shown here too, such as whether recording is on. Called
+   * when the person pulls the list, comes back to the screen or returns to the app.
+   */
+  onRefresh?: () => unknown;
   /**
    * Extra space below the list, such as Android's bottom safe-area inset. On iOS the
    * list already keeps clear of the bars and the home indicator, including a
@@ -93,10 +101,11 @@ export function MeetingsList({
   onOpen,
   externalRef = null,
   liveTranscript = true,
-  liveTranscriptDefault = false,
+  liveTranscriptDefault,
   recordingOff,
   header,
   focused,
+  onRefresh,
   bottomInset = 0,
 }: MeetingsListProps) {
   const msg = useOpenGeniText();
@@ -110,16 +119,22 @@ export function MeetingsList({
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   const refreshList = list.refresh;
   const [pulling, setPulling] = useState(false);
+  const hostRefresh = useRef(onRefresh);
+  hostRefresh.current = onRefresh;
+  const refreshAll = useCallback(
+    () => Promise.all([refreshList(), Promise.resolve(hostRefresh.current?.())]),
+    [refreshList],
+  );
 
   useEffect(() => {
-    if (focused) void refreshList();
-  }, [focused, refreshList]);
+    if (focused) void refreshAll();
+  }, [focused, refreshAll]);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") void refreshList();
+      if (state === "active") void refreshAll();
     });
     return () => subscription.remove();
-  }, [refreshList]);
+  }, [refreshAll]);
   // A recording that just finished uploading shows up (and starts transcribing) at once.
   const finishedCount = recorder?.finished.length ?? 0;
   useEffect(() => {
@@ -145,7 +160,7 @@ export function MeetingsList({
           refreshing={pulling}
           onRefresh={() => {
             setPulling(true);
-            void list.refresh().finally(() => setPulling(false));
+            void refreshAll().finally(() => setPulling(false));
           }}
         />
       }
@@ -160,7 +175,10 @@ export function MeetingsList({
           externalRef={externalRef}
           liveTranscript={
             liveTranscript && liveModel
-              ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
+              ? {
+                  defaultOn: liveTranscriptDefault ?? models.liveTranscript ?? false,
+                  usdPerHour: liveModel.usdPerHour,
+                }
               : null
           }
         />
@@ -519,9 +537,12 @@ function RecorderCard({
                     color: c["fg-muted"],
                   }}
                 >
-                  {liveOn
-                    ? `${msg("native.meetings.meetingsList.showsWhatSSaid")} ${liveCostHint(msg, liveTranscript.usdPerHour)}`
-                    : msg("native.meetings.meetingsList.showsWhatSSaid")}
+                  {[
+                    msg("native.meetings.meetingsList.showsWhatSSaid"),
+                    liveOn ? liveCostHint(msg, liveTranscript.usdPerHour) : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                 </Text>
               </View>
               <Switch
@@ -703,12 +724,17 @@ function LivePreview({ recorder }: { recorder: MeetingRecorder }) {
 }
 
 /* The microphone's level, read a few times a second; a flat bar while paused. */
-// Input levels are RMS x 4. Anything a real room picks up stays well above this
-// (about -78 dBFS); a muted, blocked or broken microphone delivers silence.
-const SILENT_LEVEL = 0.0005;
+// Input levels are RMS x 4. A working microphone's own noise stays well above
+// this (about -112 dBFS) even in a quiet room between sentences; a muted,
+// blocked or broken one delivers digital silence.
+const SILENT_LEVEL = 0.00001;
 const SILENT_AFTER_MS = 10_000;
 
-/** True once a running recording has heard nothing at all for a while. */
+/**
+ * True once a running recording has heard nothing at all since it started or
+ * resumed. A microphone that has delivered sound is working, so a pause in
+ * the conversation, however long, never counts.
+ */
 function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolean {
   const [silent, setSilent] = useState(false);
   const levels = recorder.levels;
@@ -717,10 +743,14 @@ function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolea
       setSilent(false);
       return;
     }
-    let lastSound = Date.now();
+    const since = Date.now();
     const timer = setInterval(() => {
-      if ((levels()[0] ?? 0) > SILENT_LEVEL) lastSound = Date.now();
-      setSilent(Date.now() - lastSound > SILENT_AFTER_MS);
+      if ((levels()[0] ?? 0) > SILENT_LEVEL) {
+        setSilent(false);
+        clearInterval(timer);
+        return;
+      }
+      setSilent(Date.now() - since > SILENT_AFTER_MS);
     }, 500);
     return () => clearInterval(timer);
   }, [active, levels]);

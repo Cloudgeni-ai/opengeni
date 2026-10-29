@@ -106,6 +106,7 @@ export type ComposerDelivery = Pick<
   | "steer"
   | "sending"
   | "canSend"
+  | "preparing"
   | "error"
   | "clearError"
   | "reconnecting"
@@ -136,6 +137,13 @@ export { defaultChatComposerMessages } from "../composer-messages";
 export type { ChatComposerMessages } from "../composer-messages";
 
 export type ComposerSubmitMode = "queue" | "steer";
+/**
+ * How long a Send pressed while the composer is still preparing waits for it.
+ * Long enough for a slow first load and one retry of a timed-out draft read;
+ * after that the hold ends and the person is told to try again.
+ */
+const HELD_SEND_LIMIT_MS = 30_000;
+
 export type ComposerSubmitBlocker =
   | "disabled"
   | "attachment"
@@ -556,6 +564,45 @@ export function useChatComposerController({
   const annotationsIncomplete = (delivery.annotations ?? []).some(
     (annotation) => annotation.note.trim().length === 0,
   );
+  // Send can be pressed before everything it needs has loaded (right after the
+  // page opens). A draft sent then waits, shown as sending, and goes out once
+  // Send is allowed, instead of being silently ignored. It is cancelled when
+  // the box is cleared, and otherwise ends only when the delivery has stopped
+  // preparing and still can't send: a real blocker, which shows its message.
+  const preparing = delivery.preparing === true;
+  const hasDraftText = visibleValue.trim().length > 0 || (attachments?.attachments.length ?? 0) > 0;
+  const waitsForPreparation = preparing && hasDraftText;
+  const heldSendRef = useRef<((ready: boolean) => void) | null>(null);
+  // The notice a held Send that gave up showed, so the next Send or edit can
+  // clear exactly it; it must not outlive the moment or hide a later error.
+  const heldSendNoticeRef = useRef<Notice | null>(null);
+  const clearHeldSendNotice = useCallback(() => {
+    const shown = heldSendNoticeRef.current;
+    if (!shown) return;
+    heldSendNoticeRef.current = null;
+    setNotice((current) => (current === shown ? null : current));
+  }, []);
+  // A held Send uses the composer as it is when it is released.
+  const latestSendRef = useRef({ delivery, resumesOnSend, singleSend });
+  useLayoutEffect(() => {
+    latestSendRef.current = { delivery, resumesOnSend, singleSend };
+  });
+  const deliveryCanSend = delivery.canSend;
+  useEffect(() => {
+    const release = heldSendRef.current;
+    if (!release) return;
+    const ready = deliveryCanSend && !disabled;
+    if (!ready && waitsForPreparation) return;
+    heldSendRef.current = null;
+    release(ready);
+  }, [deliveryCanSend, disabled, waitsForPreparation]);
+  useEffect(
+    () => () => {
+      heldSendRef.current?.(false);
+      heldSendRef.current = null;
+    },
+    [],
+  );
 
   const submitBlocker: ComposerSubmitBlocker = disabled
     ? "disabled"
@@ -567,13 +614,14 @@ export function useChatComposerController({
           ? "command"
           : annotationsIncomplete
             ? "annotations"
-            : delivery.canSend
+            : delivery.canSend || waitsForPreparation
               ? null
               : "empty";
   const canSubmit = submitBlocker === null;
 
   const submit = useCallback(
     async (mode: ComposerSubmitMode): Promise<boolean> => {
+      clearHeldSendNotice();
       if (commandDraftBlocked) {
         setNotice({ tone: "error", message: messages.slashCommandBlocked });
         delivery.clearError();
@@ -587,17 +635,48 @@ export function useChatComposerController({
         delivery.requestAnnotationReview?.();
         return false;
       }
-      if (!delivery.canSend) return false;
+      if (!delivery.canSend && !waitsForPreparation) return false;
       submittingRef.current = true;
       setSubmitting(true);
       setSubmittingMode(mode);
       try {
-        if (resumesOnSend) return await delivery.steer();
+        if (!delivery.canSend) {
+          let gaveUp = false;
+          const ready = await new Promise<boolean>((resolve) => {
+            // Never wait forever: a load that hangs ends the hold with a message.
+            const limit = window.setTimeout(() => {
+              if (heldSendRef.current !== settle) return;
+              heldSendRef.current = null;
+              gaveUp = true;
+              resolve(false);
+            }, HELD_SEND_LIMIT_MS);
+            const settle = (value: boolean) => {
+              window.clearTimeout(limit);
+              resolve(value);
+            };
+            heldSendRef.current = settle;
+          });
+          if (!ready) {
+            if (gaveUp && mountedRef.current) {
+              const gaveUpNotice: Notice = {
+                tone: "error",
+                message: messages.heldSendGaveUp ?? t("composerMessages.heldSendGaveUp"),
+              };
+              heldSendNoticeRef.current = gaveUpNotice;
+              setNotice(gaveUpNotice);
+            }
+            return false;
+          }
+        }
+        const current = latestSendRef.current;
+        if (current.resumesOnSend) return await current.delivery.steer();
         // With one Send, Cmd/Ctrl+Enter is just Send.
-        if (mode !== "steer" || singleSend) return await delivery.send();
+        if (mode !== "steer" || current.singleSend) return await current.delivery.send();
         // Cmd/Ctrl+Enter and the button beside Send send the other way:
         // Steer when Send queues, queue when Send steers.
-        return delivery.sendAlternate ? await delivery.sendAlternate() : await delivery.steer();
+        return current.delivery.sendAlternate
+          ? await current.delivery.sendAlternate()
+          : await current.delivery.steer();
       } finally {
         submittingRef.current = false;
         if (mountedRef.current) {
@@ -609,13 +688,15 @@ export function useChatComposerController({
     [
       annotationsIncomplete,
       blockedByAttachment,
+      clearHeldSendNotice,
       commandDraftBlocked,
       delivery,
       disabled,
       messages.annotationNotesRequired,
+      messages.heldSendGaveUp,
       messages.slashCommandBlocked,
-      resumesOnSend,
-      singleSend,
+      t,
+      waitsForPreparation,
     ],
   );
 
@@ -766,6 +847,13 @@ export function useChatComposerController({
       current?.message === messages.annotationNotesRequired ? null : current,
     );
   }, [annotationsIncomplete, messages.annotationNotesRequired]);
+  // Editing the draft ends a held Send's notice (so does the next Send). A
+  // background error, such as a draft read being retried, does not: the
+  // person still needs to know their message wasn't sent.
+  const attachmentCount = attachments?.attachments.length ?? 0;
+  useEffect(() => {
+    clearHeldSendNotice();
+  }, [attachmentCount, clearHeldSendNotice, visibleValue]);
 
   const runControlOperation = useCallback(async (operation: () => Promise<void>) => {
     if (controlOperationRef.current) return false;
@@ -1375,7 +1463,7 @@ export type ComposerModelPickerProps = {
   onChange?: ((modelId: string) => void) | undefined;
   label?: string | undefined;
   className?: string | undefined;
-  /** Filter to Codex models for remote_v2-locked sessions. */
+  /** Offer only Codex models; other providers' models are shown disabled. */
   codexOnly?: boolean | undefined;
 };
 
@@ -2176,7 +2264,9 @@ function AttachmentChips({
   }
 
   return (
-    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5">
+    // Compact chips extend their touch targets beyond their visible borders.
+    // Keep neighboring rows and columns outside those expanded hit areas.
+    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5 pointer-coarse:gap-2.5">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
         const secureContextRequired = attachment.errorCode === "secure_context_required";

@@ -356,6 +356,8 @@ async function settleOrganizationMembershipProtocols(
   }
 }
 
+const EXTERNAL_USER_SUBJECT = /^external_user:[0-9a-f-]{36}$/;
+
 /**
  * Remove one workspace membership through the fenced SECURITY DEFINER
  * teardown (migration 0278): the same prepare/settle/command protocol as
@@ -456,6 +458,25 @@ export async function removeWorkspaceMember(
         return (row.result as { removed?: unknown } | null)?.removed === true;
       },
     );
+    // Every removal of an external member, by the app's key or by a person,
+    // stamps a revocation marker under the organization fence held above,
+    // even when no row was left to remove: a request that authenticated
+    // before this removal must not state the member back in afterwards.
+    if (EXTERNAL_USER_SUBJECT.test(input.targetSubjectId)) {
+      await withRlsContext(
+        txDb,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) => {
+          await scopedDb.execute(sql`insert into external_workspace_member_revocations
+              (account_id, workspace_id, subject_id, revocation_sequence)
+            values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.targetSubjectId},
+              nextval('external_workspace_member_revocation_seq'))
+            on conflict (account_id, workspace_id, subject_id) do update
+              set revocation_sequence = excluded.revocation_sequence,
+                revoked_at = clock_timestamp()`);
+        },
+      );
+    }
     if (organizationAdministrationCapabilityId) {
       await txDb.execute(
         sql`select close_organization_shared_workspace_administration_capability(

@@ -65,7 +65,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const completeConnect = useCallback(() => {
     setConnectRequest(null);
-    void context.refreshGitHub(workspaceId);
+    // The connect flow just changed the binding: read GitHub's list fresh.
+    void context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
   }, [context, workspaceId]);
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "github:manage");
   const canManagePersonal = hasWorkspacePermission(
@@ -88,8 +89,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const busy = context.githubAppBusy || disconnecting;
 
   // A failed status fetch with no prior snapshot is unknown, not unbound: show a
-  // visible failure with a retry instead of pinning the tile at Loading.
+  // visible failure with a retry instead of pinning the tile at Loading. The
+  // same goes for a repository list that never loaded.
   const statusFailed = status === null && !context.repoBusy && context.githubStatusFailed;
+  const repositoriesFailed =
+    status !== null &&
+    !context.repoBusy &&
+    context.githubStatusFailed &&
+    !context.githubCatalogReady;
+  const loadFailed = statusFailed || repositoriesFailed;
   const catalogLoading = context.repoBusy || !context.githubCatalogReady;
   const personalConnection = context.personalGitHubStatus?.connection ?? null;
   const personalConnected = personalConnection?.status === "active";
@@ -99,7 +107,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const bound = status?.status === "bound" && installations.length > 0;
   const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
   const chip =
-    personalNeedsAttention || broken || statusFailed
+    personalNeedsAttention || broken || loadFailed
       ? ({ label: "Needs attention", tone: "warn" } as const)
       : personalConnected
         ? ({ label: "Connected", tone: "ok" } as const)
@@ -394,7 +402,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     mark: { logoSrc: GITHUB_LOGO_URL, monogram: "G" },
     chip,
     connection: facts,
-    ...(bound
+    ...(bound && !repositoriesFailed
       ? {
           access: {
             title: "Repositories",
@@ -416,15 +424,20 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       : {}),
     options,
     footer,
-    ...(statusFailed
+    ...(loadFailed
       ? {
           notice: {
             tone: "failed" as const,
-            title: "GitHub status could not be loaded.",
-            description: "The GitHub App binding is unknown until the status loads.",
+            title: statusFailed
+              ? "GitHub status could not be loaded."
+              : "Repositories could not be loaded.",
+            ...(statusFailed
+              ? { description: "The GitHub App binding is unknown until the status loads." }
+              : {}),
             action: {
               label: "Retry",
-              onClick: () => void context.refreshGitHub(workspaceId),
+              onClick: () =>
+                void context.refreshGitHub(workspaceId, undefined, { userInitiated: true }),
             },
           },
         }

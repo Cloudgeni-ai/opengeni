@@ -76,6 +76,15 @@ test("recomputes a merge and rejects a provider merge that silently drops earlie
       "corrupt merge",
     );
     expect(() => verifyMergeContent(before, corrupt, cwd)).toThrow("landed merge content mismatch");
+    // A squash commit titled "(#N)" is recomputed from its parent and PR #N's head.
+    const squash = git("commit-tree", `${head}^{tree}`, "-p", before, "-m", "Add pr (#7)");
+    const heads = (number: number) => (number === 7 ? pr : null);
+    expect(verifyMergeContent(before, squash, cwd, heads).verified).toEqual([squash]);
+    expect(verifyMergeContent(before, squash, cwd, () => null).singleParent).toEqual([squash]);
+    const badSquash = git("commit-tree", `${pr}^{tree}`, "-p", before, "-m", "Add pr (#7)");
+    expect(() => verifyMergeContent(before, badSquash, cwd, heads)).toThrow(
+      "landed merge content mismatch",
+    );
     expect(() => verifyMergeContent(pr, before, cwd)).toThrow();
     expect(() => verifyMergeContent("main", head, cwd)).toThrow("exact base/head");
   } finally {

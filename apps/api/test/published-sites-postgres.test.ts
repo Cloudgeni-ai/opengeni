@@ -31,6 +31,7 @@ import {
   createDb,
   createConnection,
   encryptEnvironmentValue,
+  recordSiteToolAllowance,
   updateConnectorToolPermissionPolicies,
   createOrganizationApiKey,
   createSession,
@@ -60,6 +61,7 @@ import { buildOrganizationMcpServer } from "../src/organization-mcp";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { siteRuntimeBudgetLimits } from "../src/site-publishing/runtime";
+import { clearSiteOutsideFundingMemo } from "../src/site-publishing/agent-model";
 import { SITE_AGENT_DEFAULTS_VERSION } from "../src/site-publishing/agent-session";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
@@ -1284,7 +1286,7 @@ test("site-runtime checks the gateway signature before anything else", async () 
 }, 60_000);
 
 /** Real account expansion, encrypted credentials and HTTP MCP; no gateway mocks. */
-async function pageToolsFixture() {
+async function pageToolsFixture(options: { requireApproval?: string[] } = {}) {
   const authorizations: string[] = [];
   const callAuthorizations: string[] = [];
   let atProvider: (() => Promise<void>) | undefined;
@@ -1319,6 +1321,7 @@ async function pageToolsFixture() {
           url: `${proxy.url}mcp`,
           cacheToolsList: false,
           allowedTools: ["search_documents", "fetch_document"],
+          ...(options.requireApproval ? { requireApproval: options.requireApproval } : {}),
           connectionRef: {
             providerDomain: "127.0.0.1",
             kind: "api_key",
@@ -1509,7 +1512,10 @@ test("published page tools: declarations, audiences, live membership and approva
         approvalToken,
       });
       expect(targeted.status, JSON.stringify(targeted.json)).toBe(409);
-      expect(targeted.json.error.message).toBe("tool_gateway_approval_required");
+      // A published page has no Opengeni frame to confirm in.
+      expect(targeted.json.error.details.code).toBe(
+        approvalToken ? "tool_gateway_approval_required" : "site_tool_consent_requires_opengeni",
+      );
     }
     expect(f.provider.calls).toHaveLength(0);
     const visitor = visitorId();
@@ -1545,6 +1551,151 @@ test("published page tools: declarations, audiences, live membership and approva
     await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
     expect((await f.post("catalog", {}, member)).status).toBe(403);
     expect(f.provider.calls).toHaveLength(0);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+// Regression: Bendik's newsletter Site could not send Gmail after he set the
+// recommended-Ask "Send message" tool to Allow. Sites call through targeted
+// resolve/invoke, so a saved Allow must make that path work, and switching the
+// tool back to Ask must stop the next call before the provider is reached. On a
+// published hostname that call cannot be confirmed in the page; the viewer's
+// own "Always allow for this Site" still applies there.
+test("published page tools: a saved Allow makes a recommended-Ask connection tool callable through targeted invoke", async () => {
+  const f = await pageToolsFixture({ requireApproval: ["search_documents"] });
+  try {
+    for (const account of [f.prod, f.personal]) {
+      const resolved = await f.post("resolve", { target: { identity: account.identity } });
+      expect(resolved.status, JSON.stringify(resolved.json)).toBe(200);
+      const invoked = await f.post("invoke", {
+        target: { identity: account.identity },
+        operationId: crypto.randomUUID(),
+        expectedDefinitionDigest: resolved.json.definitionDigest,
+        arguments: { query: account.label },
+      });
+      expect(invoked.status, JSON.stringify(invoked.json)).toBe(200);
+      expect(invoked.json.result.content[0].text).toBe(`found document for ${account.label}`);
+    }
+    expect(f.provider.calls).toHaveLength(2);
+    const resolved = await f.post("resolve", { target: { identity: f.prod.identity } });
+    expect(resolved.status, JSON.stringify(resolved.json)).toBe(200);
+    await updateConnectorToolPermissionPolicies(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: f.owner.subjectId,
+      connectionId: f.prod.connection.id,
+      serverId: "grafana",
+      toolNames: [f.prod.identity.toolName],
+      policy: "ask",
+    });
+    // The earlier definition said Allow: it is stale, not silently approved.
+    const stale = await f.post("invoke", {
+      target: { identity: f.prod.identity },
+      operationId: crypto.randomUUID(),
+      expectedDefinitionDigest: resolved.json.definitionDigest,
+      arguments: { query: "after ask" },
+    });
+    expect(stale.status, JSON.stringify(stale.json)).toBe(409);
+    expect(stale.json.error.details.code).toBe("tool_definition_stale");
+    const current = await f.post("resolve", { target: { identity: f.prod.identity } });
+    expect(current.status, JSON.stringify(current.json)).toBe(200);
+    expect(current.json.entry.approval).toBe("human");
+    const invokeAsked = () =>
+      f.post("invoke", {
+        target: { identity: f.prod.identity },
+        operationId: crypto.randomUUID(),
+        expectedDefinitionDigest: current.json.definitionDigest,
+        arguments: { query: "after ask" },
+      });
+    const asked = await invokeAsked();
+    expect(asked.status, JSON.stringify(asked.json)).toBe(409);
+    expect(asked.json.error.message).toBe("Open this Site in Opengeni to confirm this action.");
+    expect(asked.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
+    expect(f.provider.calls).toHaveLength(2);
+    // Another person's allowance, or one for another connection, changes nothing.
+    const allowance = {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      siteId: f.site.id,
+      serverId: "grafana",
+      toolName: f.prod.identity.toolName,
+    };
+    await recordSiteToolAllowance(db.db, {
+      ...allowance,
+      subjectId: f.owner.subjectId,
+      connectionId: f.prod.connection.id,
+    });
+    await recordSiteToolAllowance(db.db, {
+      ...allowance,
+      subjectId: f.member.subjectId,
+      connectionId: f.staging.connection.id,
+    });
+    expect((await invokeAsked()).status).toBe(409);
+    expect(f.provider.calls).toHaveLength(2);
+    // The viewer's own "Always allow for this Site" for this connection runs it.
+    await recordSiteToolAllowance(db.db, {
+      ...allowance,
+      subjectId: f.member.subjectId,
+      connectionId: f.prod.connection.id,
+    });
+    const allowed = await invokeAsked();
+    expect(allowed.status, JSON.stringify(allowed.json)).toBe(200);
+    expect(allowed.json.result.content[0].text).toBe("found document for after ask");
+    expect(f.provider.calls).toHaveLength(3);
+    expect(f.callAuthorizations.at(-1)).toBe("Bearer page-prod");
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+// A Site that declares the connector itself runs on each viewer's own account.
+// A viewer with several accounts must choose, which a published page cannot
+// ask; their own "Always allow for this Site" on one account chooses it.
+test("published page tools: a declared connector runs on the viewer's own account", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const canonical = { serverId: "grafana", toolName: "search_documents" };
+    const site = await f.publish("Canonical page tools", "workspace", [canonical]);
+    const publication = await f.publication(f.owner, site.id, "PUT", {
+      agent: { enabled: false },
+    });
+    expect(publication.status, JSON.stringify(publication.json)).toBe(201);
+    const host = String(publication.json.hostname);
+    const session = await f.signIn(f.member, host);
+    const post = (method: string, body: unknown) =>
+      f.gateway(host, "POST", `/tools/${method}`, { session, body });
+    const invoke = () =>
+      post("invoke", {
+        target: { identity: canonical },
+        operationId: crypto.randomUUID(),
+        arguments: { query: "canonical" },
+      });
+    const choose = await invoke();
+    expect(choose.status, JSON.stringify(choose.json)).toBe(409);
+    expect(choose.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
+    expect(f.provider.calls).toHaveLength(0);
+    await recordSiteToolAllowance(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: f.member.subjectId,
+      siteId: site.id,
+      serverId: "grafana",
+      toolName: "search_documents",
+      connectionId: f.personal.connection.id,
+    });
+    const ran = await invoke();
+    expect(ran.status, JSON.stringify(ran.json)).toBe(200);
+    expect(ran.json.tool.entry.identity).toEqual(f.personal.identity);
+    expect(f.callAuthorizations).toEqual(["Bearer page-personal"]);
+    // Another member's own account route is not declared here.
+    const foreign = await post("invoke", {
+      target: { identity: f.foreign.identity },
+      operationId: crypto.randomUUID(),
+      arguments: { query: "foreign" },
+    });
+    expect(foreign.status).toBe(403);
+    expect(f.provider.calls).toHaveLength(1);
   } finally {
     f.close();
   }
@@ -2215,7 +2366,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
     "/takedown",
   );
   expect(readOnlyTakedown.status).toBe(403);
-  expect(code(readOnlyTakedown)).toBeUndefined();
+  expect(code(readOnlyTakedown)).toBe("missing_permission");
   expect(JSON.stringify(readOnlyTakedown.json)).toContain("artifacts:publish");
   // A signed-in member is talking to the Site's assistant when it is taken down.
   const memberToken = await f.signIn(f.member, site.host);
@@ -2269,7 +2420,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
 
   const readOnlyRestore = await f.publication(readOnly, site.id, "POST", {}, "/restore");
   expect(readOnlyRestore.status).toBe(403);
-  expect(code(readOnlyRestore)).toBeUndefined();
+  expect(code(readOnlyRestore)).toBe("missing_permission");
   // The takedown revoked every viewer session and cancelled the running conversation.
   const [revoked] = await shared.admin`select count(*)::int as n from site_viewer_sessions
     where site_id = ${site.id} and revoked_at is null`;
@@ -3819,6 +3970,81 @@ test("the model follows the viewer: people outside the workspace never use a sub
     code: "not_available_for_viewer",
     feature: "agent_model",
   });
+});
+
+test("an assistant the workspace can't pay for is unavailable to outsiders, not a purchase prompt", async () => {
+  clearSiteOutsideFundingMemo();
+  // Credit limits on, and the account has no credits yet.
+  const f = await fixture({ billingMode: "stripe" });
+  const site = await f.live("Unfunded", { access: "public", agent: { enabled: true } });
+  const codes = async () =>
+    (await f.publication(f.owner, site.id, "GET")).json.warnings.map(
+      (warning: { code: string }) => warning.code,
+    );
+  const start = (who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const send = (sessionId: string, who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      ...who,
+      body: { type: "user.message", payload: { text: "More" } },
+    });
+  const credits = async (micros: number) => {
+    const key = crypto.randomUUID();
+    await shared.admin`insert into credit_ledger_entries
+      (account_id, type, amount_micros, source_type, source_id, idempotency_key, occurred_at)
+      values (${f.accountId}, ${micros > 0 ? "grant" : "model_usage_debit"}, ${micros},
+        ${micros > 0 ? null : "model_response"}, ${micros > 0 ? null : `fixture:${key}`}, ${key}, now())`;
+  };
+  const unavailable = (refused: { status: number; json: any }, reason: string) => {
+    expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+    expect(refused.json.error.message).toBe("This Site's assistant isn't available right now");
+    expect(refused.json.error.details).toMatchObject({
+      code: "not_available_for_viewer",
+      feature: "agent",
+      reason,
+    });
+  };
+
+  const visitor = visitorId();
+  const config = await f.gateway(site.host, "GET", "/site/config", { visitor });
+  expect(config.status, JSON.stringify(config.json)).toBe(200);
+  expect(config.json.capabilities.agent).toBe(false);
+  expect(config.json.agent.enabled).toBe(false);
+  expect(await codes()).toContain("agent_model_outside_no_credits");
+  unavailable(await start({ visitor }), "no_credits");
+  // Nothing is left behind for the refused start.
+  const [left] = await shared.admin`select count(*)::int as count from sessions
+    where workspace_id = ${f.workspace.id}`;
+  expect(left!.count).toBe(0);
+  // A member still sees the assistant and keeps the ordinary credit refusal,
+  // which they can act on, now with a stable details.code.
+  const memberSession = await f.signIn(f.member, site.host);
+  const memberConfig = await f.gateway(site.host, "GET", "/site/config", {
+    session: memberSession,
+  });
+  expect(memberConfig.json.capabilities.agent).toBe(true);
+  const member = await start({ session: memberSession });
+  expect(member.status, JSON.stringify(member.json)).toBe(402);
+  expect(member.json.error).toMatchObject({
+    code: "payment_required",
+    details: { code: "insufficient_credits" },
+  });
+
+  // With credits, the warning is gone at once and a turn starts. site.config
+  // reuses its answer briefly (unit-tested), so forget it here.
+  await credits(5_000_000);
+  expect(await codes()).not.toContain("agent_model_outside_no_credits");
+  clearSiteOutsideFundingMemo();
+  const funded = await f.gateway(site.host, "GET", "/site/config", { visitor });
+  expect(funded.json.capabilities.agent).toBe(true);
+  const started = await start({ visitor });
+  expect(started.status, JSON.stringify(started.json)).toBe(202);
+
+  // Credits run out mid-conversation: the next message gets the same plain
+  // refusal, not the purchase prompt.
+  await credits(-5_000_000);
+  unavailable(await send(started.json.id, { visitor }), "no_credits");
+  clearSiteOutsideFundingMemo();
 });
 
 test("legacy three-window settlement, release and conversion preserve newer reservations", async () => {

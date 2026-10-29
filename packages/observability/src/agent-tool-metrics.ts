@@ -58,6 +58,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   notification_withdraw: "session",
   inbox_tidy: "session",
   set_other_session_title: "session",
+  bot_template_save: "session",
   sessions_list: "session",
   sandboxes_list: "machine",
   sandbox_attach: "machine",

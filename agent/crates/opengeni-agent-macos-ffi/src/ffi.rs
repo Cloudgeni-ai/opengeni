@@ -154,8 +154,8 @@ pub(super) fn machine_locked() -> Result<bool, MacFfiError> {
 }
 
 /// The facts [`crate::console_state`] decides from: this session's
-/// CoreGraphics dictionary, the IORegistry root's `IOConsoleLocked`, and the
-/// owner of `/dev/console`.
+/// CoreGraphics dictionary, the IORegistry root's `IOConsoleUsers` and
+/// `IOConsoleLocked`, and the owner of `/dev/console`.
 pub(super) fn console_facts() -> Result<crate::MacConsoleFacts, MacFfiError> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -173,33 +173,74 @@ pub(super) fn console_facts() -> Result<crate::MacConsoleFacts, MacFfiError> {
             .and_then(|value| value.downcast::<CFBoolean>())
             .map(bool::from)
     };
+    let user = unsafe { getuid() };
     Ok(crate::MacConsoleFacts {
         session_locked: flag("CGSSessionScreenIsLocked").unwrap_or(false),
         session_on_console: flag("kCGSSessionOnConsoleKey").unwrap_or(true),
         console_locked: registry_console_locked(),
+        console_session: registry_console_users().map(|users| crate::console_session(&users, user)),
         console_owner: std::fs::metadata("/dev/console")
             .ok()
             .map(|metadata| metadata.uid()),
-        user: unsafe { getuid() },
+        user,
     })
 }
 
-/// The IORegistry root's `IOConsoleLocked`; false when it cannot be read.
-fn registry_console_locked() -> bool {
+/// A property of the IORegistry root, or `None` when it cannot be read.
+fn registry_root_property(name: &str) -> Option<CFType> {
     let root = unsafe { IORegistryGetRootEntry(0) };
     if root == 0 {
-        return false;
+        return None;
     }
-    let key = CFString::new("IOConsoleLocked");
+    let key = CFString::new(name);
     let value = unsafe {
         IORegistryEntryCreateCFProperty(root, key.as_concrete_TypeRef(), core::ptr::null(), 0)
     };
     unsafe { IOObjectRelease(root) };
     if value.is_null() {
-        return false;
+        return None;
     }
-    let value = unsafe { CFType::wrap_under_create_rule(value) };
-    value.downcast::<CFBoolean>().is_some_and(bool::from)
+    Some(unsafe { CFType::wrap_under_create_rule(value) })
+}
+
+/// The IORegistry root's `IOConsoleUsers`: every logged-in GUI session, with
+/// the one on the console marked. `None` when it cannot be read, or when an
+/// entry has no user id (then which session is on screen is not proven).
+fn registry_console_users() -> Option<Vec<crate::MacConsoleUser>> {
+    use core_foundation::array::CFArray;
+    use core_foundation::number::CFNumber;
+
+    let users = registry_root_property("IOConsoleUsers")?.downcast::<CFArray>()?;
+    crate::console_state::console_users(users.get_all_values().into_iter().map(|entry| {
+        // The array holds its entries for this call; each is checked to be a
+        // dictionary before it is wrapped as one (retained again).
+        let item = unsafe { CFType::wrap_under_get_rule(entry) };
+        if !item.instance_of::<CFDictionary>() {
+            return None;
+        }
+        let entry: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(entry as CFDictionaryRef) };
+        let value = |key: &str| entry.find(CFString::new(key));
+        let flag = |key: &str| {
+            value(key)
+                .and_then(|value| value.downcast::<CFBoolean>())
+                .is_some_and(bool::from)
+        };
+        Some(crate::console_state::MacConsoleUserEntry {
+            user: value("kCGSSessionUserIDKey")
+                .and_then(|value| value.downcast::<CFNumber>())
+                .and_then(|number| number.to_i64()),
+            on_console: flag("kCGSSessionOnConsoleKey"),
+            screen_locked: flag("CGSSessionScreenIsLocked"),
+        })
+    }))
+}
+
+/// The IORegistry root's `IOConsoleLocked`; false when it cannot be read.
+fn registry_console_locked() -> bool {
+    registry_root_property("IOConsoleLocked")
+        .and_then(|value| value.downcast::<CFBoolean>())
+        .is_some_and(bool::from)
 }
 
 /// Fires the Screen Recording + Accessibility system prompts once.

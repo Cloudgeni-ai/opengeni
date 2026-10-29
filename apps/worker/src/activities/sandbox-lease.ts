@@ -57,6 +57,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  summarizeQueuedTurnsByHold,
   countActiveUsers,
   readCreditGrantTotals,
   readManagedAuthNewSignupsSwitch,
@@ -96,6 +97,7 @@ import {
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   type MeterableWarmLease,
   type ReapDrainable,
   type RetainedProcessProviderProof,
@@ -125,6 +127,7 @@ import { appendSessionCommandOutput } from "@opengeni/db/session-command-output"
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
+  backgroundCommandWakeSender,
   agentConnectionCurrent,
   connectedRunnerReleaseMode,
   type ConnectedRunnerReleaseMode,
@@ -238,6 +241,7 @@ import {
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordSandboxCheckpointStalenessGauges,
+  recordQueuedTurnHoldGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -253,6 +257,7 @@ import {
   persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "../sandbox-archive-storage";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 
@@ -764,7 +769,7 @@ export function createSandboxLeaseActivities(
           recordSandboxCommandContainment(observability, outcome),
         onCommandContainmentError: (error: unknown) => {
           observability.warn("sandbox reaper: retained command containment inspection failed", {
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         },
       };
@@ -801,7 +806,7 @@ export function createSandboxLeaseActivities(
         settings.sandboxRotationBatchSize,
       ).catch((error) => {
         observability.warn("sandbox reaper: provider-deadline rotation request failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
         return 0;
       });
@@ -951,7 +956,7 @@ export function createSandboxLeaseActivities(
       } catch (error) {
         observability.warn("sandbox reaper: idle checkpoint resume failed", {
           ...fields,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
         return skipped("provider_error");
       }
@@ -990,7 +995,8 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability, objectStorage, bus } = await services();
+      const { db, settings, observability, objectStorage, bus, wakeSessionWorkflow } =
+        await services();
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs
@@ -1015,6 +1021,7 @@ export function createSandboxLeaseActivities(
           captureAttempt,
           objectStorage,
           bus,
+          wakeSessionWorkflow,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -1030,7 +1037,7 @@ export function createSandboxLeaseActivities(
           captureOperationId: lease?.archiveCapture?.operationId ?? input.operationId,
           captureAttempt: lease?.archiveCapture?.attempt ?? activityAttempt,
           timeoutClass: input.timeoutClass,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         };
         if (error instanceof SandboxDrainRecoveryDeferredError) {
           observability.info("sandbox reaper: per-sandbox recovery deferred safely", details);
@@ -1058,7 +1065,7 @@ export function createSandboxLeaseActivities(
       const parentUpdates = await reconcilePendingParentSystemUpdates(service, 100).catch(
         (error) => {
           observability.warn("system-update outbox reconciliation failed", {
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
           return { claimed: 0, delivered: 0, failed: 1 };
         },
@@ -1066,7 +1073,7 @@ export function createSandboxLeaseActivities(
       const expiredSessionListSnapshots = await reapExpiredSessionListSnapshots(db, 500).catch(
         (error) => {
           observability.warn("session-list snapshot reconciliation failed", {
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
           return 0;
         },
@@ -1088,7 +1095,15 @@ export function createSandboxLeaseActivities(
       // Connected Machine commands are not managed-sandbox lease state. Their
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
-      await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+      await reconcileConnectedMachineBackgroundCommands(
+        db,
+        settings,
+        observability,
+        service.bus,
+        undefined,
+        undefined,
+        service.wakeSessionWorkflow,
+      );
       await reconcileConnectedCommandOutputReleases(db, settings, observability, service.bus);
 
       // Disabling new lease ownership cannot strand a previously dispatched
@@ -1103,7 +1118,7 @@ export function createSandboxLeaseActivities(
         );
       } catch (error) {
         observability.warn("sandbox reaper: Modal create recovery inventory failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
 
@@ -1144,7 +1159,7 @@ export function createSandboxLeaseActivities(
         }
       } catch (error) {
         observability.warn("sandbox reaper: viewer force-drain workspace read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
       forceDrained = await forceDrainOverLimitWorkspaces(
@@ -1164,6 +1179,7 @@ export function createSandboxLeaseActivities(
         probeRetainedProcess,
         options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
         service.bus,
+        service.wakeSessionWorkflow,
       );
 
       // A request or PTY left on a Modal box whose lease epoch has ended can
@@ -1181,7 +1197,7 @@ export function createSandboxLeaseActivities(
         recordSandboxOrphansTerminated(observability, modalOrphansTerminated);
       } catch (error) {
         observability.warn("sandbox reaper: Modal orphan sweep failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
 
@@ -1192,14 +1208,14 @@ export function createSandboxLeaseActivities(
         );
       } catch (error) {
         observability.warn("sandbox reaper: compute orphan sweep failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
 
       const checkpointGc = await gcSandboxCheckpointArtifacts(db, settings, observability).catch(
         (error) => {
           observability.warn("sandbox reaper: checkpoint artifact GC failed", {
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
           return { claimed: 0, deleted: 0, failed: 0 };
         },
@@ -1295,14 +1311,14 @@ export function createSandboxLeaseActivities(
           .catch((error: unknown) => {
             service.observability.warn("sandbox reaper: idle checkpoint failed", {
               sandboxLeaseKey: sandboxLeaseTelemetryKey(target.workspaceId, target.sandboxGroupId),
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
           })
           .finally(() => embeddedIdleCheckpoints.delete(key));
       }
     } catch (error) {
       service.observability.warn("sandbox reaper: idle checkpoint inventory failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     const terminated = outcomes.filter(
@@ -1508,7 +1524,7 @@ async function gcSandboxCheckpointArtifacts(
   const adopted = await adoptLegacyModalCheckpointReceipts(db, settings, observability).catch(
     (error) => {
       observability.warn("sandbox reaper: legacy Modal checkpoint discovery failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return 0;
     },
@@ -1553,7 +1569,7 @@ async function gcSandboxCheckpointArtifacts(
         artifactId: claim.id,
         claimId,
         deleted: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
         retryAfterMs,
       }).catch(() => false);
       observability.warn("sandbox reaper: checkpoint artifact delete failed", {
@@ -1561,7 +1577,7 @@ async function gcSandboxCheckpointArtifacts(
         providerBackend: claim.providerBackend,
         objectKind: claim.objectKind,
         attempt: claim.deleteAttempts,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   });
@@ -1616,7 +1632,7 @@ async function adoptLegacyModalCheckpointReceipts(
         workspaceId: slot.workspaceId,
         sandboxGroupId: slot.sandboxGroupId,
         slot: slot.slot,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   });
@@ -1675,7 +1691,9 @@ export async function reconcileConnectedMachineBackgroundCommands(
   bus: ActivityServices["bus"],
   controlRpcOverride?: ControlRpc,
   runnerModeOverride?: typeof connectedRunnerReleaseMode,
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"],
 ): Promise<void> {
+  const wake = backgroundCommandWakeSender(wakeSessionWorkflow);
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
@@ -1699,7 +1717,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
     } catch (error) {
       recordConnectedCommandReconciliation(observability, "claim_failed");
       observability.warn("sandbox reaper: connected-command claim failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return;
     }
@@ -1840,7 +1858,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
               commandId: claim.commandId,
               enrollmentId: claim.enrollmentId,
               connectionInstanceId: claim.connectionInstanceId,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
           }
           await deferConnectedCommandClaim(
@@ -1872,13 +1890,14 @@ export async function reconcileConnectedMachineBackgroundCommands(
           claim,
           proof,
           receipt,
+          wake,
           publish: async (events) => {
             try {
               await bus.publish(claim.workspaceId, claim.sessionId, events);
             } catch (error) {
               observability.warn("sandbox reaper: connected-command event fanout failed", {
                 commandId: claim.commandId,
-                error: error instanceof Error ? error.message : String(error),
+                error: errorMessage(error),
               });
             }
           },
@@ -1901,7 +1920,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
         recordConnectedCommandReconciliation(observability, "settlement_failed");
         observability.warn("sandbox reaper: connected-command settlement failed", {
           commandId: claim.commandId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
         await deferConnectedCommandClaim(db, settings, observability, claim, "settlement_failed");
       }
@@ -1939,7 +1958,7 @@ export async function reconcileConnectedCommandOutputReleases(
     } catch (error) {
       recordConnectedCommandReconciliation(observability, "claim_failed");
       observability.warn("sandbox reaper: connected-command output claim failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return;
     }
@@ -2126,7 +2145,7 @@ export async function releaseClaimedConnectedCommandOutput(
     }).catch(() => false);
     observability.warn("sandbox reaper: connected-command output release deferred", {
       commandId: claim.commandId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -2217,7 +2236,7 @@ async function deferConnectedCommandClaim(
     recordConnectedCommandReconciliation(observability, "defer_failed");
     observability.warn("sandbox reaper: connected-command defer failed", {
       commandId: claim.commandId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -2287,12 +2306,7 @@ async function settleEndedEpochBlockers(
       status = error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "error";
       observability.warn("sandbox reaper: ended-epoch box probe failed", {
         ...details,
-        error:
-          error === RETAINED_PROCESS_PROBE_TIMEOUT
-            ? "provider_timeout"
-            : error instanceof Error
-              ? error.message
-              : String(error),
+        error: error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : errorMessage(error),
       });
     }
     observed.set(instanceId, status);
@@ -2310,7 +2324,7 @@ async function settleEndedEpochBlockers(
     tuples = await listEndedEpochWorkspaceBlockers(db, { limit: ENDED_EPOCH_BLOCKER_LIST_LIMIT });
   } catch (error) {
     observability.warn("sandbox reaper: ended-epoch blocker inventory failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     tuples = [];
   }
@@ -2335,7 +2349,7 @@ async function settleEndedEpochBlockers(
     } catch (error) {
       observability.warn("sandbox reaper: ended-epoch blocker settlement failed", {
         ...details,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -2347,7 +2361,7 @@ async function settleEndedEpochBlockers(
     });
   } catch (error) {
     observability.warn("sandbox reaper: ended-epoch setup inventory failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     setups = [];
   }
@@ -2389,7 +2403,7 @@ async function settleEndedEpochBlockers(
       deferEndedEpochProbe(backoff, turnKey);
       observability.warn("sandbox reaper: ended-epoch setup reconciliation failed", {
         ...details,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -2411,6 +2425,20 @@ function deferEndedEpochProbe(backoff: EndedEpochProbeBackoff, key: string): voi
   });
 }
 
+/** A failed direct wake falls back to the dispatcher; say so, so a broken
+ * signaler does not silently turn every command wake into a 10 s one. */
+function wakeSignalWarning(
+  observability: ActivityServices["observability"],
+  what: string,
+): (error: unknown, wake: { sessionId: string; wakeRevision: number }) => void {
+  return (error, wake) =>
+    observability.warn(`sandbox reaper: ${what} wake signal failed; the dispatcher delivers it`, {
+      sessionId: wake.sessionId,
+      wakeRevision: wake.wakeRevision,
+      error: errorMessage(error),
+    });
+}
+
 async function reconcileTerminalRetainedProcesses(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
@@ -2418,6 +2446,7 @@ async function reconcileTerminalRetainedProcesses(
   probe: RetainedProcessProbeFn,
   inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
   bus: ActivityServices["bus"],
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"],
 ): Promise<void> {
   const claimId = crypto.randomUUID();
   let claims: Awaited<ReturnType<typeof claimTerminalRetainedProcesses>>;
@@ -2430,7 +2459,7 @@ async function reconcileTerminalRetainedProcesses(
   } catch (error) {
     recordRetainedProcessReconciliation(observability, "claim_failed");
     observability.warn("sandbox reaper: retained-process claim failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return;
   }
@@ -2478,7 +2507,7 @@ async function reconcileTerminalRetainedProcesses(
       } catch (error) {
         observability.warn("sandbox reaper: retained-command background recovery failed", {
           processId: process.id,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }
@@ -2584,7 +2613,7 @@ async function reconcileTerminalRetainedProcesses(
         } catch (error) {
           observability.warn("sandbox reaper: legacy deadline cancellation intent failed", {
             processId: process.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       }
@@ -2736,7 +2765,7 @@ async function reconcileTerminalRetainedProcesses(
             observability.warn("sandbox reaper: retained-process provider probe failed", {
               processId: process.id,
               providerBackend: process.providerBackend,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
             observation = { status: "deferred", reason: "provider_error" };
           }
@@ -2759,7 +2788,7 @@ async function reconcileTerminalRetainedProcesses(
         } catch (error) {
           observability.warn("sandbox reaper: retained-process binding adoption failed", {
             processId: process.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
           observation = { status: "deferred", reason: "provider_error" };
         }
@@ -2832,7 +2861,7 @@ async function reconcileTerminalRetainedProcesses(
         } catch (error) {
           observability.warn("sandbox reaper: retained-command background recovery failed", {
             processId: sibling.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       }
@@ -2860,17 +2889,22 @@ async function reconcileTerminalRetainedProcesses(
               (error) => {
                 observability.warn("sandbox reaper: lost-box command event fanout failed", {
                   sandboxGroupId: process.sandboxGroupId,
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                 });
               },
             );
           }
+          await signalBackgroundCommandWakes(
+            marked.backgroundCommandWakes,
+            backgroundCommandWakeSender(wakeSessionWorkflow),
+            { onError: wakeSignalWarning(observability, "lost-box command") },
+          );
           continue;
         }
       } catch (error) {
         observability.warn("sandbox reaper: whole-box loss settlement failed", {
           processId: process.id,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
       // Stale (a draining drain or another observer owns the box): fall back
@@ -2902,16 +2936,21 @@ async function reconcileTerminalRetainedProcesses(
         } catch (error) {
           observability.warn("sandbox reaper: retained-command event fanout failed", {
             processId: process.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       }
+      await signalBackgroundCommandWakes(
+        settlement.backgroundCommandWakes,
+        backgroundCommandWakeSender(wakeSessionWorkflow),
+        { onError: wakeSignalWarning(observability, "retained command") },
+      );
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
       recordRetainedProcessReconciliation(observability, "settlement_failed");
       observability.warn("sandbox reaper: retained-process settlement failed", {
         processId: process.id,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       await deferRetainedProcessClaim(
         db,
@@ -2967,7 +3006,7 @@ async function deferRetainedProcessClaim(
     recordRetainedProcessReconciliation(observability, "defer_failed");
     observability.warn("sandbox reaper: retained-process defer failed", {
       processId: process.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -3331,19 +3370,16 @@ export async function probeRetainedProcessAtProvider(
         throw new Error("Provider command output requires durable capture before settlement");
       return;
     }
-    const page = session.getProviderCommandOutput?.(value);
-    if (page?.command.kind === "modal-router-v1" && typeof value === "string") {
-      if (!session.captureCommandOutput || !(await session.captureCommandOutput(value)))
+    if (session.getProviderCommandOutput?.(value)) {
+      if (
+        typeof value !== "string" ||
+        !session.captureCommandOutput ||
+        !(await session.captureCommandOutput(value))
+      )
         throw new Error("Byte-offset output requires atomic capture before settlement");
       return;
     }
-    if (page) {
-      for (const chunk of page.chunks)
-        if (chunk.text)
-          await captureOutput(chunk.text, chunk.chunkId, chunk.stream, page.streamFidelity);
-    } else {
-      await captureRetainedProbeOutput(process.id, value, captureOutput);
-    }
+    await captureRetainedProbeOutput(process.id, value, captureOutput);
     if (typeof value === "string") await session.acknowledgeCommandOutput?.(value);
   };
 
@@ -3525,7 +3561,7 @@ async function accrueWarmTick(
     leases = await listMeterableWarmLeases(db);
   } catch (error) {
     observability.warn("sandbox reaper: warm-lease read failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return { accrued, workspaceIds };
   }
@@ -3557,7 +3593,7 @@ async function accrueWarmTick(
       observability.warn("sandbox reaper: warm-seconds accrual failed for lease", {
         workspaceId: lease.workspaceId,
         sandboxGroupId: lease.sandboxGroupId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   });
@@ -3624,6 +3660,17 @@ async function refreshQueueLeaseAndCreditGauges(
         recordTurnsQueuedGauge(observability, await countQueuedTurns(db));
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn gauge refresh failed", {
+          error: errorMessage(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        // Publishes nothing until a later migration grants 0988's withheld
+        // runtime EXECUTE (the summary is null).
+        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -3723,7 +3770,7 @@ async function refreshQueueLeaseAndCreditGauges(
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     })(),
@@ -3732,7 +3779,7 @@ async function refreshQueueLeaseAndCreditGauges(
         recordActiveUserGauges(observability, await countActiveUsers(db));
       } catch (error) {
         observability.warn("sandbox reaper: active-user gauge refresh failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     })(),
@@ -3741,7 +3788,7 @@ async function refreshQueueLeaseAndCreditGauges(
         recordCreditGrantGauges(observability, await readCreditGrantTotals(db));
       } catch (error) {
         observability.warn("sandbox reaper: credit-grant gauge refresh failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     })(),
@@ -3755,7 +3802,7 @@ async function refreshQueueLeaseAndCreditGauges(
         recordVerifiedSignupTrialSwitchGauge(observability, trialSwitch?.grantsEnabled === true);
       } catch (error) {
         observability.warn("sandbox reaper: trial-credit switch gauge refresh failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     })(),
@@ -3768,7 +3815,7 @@ async function refreshQueueLeaseAndCreditGauges(
         );
       } catch (error) {
         observability.warn("sandbox reaper: new-signups switch gauge refresh failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     })(),
@@ -3787,7 +3834,7 @@ async function refreshSandboxInventoryGauge(
   } catch (error) {
     recordSandboxInventoryProjectionFailure(observability, domain);
     observability.warn(`sandbox reaper: ${diagnosticName} gauge refresh failed`, {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -3830,7 +3877,7 @@ async function forceDrainOverLimitWorkspaces(
       } catch (error) {
         observability.warn("sandbox reaper: force-drain check failed for workspace", {
           workspaceId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     },
@@ -3865,7 +3912,7 @@ export async function reconcileModalProviderCreates(
     } catch (error) {
       observability.warn("sandbox reaper: Modal create remains fenced pending discovery", {
         ...candidate,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   });
@@ -4007,7 +4054,7 @@ async function sweepComputeOrphansForConfiguredBackend(
     }
   } catch (error) {
     observability.warn("sandbox reaper: stale compute enrollment inventory failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
   if (!settings.computeApiUrl || !settings.computeApiKey || !settings.computeLinkUrl) return 0;
@@ -4061,7 +4108,7 @@ async function sweepModalOrphansForConfiguredBackend(
     liveLeases = await listLiveModalSandboxLeaseAttributions(db);
   } catch (error) {
     observability.warn("sandbox reaper: live Modal lease attribution read failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return 0;
   }
@@ -4093,7 +4140,7 @@ async function sweepModalOrphansForConfiguredBackend(
     } catch (error) {
       recordSandboxInventoryProjectionFailure(observability, "modal_provider");
       observability.warn("sandbox reaper: Modal inventory ownership re-read failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -4236,6 +4283,7 @@ async function terminateDrainableBox(
   attempt: SandboxDrainCaptureAttempt,
   objectStorage: ObjectStorage | null,
   bus: ActivityServices["bus"] | null = null,
+  wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"] | null = null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -4457,6 +4505,10 @@ async function terminateDrainableBox(
         // (terminateProviderBox), so it may capture around a request whose
         // owner crashed. It terminates the box right after either way.
         pointInTimeCapture: providerDrainCaptureIsPointInTime(backend, lease.resumeState),
+        // A compute sandbox whose group ended is deleted without a capture
+        // (below), so a request a dead API process or worker left open on it
+        // no longer keeps it running; the claim decides this under its lock.
+        groupEndDiscard: backend === "compute",
         deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         // An unknown-outcome setup request of a closed attempt never settles
         // on a live box; after the idle grace it no longer pins the drain.
@@ -4499,6 +4551,9 @@ async function terminateDrainableBox(
   // claim fences every arrival), and the persist CAS below re-checks it under
   // the same lock before anything is deleted. The claim stamps its own
   // `teardown_claim` rotation, which is not a rotation of the workspace.
+  // A request whose owner died (an API process during a rollout, a crashed
+  // worker) does not hold the delete up: the claim was taken around it, and
+  // the cold commit settles it only once the box is gone.
   const dispositionLease = captureClaimLease ?? lease;
   if (
     captureDisposition === "capture_required" &&
@@ -4778,9 +4833,8 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(
-    db,
-    {
+  const { wentCold, unpublishedProviderLost, backgroundCommandEvents, backgroundCommandWakes } =
+    await confirmDrainCold(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
@@ -4799,16 +4853,20 @@ async function terminateDrainableBox(
       // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
       providerStopped:
         managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
-    },
-  );
+    });
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
   await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
     observability.warn("sandbox reaper: contained command event fanout failed", {
       sandboxGroupId: row.sandboxGroupId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   });
+  await signalBackgroundCommandWakes(
+    backgroundCommandWakes,
+    backgroundCommandWakeSender(wakeSessionWorkflow),
+    { onError: wakeSignalWarning(observability, "contained command") },
+  );
   if (wentCold) {
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another
@@ -4852,7 +4910,7 @@ async function terminateDrainableBox(
           leaseEpoch: row.leaseEpoch,
           backend: lease.backend,
           instanceId: lease.instanceId,
-          error: eventError instanceof Error ? eventError.message : String(eventError),
+          error: errorMessage(eventError),
         },
       );
     }

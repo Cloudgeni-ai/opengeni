@@ -272,6 +272,7 @@ fn every_series() -> Metrics {
         pressure: [[Some(1); 2]; 3],
         transfers_foreground: Some(1),
         transfers_background: Some(1),
+        memory_levels: Some(compute_core::MemoryLevels::default()),
         ..Gauges::default()
     });
     metrics

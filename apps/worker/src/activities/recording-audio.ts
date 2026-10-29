@@ -7,6 +7,15 @@ import { readTail, trackRecordingProcesses } from "./recording-usage";
 export { recordingAudioContainer, type RecordingAudioContainer };
 
 /**
+ * Decode audio on its container timeline. A capture can leave small holes in
+ * its timestamps (a desktop's system audio did: 436 holes, 33 s in under
+ * 8 minutes). A plain decode closes them up, so everything timed on the
+ * decoded audio (words, speaker turns, pieces) runs early against the
+ * player. This fills each hole with silence instead, from time zero.
+ */
+export const RECORDING_TIMELINE_FILTER = "aresample=async=1:first_pts=0";
+
+/**
  * Turning a track's uploaded chunks into one seekable audio file.
  *
  * A browser MediaRecorder writes one container header and then appends
@@ -14,6 +23,10 @@ export { recordingAudioContainer, type RecordingAudioContainer };
  * file. A reload, a crash or a device switch starts a new session with a new
  * header. Each session becomes one "run"; runs are placed on the recording's
  * timeline by their first chunk's start time.
+ *
+ * A chunk boundary can fall inside a header: Chromium sometimes hands out the
+ * first byte of a session on its own when no audio has arrived yet. A chunk
+ * too short to tell is held and judged together with the chunks after it.
  *
  * A phone writes an ADTS AAC stream: every frame carries its own header, so
  * any chunk concatenates onto the one before. There a run ends where the
@@ -64,6 +77,32 @@ export function startsAdtsFrame(bytes: Uint8Array): boolean {
   return bytes.length >= 7 && bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0;
 }
 
+/** Bytes `startsContainer` needs to recognise every header it knows. */
+const CONTAINER_HEADER_BYTES = 8;
+const EBML_MAGIC = [0x1a, 0x45, 0xdf, 0xa3] as const;
+const OGG_MAGIC = [0x4f, 0x67, 0x67, 0x53] as const;
+
+/**
+ * Whether bytes too short to judge may be the start of a container header
+ * that the next chunk completes. Before any run, anything may be (an MP4 box
+ * starts with its size); within a run only bytes that begin like an EBML or
+ * Ogg header may be.
+ */
+function mayStartContainer(bytes: Uint8Array, inRun: boolean): boolean {
+  if (bytes.length >= CONTAINER_HEADER_BYTES || startsContainer(bytes)) return false;
+  if (!inRun) return true;
+  const beginsLike = (magic: readonly number[]) =>
+    bytes.every((byte, index) => index >= magic.length || byte === magic[index]);
+  return beginsLike(EBML_MAGIC) || beginsLike(OGG_MAGIC);
+}
+
+function joined(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(left.length + right.length);
+  bytes.set(left, 0);
+  bytes.set(right, left.length);
+  return bytes;
+}
+
 /** How far an ADTS chunk may start from where the one before ended and still continue it. */
 const ADTS_CONTINUITY_MILLISECONDS = 1_000;
 
@@ -88,7 +127,7 @@ export function preparedAudioFormat(container: RecordingAudioContainer): {
   codec: string;
 } {
   // MP4 (Safari) and ADTS (phones) sources are AAC; everything else is Opus.
-  // Keep the codec so a single run is only remuxed, never re-encoded.
+  // The prepared file keeps the source's codec.
   return container === "mp4" || container === "aac"
     ? { extension: "m4a", mimeType: "audio/mp4", muxer: "ipod", codec: "aac" }
     : { extension: "webm", mimeType: "audio/webm", muxer: "webm", codec: "libopus" };
@@ -177,19 +216,31 @@ export async function prepareRecordingTrackAudio(input: {
     const runs: Array<{ startMilliseconds: number; path: string }> = [];
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     let previous: RecordingAudioChunk | null = null;
+    // Short bytes held until the chunks after them show whether a header starts there.
+    let held: { bytes: Uint8Array; chunk: RecordingAudioChunk } | null = null;
     try {
       for (const chunk of ordered) {
         input.signal?.throwIfAborted();
-        const bytes = await input.readChunk(chunk);
-        if (!bytes) {
+        const read = await input.readChunk(chunk);
+        if (!read) {
           throw new RecordingAudioError(`Chunk ${chunk.chunkNumber} is missing`, "missing_chunk");
         }
-        if (!handle || startsRun(container, bytes, previous, chunk)) {
+        // Held bytes start where their own chunk did.
+        const first: RecordingAudioChunk = held?.chunk ?? chunk;
+        const bytes: Uint8Array = held ? joined(held.bytes, read) : read;
+        held = null;
+        if (container !== "aac" && mayStartContainer(bytes, handle !== null)) {
+          held = { bytes, chunk: first };
+          previous = chunk;
+          input.onProgress?.();
+          continue;
+        }
+        if (!handle || startsRun(container, bytes, previous, first)) {
           const header = container === "aac" ? startsAdtsFrame(bytes) : startsContainer(bytes);
           if (!header) {
             throw new RecordingAudioError(
               container === "aac"
-                ? `Chunk ${chunk.chunkNumber} does not start with an AAC frame`
+                ? `Chunk ${first.chunkNumber} does not start with an AAC frame`
                 : "The first chunk of the track has no container header",
               "invalid_audio",
             );
@@ -197,11 +248,21 @@ export async function prepareRecordingTrackAudio(input: {
           await handle?.close();
           const path = join(directory, `run-${runs.length}.${container}`);
           handle = await open(path, "wx", 0o600);
-          runs.push({ startMilliseconds: chunk.startMilliseconds, path });
+          runs.push({ startMilliseconds: first.startMilliseconds, path });
         }
         await handle.write(bytes);
         previous = chunk;
         input.onProgress?.();
+      }
+      // The track ended on short bytes: the tail of its last run.
+      if (held) {
+        if (!handle) {
+          throw new RecordingAudioError(
+            "The first chunk of the track has no container header",
+            "invalid_audio",
+          );
+        }
+        await handle.write(held.bytes);
       }
     } finally {
       await handle?.close();
@@ -219,6 +280,10 @@ export async function prepareRecordingTrackAudio(input: {
     ];
     let result: { stderr: string };
     if (runs.length === 1) {
+      // Re-encoded through the timeline filter rather than copied: a copy keeps
+      // the capture's holes, and a model that decodes the file itself would
+      // close them up and time its words early against our speaker turns and
+      // the player.
       result = await runFfmpeg(
         input.ffmpegPath,
         [
@@ -228,8 +293,12 @@ export async function prepareRecordingTrackAudio(input: {
           "-vn",
           "-map",
           "0:a:0",
+          "-af",
+          RECORDING_TIMELINE_FILTER,
           "-c:a",
-          "copy",
+          format.codec,
+          "-b:a",
+          format.codec === "aac" ? "64k" : "32k",
           "-f",
           format.muxer,
           output,
@@ -242,7 +311,7 @@ export async function prepareRecordingTrackAudio(input: {
       const delayed = runs
         .map((run, index) => {
           const delay = Math.max(0, run.startMilliseconds - first);
-          return `[${index}:a:0]aresample=48000,aformat=channel_layouts=mono,adelay=${delay}:all=1[a${index}]`;
+          return `[${index}:a:0]${RECORDING_TIMELINE_FILTER},aresample=48000,aformat=channel_layouts=mono,adelay=${delay}:all=1[a${index}]`;
         })
         .join(";");
       const mix = `${runs.map((_, index) => `[a${index}]`).join("")}amix=inputs=${runs.length}:normalize=0:dropout_transition=0[out]`;
@@ -298,12 +367,34 @@ const PIECE_OUTPUT: Record<
   flac: {
     extension: "flac",
     mimeType: "audio/flac",
-    args: ["-ac", "1", "-ar", "16000", "-c:a", "flac", "-f", "flac"],
+    args: [
+      "-af",
+      RECORDING_TIMELINE_FILTER,
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "flac",
+      "-f",
+      "flac",
+    ],
   },
   wav: {
     extension: "wav",
     mimeType: "audio/wav",
-    args: ["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav"],
+    args: [
+      "-af",
+      RECORDING_TIMELINE_FILTER,
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_s16le",
+      "-f",
+      "wav",
+    ],
   },
   webm: { extension: "webm", mimeType: "audio/webm", args: ["-c:a", "copy", "-f", "webm"] },
   mp4: { extension: "m4a", mimeType: "audio/mp4", args: ["-c:a", "copy", "-f", "ipod"] },

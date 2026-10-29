@@ -12,7 +12,7 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
-import { assertGoalResumeAllowed } from "@opengeni/core";
+import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
@@ -104,6 +104,10 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  firstPartySecretValuesFromMeta,
+  maskSecretValuesInError,
+  rememberingSecretResolver,
+  SecretValueMemory,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -166,6 +170,8 @@ import {
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
+  getWorkspaceGrant,
+  readTurnSenderAccess,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
@@ -183,6 +189,15 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import {
+  AvatarInput,
+  PROJECT_AVATAR_TOOL_GUIDANCE,
+  SESSION_PROFILE_TOOL_GUIDANCE,
+  projectAvatarFromToolInput,
+  registerBotTemplateTools,
+  sessionProfileToolInputShape,
+  setSessionProfileFromTool,
+} from "./session-profile-tools";
 import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
@@ -317,7 +332,6 @@ import {
   sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
   steerAgentSession,
-  updateSessionTitle,
   setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -330,6 +344,7 @@ import {
   provisionSandbox,
   runOnSandbox,
   createRunOnSecretResolver,
+  createSessionCredentialEnvironment,
   swapActiveSandbox,
   type FleetContext,
   type FleetServices,
@@ -363,6 +378,7 @@ import {
   hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
+  withSecretValueMasking,
 } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
@@ -397,11 +413,19 @@ import {
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
+import {
+  marketplacePluginCapabilityItem,
+  marketplacePluginCapabilityItems,
+  mcpConnectionEndpointKey,
+  pluginCapabilitySetup,
+  pluginMcpEndpointKeys,
+} from "../integrations/marketplace-plugin-catalog";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
+import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -429,6 +453,7 @@ import {
   type OtherWorkspaceSessionTool,
 } from "./session-other-workspace";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -592,6 +617,8 @@ export function orchestrationFailureEnvelope(
           error.status >= 500
             ? "The workspace is temporarily unavailable — retry."
             : boundedOrchestrationFailureMessage(error.message),
+        // The plain sentence doesn't name the permission; keep it machine-readable.
+        ...(error instanceof MissingPermissionRefusal ? { permission: error.permission } : {}),
       },
     };
   }
@@ -730,8 +757,6 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         connectionAuthorities: true,
         pinnedAccounts: true,
         pinnedAccountsRequired: true,
-        variableSetId: true,
-        environmentId: true,
         ...(events ? {} : { events: true as const }),
       })
       .strict(),
@@ -985,10 +1010,25 @@ class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) =>
-      dispatchWithSessionAuthorizationReadReuse(() =>
-        handler(...args),
-      )) as ToolCallback<InputArgs>);
+    return super.registerTool(name, config, ((...args: unknown[]) => {
+      const dispatch = () => dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+      // A worker call whose arguments carried resolved secret values names
+      // them in `_meta`: everything this call stores and returns has them
+      // replaced by their references (docs/secrets.md, Masking).
+      // Only an agent attempt's worker sends them.
+      const memory =
+        this.grant.principalKind === "agent_attempt"
+          ? firstPartyCallSecretValues(args.at(-1))
+          : null;
+      if (!memory) return dispatch();
+      return withSecretValueMasking(memory, async () => {
+        try {
+          return memory.mask(await dispatch(), "first_party_result");
+        } catch (error) {
+          throw maskSecretValuesInError(error, memory);
+        }
+      });
+    }) as ToolCallback<InputArgs>);
   }
 
   ensureToolsListHandler(): void {
@@ -1005,6 +1045,23 @@ class PolicyMcpServer extends McpServer {
         }),
       )
       .disable();
+  }
+}
+
+/** The masking memory for one first-party call's resolved values, if it has any. */
+function firstPartyCallSecretValues(extra: unknown): SecretValueMemory | null {
+  try {
+    const meta =
+      extra !== null && typeof extra === "object"
+        ? (extra as { _meta?: unknown })._meta
+        : undefined;
+    const entries = firstPartySecretValuesFromMeta(meta);
+    if (entries.length === 0) return null;
+    const memory = new SecretValueMemory();
+    for (const entry of entries) memory.remember(entry.value, entry.label);
+    return memory.size > 0 ? memory : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1079,6 +1136,48 @@ export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
   // Notifications carry no id and get no response. The stateless transport
   // holds no in-flight request a cancellation could reach.
   return method.startsWith("notifications/") && !("id" in message);
+}
+
+/**
+ * The grant of the person an in-chat setup card is for, as their chat sees it.
+ * For an agent, that is the human it acts for, with what their sign-in could
+ * do when they sent this turn's message, or their latest message in this chat
+ * for a turn the platform started for them (frozen with each message: an
+ * embed's token narrows it, and their own workspace counts without a
+ * membership). Without such a message it falls back to their membership. Any
+ * other caller is the person, with this request's own (already effective)
+ * grant.
+ */
+async function connectingPersonGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<{
+  permissions: readonly string[];
+  permissionMode?: "legacy" | "explicit" | undefined;
+} | null> {
+  const claims = exactAgentAttemptClaims(grant);
+  if (!claims) {
+    return {
+      permissions: grant.permissions,
+      ...(grant.permissionMode ? { permissionMode: grant.permissionMode } : {}),
+    };
+  }
+  const { initiatingHumanSubjectId } = await requireLiveAgentAttemptAuthorization(
+    db,
+    grant,
+    sessionId,
+  );
+  if (!initiatingHumanSubjectId) return null;
+  const sent = await readTurnSenderAccess(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    turnId: claims.turnId,
+    subjectId: initiatingHumanSubjectId,
+  });
+  if (sent) return { permissions: sent.permissions, permissionMode: "explicit" };
+  return await getWorkspaceGrant(db, initiatingHumanSubjectId, grant.workspaceId);
 }
 
 export function buildOpenGeniMcpServer(
@@ -1193,20 +1292,30 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "set_session_title",
       {
-        description:
-          "Set this session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once on a new session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.",
-        inputSchema: { title: z4.string().min(1).max(200) },
+        description: `Name this chat. Give a new chat a concise 3-7 word topic label: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        inputSchema: {
+          title: z4.string().min(1).max(200).optional(),
+          ...sessionProfileToolInputShape,
+        },
       },
-      async ({ title }) => {
+      async (input) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.title.write");
-        const result = await updateSessionTitle(deps, grant, sessionId, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(await setSessionProfileFromTool(deps, grant, sessionId, input));
       },
     );
+  }
+  // A bot saves itself as a template people can start new bots from.
+  if (sessionId !== null) {
+    registerBotTemplateTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   // Notifications reach the person who started this session: their inbox and,
   // when new, their phones (see notification-tools.ts).
@@ -2284,7 +2393,6 @@ export function buildOpenGeniMcpServer(
             grant,
             targetSessionId: task.targetSessionId,
             runMode: task.runMode,
-            variableSetId: task.variableSetId,
             rigId: task.rigId,
             agentConfig: task.agentConfig,
             missingTargetStatus: 404,
@@ -4371,8 +4479,6 @@ function scheduledTaskUpdateChangesState(
   ) {
     return true;
   }
-  if (update.variableSetId !== undefined && update.variableSetId !== task.variableSetId)
-    return true;
   if (update.rigId !== undefined && update.rigId !== task.rigId) return true;
   if (update.metadata !== undefined && stableJson(update.metadata) !== stableJson(task.metadata)) {
     return true;
@@ -4563,6 +4669,7 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
+      const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
         const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
@@ -4570,27 +4677,51 @@ function registerFleetTools(
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
           claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-            ? await createRunOnSecretResolver(
-                deps,
-                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-                (subjectId) =>
-                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+            ? rememberingSecretResolver(
+                await createRunOnSecretResolver(
+                  deps,
+                  { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                  (subjectId) =>
+                    vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+                ),
+                resolvedValues,
               )
             : null;
-        return json(
-          await withUserSetupCard(
-            await runOnSandbox(services, await fleetContext(), target, typedOp, {
-              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-              ...(secretResolver ? { secretResolver } : {}),
-            }),
-            userSetupCard("run_on", target),
+        // Output that shows a value this call resolved shows its reference
+        // instead, here and in anything the call stores (docs/secrets.md, Masking).
+        // Profile values resolve through the same remembering resolver, so
+        // they are masked too.
+        return await withSecretValueMasking(resolvedValues, async () =>
+          json(
+            resolvedValues.mask(
+              await withUserSetupCard(
+                await runOnSandbox(services, await fleetContext(), target, typedOp, {
+                  ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+                  ...(secretResolver ? { secretResolver } : {}),
+                  // The session's credential profile reaches run_on commands too.
+                  ...(secretResolver && claims && typedOp.kind === "exec"
+                    ? {
+                        credentials: createSessionCredentialEnvironment({
+                          db: deps.db,
+                          workspaceId: grant.workspaceId,
+                          sessionId: claims.sessionId,
+                          resolver: secretResolver,
+                        }),
+                      }
+                    : {}),
+                }),
+                userSetupCard("run_on", target),
+              ),
+              "run_on_result",
+            ),
           ),
         );
       } catch (error) {
         if (isSecretReferenceError(error)) {
           return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
         }
-        throw error;
+        // A failure that quotes a value this call resolved shows its reference.
+        throw maskSecretValuesInError(error, resolvedValues);
       }
     },
   );
@@ -4733,7 +4864,7 @@ function registerConnectedMachineTools(
         throw new Error("machine not found in this access scope; use a sandboxes_list id");
       }
       if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
-        throw new Error("missing permission: account:admin");
+        throw new MissingPermissionRefusal("account:admin");
       }
       if (enrollment.scope === "user" && sessionId && attempt) {
         // The same per-attempt admission run_on requires for personal machines.
@@ -4800,7 +4931,7 @@ function registerConnectedMachineTools(
         throw new Error("machine enrollment not found in this access scope");
       }
       if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
-        throw new Error("missing permission: account:admin");
+        throw new MissingPermissionRefusal("account:admin");
       }
       const result = await removeEnrollment(deps.db, {
         accountId: grant.accountId,
@@ -5231,6 +5362,8 @@ function registerWorkspaceOrchestrationTools(
       if (workspaceId !== undefined && workspaceId !== grant.workspaceId) {
         return await reachSessionInOtherWorkspace({
           reach: sessionAdminReach,
+          db: deps.db,
+          here: { accountId: grant.accountId, workspaceId: grant.workspaceId },
           workspaceId,
           toolName,
           arguments: rest as Record<string, unknown>,
@@ -5292,7 +5425,7 @@ function registerWorkspaceOrchestrationTools(
       });
     } catch (error) {
       deps.observability?.warn("Failed to record a consumed child answer", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   };
@@ -5654,7 +5787,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. An unchanged snapshot is not new evidence of a child's progress: do not poll it between session_wait calls as a ritual. For a long or uncertain child wait, call wait_for_input instead; no preliminary snapshot or short wait is required. Its terminal result wakes you and carries its final answer (payload.finalAnswer). Meaningful user/task/Skill monitoring cadences remain supported. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. An unchanged snapshot is not new evidence of a child's progress: do not poll it between session_wait calls as a ritual. For a long or uncertain child wait, call wait_for_input instead; no preliminary snapshot or short wait is required. Its terminal result wakes you and carries its final answer (payload.finalAnswer). Meaningful user/task/Skill monitoring cadences remain supported. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs and effectiveToolPolicy. Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
         inputSchema: {
           sessionId: z4
             .string()
@@ -6782,22 +6915,17 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "set_other_session_title",
       {
-        description:
-          "Set another session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. The target session must belong to this workspace. Replaces an existing automatic title unless a human has manually set it.",
+        description: `Name a chat other than this one, by its session_id, or set its description and avatar. A title is a concise 3-7 word topic label with the same rules as set_session_title, unless the person gave the name. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           session_id: z4.string().uuid(),
-          title: z4.string().min(1).max(200),
+          title: z4.string().min(1).max(200).optional(),
+          ...sessionProfileToolInputShape,
         },
       },
-      async ({ session_id, title }) => {
+      async ({ session_id, ...input }) => {
         await authorizeFirstPartySession(deps, grant, session_id, "session.title.write");
         await requireSession(deps.db, grant.workspaceId, session_id);
-        const result = await updateSessionTitle(deps, grant, session_id, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(await setSessionProfileFromTool(deps, grant, session_id, input));
       },
     );
 
@@ -6877,7 +7005,7 @@ function registerProjectTools(
       "project_get",
       {
         description:
-          "Read one workspace project: name, description, pin state and order. Use sessions_list with projectId to find its visible sessions.",
+          "Read one workspace project: name, description, avatar, pin state and order. Use sessions_list with projectId to find its visible sessions.",
         inputSchema: { projectId: projectIdSchema },
       },
       async ({ projectId }) => {
@@ -6891,35 +7019,45 @@ function registerProjectTools(
     server.registerTool(
       "project_create",
       {
-        description:
-          "Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration.",
-        inputSchema: { name: nameSchema, description: descriptionSchema.optional() },
+        description: `Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration. ${PROJECT_AVATAR_TOOL_GUIDANCE}`,
+        inputSchema: {
+          name: nameSchema,
+          description: descriptionSchema.optional(),
+          avatar: AvatarInput,
+        },
       },
-      async ({ name, description }) =>
-        json({
+      async ({ name, description, avatar }) => {
+        const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             name,
             description: description ?? null,
+            avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
           }),
-        }),
+        });
+      },
     );
     server.registerTool(
       "project_update",
       {
-        description:
-          "Rename, describe or pin/unpin a workspace project. Pin state is shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description.",
+        description: `Rename, describe, set the avatar of, or pin/unpin a workspace project. Its name, description, avatar and pin state are shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description. ${PROJECT_AVATAR_TOOL_GUIDANCE}`,
         inputSchema: {
           projectId: projectIdSchema,
           name: nameSchema.optional(),
           description: descriptionSchema.nullable().optional(),
+          avatar: AvatarInput,
           pinned: z4.boolean().optional(),
         },
       },
-      async ({ projectId, ...update }) => {
-        const project = await updateChannel(deps.db, grant.workspaceId, projectId, update);
+      async ({ projectId, avatar, ...update }) => {
+        const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        const project = await updateChannel(deps.db, grant.workspaceId, projectId, {
+          ...update,
+          ...(exactAvatar !== undefined ? { avatar: exactAvatar } : {}),
+        });
         if (!project) throw new Error("Project not found");
         return json({ project });
       },
@@ -7013,6 +7151,8 @@ function registerCapabilityDiscoveryTools(
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
     });
+  // Indexed marketplace plugins: a person installs one from its card.
+  const plugins = () => marketplacePluginCapabilityItems(deps.db, grant.workspaceId);
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -7066,18 +7206,20 @@ function registerCapabilityDiscoveryTools(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : item.surfaceType === "integration_definition"
-            ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
-            : capabilitySetupProjection(
-                deps,
-                grant.workspaceId,
-                item,
-                availableServerIds,
-                acceptedServerIds,
-                accountSelectionKnown,
-                availableFirstPartyTools,
-                new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-              ),
+          : item.kind === "plugin"
+            ? pluginCapabilitySetup(item)
+            : item.surfaceType === "integration_definition"
+              ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+              : capabilitySetupProjection(
+                  deps,
+                  grant.workspaceId,
+                  item,
+                  availableServerIds,
+                  acceptedServerIds,
+                  accountSelectionKnown,
+                  availableFirstPartyTools,
+                  new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                ),
       ),
     );
   };
@@ -7086,7 +7228,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Matches with kind plugin are plugins: bundles of Skills and MCP servers that the person installs for the workspace from the card. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -7094,10 +7236,50 @@ function registerCapabilityDiscoveryTools(
     },
     async ({ query, limit }) => {
       await authorize();
-      const current = await catalog();
-      const candidates = [...current.items, ...recommendations()];
+      const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
+      const candidates = [...current.items, ...recommendations(), ...pluginItems];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
-      const setups = await setupProjections(ranked.map(({ item }) => item));
+      // A plugin installs for the whole workspace. When the catalogue also
+      // offers one of its MCP servers as a connection, its setup names that
+      // connection for requests about the person's own account. Matches and
+      // their order are unchanged.
+      const pluginEndpoints = new Set(
+        ranked.flatMap(({ item }) =>
+          item.kind === "plugin" && !item.enabled ? pluginMcpEndpointKeys(item) : [],
+        ),
+      );
+      const connections =
+        pluginEndpoints.size === 0
+          ? []
+          : [
+              ...new Map(
+                candidates
+                  .filter((item) => {
+                    if (item.kind !== "mcp" || !capabilityCatalogItemIsTrustedForExposure(item))
+                      return false;
+                    const key = mcpConnectionEndpointKey(item.mcpUrl ?? item.endpointUrl);
+                    return key !== null && pluginEndpoints.has(key);
+                  })
+                  .map((item) => [item.id, item] as const),
+              ).values(),
+            ];
+      const projected = await setupProjections([...ranked.map(({ item }) => item), ...connections]);
+      const setups = projected.slice(0, ranked.length);
+      const usableConnections = connections.filter(
+        (_, index) => projected[ranked.length + index]!.status !== "unavailable",
+      );
+      for (const [index, { item }] of ranked.entries()) {
+        if (item.kind !== "plugin" || item.enabled) continue;
+        const endpoints = new Set(pluginMcpEndpointKeys(item));
+        setups[index] = pluginCapabilitySetup(
+          item,
+          usableConnections
+            .filter((connection) =>
+              endpoints.has(mcpConnectionEndpointKey(connection.mcpUrl ?? connection.endpointUrl)!),
+            )
+            .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
+        );
+      }
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
         capabilityId: item.id,
         name: item.name,
@@ -7163,9 +7345,10 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [...current.items, ...recommendations()].find(
-        (candidate) => candidate.id === capabilityId,
-      );
+      const item =
+        [...current.items, ...recommendations()].find(
+          (candidate) => candidate.id === capabilityId,
+        ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -7193,6 +7376,17 @@ function registerCapabilityDiscoveryTools(
           message: setup.detail,
         });
       }
+      // The card offers only what the person's own grant can finish, by the
+      // same rule. When it says they can't connect here, the agent must not
+      // send them to it. The person is the human this agent acts for, with
+      // the access their chat has: what their sign-in could do when they sent
+      // this turn's message, or their latest one here for a turn the platform
+      // started (an embed's token narrows it, and their own workspace counts
+      // without a membership), else their membership. Without either there is
+      // nothing to say beyond the card.
+      const person = await connectingPersonGrant(deps.db, grant, sessionId);
+      const personCannotConnect =
+        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",
@@ -7219,14 +7413,19 @@ function registerCapabilityDiscoveryTools(
         status: "authorization_requested",
         action: setup.action,
         eventId,
-        message:
-          item.id === CONNECTED_MACHINE_CAPABILITY_ID
+        message: personCannotConnect
+          ? item.kind === "plugin"
+            ? `The card was posted, but this person can't install the ${item.name} plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.`
+            : `The card was posted, but this person can't connect ${item.name} from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.`
+          : item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
               : item.surfaceType === "integration_definition"
                 ? integrationDefinitionCardPostedMessage(item)
-                : "The recommendation was posted for human confirmation. No access has been granted yet.",
+                : item.kind === "plugin"
+                  ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                  : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );

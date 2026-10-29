@@ -30,6 +30,7 @@ import {
   renderComponent,
   renderHook,
 } from "../../../../packages/react/test/render-hook";
+import { errorMessage } from "@opengeni/contracts/values";
 
 registerDom();
 
@@ -148,7 +149,7 @@ function ComposerRepositories(props: HarnessProps) {
     props.onResourceError?.(null);
   } catch (error) {
     // The composer shows this as the picker's validation error and blocks Start.
-    props.onResourceError?.(error instanceof Error ? error.message : String(error));
+    props.onResourceError?.(errorMessage(error));
   }
   if (props.pickerOpen === false) return null;
   return createElement(RepositoryContextMenuBody, {

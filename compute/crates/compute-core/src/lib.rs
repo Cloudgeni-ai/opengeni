@@ -43,12 +43,12 @@ mod time;
 
 pub use host::{
     Action, Capacity, CpuCapacity, CreateRoom, DiskCapacity, DiskSpace, Failure, Host, Input,
-    Notice, Outcome, Resource, SandboxView, Size,
+    MemoryLevels, Notice, Outcome, Resource, SandboxView, Size,
 };
-pub use ids::{BalloonRequest, HoldId, LoanId, OpId, SandboxId};
+pub use ids::{BalloonRequest, HoldId, LoanId, OpId, SandboxId, ShrinkRequest};
 pub use level::{Durability, Level, Priority, State, Step};
 pub use policy::{
-    Admission, Backoff, DiskPolicy, FIRST_CHECKPOINT, HostPolicy, MemoryPolicy, PolicyError, Rule,
-    SleepPolicy, SleepRules, StepLimits,
+    Admission, Backoff, DiskPolicy, FIRST_CHECKPOINT, HostPolicy, MemoryPolicy, Outgrowth,
+    PolicyError, Rule, SleepPolicy, SleepRules, StepLimits,
 };
 pub use time::At;

@@ -15,6 +15,15 @@ export type {
   AutomationTemplateResponse,
   AutomationTemplateSchedule,
   AutomationTemplateTrigger,
+  BotTemplateFile,
+  BotTemplateResponse,
+  BotTemplateVisibility,
+  SessionAvatar,
+  SessionAvatarIcon,
+  CreateBotTemplateRequest,
+  ListBotTemplatesResponse,
+  UpdateBotTemplateRequest,
+  WorkspaceBotTemplate,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
   CreateAutomationTemplateRequest,
@@ -163,7 +172,7 @@ export type {
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 export type { Chats } from "./chats";
-export type { ServiceContext } from "./embedding-client";
+export type { AsUserOptions, ServiceContext } from "./embedding-client";
 export {
   OPENGENI_TEST_REQUEST_NIL_ID,
   OPENGENI_WEBHOOK_HEADERS,
@@ -258,6 +267,7 @@ export {
   SESSION_EVENT_CONVERSATION_FILTER_VERSION,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_STEP_TYPES,
+  isPresentedSessionToolCall,
   isPresentedSessionToolName,
   isSessionModelResponsePhase,
 } from "@opengeni/contracts/session-history";
@@ -266,8 +276,16 @@ export type {
   PluginDiscoveryItem,
   PluginDiscoveryPage,
 } from "@opengeni/contracts/plugin-discovery";
-export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export {
+  createSiteToolBridge,
+  isSiteCatalogStaleError,
+  SiteToolConsentDeclinedError,
+  SiteToolConnectionRequiredError,
+} from "./site-tool-bridge";
 export type {
+  SiteToolConsentPrompt,
+  SiteToolConsentDecision,
+  SiteToolConnectPrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,
@@ -280,6 +298,7 @@ export type {
   ConfirmExternalIdentityLinkRequest,
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
+  ExternalActorStatedMembership,
 } from "@opengeni/contracts/external-identities";
 export type { OfficeWorkbook, OfficeWorkbookTicket } from "./types";
 export type {
@@ -355,6 +374,10 @@ export type {
   ToolGatewayInvokeResponse,
   ToolGatewayTargetApprovalRequest,
   ToolGatewayTargetApprovalResponse,
+  ToolGatewaySiteConsentRequest,
+  ToolGatewaySiteConsentAccount,
+  ToolGatewaySiteConsentReview,
+  ToolGatewaySiteConsentResponse,
   ToolGatewayManifestRequest,
   ToolGatewayManifestResponse,
   ToolGatewayCallResponse,
@@ -398,8 +421,6 @@ export {
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
 export type { OpenGeniReadRetryOptions } from "./read-retry";
-export { parseDeprecationNotice } from "./deprecation";
-export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveAutomaticSessionTitlePreview,
@@ -458,6 +479,7 @@ export {
   isReservedOpenGeniLink,
   openGeniLinkScheme,
   parseRetainedFileReference,
+  parseSessionReference,
   parseSandboxLink,
   SESSION_SCOPE_HEADER,
 } from "./message-links";
@@ -586,7 +608,9 @@ export type {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
@@ -1007,6 +1031,11 @@ export type {
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
   UpdateOrganizationPrivacySettingsRequest,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureId,
+  InferenceFeatureAvailability,
+  FeatureUnavailableReason,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceRealtimeModelCatalogItem,
@@ -1261,18 +1290,6 @@ export type {
   GitCredentialProvider,
   GitCredentialBindingId,
   GitRepositoryAccess,
-  PrReviewProvider,
-  PrReviewCredentialKind,
-  PrReviewWebhookAuthKind,
-  PrReviewAppRegistration,
-  PrReviewManagedGitHubInstallation,
-  PrReviewManagedGitHubSetup,
-  PrReviewRepositoryBinding,
-  CreatePrReviewAppRegistrationRequest,
-  UpdatePrReviewAppRegistrationRequest,
-  CreatePrReviewRepositoryBindingRequest,
-  UpdatePrReviewRepositoryBindingRequest,
-  ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
   ListOrganizationSessionsOptions,
   ListConnectionsResponse,
@@ -1370,6 +1387,11 @@ export type {
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
   SessionTenancyBlocker,
+  SessionShareLink,
+  SessionShareLinkList,
+  SessionShareLinkState,
+  SharedSession,
+  SharedSessionMessage,
   SessionVisibilityWork,
   SessionVisibilityChangePreview,
   ForkSessionRequest,
@@ -1381,6 +1403,7 @@ export type {
   SessionListTotals,
   SiteConversationGroup,
   SessionListEntry,
+  SessionListLatestTurn,
   SessionListEntryResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,
@@ -1679,6 +1702,8 @@ export type {
   WorkspaceMemorySearchResponse,
   WorkspaceSessionDefaults,
   WorkspaceSettings,
+  WorkspaceDefaultExecutionTarget,
+  MemberDefaultExecutionTarget,
   WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
   VoiceInputProviderId,

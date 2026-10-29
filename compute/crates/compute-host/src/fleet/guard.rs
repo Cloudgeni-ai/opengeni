@@ -25,6 +25,10 @@
 //! a guard stops only at a step that may feed it all the same, so a
 //! device systemd did not keep is closed only then.
 //!
+//! On a machine the host shares, the guard feeds systemd's watchdog of its
+//! own service instead, and the service's stop hook kills the VMs
+//! ([`super::fence`], ADR 26).
+//!
 //! [`kept`]: super::kept
 
 use std::fs::File;
@@ -43,6 +47,7 @@ use compute_engine::watchdog::Watchdog;
 use compute_fleet::{Guard, GuardAction, Observed};
 use rustix::fs::{FlockOperation, flock};
 
+use super::fence::ServiceWatchdog;
 use super::gate::boot_now;
 use super::gate::nanos;
 use super::kept;
@@ -53,6 +58,12 @@ pub const STEP: Duration = Duration::from_millis(100);
 
 /// How often a guard whose watchdog systemd does not keep yet asks again.
 const KEEP_AGAIN: Duration = Duration::from_secs(1);
+
+/// The stack of the thread that lists the store. The guard's memory is
+/// locked in ([`keep_resident`]), so the step that starts the thread
+/// brings in its whole stack before it goes on: a small one keeps that
+/// step short.
+const LISTING_STACK: usize = 256 * 1024;
 
 /// What the guard watches and holds.
 #[derive(Clone, Debug)]
@@ -65,9 +76,33 @@ pub struct GuardConfig {
     pub lock: PathBuf,
     /// The mark the sleep hook leaves while a suspend is under way.
     pub suspending: PathBuf,
-    /// The watchdog device and its timeout; `None` runs without one, which
-    /// leaves a stalled guard unchecked (tests only).
-    pub watchdog: Option<(PathBuf, Duration)>,
+    /// What stops the VMs if the guard stalls or ends.
+    pub fence: Fence,
+}
+
+/// What stops the VMs if the guard stalls or ends: the watchdog it feeds
+/// at every step that may feed one (the lease valid or the VMs stopped).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fence {
+    /// The machine's watchdog device, set up with the lease terms' timeout
+    /// and `nowayout`: a guard that stops feeding it resets the machine.
+    /// For a host that has its machine to itself.
+    Machine {
+        /// The device, such as `/dev/watchdog0`.
+        device: PathBuf,
+        /// The lease terms' watchdog timeout.
+        timeout: Duration,
+    },
+    /// systemd's watchdog of the guard's own service, of at most `timeout`
+    /// (the lease terms'): systemd kills a guard that stops feeding it,
+    /// and the service's stop hook kills every VM. For a host that shares
+    /// its machine (ADR 26).
+    Service {
+        /// The lease terms' watchdog timeout.
+        timeout: Duration,
+    },
+    /// None, which leaves a stalled guard unchecked (tests only).
+    None,
 }
 
 /// Takes the guard's lock: an exclusive lock on `path`, held while the
@@ -247,6 +282,37 @@ fn held(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Locks every page the guard process maps, now and later, into memory.
+///
+/// The guard must feed the watchdog within its timeout (3 s) however
+/// loaded the host is, or the watchdog resets the machine and every
+/// sandbox on it loses its programs. A host whose guests hold more memory
+/// than it has swaps and reclaims, and a guard whose code or data the
+/// kernel took back then waits on that same busy disk to get them again,
+/// for longer than the watchdog allows. Locked, its pages stay, including
+/// those of steps it has not taken yet, such as stopping the VMs. Its unit
+/// also gives it real-time priority (`compute-guard.service`), which puts
+/// its turn first and lets its few allocations draw on the kernel's
+/// reserve, and it never waits on the journal ([`super::Lossy`]) or on
+/// systemd ([`kept`]).
+///
+/// Locking covers the guard's own memory only: not the pages of the files
+/// it reads, such as the lease file (tmpfs, which a host short of memory
+/// swaps out too), nor what the kernel does for it. Bringing every page in
+/// takes a while on such a host, so the binary's own guard command calls
+/// this on a thread of its own as the guard starts, which takes over the
+/// watchdog and feeds it meanwhile. Tests running the guard in their own
+/// process do not call it.
+///
+/// # Errors
+///
+/// When the kernel refuses, as without the right to lock memory: the
+/// guard still guards, but a host short of memory may stall it.
+pub fn keep_resident() -> io::Result<()> {
+    rustix::mm::mlockall(rustix::mm::MlockAllFlags::CURRENT | rustix::mm::MlockAllFlags::FUTURE)
+        .map_err(io::Error::from)
+}
+
 /// Runs the guard until `stop` is set and it may stop, at a step that fed
 /// the watchdog (the lease was valid or the VMs had stopped), or until it
 /// fails to feed the watchdog, which then reboots the machine; that is the
@@ -263,17 +329,29 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let _lock = hold_lock(&config.lock)?;
-    let mut watchdog = if let Some((device, timeout)) = &config.watchdog {
-        let kept = kept::kept(device, *timeout).with_context(|| {
-            format!("taking over the watchdog {} systemd kept", device.display())
-        })?;
-        if kept.is_some() {
-            tracing::info!("took over the watchdog systemd kept");
+    let mut watchdog = match &config.fence {
+        Fence::Machine { device, timeout } => {
+            let kept = kept::kept(device, *timeout).with_context(|| {
+                format!("taking over the watchdog {} systemd kept", device.display())
+            })?;
+            if kept.is_some() {
+                tracing::info!("took over the watchdog systemd kept");
+            }
+            kept
         }
-        kept
-    } else {
-        tracing::warn!("no watchdog: a stalled guard leaves VMs running past their lease");
-        None
+        Fence::Service { .. } => None,
+        Fence::None => {
+            tracing::warn!("no watchdog: a stalled guard leaves VMs running past their lease");
+            None
+        }
+    };
+    let mut service = match &config.fence {
+        Fence::Service { timeout } => {
+            let service = ServiceWatchdog::from_env(*timeout)?;
+            tracing::info!("the guard feeds its service's watchdog: the machine is shared");
+            Some(service)
+        }
+        Fence::Machine { .. } | Fence::None => None,
     };
     let cgroup = Cgroup::at(&config.cgroup);
     let guard = Guard::new();
@@ -294,7 +372,7 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
         let feed = step_once(&guard, &cgroup, config, &mut last, &mut saying);
         if feed {
             if watchdog.is_none()
-                && let Some((device, timeout)) = &config.watchdog
+                && let Fence::Machine { device, timeout } = &config.fence
             {
                 watchdog = Some(
                     Watchdog::open(device, *timeout)
@@ -304,13 +382,21 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
             if let Some(watchdog) = &mut watchdog {
                 watchdog.feed().context("feeding the watchdog")?;
             }
+            if let Some(service) = &mut service {
+                service.feed();
+            }
         }
         if let Some(watchdog) = &watchdog
             && !kept_open
         {
             kept_open = keeping.kept(watchdog.as_fd(), socket.as_deref());
         }
-        if ready.is_none() && (kept_open || config.watchdog.is_none()) {
+        let armed = match &config.fence {
+            Fence::Machine { .. } => kept_open,
+            Fence::Service { .. } => service.as_ref().is_some_and(ServiceWatchdog::fed),
+            Fence::None => true,
+        };
+        if ready.is_none() && armed {
             // Armed and stepped once: the VMs are guarded from here on. A
             // look at whether a guard is ready (the agent's, at its start)
             // holds the lock for a moment; then it is taken a step later.
@@ -465,6 +551,7 @@ impl Keeping {
             let list = Arc::clone(&self.list);
             std::thread::Builder::new()
                 .name("guard-store".into())
+                .stack_size(LISTING_STACK)
                 .spawn(move || {
                     let _ = answer.send(list(identity));
                 })?;
@@ -703,7 +790,10 @@ mod tests {
             lease_file: dir.join("lease.json"),
             lock: dir.join("guard.lock"),
             suspending: dir.join("suspending"),
-            watchdog,
+            fence: watchdog.map_or(Fence::None, |(device, timeout)| Fence::Machine {
+                device,
+                timeout,
+            }),
         }
     }
 
@@ -837,10 +927,16 @@ mod tests {
     fn a_guard_asked_to_stop_stops_only_at_a_step_that_may_feed_the_watchdog() {
         let dir = tempfile::tempdir().unwrap();
         let group = dir.path().join("vms");
-        std::fs::create_dir(&group).unwrap();
-        std::fs::write(group.join("cgroup.freeze"), "0").unwrap();
+        // One VM, running, in a group of its own inside the VMs' cgroup,
+        // which holds no process itself: the guard kills that VM.
+        let vm = group.join("vm");
+        for path in [&group, &vm] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("cgroup.freeze"), "0").unwrap();
+            std::fs::write(path.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+            std::fs::write(path.join("cgroup.procs"), "").unwrap();
+        }
         let events = group.join("cgroup.events");
-        std::fs::write(&events, "populated 1\nfrozen 0\n").unwrap();
         let mut lapsed = config(dir.path(), None);
         lapsed.cgroup = group.clone();
         // No lease file: the lease has run out.
@@ -856,14 +952,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         stop.store(true, Ordering::Relaxed);
-        std::thread::sleep(STEP * 5);
+        // It goes on killing them: a kill written after it was asked to
+        // stop, however slowly the steps come on a busy machine.
+        let kill = vm.join("cgroup.kill");
+        let _ = std::fs::remove_file(&kill);
+        let started = std::time::Instant::now();
+        while std::fs::read_to_string(&kill).ok().as_deref() != Some("1") {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "it stopped killing them"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(STEP * 3);
         assert!(!guard.is_finished(), "it stopped with the VMs running");
-        assert_eq!(
-            std::fs::read_to_string(group.join("cgroup.kill")).unwrap(),
-            "1",
-            "it goes on killing them"
-        );
         // They are gone: it may feed the watchdog, and stops.
+        std::fs::write(vm.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
         std::fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
         let started = std::time::Instant::now();
         while !guard.is_finished() {
@@ -1117,5 +1221,67 @@ mod tests {
         let mut keeping = Keeping::new(false, Arc::new(|_| Ok(true)));
         assert!(!keeping.kept(device.as_fd(), None));
         assert!(keeping.told);
+    }
+
+    /// systemd slow to take its messages, as on a host short of memory:
+    /// the guard's step, which feeds the watchdog, never waits for it, and
+    /// the guard is ready once systemd takes them again.
+    #[test]
+    fn a_guard_whose_systemd_is_slow_steps_on_time_and_asks_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let device = File::create(dir.path().join("device")).unwrap();
+        let path = dir.path().join("notify");
+        let slow = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        let queued = kept::fill_queue(&path);
+        let mut keeping = Keeping::new(false, Arc::new(|_| Ok(false)));
+        let mut slowest = Duration::ZERO;
+        // Long enough to ask a few times.
+        let until = Instant::now() + KEEP_AGAIN * 2 + STEP;
+        while Instant::now() < until {
+            let started = Instant::now();
+            assert!(!keeping.kept(device.as_fd(), path.to_str()));
+            slowest = slowest.max(started.elapsed());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(keeping.told, "said why it is not ready");
+        assert!(slowest < STEP, "a step waited {slowest:?} on systemd");
+
+        // systemd takes its messages again.
+        drop((slow, queued));
+        std::fs::remove_file(&path).unwrap();
+        let systemd = Systemd::start(path.clone(), true, Duration::ZERO);
+        keeping.list = systemd.list();
+        assert!(keep_for(
+            &mut keeping,
+            &device,
+            systemd.socket(),
+            KEEP_AGAIN * 3,
+            || {}
+        ));
+    }
+
+    /// A host whose guests hold more memory than it has must not stall
+    /// its guard into the watchdog's reset: the installed unit gives the
+    /// guard the processor first, and it is never restarted.
+    #[test]
+    fn the_installed_guard_runs_first_and_is_never_restarted() {
+        let unit = include_str!("../../../../deploy/host/compute-guard.service");
+        let set: Vec<&str> = unit
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        for directive in [
+            "CPUSchedulingPolicy=fifo",
+            "CPUSchedulingPriority=1",
+            "OOMScoreAdjust=-1000",
+            "Restart=no",
+            "ExecStart=/opt/compute/current/compute-host guard",
+        ] {
+            assert!(
+                set.contains(&directive),
+                "compute-guard.service lacks {directive}"
+            );
+        }
     }
 }

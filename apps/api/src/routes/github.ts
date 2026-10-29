@@ -56,6 +56,7 @@ import {
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
   updateGitHubActionPolicyGroup,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -68,6 +69,7 @@ import {
 import {
   githubBindingStatus,
   GitHubRepositoryBranchAuthorityError,
+  isTransientGitHubRepositoryListFailure,
   listWorkspaceGitHubInstallationBindings,
   listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
@@ -100,6 +102,8 @@ import {
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -349,14 +353,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, {
-          message: JSON.stringify({ message: error.message, missing: error.missing }),
-        });
-      }
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
-      });
+      throw githubRepositoryListRouteError(error);
     }
   });
 
@@ -364,16 +361,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
-    } catch (error) {
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, {
-          message: JSON.stringify({ message: error.message, missing: error.missing }),
-        });
-      }
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
+      return c.json({
+        repositories: await listWorkspaceGitHubRepositories(deps, workspaceId, { fresh: true }),
       });
+    } catch (error) {
+      throw githubRepositoryListRouteError(error);
     }
   });
 
@@ -448,6 +440,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
       installationId,
       eventRouteSecret: eventRouteSecret(settings),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
     return c.body(null, 204);
   });
@@ -1093,6 +1086,25 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
   return new HTTPException(502, { message: "GitHub authority verification failed" });
 }
 
+/**
+ * A GitHub outage (5xx, rate limit, timeout, network) stays a 502 that clients
+ * may retry. GitHub refusing the installation (401, 403, 404) is not an outage:
+ * it is a 409 that asks for a reconnect, so background reads stop retrying it.
+ */
+function githubRepositoryListRouteError(error: unknown): HTTPException {
+  if (error instanceof GitHubAppConfigurationError) {
+    return new HTTPException(409, {
+      message: JSON.stringify({ message: error.message, missing: error.missing }),
+    });
+  }
+  if (error instanceof GitHubAppApiError && !isTransientGitHubRepositoryListFailure(error)) {
+    return new HTTPException(409, {
+      message: "GitHub no longer grants access to this installation; reconnect GitHub",
+    });
+  }
+  return new HTTPException(502, { message: errorMessage(error) });
+}
+
 function githubRepositoryBranchesRouteError(error: unknown): Error {
   if (error instanceof HTTPException) {
     return error;
@@ -1132,9 +1144,7 @@ export function requirePublicGitHubRepositoryVerificationPermission(
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: "missing permission: sessions:create or sessions:control",
-  });
+  throw new MissingPermissionRefusal("sessions:create");
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {

@@ -10,7 +10,11 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { AgentBrowserDriver, ManagedBrowserRunner, BrowserPasskeyManager } from "../src";
+import type { BrowserCdpConnection } from "../src/cdp-driver";
+import { CdpConnection } from "../src/cdp";
 import { startFakeLoginServer, type FakeLoginServer } from "../../testing/src/fake-login/server";
+import { encryptString, generateSymmetricKey } from "../../vaults-bitwarden/src/crypto";
+import { cipherPasskeys } from "../../vaults-bitwarden/src/mapping";
 
 // Fake-login suite through the real browserd driver and Chrome: passkeys
 // (register, sync-only reload, every tab), a cross-origin CAPTCHA iframe and a
@@ -55,16 +59,17 @@ afterAll(async () => {
   }
 });
 
-e2e(
-  "registers a passkey, signs in with it, and signs in again in a fresh browser that only got it through sync, in every tab",
-  async () => {
+e2e.each(["device-bound", "backed-up", "bitwarden", "legacy-missing-flags"] as const)(
+  "vault passkey registration and fresh-browser import: %s",
+  async (source) => {
+    const backedUp = source !== "device-bound";
     const username = `pk-${randomUUID().slice(0, 8)}`;
     const password = "Passkey-User-Password-1!";
     const itemId = randomUUID();
     let stored: BrowserPasskeyCredential;
     const signCounts: number[] = [];
     // ---- browser 1: sign up, register, sign in ----------------------------------
-    const first = await launch("pk1");
+    const first = await launch("pk1", backedUp);
     try {
       let page = await first.driver.start(`${site.url}/signup`);
       page = await act(page, fillByRef(page, "textbox", "Username", username));
@@ -86,6 +91,10 @@ e2e(
       expect(event.origin).toBe(site.url);
       expect(event.credential.rpId).toBe("localhost");
       expect(event.credential.privateKey.length).toBeGreaterThan(100);
+      expect(event.credential).toMatchObject({
+        backupEligibility: backedUp,
+        backupState: backedUp,
+      });
       // The API saves the vault item, acknowledges the event and supplies the item.
       stored = { ...event.credential, itemId };
       expect((await first.sync([stored], [event.eventId])).events).toEqual([]);
@@ -97,11 +106,37 @@ e2e(
       page = await until(first.driver, page.target.id, (o) =>
         hasName(o, `Logged in as ${username}`),
       );
+      if (source === "backed-up") {
+        // A new API attempt can discover capabilities before it has written
+        // the previous assertion's higher counter back to the vault. A read-only
+        // probe must preserve that counter while the stale lease is replaced.
+        const pending = await first.sync(null);
+        const asserted = only(pending.events, "asserted");
+        expect(asserted.signCount).toBeGreaterThan(stored.signCount);
+        await first.sync(null); // capability probe: no credential replacement or ack
+        const reconciled = await first.sync([stored]);
+        expect(only(reconciled.events, "asserted").signCount).toBe(asserted.signCount);
+        await first.sync(null, [asserted.eventId]);
+        page = await act(page, { type: "navigate", url: `${site.url}/logout` });
+        page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
+        page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+        page = await until(first.driver, page.target.id, (o) =>
+          hasName(o, `Logged in as ${username}`),
+        );
+        expect(await serverSignCount(username)).toBeGreaterThan(asserted.signCount);
+      }
       signCounts.push(await assertedSignCount(first, itemId));
     } finally {
       await first.close();
     }
     stored = { ...stored, signCount: signCounts[0]! };
+    if (source === "bitwarden") stored = throughBitwarden(stored);
+    if (source === "legacy-missing-flags") {
+      // Reproduce the old import without changing the key, RP id, handle or
+      // counter. The verifier checks the signature before rejecting BE.
+      const { backupEligibility: _be, backupState: _bs, ...legacy } = stored;
+      stored = legacy;
+    }
     expect(await serverSignCount(username)).toBe(signCounts[0]!);
 
     // ---- browser 2: fresh profile, credential only from sync ----------------------
@@ -112,6 +147,21 @@ e2e(
       let page = await second.driver.start(`${site.url}/passkey/login`);
       expect(hasName(page, "Not signed in")).toBe(true);
       page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+      if (source === "legacy-missing-flags") {
+        page = await until(second.driver, page.target.id, (o) =>
+          names(o).some((name) =>
+            name.includes("backup_eligibility_mismatch: BE changed since registration"),
+          ),
+        );
+        expect(hasName(page, "Not signed in")).toBe(true);
+        expect(await assertedSignCount(second, itemId)).toBeGreaterThan(signCounts[0]!);
+        expect(site.state().attempts.at(-1)).toMatchObject({
+          username,
+          ok: false,
+          reason: "backup_eligibility_mismatch",
+        });
+        return;
+      }
       page = await until(second.driver, page.target.id, (o) =>
         hasName(o, `Logged in as ${username}`),
       );
@@ -143,11 +193,143 @@ e2e(
     expect(await serverSignCount(username)).toBe(signCounts.at(-1)!);
     const rejected = site
       .state()
-      .attempts.filter((attempt) => attempt.flow === "passkey" && !attempt.ok);
+      .attempts.filter(
+        (attempt) => attempt.flow === "passkey" && attempt.username === username && !attempt.ok,
+      );
     expect(rejected).toEqual([]);
-    evidence.passkey = { username, signCounts };
+    evidence[`passkey-${source}`] = { username, signCounts };
   },
   180_000,
+);
+
+e2e(
+  "a fresh browser holding another browser's passkey only through sync starts signed out, autofill never signs it in, and signing out sticks",
+  async () => {
+    const username = `pk-autofill-${randomUUID().slice(0, 8)}`;
+    const password = "Passkey-Autofill-Password-1!";
+    const itemId = randomUUID();
+    let stored: BrowserPasskeyCredential;
+    // ---- browser 1: sign up and register a passkey, as another identity did --------
+    const first = await launch("pk-autofill-1");
+    try {
+      let page = await first.driver.start(`${site.url}/signup`);
+      page = await act(page, fillByRef(page, "textbox", "Username", username));
+      page = await act(page, fillByRef(page, "textbox", "Password", password));
+      page = await act(page, fillByRef(page, "textbox", "Confirm password", password));
+      page = await act(page, clickByRef(page, "button", "Create account"));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/register` });
+      page = await act(page, clickByRef(page, "button", "Create a passkey"));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Passkey saved for ${username}`),
+      );
+      const event = only((await first.sync(null)).events, "registered");
+      stored = { ...event.credential, itemId };
+      await first.sync([stored], [event.eventId]);
+    } finally {
+      await first.close();
+    }
+    const passkeySignIns = () =>
+      site
+        .state()
+        .attempts.filter((attempt) => attempt.flow === "passkey" && attempt.username === username);
+
+    // ---- browser 2: a fresh, empty profile that holds the passkey only via sync ----
+    const second = await launch("pk-autofill-2");
+    try {
+      await second.sync([stored], []);
+      // Nothing of the other browser's sign-in is here.
+      let page = await second.driver.start(`${site.url}/welcome`);
+      expect(hasName(page, "Not signed in")).toBe(true);
+      expect(await cookieNames(second)).toEqual([]);
+      // The identifier page asks for a passkey through autofill on load. Nobody
+      // picked one, so it must not sign in: it shows its username field.
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/autofill` });
+      page = await until(second.driver, page.target.id, (o) =>
+        names(o).some((name) => name.startsWith("Passkey autofill")),
+      );
+      await Bun.sleep(1_500);
+      page = await second.driver.observe(page.target.id);
+      expect(hasName(page, `Logged in as ${username}`)).toBe(false);
+      expect(nodes(page).some((node) => node.role === "textbox" && node.name === "Username")).toBe(
+        true,
+      );
+      expect(passkeySignIns()).toEqual([]);
+      expect(await cookieNames(second)).toEqual([]);
+      await shot(second.driver, page.target.id, "passkey-autofill-not-answered");
+
+      // Asked for in the open, the same passkey still signs in.
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
+      page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+      page = await until(second.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
+      expect(passkeySignIns().filter((attempt) => attempt.ok)).toHaveLength(1);
+      expect(await cookieNames(second)).toEqual(["fl_session"]);
+
+      // Signing out sticks: the autofill page does not sign the passkey back in.
+      page = await act(page, { type: "navigate", url: `${site.url}/logout` });
+      expect(hasName(page, "Not signed in")).toBe(true);
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/autofill` });
+      page = await until(second.driver, page.target.id, (o) =>
+        names(o).some((name) => name.startsWith("Passkey autofill")),
+      );
+      await Bun.sleep(1_500);
+      page = await act(page, { type: "navigate", url: `${site.url}/welcome` });
+      expect(hasName(page, "Not signed in")).toBe(true);
+      expect(passkeySignIns().filter((attempt) => attempt.ok)).toHaveLength(1);
+      expect(await cookieNames(second)).toEqual([]);
+    } finally {
+      await second.close();
+    }
+  },
+  120_000,
+);
+
+e2e(
+  "a cross-origin frame, which shares its tab's authenticator, is offered no passkey autofill either",
+  async () => {
+    // The frame asks for a passkey through autofill and reports to its page.
+    // A request the authenticator answers settles at once (here with no
+    // credential: NotAllowedError); a withdrawn one stays pending.
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request) {
+        const url = new URL(request.url);
+        const body =
+          url.pathname === "/frame"
+            ? `<script>(async () => {
+  const report = (text) => parent.postMessage(text, "*");
+  report("autofill " + (await PublicKeyCredential.isConditionalMediationAvailable() ? "offered" : "not available"));
+  navigator.credentials.get({ mediation: "conditional", publicKey: { challenge: new Uint8Array(32), rpId: location.hostname, allowCredentials: [] } })
+    .then(() => report("request answered"), (error) => report("request answered: " + error.name));
+  setTimeout(() => report("request still pending"), 1000);
+})();</script>`
+            : `<ul id="frame-log" aria-label="Frame log"></ul>
+<script>addEventListener("message", (event) => { const item = document.createElement("li"); item.textContent = "frame: " + event.data; document.getElementById("frame-log").append(item); });</script>
+<iframe title="Embedded sign-in" allow="publickey-credentials-get *" src="http://embedded.localhost:${url.port}/frame"></iframe>`;
+        return new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
+      },
+    });
+    const browser = await launch("pk-autofill-frame");
+    try {
+      let page = await browser.driver.start(`http://localhost:${server.port}/`);
+      page = await until(browser.driver, page.target.id, (o) =>
+        names(o).some((name) => name.startsWith("frame: request")),
+      );
+      await Bun.sleep(1_200);
+      page = await browser.driver.observe(page.target.id);
+      const log = names(page).filter((name) => name.startsWith("frame: "));
+      expect(log).toEqual(["frame: autofill not available", "frame: request still pending"]);
+    } finally {
+      await browser.close();
+      await server.stop(true);
+    }
+  },
+  60_000,
 );
 
 e2e(
@@ -243,6 +425,37 @@ e2e(
 
 // ---- harness --------------------------------------------------------------------
 
+/** Only freshly generated fixture material; no account or remote vault access. */
+function throughBitwarden(credential: BrowserPasskeyCredential): BrowserPasskeyCredential {
+  const key = generateSymmetricKey();
+  const enc = (value: string) => encryptString(value, key);
+  const [imported] = cipherPasskeys(
+    {
+      type: 1,
+      login: {
+        fido2Credentials: [
+          {
+            credentialId: enc(
+              `b64.${Buffer.from(credential.credentialId, "base64").toString("base64url")}`,
+            ),
+            rpId: enc(credential.rpId),
+            userHandle: enc(credential.userHandle ?? ""),
+            userName: enc(credential.userName ?? ""),
+            userDisplayName: enc(credential.userDisplayName ?? ""),
+            keyValue: enc(credential.privateKey),
+            keyAlgorithm: enc("ECDSA"),
+            keyCurve: enc("P-256"),
+            counter: enc(String(credential.signCount)),
+          },
+        ],
+      },
+    },
+    key,
+  );
+  expect(imported).toBeDefined();
+  return { ...imported!, itemId: credential.itemId };
+}
+
 type Browser = {
   driver: AgentBrowserDriver;
   sync(
@@ -252,7 +465,7 @@ type Browser = {
   close(): Promise<void>;
 };
 
-async function launch(label: string): Promise<Browser> {
+async function launch(label: string, backedUp = false): Promise<Browser> {
   const directory = await mkdtemp(`/tmp/w4cdp-${label}-`);
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
@@ -270,6 +483,32 @@ async function launch(label: string): Promise<Browser> {
     runner,
     focusEmulation: true,
     passkeys,
+    // Simulate a password manager at registration only. The fresh browser's
+    // imports use the production defaults, never these registrar defaults.
+    ...(backedUp
+      ? {
+          connect: async (endpoint: string) => {
+            const connection = await CdpConnection.connect(endpoint);
+            const send = connection.send.bind(connection);
+            connection.send = (method, params, options) =>
+              send(
+                method,
+                method === "WebAuthn.addVirtualAuthenticator"
+                  ? {
+                      ...params,
+                      options: {
+                        ...(params?.options as Record<string, unknown>),
+                        defaultBackupEligibility: true,
+                        defaultBackupState: true,
+                      },
+                    }
+                  : params,
+                options,
+              );
+            return connection;
+          },
+        }
+      : {}),
   });
   drivers.set(browserSessionId, driver);
   return {
@@ -393,6 +632,18 @@ async function assertedSignCount(browser: Browser, itemId: string): Promise<numb
     await Bun.sleep(100);
   }
   throw new Error("no passkey assertion event");
+}
+
+/** Every cookie the browser holds, by name. */
+async function cookieNames(browser: Browser): Promise<string[]> {
+  const connection = (browser.driver as unknown as { connection: BrowserCdpConnection | null })
+    .connection;
+  if (!connection) throw new Error("the browser is not running");
+  const { cookies } = await connection.send<{ cookies: Array<{ name: string }> }>(
+    "Storage.getCookies",
+    {},
+  );
+  return cookies.map((cookie) => cookie.name).sort();
 }
 
 async function serverSignCount(username: string): Promise<number> {

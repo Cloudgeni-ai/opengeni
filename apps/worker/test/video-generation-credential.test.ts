@@ -6,6 +6,7 @@ import {
   encryptVideoGenerationApiKey,
   encryptVideoGenerationConnectionReference,
 } from "../src/activities/video-generation-credential";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("video generation credential envelope", () => {
   const key = Buffer.alloc(32, 7);
@@ -23,7 +24,7 @@ describe("video generation credential envelope", () => {
     try {
       decryptVideoGenerationApiKey(key, encrypted);
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
     expect(message).toBe("Video provider credential lease is malformed");
     expect(message).not.toContain(secret);
@@ -60,7 +61,7 @@ describe("video generation credential envelope", () => {
     try {
       decryptVideoGenerationCredential(key, encrypted);
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
     expect(message).toBe("Video provider credential lease is malformed");
     expect(message).not.toContain("xai-refresh");

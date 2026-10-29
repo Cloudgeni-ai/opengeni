@@ -9,6 +9,7 @@ import {
 import {
   appendSessionEvents,
   bootstrapWorkspace,
+  createChannel,
   createDb,
   createSession,
   createScheduledTask,
@@ -19,6 +20,7 @@ import {
   SessionListAccessError,
   setSessionArchive,
   setSessionPin,
+  updateChannel,
   updateScheduledTask,
 } from "../src/index";
 
@@ -329,6 +331,53 @@ test("a schedule timing edit alone refreshes lists, since it decides the upcomin
   // An unchanged spec, or an edit that cannot change the icon, stays quiet.
   await shared.admin`update scheduled_tasks set schedule=schedule where id=${task.id}`;
   await updateScheduledTask(client.db, grant.workspaceId, task.id, { name: "Renamed" });
+  await drain();
+  expect(changes).toHaveLength(0);
+});
+
+test("a project's avatar or description change refreshes lists, since the sidebar shows them", async () => {
+  const id = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: id,
+    accountName: "Project hints",
+    workspaceExternalSource: "test",
+    workspaceExternalId: id,
+    workspaceName: "Project hints",
+    subjectId: `reader:${id}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const project = await createChannel(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    name: "Design",
+  });
+  const everyList = {
+    schema: "public",
+    workspaceId: grant.workspaceId,
+    sessionId: null,
+    subjectId: null,
+    all: true,
+  };
+  await drain();
+  changes.length = 0;
+
+  await updateChannel(client.db, grant.workspaceId, project.id, {
+    avatar: { kind: "emoji", emoji: "🎨", hue: 275 },
+  });
+  await drain();
+  expect(changes).toEqual([everyList]);
+  changes.length = 0;
+
+  await updateChannel(client.db, grant.workspaceId, project.id, {
+    description: "Interface polish",
+  });
+  await drain();
+  expect(changes).toEqual([everyList]);
+  changes.length = 0;
+
+  // Writing the same profile again stays quiet.
+  await shared.admin`update channels set avatar=avatar, description=description where id=${project.id}`;
   await drain();
   expect(changes).toHaveLength(0);
 });

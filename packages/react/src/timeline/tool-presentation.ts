@@ -873,6 +873,7 @@ export function skillToolPreview(item: ToolCallItem): string | null {
 const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Chats, goals and notifications
   nameChat: "rename",
+  saveBotTemplate: "rename",
   notify: "bell",
   withdrawNotification: "bell",
   tidyInbox: "inbox",
@@ -967,6 +968,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Scheduled tasks
   checkSchedules: "calendar",
   checkEvents: "calendar",
+  changeEventSource: "calendar",
   createSchedule: "calendar",
   updateSchedule: "calendar",
   runSchedule: "calendar",
@@ -1884,7 +1886,49 @@ export function toolRowPresentation(
 ): ToolRowPresentation {
   item = invokedToolCall(item);
   const row = presentedToolRow(t, item, context);
-  return context.details === "plain" ? plainToolRow(t, item, row, context) : row;
+  const presented = context.details === "plain" ? plainToolRow(t, item, row, context) : row;
+  if (item.awaitingApproval) return awaitingApprovalRow(t, presented);
+  return item.approvalRejected
+    ? rejectedApprovalRow(t, presented, item.approvalRejected === "automatic")
+    : presented;
+}
+
+/** A call waiting for the person's approval has not run: say so, never "Done". */
+function awaitingApprovalRow(t: OpenGeniText, row: ToolRowPresentation): ToolRowPresentation {
+  return {
+    ...row,
+    iconTone: "accent",
+    running: false,
+    chip: undefined,
+    failed: false,
+    cancelled: false,
+    detailPreview: false,
+    preview: textPreview(t("timeline.toolRenderers.waitingForYourApproval")),
+  };
+}
+
+/** A rejected call never ran: say so and by whom, never "Done" or "Interrupted". */
+function rejectedApprovalRow(
+  t: OpenGeniText,
+  row: ToolRowPresentation,
+  automatic: boolean,
+): ToolRowPresentation {
+  return {
+    ...row,
+    iconTone: "muted",
+    running: false,
+    chip: undefined,
+    failed: false,
+    cancelled: false,
+    detailPreview: false,
+    preview: textPreview(
+      t(
+        automatic
+          ? "timeline.toolRenderers.declinedAutomatically"
+          : "timeline.toolRenderers.youRejectedThis",
+      ),
+    ),
+  };
 }
 
 function presentedToolRow(

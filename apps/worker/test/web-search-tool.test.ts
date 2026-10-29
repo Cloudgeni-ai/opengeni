@@ -215,6 +215,12 @@ describe("web_search and web_fetch attempt tools", () => {
         creditMicros: 9_450,
         marginBps: 500,
         basis: "provider_reported",
+        // Exa has no EU option: its route's code-owned record is unknown.
+        processingResidency: {
+          geography: "unknown",
+          deploymentType: "provider_default",
+          regions: [],
+        },
       },
     ]);
   });

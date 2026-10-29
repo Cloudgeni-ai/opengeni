@@ -83,6 +83,6 @@ export function organizationSettingsDescription(
     case "developer":
       return "API keys, webhooks and a credential provider for products built on Opengeni.";
     case "security":
-      return "Private chats, how long data is kept, and recovery.";
+      return "Where models run, private chats, how long data is kept, and recovery.";
   }
 }

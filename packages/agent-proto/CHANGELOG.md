@@ -1,5 +1,13 @@
 # @opengeni/agent-proto
 
+## 5.5.1
+
+### Patch Changes
+
+- 45eec8d: The machine agent no longer serves the request/reply Git operation (`ControlRequest.git`). No current Opengeni server sends it: Git runs as an ordinary command. The wire protocol reserves the field numbers, and `GitRequest`, `GitResponse`, `GitOp`, `GitStatus` and `GitFileStatus` are gone from the generated types.
+
+## 5.4.2
+
 ## 5.3.1
 
 ## 5.2.1

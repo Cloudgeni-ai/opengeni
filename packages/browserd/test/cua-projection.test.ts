@@ -32,6 +32,24 @@ test("a table cell macOS repeats under its AXColumn is one element to a locator"
   );
 });
 
+test("a macOS combo box reads as a combobox whose value can be set, like a popup button", () => {
+  const [combo, popup] = projectElements(
+    [
+      { role: "AXComboBox", label: "City", value: "Oslo", actions: ["AXConfirm", "AXShowMenu"] },
+      { role: "AXPopUpButton", label: "Size", value: "Medium", actions: ["AXPress"] },
+    ].map((element, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      ...element,
+    })),
+    "macos",
+  );
+  expect(combo).toMatchObject({ role: "combobox", name: "City", value: "Oslo" });
+  expect(combo!.actions).toContain("set_value");
+  expect(popup).toMatchObject({ role: "combobox", name: "Size", value: "Medium" });
+  expect(popup!.actions).toContain("set_value");
+});
+
 test("an exact name is the whole name in any case and spacing", () => {
   const [save, saveAs] = projectElements(
     ["  Save  changes ", "Save changes as"].map((label, offset) => ({
@@ -50,6 +68,31 @@ test("an exact name is the whole name in any case and spacing", () => {
   expect(() => locate([save!, saveAs!], exact("Save"))).toThrow(
     "CUA locator must resolve to exactly one observed element",
   );
+});
+
+test("a Windows title bar does not offer set_value, though CUA lists its read-only value", () => {
+  const [titleBar, field] = projectElements(
+    [
+      {
+        element_index: 0,
+        element_token: "snapshot:0",
+        role: "TitleBar",
+        label: "Untitled - Notepad",
+        value: "Untitled - Notepad",
+        actions: ["set_value"],
+      },
+      {
+        element_index: 1,
+        element_token: "snapshot:1",
+        role: "Edit",
+        label: "Text Editor",
+        actions: ["set_value", "scroll"],
+      },
+    ],
+    "windows",
+  );
+  expect(titleBar!.actions).toEqual([]);
+  expect(field).toMatchObject({ role: "textbox", actions: ["set_value"] });
 });
 
 test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {
@@ -272,6 +315,68 @@ test("web pages on macOS read without context-menu actions or repeated link text
     // The link's own text is not listed again; other page text is plain text.
     ["s:5", "text", "Computer accessibility refers to", []],
   ]);
+});
+
+test("Chrome's page controls can be invoked although Chrome lists no AXPress on them", () => {
+  // What Chrome reports with the accessibility mode CUA turns on: every node
+  // of the page lists only AXShowMenu and AXScrollToVisible.
+  const listed = ["AXShowMenu", "AXScrollToVisible"];
+  const elements = [
+    { element_index: 0, element_token: "s:0", role: "AXWindow", label: "Sign in", actions: [] },
+    {
+      element_index: 1,
+      element_token: "s:1",
+      parent_index: 0,
+      role: "AXButton",
+      label: "Reload",
+      actions: listed,
+    },
+    {
+      element_index: 2,
+      element_token: "s:2",
+      parent_index: 0,
+      role: "AXWebArea",
+      label: "Sign in",
+      actions: listed,
+    },
+    ...(
+      [
+        [3, "AXButton", "Continue"],
+        [4, "AXLink", "Help"],
+        [5, "AXCheckBox", "On, extension enabled"],
+        [6, "AXRadioButton", "Work"],
+        [7, "AXStaticText", "Use your passkey"],
+        [8, "AXHeading", "Sign in"],
+        [9, "AXPopUpButton", "Country"],
+      ] as const
+    ).map(([index, role, label]) => ({
+      element_index: index,
+      element_token: `s:${index}`,
+      parent_index: 2,
+      role,
+      label,
+      actions: listed,
+    })),
+  ];
+  const nodes = projectElements(elements, "macos", new Map(), true);
+  expect(nodes.map((node) => [node.ref, node.role, node.actions])).toEqual([
+    ["s:0", "window", []],
+    // Browser UI outside the page is invoked only when it lists AXPress.
+    ["s:1", "button", ["show_menu", "focus"]],
+    ["s:2", "AXWebArea", []],
+    ["s:3", "button", ["invoke", "focus"]],
+    ["s:4", "link", ["invoke", "focus"]],
+    ["s:5", "checkbox", ["invoke", "focus"]],
+    ["s:6", "radio", ["invoke", "focus"]],
+    // Page text and headings stay plain text.
+    ["s:7", "text", []],
+    ["s:8", "AXHeading", []],
+    // CUA refuses to press a page's select in the background; it takes set_value.
+    ["s:9", "combobox", ["set_value", "focus"]],
+  ]);
+  // An app CUA does not report as taking an unlisted press (a WebKit page).
+  const webkit = projectElements(elements, "macos", new Map(), false);
+  expect(webkit.find((node) => node.ref === "s:3")?.actions).not.toContain("invoke");
 });
 
 test("file dialog places, folders and files open on invoke and are not edited", () => {

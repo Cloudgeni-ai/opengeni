@@ -1554,7 +1554,9 @@ function HumanInputRow({
     item.response.outcome === "answered"
       ? m.humanInputOutcome.answered
       : item.response.outcome === "skipped"
-        ? m.humanInputOutcome.skipped
+        ? item.response.agentDecides
+          ? (m.humanInputOutcome.agentDecides ?? m.humanInputOutcome.skipped)
+          : m.humanInputOutcome.skipped
         : item.response.outcome === "expired"
           ? m.humanInputOutcome.expired
           : m.humanInputOutcome.cancelled;

@@ -78,6 +78,8 @@ import {
   invitationState,
   invitationStatusLabel,
   joinNames,
+  memberEmail,
+  memberEmailDetail,
   memberName,
   memberStatusLabel,
   ORGANIZATION_ROLE_LABELS,
@@ -442,7 +444,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
     .filter((member) =>
       matches(
         memberName(member),
-        member.email,
+        memberEmail(member),
         ...member.sharedWorkspaceAccess.map((access) => access.workspaceName),
       ),
     )
@@ -547,7 +549,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
                     leading={<PersonAvatar name={name} />}
                     title={name}
                     titleAddon={you ? <MetaChip variant="outline">You</MetaChip> : undefined}
-                    description={member.email && member.email !== name ? member.email : undefined}
+                    description={memberEmailDetail(member, name)}
                     status={
                       status ? (
                         <StatusBadge
@@ -850,10 +852,7 @@ function PersonPage({
             ) : null}
           </>
         }
-        meta={[
-          member.email && member.email !== name ? member.email : null,
-          ORGANIZATION_ROLE_LABELS[member.role],
-        ]}
+        meta={[memberEmailDetail(member, name) ?? null, ORGANIZATION_ROLE_LABELS[member.role]]}
         actions={
           <>
             {capability.canReactivate ? (

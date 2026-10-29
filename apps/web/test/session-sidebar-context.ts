@@ -7,6 +7,7 @@ import type {
   WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type { AppContextValue } from "@opengeni/react/app/app-context";
 import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
 import type { Session } from "@opengeni/react/app/types";
@@ -52,6 +53,15 @@ function session(
     archiveVersion: 0,
     unread: false,
     treeStats: { directChildren: 0, totalDescendants: 0, truncated: false },
+    // What the regular chat beside a Site reads from its session.
+    resources: [],
+    activeTurnId: null,
+    lastSequence: 0,
+    model: "preview-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    tools: [],
+    toolPolicy: { mode: "workspace_default" },
   } as Session;
 }
 
@@ -189,8 +199,13 @@ export const ipoSiteId = "00000000-0000-4000-a000-000000000002";
 export const pricingSiteId = "00000000-0000-4000-a000-000000000003";
 export const checklistSiteId = "00000000-0000-4000-a000-000000000004";
 /**
+ * When each Site with conversations last got a new version. A Site row's
+ * time is its newest publish; its conversations' messages never move it.
+ */
+const sitePublishedAt = new Map<string, string>();
+/**
  * Sites a listed chat created that have no conversations yet. Each sits in
- * its creating chat's project, ordered by its own latest activity.
+ * its creating chat's project, ordered by its newest publish.
  */
 const createdSites: Array<{
   siteId: string;
@@ -231,6 +246,10 @@ if (sitesScenario) {
     siteConversation(903, "Export usage to CSV", usage, null, 2600),
     siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
   );
+  // "Opengeni usage" was last published well before its newest conversation
+  // (2 minutes ago), so it sits below "Slack community connection test".
+  sitePublishedAt.set(usageSiteId, timeBefore(90));
+  sitePublishedAt.set(ipoSiteId, timeBefore(300));
   // "Pricing page copy" (Website redesign) and "Workspace Site planning"
   // (Default) each made a Site nobody has asked anything yet.
   createdSites.push(
@@ -446,6 +465,9 @@ export type SessionSidebarEvidence = {
   siteOpens: string[];
   /** Site sidebar changes, in order. */
   siteSidebarCalls: { siteId: string; pinned?: boolean; archived?: boolean }[];
+  /** Site rows moved to another project, in order. */
+  siteProjectCalls: { siteId: string; fromChannelId: string | null; channelId: string | null }[];
+  failSiteProject: boolean;
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
@@ -464,6 +486,8 @@ export const evidence: SessionSidebarEvidence = {
   archiveCalls: [],
   siteOpens: [],
   siteSidebarCalls: [],
+  siteProjectCalls: [],
+  failSiteProject: false,
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
@@ -542,7 +566,9 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       current.conversations += 1;
       current.total += 1;
       current.active += active;
-      if (row.updatedAt > current.updatedAt) current.updatedAt = row.updatedAt;
+      // Without a publish the row keeps its first conversation's start.
+      if (!sitePublishedAt.has(origin.siteId) && row.createdAt < current.updatedAt)
+        current.updatedAt = row.createdAt;
       if (row.createdAt > current.createdAt) current.createdAt = row.createdAt;
       continue;
     }
@@ -551,7 +577,8 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       channelId: row.channelId ?? null,
       title: origin.title,
       conversations: 1,
-      updatedAt: row.updatedAt,
+      // The newest publish, never its conversations' messages.
+      updatedAt: sitePublishedAt.get(origin.siteId) ?? row.createdAt,
       createdAt: row.createdAt,
       total: 1,
       attention: 0,
@@ -825,11 +852,65 @@ if (sitesScenario) {
         archivedAt: state.archived ? new Date().toISOString() : null,
       };
     },
+    // As the server does: the row's conversations move with it, and the Site
+    // itself when the row is its own project's.
+    updateSiteProject: async (
+      _workspace: string,
+      siteId: string,
+      request: { fromChannelId: string | null; channelId: string | null },
+    ) => {
+      evidence.siteProjectCalls.push({ siteId, ...request });
+      if (evidence.failSiteProject) throw new Error("Preview move refused");
+      const movedSessionIds: string[] = [];
+      for (const row of rows) {
+        if (!siteConversationIds.has(row.id) || row.parentSessionId) continue;
+        const origin = row.metadata._opengeniSiteOrigin as { siteId?: string } | undefined;
+        if (origin?.siteId !== siteId || (row.channelId ?? null) !== request.fromChannelId)
+          continue;
+        row.channelId = request.channelId;
+        movedSessionIds.push(row.id);
+      }
+      const created = createdSites.find((candidate) => candidate.siteId === siteId);
+      const siteMoved = created?.channelId === request.fromChannelId;
+      if (created && siteMoved) created.channelId = request.channelId;
+      return { siteId, channelId: request.channelId, siteMoved, movedSessionIds };
+    },
     tools: {
       forWorkspace: () => ({
         $catalog: async () => ({ tools: [], revision: "preview" }),
       }),
     },
+    // The regular chat beside the Site: what it reads to draw, served as an
+    // empty workspace (no connections, machines, secrets or other agents).
+    connectTransport: () => ({}),
+    listWorkspaceMembers: async () => [],
+    listWorkspaceSkills: async () => ({ skills: [], nextCursor: null }),
+    getWorkspaceRealtimeModelCatalog: async () => ({ models: [] }),
+    getWorkspaceModelCatalog: async () => ({
+      models: [
+        {
+          id: "preview-model",
+          label: "GPT-5.5",
+          provider: "openai",
+          providerLabel: "OpenAI",
+          api: "responses",
+          capabilities: {
+            reasoning: { efforts: ["low", "medium", "high"], defaultEffort: "medium" },
+            latencyModes: [],
+            input: { image: true },
+          },
+          cost: "included",
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "configuration",
+            checkedAt: null,
+          },
+          policyAllowed: true,
+          availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+        },
+      ],
+    }),
   });
   // Preview control for checks: a version published elsewhere (another
   // person, an agent in another chat) shows in the open Site view.
@@ -884,9 +965,130 @@ if (previewParameters.has("hints")) {
   });
 }
 
+/**
+ * The Site view's chat is the app's regular chat route, which reads more of
+ * the API than the sidebar. Calls this preview doesn't serve answer as an API
+ * without that route (404), which the real components already handle, so the
+ * chat draws as it would against such a server.
+ */
+// Calls the components only make when the client offers them (they check
+// first), so the preview leaves them out rather than refusing them.
+const OPTIONAL_CALLS = new Set([
+  "appendRecordingLiveSegments",
+  "attachMachine",
+  "continueSessionWaitingWork",
+  "createFileDownloadUrl",
+  "createRecordingLiveSession",
+  "createRetainedArtifactDownloadUrl",
+  "createVideoArtifactPlaybackSource",
+  "downloadRetainedArtifact",
+  "downloadRetainedScreenshot",
+  "findGoal",
+  "fsRead",
+  "getAccessContext",
+  "getClientConfig",
+  "getMyUsage",
+  "getWorkspace",
+  "getWorkspaceArtifactCurrent",
+  "listApiIntegrations",
+  "listArtifactCatalog",
+  "listCapabilities",
+  "listEventPage",
+  "removeEnrollment",
+  "requestJson",
+  "streamWorkspaceInteractionRevisions",
+  "streamWorkspaceLiveEvents",
+  "swapActiveSandbox",
+  "transcribeAudio",
+  "updateMachineAgent",
+  "updateMachineOperationPolicy",
+  "updateRecording",
+  "updateSessionToolPolicy",
+  "withHeaders",
+]);
+
+function withUnservedCallsRefused(served: OpenGeniClient): OpenGeniClient {
+  const refused = new Map<string, () => Promise<never>>();
+  return new Proxy(served, {
+    get(target, property, receiver) {
+      if (
+        property in target ||
+        typeof property !== "string" ||
+        property === "then" ||
+        OPTIONAL_CALLS.has(property)
+      )
+        return Reflect.get(target, property, receiver);
+      let unserved = refused.get(property);
+      if (!unserved) {
+        unserved = () =>
+          Promise.reject(
+            new OpenGeniApiError(404, JSON.stringify({ unserved: property }), {
+              code: "preview_unserved",
+            }),
+          );
+        refused.set(property, unserved);
+      }
+      return unserved;
+    },
+  });
+}
+
+/** The client the app and the SDK hooks use; the Sites scenario also draws the regular chat. */
+export const previewClient = sitesScenario ? withUnservedCallsRefused(client) : client;
+
 const invocation = { workspaceId };
 const context = {
-  client,
+  client: previewClient,
+  // The regular chat beside a Site reads the workspace and the server's
+  // switches: uploads are on, so files can be attached there. The publish
+  // form names the workspace and checks it isn't Personal.
+  workspaces: [
+    {
+      id: workspaceId,
+      name: "Product engineering",
+      kind: "shared",
+      accountId: "preview",
+      settings: {},
+    },
+  ],
+  authSession: null,
+  managedSelfContext: null,
+  accessKeyVersion: 0,
+  inspectorOpen: false,
+  setInspectorOpen: () => {},
+  sessionCreationHandoff: null,
+  personalGitHubAuthority: null,
+  toolMcpServers: [],
+  workspaceDefaultToolIds: [],
+  workspaceMcpCatalogReady: true,
+  workspaceMcpCatalogLoadedSuccessfully: true,
+  workspaceCapabilityCatalog: [],
+  currentResources: [],
+  refreshWorkspaceMcpServers: async () => {},
+  refreshGitHub: async () => {},
+  refreshPersonalGitHub: async () => {},
+  githubRepos: [],
+  githubStatus: null,
+  githubStatusFailed: false,
+  githubCatalogReady: true,
+  personalGitHubStatus: null,
+  personalGitHubRepositories: [],
+  personalGitHubSelection: null,
+  personalGitHubCatalogReady: true,
+  personalGitHubBusy: false,
+  selectedPersonalGitHubRepoIds: new Set(),
+  selectedPersonalGitHubRepoRefs: {},
+  selectedRepoIds: new Set(),
+  selectedRepoRefs: {},
+  selectedCapabilityToolIds: new Set(),
+  manualRepos: [],
+  repositoryGroups: [],
+  repositoryValidationError: null,
+  selectedInstallationId: null,
+  busy: false,
+  repoBusy: false,
+  githubAppBusy: false,
+  workspaceStateOwnerId: workspaceId,
   // In the Sites scenario the session route supplies the open session, as in
   // the app; the rail injects it. Other scenarios keep no open session.
   get session() {
@@ -911,10 +1113,7 @@ const context = {
     ],
   },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
-  clientConfig: {},
-  // The Site view's publish form names the workspace and checks it isn't Personal.
-  workspaces: [{ id: workspaceId, name: "Product engineering", kind: "shared" }],
-  managedSelfContext: null,
+  clientConfig: { fileUploads: { enabled: true }, auth: { mode: "none" } },
   captureWorkspaceInvocation: () => invocation,
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},
@@ -930,6 +1129,23 @@ const context = {
 } as unknown as AppContextValue;
 
 export const useAppContext = () => context;
+// The regular chat beside a Site keeps its own event feed; the app's is for the page's chat.
+export function createSessionEventFeedStore() {
+  let snapshot: unknown = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    set: (feed: unknown) => {
+      if (snapshot === feed) return;
+      snapshot = feed;
+      for (const listener of listeners) listener();
+    },
+  };
+}
 // The session header reads the context optionally; the sidebar preview always provides it.
 export const useOptionalAppContext = () => context;
 export const useRail = () => ({

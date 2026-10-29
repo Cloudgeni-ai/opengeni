@@ -36,6 +36,7 @@ import {
 } from "./mcp-event-source-client";
 import { boundEvent } from "./normalize";
 import { eventStatusReason } from "./status-reason";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The Gmail source: one person's mailbox, read with the Gmail connection
@@ -247,7 +248,7 @@ export async function createGmailEventSource(input: {
     const blocked = gmailBlockedReason(error);
     if (blocked) throw new HTTPException(422, { message: blocked.text });
     throw new HTTPException(503, {
-      message: `Couldn't reach Gmail (${(error instanceof Error ? error.message : String(error)).slice(0, 200)}). Try again shortly.`,
+      message: `Couldn't reach Gmail (${errorMessage(error).slice(0, 200)}). Try again shortly.`,
     });
   }
   const { source, created } = await createEventSource(input.db, {

@@ -18,6 +18,9 @@ import type { RecordingsClientLike } from "../recordings";
 
 const WORKSPACE = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
 const ME = "user:ingrid";
+const SALES_WORKSPACE = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+/** The viewer's own Only me meeting stored in the Sales workspace. */
+export const ELSEWHERE_RECORDING_ID = "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b";
 const NOW = Date.now();
 const minutes = (count: number) => count * 60_000;
 const iso = (offset: number) => new Date(NOW - offset).toISOString();
@@ -171,6 +174,41 @@ const LINES: Array<[label: string, seconds: number, text: string]> = [
   ["speaker_0", 140, "I'll send the numbers before then."],
 ];
 
+const TOMAS = "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e";
+
+/**
+ * The ready meeting's notes, as an agent writes them: an overview, topics with
+ * nested points, then Decisions and Action items. Speakers and people are
+ * mentions (`speaker:<label>`, `person:<id>`), shown with their current names.
+ */
+const SUMMARY_NOTES = [
+  "The first-run experience and the pricing page. [Ingrid Solberg](speaker:track-0) and [Tomas Eriksen](speaker:speaker_0) agreed onboarding comes first: completion is up, but the empty state after connecting still loses people.",
+  "",
+  "## Onboarding",
+  "",
+  "- The empty state after connecting doesn't say what to do next",
+  "  - [Speaker 2](speaker:speaker_1) sees the same stall in the session replays",
+  "  - One suggested first task, with a link to the full list",
+  "- Three starter tasks were too many: choice is what caused the stall",
+  "",
+  "## Pricing page",
+  "",
+  `- Two months free on annual, with the monthly price shown first`,
+  `  - Finance is fine with it, says [Tomas Eriksen](person:${TOMAS})`,
+  "- The comparison table needs a monthly and annual toggle",
+  "",
+  "## Decisions",
+  "",
+  "- Keep the first-run suggestion to one task.",
+  "- Review both pricing tables on Monday and ship the clearer one.",
+  "",
+  "## Action items",
+  "",
+  "- [ ] [Speaker 2](speaker:speaker_1) drafts the suggested task by Thursday",
+  "- [ ] [Lea Haugen](speaker:speaker_2) mocks both pricing tables",
+  `- [ ] [Tomas Eriksen](person:${TOMAS}) sends the numbers before Monday`,
+].join("\n");
+
 export type MeetingsFixture = {
   client: RecordingsClientLike;
   workspaceId: string;
@@ -212,6 +250,14 @@ export function createMeetingsFixture(
     pinned?: boolean;
     /** The workspace meeting language the server reports. */
     language?: string | null;
+    /** Whether the server reports the workspace's recorders start with live text on. */
+    liveTranscript?: boolean;
+    /** The viewer also has Only me meetings in another workspace, "Sales". */
+    otherWorkspaces?: boolean;
+    /** Every model is the deployment's, charged in credits: none transcribes without them. */
+    creditsOnly?: boolean;
+    /** The organization's ChatGPT subscription also transcribes meetings, at no credit cost. */
+    subscription?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -220,7 +266,7 @@ export function createMeetingsFixture(
       memberSubjectId: ME,
       voice: rememberedVoice("self"),
     }),
-    person("1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e", "Tomas Eriksen"),
+    person(TOMAS, "Tomas Eriksen"),
     person("9c8b7a6f-5e4d-4c3b-a291-807f6e5d4c3b", "Lea Haugen", {
       voice: rememberedVoice("attested"),
     }),
@@ -230,7 +276,8 @@ export function createMeetingsFixture(
       label: "track-0",
       name: "Ingrid Solberg",
       personId: people[0]!.id,
-      source: "confirmed",
+      // Beside the computer audio, the microphone is the person recording.
+      source: "track",
       confidence: null,
     },
     {
@@ -430,9 +477,51 @@ export function createMeetingsFixture(
     dictationDefault: null,
     pinned: false,
   };
+  const offered = options.pinned ? pinnedModels : unpinnedModels;
   const models: ListRecordingModelsResponse = {
-    ...(options.pinned ? pinnedModels : unpinnedModels),
+    ...offered,
+    ...(options.subscription
+      ? {
+          models: [
+            ...offered.models,
+            {
+              providerId: "codex-subscription",
+              providerName: "ChatGPT",
+              model: "chatgpt-dictation",
+              name: "ChatGPT dictation",
+              available: true,
+              funding: "workspace_subscription" as const,
+              usdPerHour: null,
+              capabilities: {
+                batch: true,
+                live: false,
+                diarization: false,
+                liveDiarization: false,
+                multichannel: false,
+                maxSpeakers: null,
+                wordTimestamps: false,
+                languages: [],
+                languageDetection: true,
+                keyterms: false,
+                speakerLibrary: false,
+                maxDurationSeconds: null,
+                maxFileBytes: null,
+              },
+            },
+          ],
+        }
+      : {}),
+    ...(options.creditsOnly
+      ? {
+          models: offered.models.map((entry) => ({
+            ...entry,
+            funding: "deployment" as const,
+            usdPerHour: entry.usdPerHour ?? 0.4,
+          })),
+        }
+      : {}),
     ...(options.language !== undefined ? { language: options.language } : {}),
+    ...(options.liveTranscript !== undefined ? { liveTranscript: options.liveTranscript } : {}),
   };
   const liveSegments: RecordingLiveSegment[] = LIVE_LINES.map(
     ([trackNumber, seconds, text], index) => ({
@@ -474,7 +563,7 @@ export function createMeetingsFixture(
         },
         {
           kind: "notes",
-          body: "## Summary\n\nThe release went out cleanly and the error rate is flat. Onboarding completion is up, but the second step still loses people.\n\n## Decisions\n\n- Ship the migration once the schema change is reviewed.\n\n## Action items\n\n- [ ] Tomas reviews the schema change today\n- [ ] Ingrid shares the onboarding numbers by Friday",
+          body: SUMMARY_NOTES,
           revision: 1,
           updatedAt: iso(minutes(36)),
           updatedBy: { subjectId: ME, sessionId: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f" },
@@ -482,6 +571,28 @@ export function createMeetingsFixture(
       ],
     ],
   ]);
+  // The viewer's own Only me meetings stored in another workspace of the
+  // organization appear in this workspace's list, labelled with where they live.
+  if (options.otherWorkspaces && options.state !== "empty") {
+    const sales = { id: SALES_WORKSPACE, name: "Sales" };
+    recordings = [
+      ...recordings,
+      recording(ELSEWHERE_RECORDING_ID, "Pipeline review", minutes(60 * 3), 1_864_000, {
+        workspaceId: SALES_WORKSPACE,
+        sourceWorkspace: sales,
+      }),
+      recording(
+        "4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
+        "Forecast with Lea",
+        minutes(60 * 26),
+        3_104_000,
+        {
+          workspaceId: SALES_WORKSPACE,
+          sourceWorkspace: sales,
+        },
+      ),
+    ].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
   const client = {
     listRecordings: async (
       _workspaceId: string,

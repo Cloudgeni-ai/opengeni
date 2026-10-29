@@ -1,7 +1,11 @@
 /**
  * One meeting's own page: back to Meetings, the title with who can see it,
- * the player, then the transcript. The quiet card on the right names the
- * speakers and says which transcript version this is, with Transcribe again.
+ * Summary · Transcript · Notepad under it, then the player and the open tab.
+ * Summary is the written notes (with mention chips and Copy), Transcript the
+ * turns as speaker bubbles, Notepad what people jotted down; Summary and
+ * Transcript end with "Ask about this meeting" when the host answers it. The
+ * quiet card on the right names the speakers and says which transcript
+ * version this is, with Transcribe again.
  *
  * Until the transcript exists the page says where the meeting is: still
  * recording here (with Pause and Stop, so taking notes never hides it), not
@@ -10,19 +14,13 @@
  * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-  type ComponentProps,
-} from "react";
+import { regionRestrictedText } from "../inference-region";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
   ChevronDownIcon,
+  CreditCardIcon,
   GlobeIcon,
   LoaderCircleIcon,
   LockIcon,
@@ -33,8 +31,10 @@ import {
 import { toast } from "sonner";
 import type {
   Recording,
+  RecordingNote,
   RecordingPerson,
   RecordingTranscriptVersion,
+  RecordingTranscriptionModel,
   RecordingVisibility,
 } from "@opengeni/contracts";
 import {
@@ -44,13 +44,19 @@ import {
   languageName,
   meetingHereStatus,
   meetingPhase,
+  meetingUploadFailure,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
   meetingTitle,
+  transcribingText,
   transcriptErrorText,
+  transcriptFixModel,
+  transcriptNeedsCredits,
   useRecording,
   useRecordingModels,
+  useRecordingNotes,
   useRecordingPeople,
   useRecordingsClient,
   useLiveTranscript,
@@ -84,6 +90,7 @@ import { FormDialog } from "../ui/form-dialog";
 import { MoreMenu } from "../ui/page-actions";
 import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
+import { SegmentedControl } from "../ui/segmented-control";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
 import { cn } from "../app/lib/utils";
@@ -103,15 +110,11 @@ import {
   speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
-import {
-  liveSpeakerName,
-  RecordingBar,
-  recorderLiveLines,
-  uploadLine,
-  useOnline,
-} from "./recorder-panel";
+import { liveSpeakerName, RecordingBar, recorderLiveLines, useOnline } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
-import { MeetingNotes } from "./meeting-notes";
+import { MeetingAsk, type MeetingAskResult } from "./meeting-ask";
+import { meetingMentionResolver } from "./meeting-mentions";
+import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
 
@@ -223,6 +226,38 @@ function RenameDialog({
   );
 }
 
+/**
+ * The models "Transcribe again" offers. One that can't be used says why:
+ * "Not supported in EU" when EU-only switched it off, otherwise what to connect.
+ */
+export function transcribeAgainModelOptions(
+  models: readonly Pick<
+    RecordingTranscriptionModel,
+    | "providerId"
+    | "providerName"
+    | "model"
+    | "name"
+    | "available"
+    | "unavailableReason"
+    | "usdPerHour"
+  >[],
+  msg: OpenGeniText = defaultText,
+): SelectOption[] {
+  return models.map((entry) => ({
+    value: `${entry.providerId}/${entry.model}`,
+    label: entry.name,
+    meta:
+      entry.usdPerHour !== null
+        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
+        : entry.providerName,
+    disabled: !entry.available,
+    disabledReason: entry.available
+      ? undefined
+      : (regionRestrictedText(msg, entry.unavailableReason) ??
+        msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName })),
+  }));
+}
+
 function TranscribeAgainDialog({
   open,
   recording,
@@ -265,18 +300,7 @@ function TranscribeAgainDialog({
       setError(null);
     }
   }, [open, initialModel]);
-  const modelOptions: SelectOption[] = models.map((entry) => ({
-    value: `${entry.providerId}/${entry.model}`,
-    label: entry.name,
-    meta:
-      entry.usdPerHour !== null
-        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
-        : entry.providerName,
-    disabled: !entry.available,
-    disabledReason: entry.available
-      ? undefined
-      : msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName }),
-  }));
+  const modelOptions = transcribeAgainModelOptions(models, msg);
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
   const estimate =
     selected?.usdPerHour != null && recording.durationMilliseconds > 0
@@ -429,15 +453,118 @@ function VisibilityMenu({
   );
 }
 
+/** A transcript version's model and the provider it runs on, by name. */
+type ModelAbout = {
+  modelName: string;
+  providerName: string;
+  funding: string;
+  /** The deployment offers no other model. */
+  pinned: boolean;
+};
+
 const SPINNER = (
   <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
 );
+
+/** What fixes a failed transcript, besides transcribing it again from the dialog. */
+type TranscriptFixes = {
+  /** The models this workspace can transcribe with, to pick the direct fix from. */
+  models: readonly RecordingTranscriptionModel[];
+  /** Transcribe it now with another model, the one-click fix. */
+  onTranscribeWith: (model: RecordingTranscriptionModel) => Promise<void>;
+  /** Opens where credits are bought; absent when this person can't buy them. */
+  onOpenBilling?: (() => void) | undefined;
+  /** Opens where models are connected; absent when this person can't connect them. */
+  onConnectModels?: (() => void) | undefined;
+};
+
+/**
+ * A failed transcript's actions: one direct fix (another model that works
+ * here, else adding credits or connecting a model), then Transcribe again,
+ * which tries once more with any model once the cause is fixed.
+ */
+function FailedTranscriptActions({
+  version,
+  about,
+  fixes,
+  onRetry,
+}: {
+  version: RecordingTranscriptVersion | null;
+  about: ModelAbout | null;
+  fixes: TranscriptFixes;
+  onRetry: () => void;
+}) {
+  const msg = useOpenGeniText();
+  const [running, setRunning] = useState(false);
+  const code = version?.errorCode ?? null;
+  const switchTo = transcriptFixModel(code, version, fixes.models);
+  const connect =
+    !switchTo &&
+    (code === "missing_provider_key" || code === "provider_unauthorized") &&
+    about?.funding !== "deployment"
+      ? fixes.onConnectModels
+      : undefined;
+  const billing = !switchTo && transcriptNeedsCredits(code) ? fixes.onOpenBilling : undefined;
+  return (
+    <span className="flex flex-wrap gap-2">
+      {switchTo ? (
+        <Button
+          type="button"
+          size="sm"
+          disabled={running}
+          onClick={() => {
+            setRunning(true);
+            void fixes
+              .onTranscribeWith(switchTo)
+              .catch((error: unknown) => {
+                toast.error(msg("meetings.detailPage.couldnTStartTranscribing"), {
+                  description: errorText(error),
+                });
+              })
+              .finally(() => setRunning(false));
+          }}
+        >
+          {running ? SPINNER : null}
+          {msg("meetings.detailPage.transcribeWithModel", { modelName: switchTo.name })}
+        </Button>
+      ) : billing ? (
+        <Button type="button" size="sm" onClick={billing}>
+          <CreditCardIcon aria-hidden="true" />
+          {msg("meetings.detailPage.addCredits")}
+        </Button>
+      ) : connect ? (
+        <Button type="button" size="sm" onClick={connect}>
+          {msg("meetings.detailPage.connectAModel")}
+        </Button>
+      ) : null}
+      <Button type="button" size="sm" variant="outline" disabled={running} onClick={onRetry}>
+        {msg("meetings.detailPage.transcribeAgain")}
+      </Button>
+    </span>
+  );
+}
+
+/** Why an upload failed, in the words of a transcript failure when it has the same cause. */
+function uploadFailureText(
+  failure: { code: string; message: string } | null,
+  msg: OpenGeniText,
+): string {
+  if (!failure) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
+  if (transcriptNeedsCredits(failure.code)) return transcriptErrorText(failure.code, msg);
+  // The notice's title already says the upload failed; the server's reason
+  // reads as the first sentence of its text.
+  const reason = failure.message.trim();
+  if (!reason) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
+  return /[.!?]$/.test(reason) ? reason : `${reason}.`;
+}
 
 function PhaseNotice({
   recording,
   recorder,
   here,
   recordingElsewhere,
+  modelOf,
+  fixes,
   onRetry,
 }: {
   recording: Recording;
@@ -446,6 +573,9 @@ function PhaseNotice({
   here: MeetingHereStatus | null;
   /** It's captured on another device with the live preview on. */
   recordingElsewhere: boolean;
+  /** The version's model and its provider, when the workspace's list has it. */
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
+  fixes: TranscriptFixes;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -461,45 +591,83 @@ function PhaseNotice({
     );
   }
   if (phase.kind === "uploading" && recorder && here === "upload_failed") {
+    // The audio stays on this device: once the cause is fixed, the same upload carries on.
     return (
-      <Notice tone="failed" live="polite">
-        {uploadLine(recorder, true, msg)}
+      <Notice
+        tone="failed"
+        title={msg("meetings.detailPage.theUploadDidnTFinish")}
+        live="polite"
+        actionLayout="responsive"
+        action={
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              // The uploader holding it was closed: reloading starts a new one.
+              if (!recorder.retryUpload(recording.id)) {
+                toast.error(msg("meetings.detailPage.couldnTTryAgainReload"));
+              }
+            }}
+          >
+            {msg("meetings.detailPage.tryAgain")}
+          </Button>
+        }
+      >
+        {msg("meetings.detailPage.uploadFailureKeptHere", {
+          reason: uploadFailureText(meetingUploadFailure(recorder, recording.id), msg),
+        })}
+      </Notice>
+    );
+  }
+  if (phase.kind === "uploading" && here === "uploading") {
+    return (
+      <Notice tone="waiting" icon={SPINNER} live="polite">
+        {msg("meetings.detailPage.uploadingFromThisDevice")}
       </Notice>
     );
   }
   if (phase.kind === "uploading" && here !== "transcribing") {
-    return (
+    // Nothing on this device can move it along: say where the audio is and what finishes it.
+    return recordingElsewhere ? (
       <Notice
         tone="waiting"
         icon={SPINNER}
         title={msg("meetings.detailPage.notFinishedYet")}
         live="polite"
       >
-        {recordingElsewhere
-          ? msg("meetings.detailPage.itSStillBeingRecorded")
-          : msg("meetings.detailPage.theAudioIsOnThe")}
+        {msg("meetings.detailPage.itSStillBeingRecorded")}
+      </Notice>
+    ) : (
+      <Notice tone="waiting" title={msg("meetings.detailPage.notFinishedYet")} live="polite">
+        {msg("meetings.detailPage.theAudioIsOnThe")}
       </Notice>
     );
   }
   if (phase.kind === "transcribing" || phase.kind === "uploading") {
     return (
       <Notice tone="waiting" icon={SPINNER} live="polite">
-        {msg("meetings.detailPage.transcribingThisUsuallyTakesA")}
+        {transcribingText(recording.durationMilliseconds, msg)}
       </Notice>
     );
   }
   if (phase.kind === "failed") {
+    const about = phase.version ? modelOf(phase.version) : null;
     return (
       <Notice
         tone="failed"
         title={msg("meetings.detailPage.theTranscriptFailed")}
+        actionLayout="responsive"
         action={
-          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            {msg("meetings.detailPage.transcribeAgain")}
-          </Button>
+          <FailedTranscriptActions
+            version={phase.version}
+            about={about}
+            fixes={fixes}
+            onRetry={onRetry}
+          />
         }
       >
-        {transcriptErrorText(phase.version?.errorCode ?? null, msg)}
+        {transcriptErrorText(phase.version?.errorCode ?? null, msg, about)}
       </Notice>
     );
   }
@@ -532,11 +700,15 @@ function RerunNotice({
   versions,
   shownVersionNumber,
   modelName,
+  modelOf,
+  fixes,
   onRetry,
 }: {
   versions: readonly RecordingTranscriptVersion[];
   shownVersionNumber: number;
   modelName: (version: RecordingTranscriptVersion) => string;
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
+  fixes: TranscriptFixes;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -559,14 +731,18 @@ function RerunNotice({
       <Notice
         tone="failed"
         title={msg("meetings.detailPage.transcribingAgainFailed")}
+        actionLayout="responsive"
         action={
-          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            {msg("meetings.detailPage.transcribeAgain")}
-          </Button>
+          <FailedTranscriptActions
+            version={newest}
+            about={modelOf(newest)}
+            fixes={fixes}
+            onRetry={onRetry}
+          />
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
-          transcriptErrorText: transcriptErrorText(newest.errorCode, msg),
+          transcriptErrorText: transcriptErrorText(newest.errorCode, msg, modelOf(newest)),
         })}
       </Notice>
     );
@@ -574,21 +750,18 @@ function RerunNotice({
   return null;
 }
 
+/** The meeting page's tabs. */
+type MeetingTab = "summary" | "transcript" | "notepad";
+
+/** Summary when there are written notes to read, else Transcript. */
+export function openingMeetingTab(notes: RecordingNote | null): MeetingTab {
+  return notes?.body.trim() ? "summary" : "transcript";
+}
+
 /** One of the host's own lines about a meeting, such as its project. */
 export type MeetingDetail = { id: string; label: string; content: ReactNode };
 
-function MeetingDetailPageContent({
-  workspaceId,
-  recordingId,
-  viewerSubjectId,
-  viewerName,
-  voiceRecognition = false,
-  recordings: recordingsClient,
-  onBack,
-  onOpenSettings,
-  details,
-  onOpenChat,
-}: {
+type MeetingDetailPageProps = {
   workspaceId: string;
   recordingId: string;
   viewerSubjectId: string;
@@ -602,13 +775,61 @@ function MeetingDetailPageContent({
   /** Opens Meetings settings, where voice recognition is turned on. */
   onOpenSettings?: (() => void) | undefined;
   /**
+   * Opens where this person adds credits, the fix a transcript refused for
+   * credits offers when no other model works here. Omit it for someone who
+   * can't buy credits.
+   */
+  onOpenBilling?: (() => void) | undefined;
+  /**
+   * Opens where models are connected, the fix for a transcript whose
+   * provider isn't connected. Omit it for someone who can't connect one.
+   */
+  onConnectModels?: (() => void) | undefined;
+  /**
    * The host's own lines about this meeting, shown first beside the
    * transcript, such as the project it belongs to.
    */
   details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
   /** Opens a chat, such as the one whose agent wrote the notes. */
   onOpenChat?: ((sessionId: string) => void) | undefined;
-}) {
+  /**
+   * Answers "Ask about this meeting", usually by starting a chat with the
+   * meeting attached and the question as its first message. Without it the
+   * page has no Ask input. Resolve false to keep the question in the input
+   * when the host couldn't take it and has already said why.
+   */
+  onAsk?:
+    | ((recordingId: string, question: string) => MeetingAskResult | Promise<MeetingAskResult>)
+    | undefined;
+};
+
+/**
+ * Each meeting starts fresh, even when the host keeps the page mounted and
+ * only changes `recordingId`: its own opening tab, drafts and dialogs.
+ */
+export function MeetingDetailPage(props: MeetingDetailPageProps) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingDetailPageForRecording key={props.recordingId} {...props} />
+    </MeetingsOverlayScope>
+  );
+}
+
+function MeetingDetailPageForRecording({
+  workspaceId,
+  recordingId,
+  viewerSubjectId,
+  viewerName,
+  voiceRecognition = false,
+  recordings: recordingsClient,
+  onBack,
+  onOpenSettings,
+  onOpenBilling,
+  onConnectModels,
+  details,
+  onOpenChat,
+  onAsk,
+}: MeetingDetailPageProps) {
   const msg = useOpenGeniText();
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
   const meeting = useRecording(recordingId, override);
@@ -625,8 +846,11 @@ function MeetingDetailPageContent({
     refreshKey: transcriptVersionId ?? null,
     enabled: Boolean(transcriptVersionId),
   });
-  const people = useRecordingPeople(override);
-  const models = useRecordingModels(override);
+  // A person's own Only me meeting from another workspace of the organization
+  // keeps its people and transcribers in the workspace that stores it.
+  const home = { ...override, workspaceId: recording?.workspaceId ?? workspaceId };
+  const people = useRecordingPeople(home);
+  const models = useRecordingModels(home);
   const { client } = useRecordingsClient(override);
   const { recorder } = useMeetingRecorder();
   const online = useOnline();
@@ -649,6 +873,28 @@ function MeetingDetailPageContent({
   const [deleting, setDeleting] = useState(false);
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
   const [rememberingVoice, setRememberingVoice] = useState<RecordingPerson | null>(null);
+  const notes = useRecordingNotes(recordingId, override);
+  // Summary when the meeting has written notes, else Transcript: decided once
+  // the notes load, so notes written later don't move the reader.
+  const [openingTab, setOpeningTab] = useState<MeetingTab | null>(null);
+  const [chosenTab, setChosenTab] = useState<MeetingTab | null>(null);
+  if (openingTab === null && !notes.loading) {
+    setOpeningTab(openingMeetingTab(notes.notes));
+  }
+  const tab = chosenTab ?? openingTab;
+  const slots = useMemo(() => speakerColorSlots(transcript.segments), [transcript.segments]);
+  const mentionTracks = recording?.tracks;
+  const mentions = useMemo(
+    () =>
+      meetingMentionResolver({
+        speakers: transcript.speakers,
+        tracks: mentionTracks ?? [],
+        people: people.people,
+        slots,
+        msg,
+      }),
+    [transcript.speakers, mentionTracks, people.people, slots, msg],
+  );
 
   const { sources, reload } = useTrackSources(recording, (trackNumber) =>
     client.getRecordingTrackAudio(workspaceId, recordingId, trackNumber),
@@ -661,6 +907,40 @@ function MeetingDetailPageContent({
       )?.name ?? entry.model,
     [models.models],
   );
+  const modelOf = useCallback(
+    (entry: RecordingTranscriptVersion): ModelAbout | null => {
+      const found = models.models.find(
+        (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
+      );
+      return found
+        ? {
+            modelName: found.name,
+            providerName: found.providerName,
+            funding: found.funding,
+            pinned: models.pinned,
+          }
+        : null;
+    },
+    [models.models, models.pinned],
+  );
+  // A failed transcript's direct fix runs another model with this meeting's
+  // own options; null language detects it, as Transcribe again does.
+  const rerunMeeting = meeting.rerun;
+  const shownTranscription = recording?.transcription;
+  const fixes: TranscriptFixes = {
+    models: models.models,
+    onTranscribeWith: async (model) => {
+      const { providerId: _provider, model: _model, ...options } = shownTranscription ?? {};
+      await rerunMeeting({
+        ...options,
+        providerId: model.providerId,
+        model: model.model,
+        language: options.language ?? null,
+      });
+    },
+    onOpenBilling,
+    onConnectModels,
+  };
 
   const createPerson = people.create;
   const { rememberVoice, forgetVoice } = people;
@@ -669,6 +949,12 @@ function MeetingDetailPageContent({
   const nameSpeaker = transcript.nameSpeaker;
   const transcriptSpeakers = transcript.speakers;
   const peopleList = people.people;
+  // Naming reads the people list right after a person was created, before
+  // the list has rerendered with them.
+  const latestPeople = useRef(peopleList);
+  latestPeople.current = peopleList;
+  const createdPeople = useRef(new Map<string, RecordingPerson>());
+  const offeredVoices = useRef(new Set<string>());
   // Without voice recognition a name is only for this meeting; say so once,
   // the first time someone is named here.
   const toldNotRemembered = useRef(false);
@@ -682,11 +968,65 @@ function MeetingDetailPageContent({
         : {}),
     });
   }, [msg, voiceRecognition, onOpenSettings]);
+  const offerMyVoice = useCallback(
+    (me: RecordingPerson) => {
+      // Naming yourself is when remembering your voice makes sense.
+      toast.success(msg("meetings.detailPage.namedYou"), {
+        // Long enough to read and decide; the speaker menu offers it later too.
+        duration: 10_000,
+        description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
+        action: {
+          label: msg("meetings.detailPage.rememberMyVoice"),
+          onClick: () =>
+            void rememberVoice(me.id, "self").then(
+              () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
+              (error: unknown) =>
+                toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
+                  description: errorText(error),
+                }),
+            ),
+        },
+      });
+    },
+    [msg, rememberVoice],
+  );
+  // A name teaches nothing until the person's voice may be remembered, so
+  // say so once per person, the first time they're named here. Another
+  // member decides for themselves, so naming them offers nothing.
+  const offerToRemember = useCallback(
+    (personId: string) => {
+      const person =
+        latestPeople.current.find((candidate) => candidate.id === personId) ??
+        createdPeople.current.get(personId);
+      if (!person || person.voice || offeredVoices.current.has(person.id)) return;
+      const self = Boolean(viewerSubjectId) && person.memberSubjectId === viewerSubjectId;
+      if (person.memberSubjectId && !self) return;
+      offeredVoices.current.add(person.id);
+      if (self) {
+        offerMyVoice(person);
+        return;
+      }
+      toast.success(
+        msg("meetings.detailPage.namedDisplayname", { displayName: person.displayName }),
+        {
+          duration: 10_000,
+          description: msg("meetings.detailPage.rememberTheirVoiceAndLater"),
+          action: {
+            label: msg("meetings.detailPage.rememberVoice"),
+            onClick: () => setRememberingVoice(person),
+          },
+        },
+      );
+    },
+    [msg, viewerSubjectId, offerMyVoice],
+  );
   const actions: TranscriptActions = useMemo(
     () => ({
       nameSpeaker: async (label, name) => {
         await nameSpeaker(label, name);
-        if (name) tellNotRemembered();
+        if (!name) return;
+        if (!voiceRecognition) tellNotRemembered();
+        else if ("personId" in name) offerToRemember(name.personId);
       },
       viewerSubjectId,
       nameSelf: async (label: string) => {
@@ -700,21 +1040,8 @@ function MeetingDetailPageContent({
         if (!voiceRecognition) {
           tellNotRemembered();
         } else if (!me.voice) {
-          // Naming yourself is when remembering your voice makes sense.
-          toast.success(msg("meetings.detailPage.namedYou"), {
-            description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
-            action: {
-              label: msg("meetings.detailPage.rememberMyVoice"),
-              onClick: () =>
-                void rememberVoice(me.id, "self").then(
-                  () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
-                  (error: unknown) =>
-                    toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
-                      description: errorText(error),
-                    }),
-                ),
-            },
-          });
+          offeredVoices.current.add(me.id);
+          offerMyVoice(me);
         }
       },
       rejectSuggestion: async (label: string) => {
@@ -744,7 +1071,11 @@ function MeetingDetailPageContent({
       },
       moveSegment: transcript.moveSegment,
       editSegment: transcript.editSegment,
-      createPerson: async (displayName: string) => await createPerson({ displayName }),
+      createPerson: async (displayName: string) => {
+        const person = await createPerson({ displayName });
+        createdPeople.current.set(person.id, person);
+        return person;
+      },
       voices: voiceRecognition
         ? {
             viewerSubjectId,
@@ -789,6 +1120,8 @@ function MeetingDetailPageContent({
       viewerName,
       peopleList,
       tellNotRemembered,
+      offerMyVoice,
+      offerToRemember,
       rememberVoice,
       forgetVoice,
       refreshTranscript,
@@ -853,13 +1186,22 @@ function MeetingDetailPageContent({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The person recording, as the transcript will name their microphone.
+  const ownerName =
+    peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
+    (owner ? (viewerName ?? null) : null);
   const phase = meetingPhase(recording);
   // Only while the server still waits for audio: this device may know more.
   const here =
     recording.state === "capturing" ? meetingHereStatus(recorder, recording.id, online) : null;
+  const capturingHere = here === "recording" || here === "paused";
+  // Recording on this device: one page with the bar, the notepad and the live
+  // preview. Once it stops (and everywhere else), Summary · Transcript · Notepad,
+  // with this recorder's live text in Transcript until the transcript is ready.
+  const tabbed = !capturingHere;
+  const askable = Boolean(onAsk);
   const segments = transcript.segments;
-  const speakerLabels = [...speakerColorSlots(segments).keys()];
-  const slots = speakerColorSlots(segments);
+  const speakerLabels = [...slots.keys()];
   const activeSegment = sources.length > 0 ? activeSegmentIndex(segments, position) : null;
   const showTranscript = Boolean(transcriptVersionId);
   const shownVersionNumber = version?.state === "complete" ? version.versionNumber : 0;
@@ -1023,6 +1365,22 @@ function MeetingDetailPageContent({
   const header = (
     <DetailPageHeader
       title={shownTitle}
+      tabs={
+        !tabbed ? undefined : tab === null ? (
+          <Skeleton className="h-9 w-64 rounded-[10px]" />
+        ) : (
+          <SegmentedControl
+            aria-label={msg("meetings.detailPage.show")}
+            value={tab}
+            onValueChange={setChosenTab}
+            options={[
+              { value: "summary", label: msg("meetings.detailPage.summary") },
+              { value: "transcript", label: msg("meetings.detailPage.transcript") },
+              { value: "notepad", label: msg("meetings.notes.notepad") },
+            ]}
+          />
+        )
+      }
       meta={
         <DetailMeta>
           {formatAbsoluteTime(recording.startedAt, { text: msg })}
@@ -1035,11 +1393,16 @@ function MeetingDetailPageContent({
           {!owner && recording.visibility === "workspace"
             ? msg("meetings.detailPage.sharedWithTheWorkspace")
             : null}
+          {recording.sourceWorkspace
+            ? msg("meetings.detailPage.onlyMeRecordedIn", {
+                workspace: recording.sourceWorkspace.name,
+              })
+            : null}
         </DetailMeta>
       }
       actions={
         <>
-          {owner ? (
+          {owner && !recording.sourceWorkspace ? (
             <VisibilityMenu
               visibility={recording.visibility}
               onChange={(visibility) =>
@@ -1143,6 +1506,141 @@ function MeetingDetailPageContent({
       </DetailAside>
     ) : undefined;
 
+  // What the Transcript shows: who still needs a name, then the transcript,
+  // or why there isn't one yet.
+  const transcriptBody = (
+    <>
+      {showTranscript && reviewLabels.length > 0 ? (
+        // Beside the speakers card, the speakers still to review sit at
+        // the top of the transcript, where the reader starts. Only the outer
+        // wrapper hides, so no display class competes with the container query.
+        <div className="mb-5 @max-[620px]/detail:hidden">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm leading-5 text-fg-muted">{reviewLine}</p>
+            <ul
+              aria-label={msg("meetings.detailPage.speakersToReview")}
+              className="flex flex-wrap gap-2"
+            >
+              {speakerButtons("chips", reviewLabels)}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+      {showTranscript && speakerLabels.length > 0 ? (
+        // Only while the speakers card sits below the transcript. The
+        // wrapper carries no display class, so the container query wins.
+        <div className="mb-5 @[620px]/detail:hidden">
+          <div className="grid gap-2">
+            <ul aria-label={msg("meetings.detailPage.speakers")} className="flex flex-wrap gap-2">
+              {speakerButtons("chips")}
+            </ul>
+            {reviewLine ? (
+              <p className="text-xs leading-4.5 text-fg-muted">
+                {msg("meetings.detailPage.reviewlineTapADashedName", {
+                  reviewLine: reviewLine,
+                })}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {!showTranscript && (previewing || recordingHere) ? (
+        <div className="grid gap-3">
+          <p className="text-sm leading-5 text-fg-muted">
+            <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
+              {msg("meetings.detailPage.preview")}
+            </span>
+            {recording.state === "capturing" && here !== "transcribing"
+              ? msg("meetings.detailPage.whatSSaidSoFar")
+              : msg("meetings.detailPage.whatWasSaidAsIt")}
+          </p>
+          {recordingHere && recorder?.live ? (
+            <LiveTranscript
+              heading={false}
+              lines={recorderLiveLines(recorder)}
+              partials={recorder.live.map((track) => ({
+                trackNumber: track.trackNumber,
+                text: track.partial,
+              }))}
+              tracks={recorder.tracks}
+              speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg, ownerName)}
+              status={liveStatus(recorder.live, msg)}
+              empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
+            />
+          ) : (
+            <LiveTranscript
+              heading={false}
+              lines={savedLive.segments}
+              tracks={recording.tracks}
+              speakerName={(trackNumber) => {
+                const source = defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg);
+                return (
+                  ownerLiveLaneName(recording.tracks, trackNumber, ownerName ?? source, msg) ??
+                  source
+                );
+              }}
+              status={
+                savedLive.error
+                  ? { text: msg("meetings.detailPage.canTLoadThePreview"), tone: "waiting" }
+                  : null
+              }
+              empty={
+                recording.state === "capturing"
+                  ? msg("meetings.detailPage.nothingSaidYetTextShows")
+                  : msg("meetings.detailPage.noLiveTextWasSaved")
+              }
+            />
+          )}
+        </div>
+      ) : !showTranscript ? (
+        <p className="text-sm leading-5 text-fg-muted">
+          {phase.kind === "failed"
+            ? msg("meetings.detailPage.noTranscriptYet")
+            : phase.kind === "no_transcript"
+              ? msg("meetings.detailPage.thisMeetingHasnTBeen")
+              : msg("meetings.detailPage.theTranscriptShowsHereWhen")}
+        </p>
+      ) : transcript.loading && segments.length === 0 ? (
+        <div className="space-y-3" aria-busy="true">
+          <Skeleton className="h-4 w-32" />
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-4/5" />
+        </div>
+      ) : transcript.error && segments.length === 0 ? (
+        <ErrorMessage
+          title={msg("meetings.detailPage.couldnTLoadTheTranscript")}
+          details={[{ label: msg("meetings.detailPage.error"), value: transcript.error.message }]}
+          action={
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void transcript.refresh()}
+            >
+              {msg("meetings.detailPage.tryAgain")}
+            </Button>
+          }
+        >
+          {msg("meetings.detailPage.checkYourConnectionThenTry")}
+        </ErrorMessage>
+      ) : segments.length === 0 ? (
+        <p className="text-sm leading-5 text-fg-muted">
+          {msg("meetings.detailPage.noSpeechWasFoundIn")}
+        </p>
+      ) : (
+        <MeetingTranscript
+          segments={segments}
+          speakers={transcript.speakers}
+          tracks={recording.tracks}
+          people={people.people}
+          activeSegment={activeSegment}
+          actions={actions}
+          onSeek={sources.length > 0 ? (ms) => player.current?.playFrom(ms) : null}
+        />
+      )}
+    </>
+  );
+
   return (
     <DetailPage back={{ label: msg("meetings.detailPage.meetings"), onClick: onBack }}>
       {header}
@@ -1152,6 +1650,8 @@ function MeetingDetailPageContent({
           recorder={recorder}
           here={here}
           recordingElsewhere={previewing && !recordingHere}
+          modelOf={modelOf}
+          fixes={fixes}
           onRetry={() => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
@@ -1159,6 +1659,8 @@ function MeetingDetailPageContent({
             versions={meeting.versions}
             shownVersionNumber={phase.version.versionNumber}
             modelName={modelName}
+            modelOf={modelOf}
+            fixes={fixes}
             onRetry={() => setRerunning(true)}
           />
         ) : null}
@@ -1185,141 +1687,55 @@ function MeetingDetailPageContent({
         </div>
       ) : null}
       <DetailPageBody aside={aside}>
-        <MeetingNotes
-          recordingId={recording.id}
-          recording={override}
-          capturing={recording.state === "capturing"}
-          onOpenChat={onOpenChat}
-        />
-        <DetailSection title={msg("meetings.detailPage.transcript")}>
-          {showTranscript && reviewLabels.length > 0 ? (
-            // Beside the speakers card, the speakers still to review sit at
-            // the top of the transcript, where the reader starts. Only the outer
-            // wrapper hides, so no display class competes with the container query.
-            <div className="mb-5 @max-[620px]/detail:hidden">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm leading-5 text-fg-muted">{reviewLine}</p>
-                <ul
-                  aria-label={msg("meetings.detailPage.speakersToReview")}
-                  className="flex flex-wrap gap-2"
-                >
-                  {speakerButtons("chips", reviewLabels)}
-                </ul>
-              </div>
-            </div>
-          ) : null}
-          {showTranscript && speakerLabels.length > 0 ? (
-            // Only while the speakers card sits below the transcript. The
-            // wrapper carries no display class, so the container query wins.
-            <div className="mb-5 @[620px]/detail:hidden">
-              <div className="grid gap-2">
-                <ul
-                  aria-label={msg("meetings.detailPage.speakers")}
-                  className="flex flex-wrap gap-2"
-                >
-                  {speakerButtons("chips")}
-                </ul>
-                {reviewLine ? (
-                  <p className="text-xs leading-4.5 text-fg-muted">
-                    {msg("meetings.detailPage.reviewlineTapADashedName", {
-                      reviewLine: reviewLine,
-                    })}
-                  </p>
+        {tabbed ? (
+          // One column under the tabs; Ask keeps its draft across Summary and
+          // Transcript. The Summary stays mounted while hidden, so an edit in
+          // progress survives a look at the transcript.
+          <div className="flex min-w-0 flex-col">
+            {tab === null ? (
+              <DetailSection>
+                <div aria-busy="true" className="grid gap-3">
+                  <Skeleton className="h-4 w-2/3" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-1/2" />
+                </div>
+              </DetailSection>
+            ) : (
+              <>
+                <div hidden={tab !== "summary"} data-meeting-tab="summary">
+                  <DetailSection className={askable ? "pb-2" : undefined}>
+                    <MeetingSummary notes={notes} onOpenChat={onOpenChat} mentions={mentions} />
+                  </DetailSection>
+                </div>
+                {tab === "transcript" ? (
+                  <DetailSection key="transcript" className={askable ? "pb-2" : undefined}>
+                    {transcriptBody}
+                  </DetailSection>
+                ) : tab === "notepad" ? (
+                  <DetailSection key="notepad">
+                    <MeetingNotepad notes={notes} />
+                  </DetailSection>
                 ) : null}
-              </div>
-            </div>
-          ) : null}
-          {!showTranscript && (previewing || recordingHere) ? (
-            <div className="grid gap-3">
-              <p className="text-sm leading-5 text-fg-muted">
-                <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
-                  {msg("meetings.detailPage.preview")}
-                </span>
-                {recording.state === "capturing" && here !== "transcribing"
-                  ? msg("meetings.detailPage.whatSSaidSoFar")
-                  : msg("meetings.detailPage.whatWasSaidAsIt")}
-              </p>
-              {recordingHere && recorder?.live ? (
-                <LiveTranscript
-                  heading={false}
-                  lines={recorderLiveLines(recorder)}
-                  partials={recorder.live.map((track) => ({
-                    trackNumber: track.trackNumber,
-                    text: track.partial,
-                  }))}
-                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
-                  status={liveStatus(recorder.live, msg)}
-                  empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
-                />
-              ) : (
-                <LiveTranscript
-                  heading={false}
-                  lines={savedLive.segments}
-                  speakerName={(trackNumber) =>
-                    defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
-                  }
-                  status={
-                    savedLive.error
-                      ? { text: msg("meetings.detailPage.canTLoadThePreview"), tone: "waiting" }
-                      : null
-                  }
-                  empty={
-                    recording.state === "capturing"
-                      ? msg("meetings.detailPage.nothingSaidYetTextShows")
-                      : msg("meetings.detailPage.noLiveTextWasSaved")
-                  }
-                />
-              )}
-            </div>
-          ) : !showTranscript ? (
-            <p className="text-sm leading-5 text-fg-muted">
-              {phase.kind === "failed"
-                ? msg("meetings.detailPage.noTranscriptYet")
-                : phase.kind === "no_transcript"
-                  ? msg("meetings.detailPage.thisMeetingHasnTBeen")
-                  : msg("meetings.detailPage.theTranscriptShowsHereWhen")}
-            </p>
-          ) : transcript.loading && segments.length === 0 ? (
-            <div className="space-y-3" aria-busy="true">
-              <Skeleton className="h-4 w-32" />
-              <Skeleton className="h-4 w-full" />
-              <Skeleton className="h-4 w-4/5" />
-            </div>
-          ) : transcript.error && segments.length === 0 ? (
-            <ErrorMessage
-              title={msg("meetings.detailPage.couldnTLoadTheTranscript")}
-              details={[
-                { label: msg("meetings.detailPage.error"), value: transcript.error.message },
-              ]}
-              action={
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void transcript.refresh()}
-                >
-                  {msg("meetings.detailPage.tryAgain")}
-                </Button>
-              }
-            >
-              {msg("meetings.detailPage.checkYourConnectionThenTry")}
-            </ErrorMessage>
-          ) : segments.length === 0 ? (
-            <p className="text-sm leading-5 text-fg-muted">
-              {msg("meetings.detailPage.noSpeechWasFoundIn")}
-            </p>
-          ) : (
-            <MeetingTranscript
-              segments={segments}
-              speakers={transcript.speakers}
-              tracks={recording.tracks}
-              people={people.people}
-              activeSegment={activeSegment}
-              actions={actions}
-              onSeek={sources.length > 0 ? (ms) => player.current?.playFrom(ms) : null}
+              </>
+            )}
+            {askable && onAsk && tab !== "notepad" ? (
+              <MeetingAsk onAsk={(question) => onAsk(recording.id, question)} />
+            ) : null}
+          </div>
+        ) : (
+          // Recording here: the notepad first, then the live preview, as one page.
+          <>
+            <MeetingNotesSection
+              notes={notes}
+              capturing={recording.state === "capturing"}
+              onOpenChat={onOpenChat}
+              mentions={mentions}
             />
-          )}
-        </DetailSection>
+            <DetailSection title={msg("meetings.detailPage.transcript")}>
+              {transcriptBody}
+            </DetailSection>
+          </>
+        )}
       </DetailPageBody>
       <RenameDialog
         open={renaming}
@@ -1391,13 +1807,5 @@ function MeetingDetailPageContent({
         onDeleted={onBack}
       />
     </DetailPage>
-  );
-}
-
-export function MeetingDetailPage(props: ComponentProps<typeof MeetingDetailPageContent>) {
-  return (
-    <MeetingsOverlayScope>
-      <MeetingDetailPageContent {...props} />
-    </MeetingsOverlayScope>
   );
 }

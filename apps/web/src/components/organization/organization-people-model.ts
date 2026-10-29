@@ -1,3 +1,4 @@
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import type { RoleOption, RoleValue } from "@opengeni/react/ui/role-select";
 import type {
   OrganizationAdministrationOverview,
@@ -71,8 +72,22 @@ export function withArticle(label: string): string {
   return `${/^[aeiou]/.test(lower) ? "an" : "a"} ${lower}`;
 }
 
+/** A member's email address to show, or null when the account has none. */
+export function memberEmail(member: { email?: string | null }): string | null {
+  return accountContactEmail(member.email);
+}
+
+/** The email to show next to a member's name, when it adds something. */
+export function memberEmailDetail(
+  member: { email?: string | null },
+  name: string,
+): string | undefined {
+  const email = memberEmail(member);
+  return email && email !== name ? email : undefined;
+}
+
 export function memberName(member: Pick<OrganizationMember, "name" | "email">): string {
-  return member.name?.trim() || member.email || "Unnamed person";
+  return member.name?.trim() || memberEmail(member) || "Unnamed person";
 }
 
 export function firstName(name: string): string {
@@ -93,7 +108,7 @@ export function workspaceMemberName(
   member: OrganizationWorkspaceAccessMember,
   you?: { subjectId: string; label: string | null | undefined },
 ): string {
-  const known = member.name ?? member.email ?? member.subjectLabel;
+  const known = member.name ?? memberEmail(member) ?? member.subjectLabel;
   if (known) return known;
   if (you && member.subjectId === you.subjectId && you.label) return you.label;
   return member.principalKind === "service" ? "Service account" : "Unnamed person";

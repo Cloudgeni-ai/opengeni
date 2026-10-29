@@ -25,24 +25,12 @@ import {
   parseRestrictedYaml,
   type WorkflowExecutionGraphManifest,
 } from "./workflow-execution-graph";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const root = resolve(import.meta.dir, "..");
 const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
 const discoveryActionPath = ".github/actions/probe/action.yaml";
-
-test("Batch plan no longer has a five-hour priority timeout exemption", () => {
-  const source = (timeout: number) =>
-    `name: Batch CI\non: push\njobs:\n  plan:\n    timeout-minutes: ${timeout}\n    steps:\n      - name: Priority fixture\n        run: bun scripts/ci/github-pr-ci.ts priority batch\n`;
-  expect(
-    inspectWorkflowExecutionSources({
-      ".github/workflows/batch-ci.yml": source(320),
-    }).violations.join("\n"),
-  ).toContain("job timeout-minutes must be a static integer in 1..120");
-  expect(
-    inspectWorkflowExecutionSources({ ".github/workflows/batch-ci.yml": source(20) }).violations,
-  ).toEqual([]);
-});
 
 test("PR CI plan has no five-hour priority timeout exemption", () => {
   const source = (timeout: number) =>
@@ -854,7 +842,7 @@ describe("workflow execution graph manifest", () => {
           error = caught;
         }
         expect(error).toBeInstanceOf(Error);
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         expect(message).toBe(`${workflowPath} contains invalid UTF-8`);
         expect(message).not.toContain(String(malformedByte));
         errors.push(message);

@@ -17,6 +17,7 @@ import {
 } from "./session-tools";
 import type { GitHubRepository, ResourceRef, Session } from "../types";
 import { usePage } from "./navigation";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
 
@@ -78,10 +79,13 @@ export function useRepositoryCatalogRefresh(
           ? [
               context.refreshGitHub(workspaceId, undefined, {
                 sync: explicit && canManageGitHub,
+                userInitiated: explicit,
               }),
             ]
           : []),
-        ...(canReadPersonal ? [context.refreshPersonalGitHub(workspaceId)] : []),
+        ...(canReadPersonal
+          ? [context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: explicit })]
+          : []),
       ]).then(() => undefined);
       accepted.inFlight = request;
       try {
@@ -243,7 +247,7 @@ export function useFollowUpRepositories(
     } catch (error) {
       return {
         resources: [] as ResourceRef[],
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       };
     }
   }, [
@@ -409,6 +413,7 @@ export function useFollowUpRepositories(
       org: context.githubOrg,
       pending: disabled || context.busy,
       repoBusy: context.repoBusy,
+      githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
       githubAppBusy: context.githubAppBusy,
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,

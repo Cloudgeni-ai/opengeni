@@ -621,6 +621,145 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+  test("finds a marketplace plugin and posts its install card", async () => {
+    if (!shared) return;
+    const selection: FirstPartyMcpToolName[] = [
+      "capability_catalog_search",
+      "capability_authorization_request",
+    ];
+    const attempt = await seedAttempt(false, selection);
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: { ...attempt, firstPartyMcpTools: selection },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "plugin-discovery-test", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    try {
+      const pluginId = "plugin:marketplace/anthropic/sentry";
+      const search = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query: "Sentry plugin", limit: 20 },
+      });
+      expect(search.isError).not.toBe(true);
+      const body = mcpJson(search) as {
+        matches: Array<{ capabilityId: string; kind: string; setup: unknown }>;
+      };
+      expect(body.matches.find((entry) => entry.capabilityId === pluginId)).toMatchObject({
+        kind: "plugin",
+        setup: {
+          status: "authorization_required",
+          action: "enable",
+          nextAction: { toolName: "capability_authorization_request", capabilityId: pluginId },
+        },
+      });
+      const request = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: pluginId, rationale: "Triage the errors you asked about." },
+      });
+      expect(request.isError).not.toBe(true);
+      expect(mcpJson(request)).toMatchObject({
+        capabilityId: pluginId,
+        status: "authorization_requested",
+        action: "enable",
+      });
+      expect(JSON.stringify(mcpJson(request))).toContain("plugin card was posted");
+      const events = (
+        await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+      ).filter((event) => event.type === "tool.auth_needed");
+      expect(events.at(-1)?.payload).toMatchObject({
+        capability: { id: pluginId, action: "enable" },
+      });
+      // Asking is all it does: nothing is installed.
+      const [installs] = await shared.admin<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM capability_plugin_installations
+        WHERE workspace_id = ${workspace.workspaceId}`;
+      expect(installs?.count).toBe(0);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+  test("a plugin whose MCP server the catalog also offers as a connection names that connection", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const connectionId = `mcp:personal-mail-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: connectionId,
+      kind: "mcp",
+      source: "manual",
+      name: "Personal mail",
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1/",
+      authModel: "oauth2",
+      metadata: { mcpServerId: `personal-mail-${crypto.randomUUID()}` },
+    });
+    const search = async (settings: ReturnType<typeof testSettings>, query: string) => {
+      const attempt = await seedAttempt();
+      const server = buildOpenGeniMcpServer(
+        { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "plugin-connection-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      try {
+        const result = await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query, limit: 20 },
+        });
+        expect(result.isError).not.toBe(true);
+        return mcpJson(result) as {
+          matches: Array<{ capabilityId: string; setup: { status: string; detail: string } }>;
+        };
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    };
+    const plugin = (body: Awaited<ReturnType<typeof search>>, id: string) =>
+      body.matches.find((match) => match.capabilityId === id)!;
+
+    const gmail = plugin(
+      await search(testSettings({ googleConnectorSetupEnabled: true }), "email"),
+      "plugin:marketplace/openai/gmail",
+    );
+    expect(gmail.setup.status).toBe("authorization_required");
+    expect(gmail.setup.detail).toContain(
+      `For the person's own account, offer the Personal mail connection (${connectionId}) instead: call capability_authorization_request with its capabilityId. Installing the plugin is for everyone in the workspace.`,
+    );
+    // The named connection is offered on its own with a setup the person can start.
+    const own = plugin(
+      await search(testSettings({ googleConnectorSetupEnabled: true }), "Personal mail"),
+      connectionId,
+    );
+    expect(own.setup.status).toBe("authorization_required");
+    // Plugins without such a connection keep the plain install text.
+    const sentry = plugin(
+      await search(testSettings({ googleConnectorSetupEnabled: true }), "Sentry plugin"),
+      "plugin:marketplace/anthropic/sentry",
+    );
+    expect(sentry.setup.detail).toBe(
+      "Not installed. The person can review what the sentry plugin adds and install it for the workspace from its card.",
+    );
+  }, 60_000);
   test("finds Outlook for a Hotmail request and posts its Connect card; respects availability gates", async () => {
     if (!shared) return;
     const microsoftSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
@@ -779,6 +918,175 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     } finally {
       await unconfigured.close();
     }
+  }, 60_000);
+  test("tells the agent when the person can't connect from the card, matching what the card shows", async () => {
+    if (!shared) return;
+    const settings = testSettings({
+      environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+      integrationsEnabled: true,
+      integrationsStateSecret: "capability-discovery-integrations-state-secret",
+      integrationsOauthClientsJson: JSON.stringify({
+        "https://login.microsoftonline.com/common/v2.0": {
+          clientId: "microsoft-client",
+          clientSecret: "microsoft-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      }),
+    });
+    const conversation = ["workspace:read", "sessions:create", "sessions:read", "sessions:control"];
+    const request = async (
+      permissions: string[] | null,
+      // What the person's sign-in could do when they sent this turn's message,
+      // frozen with the turn (an embed's token narrows it).
+      sent?: string[],
+      // Sent with an earlier message in this chat: this turn is one the
+      // platform started for them (a wake-up, a child's result, a goal
+      // continuation), which records no grant of its own.
+      sentEarlier = false,
+      capabilityId = "api:integration:microsoft-outlook-mail",
+    ) => {
+      // The human this agent acts for: a member with exactly these
+      // permissions, or (null) someone in their own workspace with no
+      // membership row.
+      const person = `user:${crypto.randomUUID()}`;
+      if (permissions) {
+        await shared!.admin`
+          INSERT INTO workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+          VALUES (${workspace.accountId}, ${workspace.workspaceId}, ${person}, 'member',
+            ${shared!.admin.json(permissions)}::jsonb)`;
+      }
+      const attempt = await seedAttempt(false, undefined, person);
+      if (sent) {
+        if (sentEarlier) {
+          const [earlier] = await shared!.admin<{ id: string }[]>`
+            INSERT INTO session_turns (
+              account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+              status, position, prompt, model, reasoning_effort, sandbox_backend,
+              execution_generation, initiator_kind, initiator_subject_id, initiator_context
+            ) VALUES (
+              ${workspace.accountId}, ${workspace.workspaceId}, ${attempt.sessionId}, gen_random_uuid(),
+              ${`capability-wf-${crypto.randomUUID()}`}, 'completed', 1, 'Check my email',
+              'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${person}, '{"accepted":true}'::jsonb
+            ) RETURNING id`;
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${earlier!.id}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+              'none', ${sent}::text[])`;
+          // Someone else's later message in the same chat never stands in for them.
+          const [other] = await shared!.admin<{ id: string }[]>`
+            INSERT INTO session_turns (
+              account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+              status, position, prompt, model, reasoning_effort, sandbox_backend,
+              execution_generation, initiator_kind, initiator_subject_id, initiator_context
+            ) VALUES (
+              ${workspace.accountId}, ${workspace.workspaceId}, ${attempt.sessionId}, gen_random_uuid(),
+              ${`capability-wf-${crypto.randomUUID()}`}, 'completed', 2, 'Hello',
+              'gpt-5.6-sol', 'medium', 'none', 1, 'subject', 'user:someone-else',
+              '{"accepted":true}'::jsonb
+            ) RETURNING id`;
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${other!.id}, ${workspace.accountId}, ${workspace.workspaceId},
+              'user:someone-else', 'none',
+              ${[...conversation, "connections:personal"]}::text[])`;
+        } else {
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${attempt.turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+              'none', ${sent}::text[])`;
+        }
+      }
+      const server = buildOpenGeniMcpServer(
+        { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: attempt.sessionId,
+            turnId: attempt.turnId,
+            attemptId: attempt.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "capability-discovery-test", version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      try {
+        const result = await mcp.callTool({
+          name: "capability_authorization_request",
+          arguments: {
+            capabilityId,
+            rationale: "Reading the newest emails needs access to the person's inbox.",
+          },
+        });
+        expect(result.isError).not.toBe(true);
+        const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
+        expect(events.some((event) => event.type === "tool.auth_needed")).toBe(true);
+        return mcpJson(result);
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    };
+
+    // Without personal setup the card says Outlook can't be connected here,
+    // so the agent is told not to send the person to it.
+    expect(await request(conversation)).toEqual({
+      capabilityId: "api:integration:microsoft-outlook-mail",
+      status: "authorization_requested",
+      action: "connect",
+      eventId: expect.any(String),
+      message:
+        "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
+    });
+    // With it, the existing Connect card message is unchanged.
+    const connectCard =
+      "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.";
+    const cannotConnect =
+      "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.";
+    expect(await request([...conversation, "connections:personal"])).toMatchObject({
+      status: "authorization_requested",
+      message: connectCard,
+    });
+    // The person's chat decides from what their sign-in could do when they
+    // sent the message, as the card does: an embed's token that leaves out
+    // personal setup narrows a membership that has it.
+    expect(await request([...conversation, "connections:personal"], conversation)).toMatchObject({
+      status: "authorization_requested",
+      message: cannotConnect,
+    });
+    // Someone in their own workspace has no membership row; their sign-in's
+    // access still decides, either way.
+    expect(await request(null, conversation)).toMatchObject({ message: cannotConnect });
+    expect(await request(null, [...conversation, "connections:personal"])).toMatchObject({
+      message: connectCard,
+    });
+    // A turn the platform started for them decides from their latest message
+    // in this chat, the same way.
+    expect(
+      await request([...conversation, "connections:personal"], conversation, true),
+    ).toMatchObject({ message: cannotConnect });
+    expect(await request(null, conversation, true)).toMatchObject({ message: cannotConnect });
+    expect(await request(null, [...conversation, "connections:personal"], true)).toMatchObject({
+      message: connectCard,
+    });
+    // A plugin is installed for the workspace, so the agent is told who can.
+    const sentry = "plugin:marketplace/anthropic/sentry";
+    expect(await request(conversation, undefined, false, sentry)).toMatchObject({
+      message:
+        "The card was posted, but this person can't install the sentry plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.",
+    });
+    expect(
+      await request([...conversation, "capabilities:manage"], undefined, false, sentry),
+    ).toMatchObject({ message: expect.stringContaining("The sentry plugin card was posted.") });
   }, 60_000);
   test("posts the Connected Machine card without a token, and keeps it useful once machines exist", async () => {
     if (!shared) return;
@@ -1240,6 +1548,7 @@ async function seedAttempt(
     "capability_catalog_search",
     "capability_authorization_request",
   ],
+  initiatorSubjectId: string = workspace.subjectId,
 ): Promise<{
   sessionId: string;
   turnId: string;
@@ -1270,7 +1579,7 @@ async function seedAttempt(
       ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`capability-wf-${crypto.randomUUID()}`}, 'running', 0, 'Use GitHub',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${workspace.subjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
+      ${initiatorSubjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared!.admin.begin(async (tx) => {

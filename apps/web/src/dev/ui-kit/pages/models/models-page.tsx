@@ -18,7 +18,6 @@ import {
   useSettingRowField,
 } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { Switch } from "@opengeni/react/ui/switch";
 import { UsageReadout } from "@opengeni/react/ui/usage-meter";
 import { cn } from "@opengeni/react/app/lib/utils";
 
@@ -578,7 +577,6 @@ function CodexSettings() {
   const { data, setData, questions, scenario, openDialog } = useModels();
   const picks = useModelsPicks();
   const [pending, setPending] = useState<"source" | "rotation" | null>(null);
-  const [portable, setPortable] = useState(false);
 
   if (!codexOn(data, questions)) {
     return (
@@ -634,22 +632,6 @@ function CodexSettings() {
           }}
         />
       ) : null}
-      <SettingRow
-        variant={picks.settingRow}
-        label="Keep Codex chats portable"
-        description="Summarizes long chats in a form another provider's model can continue. Off keeps new chats on Codex, with better memory of long conversations."
-        control={
-          <Switch
-            checked={portable}
-            onCheckedChange={(next) => {
-              setPortable(next);
-              toast.success(
-                next ? "New Codex chats are portable" : "New Codex chats stay on Codex",
-              );
-            }}
-          />
-        }
-      />
       {questions.q13 === "segmented" ? (
         <SettingDangerRow
           label="Turn off Codex"

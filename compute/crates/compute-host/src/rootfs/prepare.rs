@@ -3,7 +3,11 @@
 //! image pinned by digest, with the host's guest programs, stored where its
 //! sandboxes are kept. Builds are not byte for byte the same, so two hosts
 //! building one OCI image store two images; the control service records
-//! the first it is told of and creates use that one.
+//! the first it is told of and creates use that one. Each build is told
+//! with the digest of the guest programs it got
+//! ([`PrepareConfig::guest_digest`]), which the host also registers with,
+//! so the service builds a release's images again once its hosts' guest
+//! programs change.
 //!
 //! An ask is answered at once, so no call stays open through a build that
 //! takes minutes: the first starts the build and every ask until it ends
@@ -30,6 +34,9 @@ pub struct PrepareConfig {
     /// The guest programs every image gets: the directory `guest/build.sh`
     /// made, as a bundle's `guest/`.
     pub guest: PathBuf,
+    /// The digest of the programs in `guest`
+    /// ([`compute_image::assemble::guest_digest`]).
+    pub guest_digest: String,
     /// Scratch space for a build, emptied before and after each.
     pub work: PathBuf,
     /// Free space each image's file system leaves for its sandboxes.
@@ -41,14 +48,22 @@ pub struct PrepareConfig {
 impl PrepareConfig {
     /// Builds with the guest programs in `guest`, in scratch space under
     /// the state root `root`, leaving each image 4 GiB free.
-    #[must_use]
-    pub fn new(root: &Path, guest: PathBuf, credentials: Option<Credentials>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// When the guest programs cannot be read.
+    pub fn new(
+        root: &Path,
+        guest: PathBuf,
+        credentials: Option<Credentials>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            guest_digest: compute_image::assemble::guest_digest(&guest)?,
             guest,
             work: crate::layout::prepare_dir(root),
             free_bytes: 4 << 30,
             credentials,
-        }
+        })
     }
 }
 
@@ -59,7 +74,8 @@ impl PrepareConfig {
     ///
     /// # Errors
     ///
-    /// When a user is given without a token.
+    /// When a user is given without a token, or the guest programs cannot
+    /// be read.
     pub fn of(
         root: &Path,
         guest: Option<PathBuf>,
@@ -69,7 +85,7 @@ impl PrepareConfig {
             return Ok(None);
         };
         let credentials = super::registry_credentials(registry_user)?;
-        Ok(Some(Self::new(root, guest, credentials)))
+        Self::new(root, guest, credentials).map(Some)
     }
 }
 
@@ -80,6 +96,8 @@ pub struct Prepared {
     pub image: ImageId,
     /// The digest of the image manifest built.
     pub digest: String,
+    /// The digest of the guest programs it was built with.
+    pub guest: String,
 }
 
 /// How an ask stands.
@@ -127,6 +145,8 @@ enum Standing {
 /// Builds a host's images, one at a time.
 pub(crate) struct Preparer {
     builder: Arc<dyn Builds>,
+    /// The digest of the guest programs every build gets.
+    guest: String,
     /// Each OCI image asked for, by the text asked with.
     builds: Mutex<HashMap<String, Standing>>,
     /// Held through each build, so builds run one at a time.
@@ -142,7 +162,8 @@ impl std::fmt::Debug for Preparer {
 impl Preparer {
     /// Builds into `store`, as `config` says.
     pub(crate) fn new<S: Store>(config: PrepareConfig, store: Arc<S>) -> Self {
-        Self::with(Arc::new(Builder { config, store }))
+        let guest = config.guest_digest.clone();
+        Self::with(Arc::new(Builder { config, store }), guest)
     }
 
     /// What builds the images a host asks for as `config` says, into
@@ -152,10 +173,12 @@ impl Preparer {
         Some(Arc::new(Self::new(config, Arc::clone(store))))
     }
 
-    /// Builds with `builder`.
-    fn with(builder: Arc<dyn Builds>) -> Self {
+    /// Builds with `builder`, which builds with the guest programs of
+    /// digest `guest`.
+    fn with(builder: Arc<dyn Builds>, guest: String) -> Self {
         Self {
             builder,
+            guest,
             builds: Mutex::default(),
             turn: tokio::sync::Mutex::default(),
         }
@@ -217,7 +240,11 @@ impl Preparer {
                     seconds = started.elapsed().as_secs_f64(),
                     "built and stored a sandbox image"
                 );
-                Standing::Done(Prepared { image: id, digest })
+                Standing::Done(Prepared {
+                    image: id,
+                    digest,
+                    guest: self.guest.clone(),
+                })
             }
             Err(message) => {
                 tracing::warn!(%image, %message, "building a sandbox image failed");
@@ -227,8 +254,8 @@ impl Preparer {
     }
 }
 
-/// Where built images go: the host's store.
-trait Keeps: Send + Sync + 'static {
+/// Where built and captured images go: the host's store.
+pub(crate) trait Keeps: Send + Sync + 'static {
     fn keep<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Option<ImageId>, EngineError>>;
 }
 
@@ -310,6 +337,8 @@ mod tests {
         0000000000000000000000000000000000000000000000000000000000000001";
     const OTHER: &str = "registry.example/desktop@sha256:\
         0000000000000000000000000000000000000000000000000000000000000002";
+    const GUEST: &str = "sha256:\
+        00000000000000000000000000000000000000000000000000000000000000ee";
 
     /// Builds only when let, each build failing while `fail` is set.
     struct Fake {
@@ -353,7 +382,7 @@ mod tests {
     fn preparer() -> (Arc<Fake>, Arc<Preparer>) {
         let fake = Arc::new(Fake::default());
         let builder: Arc<dyn Builds> = fake.clone();
-        (fake, Arc::new(Preparer::with(builder)))
+        (fake, Arc::new(Preparer::with(builder, GUEST.to_owned())))
     }
 
     /// Asks until the answer is no longer that the build is under way.
@@ -390,6 +419,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(stored.digest, PINNED.split_once('@').unwrap().1);
+        assert_eq!(stored.guest, GUEST, "told with the guest programs it got");
         for _ in 0..3 {
             assert_eq!(
                 preparer.prepare(PINNED).unwrap(),

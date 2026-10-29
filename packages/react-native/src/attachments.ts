@@ -3,6 +3,7 @@ import type { FileAsset, ResourceRef, SendMessageInput } from "@opengeni/sdk";
 import type { FileAttachmentClientLike } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "./adapters";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type NativeAttachmentStatus = "preparing" | "uploading" | "ready" | "failed";
 
@@ -301,7 +302,7 @@ export function useNativeFileAttachments(input: {
               ? {
                   ...entry,
                   status: "failed",
-                  error: cause instanceof Error ? cause.message : String(cause),
+                  error: errorMessage(cause),
                 }
               : entry,
           ),

@@ -16,12 +16,17 @@ import { hasLiteralPermission, hasPermission, type AccessGrantAuthorization } fr
  *   delegated-sign-in changes, which covers all of them; reads still work.
  * - It never carries more than the request itself could do: the workspace
  *   grant and, for organization-level actions, the account grant it was
- *   resolved with.
+ *   resolved with, plus `workspace:admin` exactly when that request could
+ *   change this workspace's settings (`workspaceSettings`, from
+ *   workspaceSettingsAuthorized): a Personal workspace's owner holds no
+ *   admin grant there, but configures it like one, and so does their chat.
  */
 export function turnAppActionGrant(input: {
   grant: AccessGrant;
   authorization?: AccessGrantAuthorization | null | undefined;
   delegatedSignInChangesEnabled: boolean;
+  /** workspaceSettingsAuthorized for this same request and its workspace. */
+  workspaceSettings: boolean;
 }): TurnAppActionGrant | null {
   const { grant, authorization } = input;
   const metadata = grant.metadata ?? {};
@@ -48,7 +53,8 @@ export function turnAppActionGrant(input: {
         hasPermission(grant.permissions, permission, grant.permissionMode) ||
         (account !== null &&
           account.accountId === grant.accountId &&
-          hasLiteralPermission(account.permissions, permission)),
+          hasLiteralPermission(account.permissions, permission)) ||
+        (permission === "workspace:admin" && input.workspaceSettings),
     ),
   };
 }

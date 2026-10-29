@@ -380,6 +380,30 @@ describe("computer session and action text", () => {
     );
   });
 
+  test("a computer whose focus action cannot bring a window forward says so when opened", () => {
+    const session = {
+      id: "c1",
+      lifecycle: "active",
+      placement: { kind: "connected_machine" },
+      platform: "windows",
+      adapter: "opengeni.cua.windows.v1",
+      displayId: null,
+      capabilities: { semanticObservation: true, clipboard: false, targetFocus: false },
+      failureCode: null,
+    };
+    expect(computerOpenText({ session, targets: [target] }).split("\n")[1]).toBe(
+      "Not available: clipboard, window focus",
+    );
+    // A computer that offers focus, or does not say, lists nothing for it.
+    for (const targetFocus of [true, undefined])
+      expect(
+        computerOpenText({
+          session: { ...session, capabilities: { ...session.capabilities, targetFocus } },
+          targets: [target],
+        }).split("\n")[1],
+      ).toBe("Not available: clipboard");
+  });
+
   test("marks a window that cannot be read off screen, with one fixed note", () => {
     const offScreen = { ...target, id: "window:2", title: "Chrome", offScreen: true as const };
     const text = computerTargetsText([target, offScreen]);
@@ -392,6 +416,34 @@ describe("computer session and action text", () => {
       ].join("\n"),
     );
     expect(computerTargetsText([target])).not.toContain("off screen");
+  });
+
+  test("says once when someone other than Opengeni used the computer within the last minute", () => {
+    const line =
+      "Someone other than Opengeni used this computer's keyboard, mouse or trackpad 12 s ago and may be using it now.";
+    expect(Buffer.byteLength(line)).toBe(110);
+    const marked = { ...target, personInputSecondsAgo: 12 };
+    expect(computerTargetsText([marked, { ...marked, id: "window:2" }])).toBe(
+      [
+        "2 targets:",
+        'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
+        'window window:2 "Calculator" pid 7 at 0,0 size 300x400',
+        line,
+      ].join("\n"),
+    );
+    const read = observation({ kind: "snapshot", roots: [], nodeCount: 0 });
+    const text = computerObservationText({
+      ...read,
+      target: { ...read.target, personInputSecondsAgo: 12 },
+    });
+    expect(text.split("\n").slice(0, 3)).toEqual([
+      'window window:1 "Sign in - Chromium" pid 42 at 9,9 size 1052x842 focused',
+      "Observation o_1, target generation g_1, frame f_1",
+      line,
+    ]);
+    // Without the mark, as for input a minute or more ago, nothing is said.
+    expect(computerTargetsText([target])).not.toContain("A person");
+    expect(computerObservationText(read)).not.toContain("A person");
   });
 
   test("reports the action state, its error and the observation after it", () => {
@@ -490,6 +542,90 @@ describe("computerObservationDiff", () => {
     expect(computerObservationText(diff)).toEndWith(
       "No element changed since o_1; its refs are still valid.",
     );
+  });
+
+  test("input the driver could not confirm that changed no element says it may not have taken effect", () => {
+    const unchanged = {
+      ...computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!,
+      capturedFrame: undefined,
+    };
+    const receipt = {
+      operationId: "op-1",
+      targetId: "window:1",
+      state: "completed",
+      error: null,
+      observation: unchanged,
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    expect(Buffer.byteLength(line)).toBe(133);
+    expect(
+      computerActionText({ ...receipt, unconfirmedInput: true as const })
+        .split("\n")
+        .slice(0, 2),
+    ).toEqual(["Action completed on window:1 (operation op-1).", line]);
+    // Input the driver confirmed, unconfirmed input that changed an element,
+    // and a failed action keep their text.
+    expect(computerActionText(receipt)).not.toContain(line);
+    const changed = {
+      ...computerObservationDiff(
+        reading("o_1", ribbon),
+        reading("o_2", [node("e10", "radio", "Style 0", { value: "1" }), ...ribbon.slice(1)]),
+      )!,
+      capturedFrame: undefined,
+    };
+    expect(
+      computerActionText({ ...receipt, observation: changed, unconfirmedInput: true as const }),
+    ).not.toContain(line);
+    expect(
+      computerActionText({
+        ...receipt,
+        state: "outcome_unknown",
+        error: { code: "driver_failed", message: "failed", retryable: false },
+        unconfirmedInput: true as const,
+      }),
+    ).not.toContain(line);
+  });
+
+  test("a batch whose input the driver could not confirm and that changed no element says so too", () => {
+    const unchanged = {
+      ...computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!,
+      capturedFrame: undefined,
+    };
+    const completed = { operationId: "op-1", state: "completed", error: null };
+    const batch = {
+      type: "batch" as const,
+      targetId: "window:1",
+      actionCount: 3,
+      steps: [completed, completed, completed],
+      observation: unchanged,
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    expect(
+      computerActionText({ ...batch, unconfirmedInput: true as const })
+        .split("\n")
+        .slice(0, 2),
+    ).toEqual(["Batch completed on window:1: 3 actions.", line]);
+    expect(computerActionText(batch)).not.toContain(line);
+    const changed = {
+      ...computerObservationDiff(
+        reading("o_1", ribbon),
+        reading("o_2", [node("e10", "radio", "Style 0", { value: "1" }), ...ribbon.slice(1)]),
+      )!,
+      capturedFrame: undefined,
+    };
+    expect(
+      computerActionText({ ...batch, observation: changed, unconfirmedInput: true as const }),
+    ).not.toContain(line);
+    // A stopped batch already says its stopped action may have taken effect.
+    expect(
+      computerActionText({
+        ...batch,
+        steps: [completed, { ...completed, state: "outcome_unknown" }],
+        unconfirmedInput: true as const,
+      }),
+    ).not.toContain(line);
   });
 
   test("keeps the whole reading when a diff would not help or could mislead", () => {

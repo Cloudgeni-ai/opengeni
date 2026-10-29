@@ -762,7 +762,7 @@ describe("conversation-first session history", () => {
       for (let index = 0; index < 2500; index += 1) call(index);
       const queued = sequence;
       store.push(at(sequence++, "turn.queued", { turnId: "T2" }, "T2"));
-      for (let index = 2500; index < 4497; index += 1) call(index);
+      for (let index = 2500; index < 3007; index += 1) call(index);
       store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
       store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
       const { client } = historyClient({ store: () => store, withPages: true });
@@ -781,7 +781,7 @@ describe("conversation-first session history", () => {
         }
         expect(marker().state).toBe("complete");
         const steps = stepEvents(hook.result.current.events);
-        expect(steps).toHaveLength(4497 * 2);
+        expect(steps).toHaveLength(3007 * 2);
         expect(steps[0]!.sequence).toBe(103);
       } finally {
         await hook.unmount();
@@ -916,7 +916,7 @@ describe("conversation-first session history", () => {
     "a turn read to a guessed lower bound offers earlier steps once its start loads",
     async () => {
       // A late row of the previous turn sits inside T1 and is the window's
-      // oldest event (the first read and its boundary page hold 2,000 rows): the
+      // oldest event (the first read and its boundary page hold 510 rows): the
       // first reads stop at it, above T1's earliest steps.
       const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
       store.push(
@@ -934,7 +934,7 @@ describe("conversation-first session history", () => {
       for (let index = 0; index < 2500; index += 1) call(index);
       const late = sequence;
       store.push(receipt(sequence++, "T0"));
-      for (let index = 2500; index < 4497; index += 1) call(index);
+      for (let index = 2500; index < 3007; index += 1) call(index);
       store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
       store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
       const { client } = historyClient({ store: () => store, withPages: true });
@@ -955,7 +955,7 @@ describe("conversation-first session history", () => {
         expect(hook.result.current.events[0]!.sequence).toBe(late);
         await loadAll();
         expect(marker().state).toBe("complete");
-        expect(stepEvents(hook.result.current.events)).toHaveLength(1997 * 2);
+        expect(stepEvents(hook.result.current.events)).toHaveLength(507 * 2);
 
         for (let page = 0; page < 10; page += 1) {
           if (hook.result.current.events.some((event) => event.type === "turn.started")) break;
@@ -974,7 +974,7 @@ describe("conversation-first session history", () => {
         const steps = stepEvents(hook.result.current.events).filter(
           (event) => event.turnId === "T1",
         );
-        expect(steps).toHaveLength(4497 * 2);
+        expect(steps).toHaveLength(3007 * 2);
         expect(steps[0]!.sequence).toBe(103);
       } finally {
         await hook.unmount();
@@ -1486,6 +1486,16 @@ describe("conversation-first session history", () => {
     expect(isConversationHistoryEvent(created("opengeni__sandbox_file_publish"), presented)).toBe(
       true,
     );
+    // An app action call is presented only when it opens a payment page.
+    const appAction = (id: string) =>
+      at(
+        5,
+        "agent.toolCall.created",
+        { id: "x", name: "opengeni__admin_action_call", arguments: JSON.stringify({ id }) },
+        "T",
+      );
+    expect(isConversationHistoryEvent(appAction("createBillingCheckout"), presented)).toBe(true);
+    expect(isConversationHistoryEvent(appAction("getBilling"), presented)).toBe(false);
     expect(
       isConversationHistoryEvent(at(6, "agent.toolCall.output", { id: "pub" }, "T"), presented),
     ).toBe(true);
@@ -2240,7 +2250,7 @@ describe("turn bookkeeping in conversation history", () => {
       try {
         await settle();
         expect(reads).toEqual([
-          expect.objectContaining({ ...V2_READ, before: Number.MAX_SAFE_INTEGER, limit: 1000 }),
+          expect.objectContaining({ ...V2_READ, before: Number.MAX_SAFE_INTEGER, limit: 255 }),
         ]);
         const window = hook.result.current.events;
         expect(hook.result.current.hasOlder).toBe(false);

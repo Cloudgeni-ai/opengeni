@@ -11,7 +11,11 @@ import {
   planRecordingTracks,
   recordingDiarizationKind,
   RecordingTranscriptionError,
+  transcriptLanguages,
+  withoutMicrophoneEchoes,
+  withRecorderVoice,
   type RecordingTranscribedWord,
+  type RecordingTrackWords,
 } from "../src/recording-transcription";
 
 function word(
@@ -79,23 +83,150 @@ describe("labelWordsFromTurns", () => {
   });
 });
 
+describe("transcriptLanguages", () => {
+  test("a transcript asked for in one language is in that language", () => {
+    // A model that labels a few Norwegian phrases as Danish.
+    expect(transcriptLanguages("nb", new Set(["nb", "da"]))).toEqual(["nb"]);
+    // Norwegian's written forms are one language; the model's name is kept.
+    expect(transcriptLanguages("no", ["nb"])).toEqual(["nb"]);
+    expect(transcriptLanguages("en", ["en-US", "en-GB", "de"])).toEqual(["en-US", "en-GB"]);
+    // Nothing heard in it: the language asked for.
+    expect(transcriptLanguages("nb", ["da"])).toEqual(["nb"]);
+    expect(transcriptLanguages("nob", [])).toEqual(["nb"]);
+  });
+
+  test("without a language asked for, every language heard counts", () => {
+    expect(transcriptLanguages(undefined, ["nb", "en", "nb"])).toEqual(["nb", "en"]);
+    expect(transcriptLanguages(null, [])).toEqual([]);
+  });
+});
+
 describe("planRecordingTracks", () => {
-  test("the microphone next to system audio is the person recording", () => {
+  test("the microphone next to system audio is the person recording's", () => {
     expect(
       planRecordingTracks([
         { trackNumber: 2, source: "system" },
         { trackNumber: 1, source: "microphone" },
       ]),
     ).toEqual([
-      { trackNumber: 1, fixedLabel: "track-1", diarize: false },
-      { trackNumber: 2, fixedLabel: null, diarize: true },
+      { trackNumber: 1, recorderLabel: "track-1" },
+      { trackNumber: 2, recorderLabel: null },
     ]);
   });
 
-  test("a microphone on its own is diarized", () => {
+  test("a microphone on its own is anyone's", () => {
     expect(planRecordingTracks([{ trackNumber: 1, source: "microphone" }])).toEqual([
-      { trackNumber: 1, fixedLabel: null, diarize: true },
+      { trackNumber: 1, recorderLabel: null },
     ]);
+  });
+});
+
+describe("withRecorderVoice", () => {
+  const recorder = { label: "track-0", speaker: null };
+  const speakerOf = (track: RecordingTrackWords) => track.recorder?.speaker;
+
+  test("one voice on the microphone is the person recording, whole track", () => {
+    const track = withRecorderVoice(
+      { trackNumber: 0, recorder, words: [word("hei", 0, 400, "A"), word("du", 500, 800, "A")] },
+      null,
+    );
+    expect(speakerOf(track)).toBeNull();
+    expect(buildRecordingSegments([track]).map((segment) => segment.speakerLabel)).toEqual([
+      "track-0",
+    ]);
+  });
+
+  test("with several voices, the one that spoke the most is the person recording", () => {
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [
+          word("Hei", 0, 300, "A"),
+          word("hva", 400, 700, "A"),
+          word("trenger", 3_000, 3_600, "B"),
+          word("dere?", 3_700, 4_500, "B"),
+          word("Et", 7_000, 7_200, "A"),
+          word("tilbud.", 7_300, 7_800, "A"),
+          word(" ", 7_900, 9_900, "C"),
+        ],
+      },
+      null,
+    );
+    expect(speakerOf(track)).toBe("B");
+  });
+
+  test("the remembered voice picks the person recording over who spoke the most", () => {
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [word("Hei", 0, 300, "A"), word("trenger", 3_000, 6_000, "B")],
+      },
+      "A",
+    );
+    expect(speakerOf(track)).toBe("A");
+    expect(withRecorderVoice({ ...track, recorder }, "Z").recorder?.speaker).toBe("B");
+  });
+
+  test("other voices on the microphone are numbered with everyone else", () => {
+    const microphone = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [
+          word("Hei", 0, 300, "S1"),
+          word("velkommen.", 400, 1_400, "S1"),
+          word("Takk.", 2_000, 2_400, "S0"),
+          word("Kort", 3_000, 3_200, null),
+        ],
+      },
+      null,
+    );
+    const tracks: RecordingTrackWords[] = [
+      microphone,
+      {
+        trackNumber: 1,
+        recorder: null,
+        words: [word("Hallo", 5_000, 5_400, "S0"), word("der", 8_000, 8_300, "S1")],
+      },
+    ];
+    expect(
+      buildRecordingSegments(tracks).map((segment) => [segment.trackNumber, segment.speakerLabel]),
+    ).toEqual([
+      [0, "track-0"],
+      [0, "speaker_0"],
+      [0, "track-0"],
+      [1, "speaker_1"],
+      [1, "speaker_2"],
+    ]);
+    expect(recordingSpeakerLabels(tracks)).toEqual(
+      new Map([
+        [
+          0,
+          new Map([
+            ["S1", "track-0"],
+            ["S0", "speaker_0"],
+          ]),
+        ],
+        [
+          1,
+          new Map([
+            ["S0", "speaker_1"],
+            ["S1", "speaker_2"],
+          ]),
+        ],
+      ]),
+    );
+  });
+
+  test("leaves tracks that are not the person recording's as they are", () => {
+    const track: RecordingTrackWords = {
+      trackNumber: 1,
+      recorder: null,
+      words: [word("a", 0, 100, "A"), word("b", 200, 900, "B")],
+    };
+    expect(withRecorderVoice(track, "A")).toBe(track);
   });
 });
 
@@ -104,7 +235,7 @@ describe("buildRecordingSegments", () => {
     const segments = buildRecordingSegments([
       {
         trackNumber: 1,
-        fixedLabel: "track-1",
+        recorder: { label: "track-1", speaker: null },
         words: [
           word("Hello", 0, 300, null, false),
           word("there.", 350, 700),
@@ -113,7 +244,7 @@ describe("buildRecordingSegments", () => {
       },
       {
         trackNumber: 2,
-        fixedLabel: null,
+        recorder: null,
         words: [word("Hi", 1000, 1200, "speaker_7", false), word("Bye", 1300, 1500, "speaker_3")],
       },
     ]);
@@ -132,11 +263,15 @@ describe("buildRecordingSegments", () => {
   });
 
   test("speaker ids map to the labels the segments carry", () => {
-    const tracks = [
-      { trackNumber: 1, fixedLabel: "track-1", words: [word("Hello", 0, 300, null)] },
+    const tracks: RecordingTrackWords[] = [
+      {
+        trackNumber: 1,
+        recorder: { label: "track-1", speaker: null },
+        words: [word("Hello", 0, 300, null)],
+      },
       {
         trackNumber: 2,
-        fixedLabel: null,
+        recorder: null,
         words: [
           word(" ", 900, 950, "S4"),
           word("Hi", 1000, 1200, "S2"),
@@ -164,15 +299,12 @@ describe("buildRecordingSegments", () => {
     ]);
   });
 
-  test("prefixes labels with the track when several tracks are diarized", () => {
+  test("numbers speakers across tracks when several tracks are diarized", () => {
     const segments = buildRecordingSegments([
-      { trackNumber: 1, fixedLabel: null, words: [word("a", 0, 100, "s")] },
-      { trackNumber: 2, fixedLabel: null, words: [word("b", 200, 300, "s")] },
+      { trackNumber: 1, recorder: null, words: [word("a", 0, 100, "s")] },
+      { trackNumber: 2, recorder: null, words: [word("b", 200, 300, "s")] },
     ]);
-    expect(segments.map((segment) => segment.speakerLabel)).toEqual([
-      "t1_speaker_0",
-      "t2_speaker_0",
-    ]);
+    expect(segments.map((segment) => segment.speakerLabel)).toEqual(["speaker_0", "speaker_1"]);
   });
 
   test("ends a long monologue at a sentence end after a minute", () => {
@@ -180,7 +312,7 @@ describe("buildRecordingSegments", () => {
     for (let second = 0; second < 70; second += 1) {
       words.push(word(second === 62 ? "done." : "word", second * 1000, second * 1000 + 800, "a"));
     }
-    const segments = buildRecordingSegments([{ trackNumber: 1, fixedLabel: null, words }]);
+    const segments = buildRecordingSegments([{ trackNumber: 1, recorder: null, words }]);
     expect(segments).toHaveLength(2);
     expect(segments[0]!.text.endsWith("done.")).toBe(true);
     expect(segments[1]!.startMilliseconds).toBe(63_000);
@@ -188,28 +320,28 @@ describe("buildRecordingSegments", () => {
 });
 
 describe("recordingDiarizationKind", () => {
-  const fixedAndDiarized = planRecordingTracks([
+  const recorderAndCall = planRecordingTracks([
     { trackNumber: 1, source: "microphone" },
     { trackNumber: 2, source: "system" },
   ]);
   test("names who told speakers apart", () => {
     expect(
       recordingDiarizationKind({
-        plans: fixedAndDiarized,
+        plans: recorderAndCall,
         providerDiarized: true,
         ourDiarizer: false,
       }),
     ).toBe("provider");
     expect(
       recordingDiarizationKind({
-        plans: fixedAndDiarized,
+        plans: recorderAndCall,
         providerDiarized: true,
         ourDiarizer: true,
       }),
     ).toBe("ours");
     expect(
       recordingDiarizationKind({
-        plans: fixedAndDiarized,
+        plans: recorderAndCall,
         providerDiarized: false,
         ourDiarizer: false,
       }),
@@ -374,5 +506,70 @@ describe("registry and cost", () => {
     );
     expect(live?.spec.capabilities.live).toBe(true);
     expect(estimateRecordingTranscriptionCostMicros(live!.spec, 3_600_000)).toBe(390_000);
+  });
+});
+
+describe("withoutMicrophoneEchoes", () => {
+  const sources = [
+    { trackNumber: 0, source: "microphone" as const },
+    { trackNumber: 1, source: "system" as const },
+  ];
+  /** One word every 300 ms from `start`; a lone "." is punctuation glued to the word before. */
+  function said(sentence: string, start: number): RecordingTranscribedWord[] {
+    return sentence
+      .split(" ")
+      .map((text, index) =>
+        word(text, start + index * 300, start + index * 300 + 250, null, text !== "."),
+      );
+  }
+  function tracks(microphone: RecordingTranscribedWord[], computer: RecordingTranscribedWord[]) {
+    const result: RecordingTrackWords[] = [
+      { trackNumber: 0, recorder: { label: "track-0", speaker: null }, words: microphone },
+      { trackNumber: 1, recorder: null, words: computer },
+    ];
+    return result;
+  }
+  const text = (track: RecordingTrackWords) => track.words.map((item) => item.text).join(" ");
+
+  test("drops what the microphone heard from the speakers, a little late", () => {
+    const [microphone, computer] = withoutMicrophoneEchoes(
+      tracks(
+        [
+          ...said("Vi kommer på mandag klokka åtte .", 1_150),
+          ...said("Takk , da sier jeg fra til snekkeren", 5_000),
+        ],
+        said("Vi kommer på mandag klokka åtte.", 1_000),
+      ),
+      sources,
+    );
+    expect(text(microphone!)).toBe("Takk , da sier jeg fra til snekkeren");
+    expect(computer!.words).toHaveLength(6);
+  });
+
+  test("drops an echo with a misheard word or two, and keeps the person talking right after", () => {
+    const [microphone] = withoutMicrophoneEchoes(
+      tracks(
+        said("vi kommer på mandag klokka åtta for å legge kabler jeg tar med nøkkelen", 1_100),
+        said("Vi kommer på mandag klokka åtte for å legge kabler", 1_000),
+      ),
+      sources,
+    );
+    expect(text(microphone!)).toBe("jeg tar med nøkkelen");
+  });
+
+  test("keeps a word both happen to say at once, and words said at another time", () => {
+    const microphone = [...said("ja", 2_000), ...said("vi kommer på mandag", 30_000)];
+    const [kept] = withoutMicrophoneEchoes(
+      tracks(microphone, [...said("Ja.", 2_100), ...said("Vi kommer på mandag", 1_000)]),
+      sources,
+    );
+    expect(kept!.words).toEqual(microphone);
+  });
+
+  test("leaves recordings without computer audio as they are", () => {
+    const microphone = said("vi kommer på mandag", 1_000);
+    const only: RecordingTrackWords[] = [{ trackNumber: 0, recorder: null, words: microphone }];
+    const [kept] = withoutMicrophoneEchoes(only, [{ trackNumber: 0, source: "microphone" }]);
+    expect(kept).toBe(only[0]);
   });
 });

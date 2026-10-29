@@ -2,8 +2,8 @@
  * Runs the recorder for the whole workspace and publishes it to the store.
  * Loaded lazily by MeetingRecorderProvider; renders nothing.
  */
-import { useEffect, useLayoutEffect } from "react";
-import { desktopCapability } from "../app/lib/desktop";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import { useRecorder } from "../recordings";
 
 import type { MeetingRecorderStore } from "./recorder-context";
@@ -22,10 +22,18 @@ export default function RecorderHost({
     ...(client ? { client } : {}),
     onFinished: (recordingId) => store.markFinished(recordingId),
   });
+  const published = useRef(recorder);
   useLayoutEffect(() => {
-    store.set(recorder);
+    published.current = recorder;
+    store.set(recorder, workspaceId);
   });
-  useEffect(() => () => store.set(null), [store]);
+  // The host for the next workspace may already have published its recorder.
+  useEffect(
+    () => () => {
+      if (store.get() === published.current) store.set(null);
+    },
+    [store],
+  );
 
   // Closing the tab ends a recording in progress. Chunks already cut are safe
   // on this device and upload next time, so only live capture asks first.
@@ -43,7 +51,7 @@ export default function RecorderHost({
   // The desktop app doesn't offer to record a call while this page records
   // one, and offers to stop when the recorded call ends.
   useEffect(() => {
-    const detection = desktopCapability("meetingDetection")?.meetingDetection;
+    const detection = getDesktopMeetingDetection();
     if (!detection) return;
     detection.setRecording(capturing);
     return () => detection.setRecording(false);

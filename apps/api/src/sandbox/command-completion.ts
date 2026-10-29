@@ -1,6 +1,11 @@
 import { AgentEventAck, type OperationCompleted } from "@opengeni/agent-proto";
 import type { Settings } from "@opengeni/config";
-import { agentConnectionCurrent, releaseStoredConnectedCommandOutput } from "@opengeni/core";
+import {
+  agentConnectionCurrent,
+  backgroundCommandWakeSender,
+  releaseStoredConnectedCommandOutput,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   computeSandboxOfEnrollment,
   settleCollectedConnectedMachineBackgroundCommand,
@@ -35,6 +40,7 @@ import {
   withoutWaking,
 } from "@opengeni/runtime/sandbox";
 import type { ConnectedCommandCompletionLocator } from "./completion-locator";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The transport of an immediate stop. One absolute budget covers capability
@@ -131,7 +137,7 @@ async function deliverStop(
     });
     return { delivered: true };
   } catch (error) {
-    return { delivered: false, error: error instanceof Error ? error.message : String(error) };
+    return { delivered: false, error: errorMessage(error) };
   }
 }
 
@@ -146,6 +152,9 @@ export type ConnectedCommandCollectionDeps = {
   reader?: Pick<OpStreamExecClient, "readExisting"> | undefined;
   /** Injected for tests: the control transport of the output release. */
   releaseRpc?: ControlRpc | undefined;
+  /** Wakes a session waiting on the settled command at once. Absent: the
+   * periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: SessionWorkflowClient["wakeSessionWorkflow"] | undefined;
 };
 
 /** Collection is housekeeping: its attach is sent without waking. When the
@@ -196,13 +205,14 @@ export async function ingestConnectedCommandCompletion(
   /** Injected for tests: the control transport of the output release. */
   releaseRpc?: ControlRpc,
   locate?: ConnectedCommandCompletionLocator,
+  wakeSessionWorkflow?: SessionWorkflowClient["wakeSessionWorkflow"],
 ): Promise<void> {
   if (!completed.exit || !completed.opId || /[\s.*>]/u.test(completed.opId)) return;
   await collectConnectedCommandCompletion(
     db,
     ids,
     completed.opId,
-    { bus, reader, releaseRpc, locate },
+    { bus, reader, releaseRpc, locate, wakeSessionWorkflow },
     { acknowledge: true },
   );
 }
@@ -299,6 +309,7 @@ export async function collectConnectedCommandCompletion(
             await bus.publish(command.workspaceId, command.sessionId, events);
           }
         : undefined,
+      wake: backgroundCommandWakeSender(deps.wakeSessionWorkflow),
     });
     // All bytes are durable before terminal fanout. Release them on the runner
     // now, while it is live from this command: one answered exchange, so no

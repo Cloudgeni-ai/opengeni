@@ -457,10 +457,20 @@ query's audience:
 
 The Site's managers (outside a Site frame) may run every query.
 
-`:viewer` (the viewer's stable principal, such as `user:<id>` or
-`guest:<visitor>`), `:viewer_kind` and `:viewer_signed_in` (1 or 0) are bound
-by the API from the verified caller. A request that supplies one is refused
-with `validation`, so a Site cannot impersonate another viewer:
+`:viewer` (the viewer's stable, opaque principal: for a person, `user:`
+followed by their subject id, such as
+`user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`, or `guest:<visitor>`; the
+same string as a Site Data record's `owner`), `:viewer_kind` (the principal's
+kind: `user` for any signed-in person, `guest`), `:viewer_signed_in` (1 or 0),
+`:viewer_access` (`member`, `invited`, `user` or `guest`; NULL for callers with
+no person, such as a service key) and `:viewer_email` (the verified email in
+lowercase, or NULL) are bound by the API from the verified caller. Published
+viewers carry access and email from their Site session; callers through the
+workspace are `member`, and their email is read only for statements that name
+`:viewer_email`; an embedding host's `userProfileLookup` address counts only
+when the profile sets `emailVerified: true`. A member previewing the Site as a
+visitor binds that role with their own email. A request that supplies one is refused with `validation`, so
+a Site cannot impersonate another viewer:
 
 ```sql
 -- define with site_sql_define_query, audience signed_in
@@ -643,7 +653,7 @@ answered; a metering failure is logged and does not fail the call.
   order, CSV import counting, and the lineage under the production session
   RLS context. Budgets and charges use an injected validation clock, never
   wall-clock timing.
-- `packages/db/test/migration-0776-site-data-postgres.test.ts`: FORCE RLS,
+- `packages/db/test/site-data-postgres.test.ts`: FORCE RLS,
   the application role without context, a mismatched tenant context with no
   tenant filter, the record-to-collection Site key, and workspace cascade.
 - `packages/contracts/test/site-session-http.test.ts`: only `current` Site
@@ -659,7 +669,7 @@ answered; a metering failure is logged and does not fail the call.
   `apps/site-gateway/test/site-database.test.ts` (request-id expiry and
   pruning, repeated column names),
   `packages/sdk/test/site-sql.test.ts` (`site.sql.run` over the bridge),
-  `packages/db/test/migration-0783-site-sql-postgres.test.ts` (FORCE RLS and
+  `packages/db/test/site-sql-postgres.test.ts` (FORCE RLS and
   cascades) and `apps/api/test/site-sql-postgres.test.ts` (routes and tools on
   Postgres against the real gateway Worker in Miniflare: audiences, guests,
   principal parameters, limits and metering, export and import round trips).

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { ComputerSupervisorDriverContext } from "../computer-supervisor";
 import { CuaComputerBackend } from "./backend";
 import { computerNativeMacWindows } from "./macos-windows";
+import { macPersonInput } from "./macos-person-input";
 import { createCuaRuntime, missingLinuxLibraryError } from "./sdk";
 import type { CuaDesktopRuntime } from "./wire";
 import { windowsFronting } from "./windows-foreground";
@@ -188,8 +189,11 @@ export async function createCuaComputerDriver(
   const backend = await CuaComputerBackend.open(
     runtime,
     process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
-    process.platform === "darwin" && nativeBinary
-      ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) }
+    process.platform === "darwin"
+      ? {
+          ...(nativeBinary ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) } : {}),
+          personInput: await macPersonInput(),
+        }
       : process.platform === "win32"
         ? { frontWindow: windowsFronting() }
         : {},

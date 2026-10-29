@@ -6,6 +6,7 @@ import type { BrowserActionCommand, BrowserObservation } from "@opengeni/contrac
 import { BrowserInteractionController } from "@opengeni/interaction";
 import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection } from "../src/cdp";
+import type { BrowserCdpConnection } from "../src/cdp-driver";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -312,6 +313,197 @@ e2e(
     } finally {
       await fixture.close();
     }
+  },
+  60_000,
+);
+
+// Clicks in a tab opened in the background, which draws no frames. Chrome
+// can take seconds to acknowledge the pointer's move there, so the click's
+// hit-target guard must still be armed when the press finally arrives.
+
+const READBACK = "function () { return this.settle(); }";
+
+/** The driver's own connection, except that each guard readback first waits
+ * for hold(). */
+function heldReadbacks(
+  connection: CdpConnection,
+  hold: () => Promise<unknown> | undefined,
+): BrowserCdpConnection {
+  return {
+    send: async <T = Record<string, unknown>>(
+      method: string,
+      params?: Readonly<Record<string, unknown>>,
+      options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
+    ) => {
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === READBACK) {
+        await hold();
+      }
+      return await connection.send<T>(method, params, options);
+    },
+    on: connection.on.bind(connection),
+    onDisconnect: connection.onDisconnect.bind(connection),
+    onDroppedMessage: connection.onDroppedMessage.bind(connection),
+    close: connection.close.bind(connection),
+    waitForEvent: connection.waitForEvent.bind(connection),
+  };
+}
+
+async function withBackgroundTab(
+  pages: Record<string, string>,
+  run: (input: {
+    page: BrowserObservation;
+    click: (
+      observation: BrowserObservation,
+      selector: string,
+    ) => ReturnType<BrowserInteractionController["run"]>;
+    evaluate: (expression: string) => Promise<unknown>;
+    /** Resolves once the page has posted a form. */
+    posted: Promise<void>;
+    /** Runs before each guard readback, until set to null. */
+    holdReadbacks: (hold: (() => Promise<unknown>) | null) => void;
+  }) => Promise<void>,
+): Promise<void> {
+  let markPosted = () => {};
+  const posted = new Promise<void>((resolve) => {
+    markPosted = resolve;
+  });
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (request.method === "POST") {
+        await request.text();
+        markPosted();
+      }
+      return new Response(pages[path] ?? "<!doctype html><title>Missing</title>", {
+        status: pages[path] === undefined ? 404 : 200,
+        headers: { "content-type": "text/html" },
+      });
+    },
+  });
+  const origin = `http://127.0.0.1:${server.port}`;
+  const directory = await mkdtemp("/tmp/ogb-background-click-");
+  const browserSessionId = randomUUID();
+  const controllerGeneration = `controller-${randomUUID()}`;
+  const runner = await ManagedBrowserRunner.create({
+    profileDirectory: join(directory, "profile"),
+    headed: false,
+    ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+      ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+      : {}),
+  });
+  let hold: (() => Promise<unknown>) | null = null;
+  const driver = new AgentBrowserDriver({
+    browserSessionId,
+    controllerGeneration,
+    runner,
+    connect: async (endpoint) =>
+      heldReadbacks(await CdpConnection.connect(endpoint), () => hold?.()),
+  });
+  const controller = new BrowserInteractionController({
+    browserSessionId,
+    controllerGeneration,
+    driver,
+  });
+  let cdp: CdpConnection | null = null;
+  try {
+    await driver.start(`${origin}/start`);
+    // Opened in the background, like a tab an agent opens next to its page.
+    const page = await driver.openTarget(`${origin}/page`);
+    const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+    const connection = await CdpConnection.connect(endpoint.cdpUrl);
+    cdp = connection;
+    const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: page.target.id,
+      flatten: true,
+    });
+    await run({
+      page,
+      click: (observation, selector) =>
+        controller.run({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: observation.target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedDocumentGeneration: observation.target.documentGeneration!,
+          expectedFrameId: observation.frameId!,
+          actor: { kind: "human", subjectId: "background-click-fixture" },
+          observationMode: "none",
+          action: { type: "click", locator: { kind: "css", selector } },
+        } satisfies BrowserActionCommand),
+      evaluate: async (expression) =>
+        (
+          await connection.send<{ result: { value: unknown } }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true },
+            { sessionId },
+          )
+        ).result.value,
+      posted,
+      holdReadbacks: (next) => {
+        hold = next;
+      },
+    });
+  } finally {
+    hold = null;
+    await (cdp as CdpConnection | null)?.close();
+    await driver.close();
+    server.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+const START = "<!doctype html><title>Start</title><h1>Start</h1>";
+
+e2e(
+  "a layer that appears as the pointer arrives in a background tab receives no click",
+  async () => {
+    await withBackgroundTab(
+      {
+        "/start": START,
+        "/page":
+          '<!doctype html><title>Hover card</title><style>body{margin:0}#card{display:none;position:absolute;top:0;left:0;width:300px;height:100px;background:#fff}</style><div style="padding:30px"><button id="target">Confirm</button></div><div id="card" role="dialog" aria-label="Profile card"><button id="follow">Follow</button></div><script>globalThis.clicks={confirm:0,card:0};target.addEventListener("click",()=>clicks.confirm++);card.addEventListener("click",()=>clicks.card++);target.addEventListener("mouseenter",()=>{card.style.display="block"});</script>',
+      },
+      async ({ page, click, evaluate }) => {
+        expect(await evaluate("document.visibilityState")).toBe("hidden");
+        const refused = await click(page, "#target");
+        expect(refused.state).not.toBe("completed");
+        expect(refused.error?.message).toContain('covered by dialog "Profile card"');
+        expect(await evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
+      },
+    );
+  },
+  60_000,
+);
+
+e2e(
+  "a submit click in a background tab completes when its page is gone before the readback",
+  async () => {
+    await withBackgroundTab(
+      {
+        "/start": START,
+        "/page":
+          '<!doctype html><title>Sign in</title><form method="post" action="/signed-in"><input name="user" value="ada"><button id="login" type="submit">Sign in</button></form>',
+        "/signed-in": "<!doctype html><title>Signed in</title><h1>Welcome</h1>",
+      },
+      async ({ page, click, evaluate, posted, holdReadbacks }) => {
+        expect(await evaluate("document.visibilityState")).toBe("hidden");
+        // A slow machine: the form's navigation replaces the document
+        // before the driver reads the guard back, so only the guard's own
+        // report of the press can confirm where it landed.
+        holdReadbacks(async () => {
+          await Promise.race([posted, Bun.sleep(15_000)]);
+          await Bun.sleep(500);
+        });
+        const result = await click(page, "#login");
+        expect(result.error ?? null).toBeNull();
+        expect(result.state).toBe("completed");
+        await posted;
+      },
+    );
   },
   60_000,
 );

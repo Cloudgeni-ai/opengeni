@@ -26,6 +26,8 @@ export type UseNewSessionDraftOptions = {
   onApplyRemote: (
     value: NewSessionDraftEditable,
     selectionHistory: NewSessionSelectionHistory,
+    /** The caller's own default placement ("Your default machine"), when usable. */
+    memberDefaultExecutionTarget: NewSessionDraft["memberDefaultExecutionTarget"] | null,
   ) => void;
   /** Replace finalized attachments with freshly revalidated server assets. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
@@ -266,7 +268,11 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       setCurrentConflict(null);
       setError(null);
       restoreReadyFilesRef.current(remote.files);
-      onApplyRemoteRef.current(remote.editable, remote.draft.selectionHistory);
+      onApplyRemoteRef.current(
+        remote.editable,
+        remote.draft.selectionHistory,
+        remote.draft.memberDefaultExecutionTarget ?? null,
+      );
     },
     [setCurrentConflict, setError],
   );

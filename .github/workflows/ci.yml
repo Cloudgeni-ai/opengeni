@@ -6,7 +6,11 @@ on:
     branches:
       - main
       - production
-  # Main PRs/merge groups use merge-queue.yml. Full CI is a separate,
+      # Merge batcher candidates (docs/merge-batcher.md): tested exactly like a
+      # main push (full suite, deployment artifacts and every workload image),
+      # and never publish anything.
+      - "batch/**"
+  # Main PRs use pr-ci.yml and land through the merge batcher. Full CI is a separate,
   # non-cancelling release-candidate lane.
   pull_request:
     branches:
@@ -115,7 +119,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -213,79 +218,101 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
 
-  # A merge-batcher landing fast-forwards main to a commit whose exact Git tree
-  # already passed a trusted Batch CI attempt. That push reuses the Batch
-  # verdict: its test lanes are skipped, while deployment artifacts, the
-  # artifact runtime (including macOS/Windows smoke receipts), workload images,
-  # landed-content verification and the full-green receipts still run. Version
-  # PR, control-plane and CI-definition landings, pushes without such a Batch
-  # attempt, schedules, dispatches and any unverifiable evidence run the full
-  # suite; release admission refuses attested receipts. The merge batcher reads
-  # this job and step name; see
-  # docs/merge-batcher.md "Main-push Batch CI attestation".
-  batch-attestation:
-    name: Batch CI attestation
+  # Main CI runs on a cadence instead of on every push (docs/merge-batcher.md
+  # "Main CI cadence"). With MAIN_CI_DEFERRED, the first attempt of an ordinary
+  # main push cancels itself before any work starts; main-approval-superseded.yml
+  # re-runs the newest main SHA's run about every 30 minutes, and anyone can
+  # re-run a main SHA to get its images now. Version merges always run.
+  main-ci-cadence:
+    name: Main CI cadence
+    # A batcher landing is never deferred: an attested push records its batch's
+    # exact-tree result and an intermediate one runs nothing (batch-receipt
+    # below). Every other push keeps the cadence.
+    needs: [batch-receipt]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
+      vars.MAIN_CI_DEFERRED == 'true' &&
+      !(needs.batch-receipt.result == 'success' && (needs.batch-receipt.outputs.kind == 'attested' || needs.batch-receipt.outputs.kind == 'intermediate')) &&
+      !startsWith(github.event.head_commit.message, 'chore: version packages') &&
+      !contains(github.event.head_commit.message, 'changeset-release/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write # cancel this run
+    steps:
+      - name: Defer this push to the main CI cadence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Deferred: main CI runs on a cadence. Re-run this workflow to test this exact SHA now." >> "$GITHUB_STEP_SUMMARY"
+          gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          # Cancellation lands within seconds; never let this run continue.
+          sleep 300
+          exit 1
+
+  # docs/merge-batcher.md "Main CI records the batch result". The merge batcher
+  # lands a batch only after ci.yml passed in full, workload images included,
+  # on the batch tip, whose exact Git tree the batch's last landed member
+  # reproduces. That push is attested and reuses the batch verdict: its test
+  # lanes are skipped, while deployment artifacts, the artifact runtime,
+  # workload images, landed-content verification and the full-green receipt
+  # still run. Earlier members of the batch, whose trees no run tested on their
+  # own, are intermediate: they run nothing else, are labelled as covered by
+  # the batch and its final SHA, and get no receipt, so canary admission
+  # refuses them. Re-runs, Version merges, CI or batcher definition changes and
+  # any missing or unreadable evidence keep ordinary main CI. Release admission
+  # refuses receipts that carry an attestation.
+  batch-receipt:
+    name: Batch receipt
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read # exact successful Batch attempt and immutable proof archives
+      actions: read # the batch's exact ci.yml run, its jobs and its impact plan
     outputs:
-      attested: ${{ steps.find.outputs.attested }}
-      batch_run_id: ${{ steps.find.outputs.batch_run_id }}
-      batch_run_attempt: ${{ steps.find.outputs.batch_run_attempt }}
-      batch_head_sha: ${{ steps.find.outputs.batch_head_sha }}
-      tree: ${{ steps.find.outputs.tree }}
+      kind: ${{ steps.receipt.outputs.kind }}
+      attested: ${{ steps.receipt.outputs.attested }}
+      batch_run_id: ${{ steps.receipt.outputs.batch_run_id }}
+      batch_run_attempt: ${{ steps.receipt.outputs.batch_run_attempt }}
+      batch_head_sha: ${{ steps.receipt.outputs.batch_head_sha }}
+      batch_branch: ${{ steps.receipt.outputs.batch_branch }}
+      tree: ${{ steps.receipt.outputs.tree }}
+      final_sha: ${{ steps.receipt.outputs.final_sha }}
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          # A batch lands at most maxBatch members on its base.
+          fetch-depth: 32
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - name: Find identical-tree trusted Batch CI
-        id: find
+      - name: Classify this main push
+        id: receipt
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          # Previous main tip: a push that lands CI definitions never attests.
-          BEFORE_SHA: ${{ github.event.before }}
-        run: bun scripts/ci/batch-attestation.ts
-      # Runs only for a verified proof. Its success is the observable signal the
-      # merge batcher's capacity scan uses to stop counting this run as full main.
-      - name: Reuse identical-tree Batch CI
-        if: ${{ steps.find.outputs.attested == 'true' }}
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-          EXPECTED_BATCH_RUN_ID: ${{ steps.find.outputs.batch_run_id }}
-          EXPECTED_BATCH_RUN_ATTEMPT: ${{ steps.find.outputs.batch_run_attempt }}
-          EXPECTED_BATCH_HEAD_SHA: ${{ steps.find.outputs.batch_head_sha }}
-          EXPECTED_TREE: ${{ steps.find.outputs.tree }}
-        run: bun scripts/ci/batch-attestation.ts verify
+        run: bun scripts/ci/batch-receipt.ts
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: batch-attestation-${{ github.sha }}
-          path: batch-attestation.json
+          name: batch-receipt-${{ github.sha }}
+          path: batch-receipt.json
           if-no-files-found: error
           retention-days: 30
 
   plan:
     name: Explain change impact
-    needs: [automation-admission, batch-attestation]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    needs: [automation-admission, main-ci-cadence, batch-receipt]
+    if: ${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 17
-    permissions:
-      contents: read
-      actions: read # exact successful Batch attempt and immutable proof archives
     outputs:
-      unit_reuse: ${{ steps.unit_reuse.outputs.reuse }}
-      attested: ${{ steps.attestation.outputs.attested }}
-      batch_run_id: ${{ steps.attestation.outputs.batch_run_id }}
-      batch_run_attempt: ${{ steps.attestation.outputs.batch_run_attempt }}
-      batch_head_sha: ${{ steps.attestation.outputs.batch_head_sha }}
-      batch_tree: ${{ steps.attestation.outputs.batch_tree }}
+      attested: ${{ steps.receipt.outputs.attested }}
+      batch_run_id: ${{ steps.receipt.outputs.batch_run_id }}
+      batch_run_attempt: ${{ steps.receipt.outputs.batch_run_attempt }}
+      batch_head_sha: ${{ steps.receipt.outputs.batch_head_sha }}
+      batch_branch: ${{ steps.receipt.outputs.batch_branch }}
+      batch_tree: ${{ steps.receipt.outputs.batch_tree }}
       mode: ${{ steps.plan.outputs.mode }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
       integration_count: ${{ steps.plan.outputs.integration_count }}
@@ -329,7 +356,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -355,18 +383,20 @@ jobs:
             echo "::error::Selected checkout identity changed"
             exit 1
           fi
-      # Fail closed: only a successful attestation job on this exact main push
+
+      # Fail closed: only a successful batch receipt for this exact main push
       # with complete, well-formed identities selects the attested topology.
-      - name: Bind identical-tree Batch CI attestation
-        id: attestation
+      - name: Bind the batch receipt
+        id: receipt
         env:
           EVENT_NAME: ${{ github.event_name }}
-          RESULT: ${{ needs.batch-attestation.result }}
-          ATTESTED: ${{ needs.batch-attestation.outputs.attested }}
-          BATCH_RUN_ID: ${{ needs.batch-attestation.outputs.batch_run_id }}
-          BATCH_RUN_ATTEMPT: ${{ needs.batch-attestation.outputs.batch_run_attempt }}
-          BATCH_HEAD_SHA: ${{ needs.batch-attestation.outputs.batch_head_sha }}
-          BATCH_TREE: ${{ needs.batch-attestation.outputs.tree }}
+          RESULT: ${{ needs.batch-receipt.result }}
+          ATTESTED: ${{ needs.batch-receipt.outputs.attested }}
+          BATCH_RUN_ID: ${{ needs.batch-receipt.outputs.batch_run_id }}
+          BATCH_RUN_ATTEMPT: ${{ needs.batch-receipt.outputs.batch_run_attempt }}
+          BATCH_HEAD_SHA: ${{ needs.batch-receipt.outputs.batch_head_sha }}
+          BATCH_BRANCH: ${{ needs.batch-receipt.outputs.batch_branch }}
+          BATCH_TREE: ${{ needs.batch-receipt.outputs.tree }}
         run: |
           set -euo pipefail
           attested=false
@@ -374,15 +404,17 @@ jobs:
              [ "$RESULT" = success ] && [ "$ATTESTED" = true ] &&
              [[ "$BATCH_RUN_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$BATCH_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] &&
              [[ "$BATCH_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BATCH_TREE" =~ ^[0-9a-f]{40}$ ]] &&
+             [[ "$BATCH_BRANCH" =~ ^batch/[0-9a-f]{12}$ ]] &&
              [ "$(git rev-parse "$GITHUB_SHA^{tree}")" = "$BATCH_TREE" ]; then
             attested=true
             {
               echo "batch_run_id=$BATCH_RUN_ID"
               echo "batch_run_attempt=$BATCH_RUN_ATTEMPT"
               echo "batch_head_sha=$BATCH_HEAD_SHA"
+              echo "batch_branch=$BATCH_BRANCH"
               echo "batch_tree=$BATCH_TREE"
             } >> "$GITHUB_OUTPUT"
-            echo "Identical-tree Batch CI run $BATCH_RUN_ID attempt $BATCH_RUN_ATTEMPT replaces this push's test lanes." >> "$GITHUB_STEP_SUMMARY"
+            echo "Batch run $BATCH_RUN_ID attempt $BATCH_RUN_ATTEMPT passed this exact tree in full; its verdict replaces this push's test lanes." >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "attested=$attested" >> "$GITHUB_OUTPUT"
 
@@ -414,6 +446,10 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
+          elif [ "$EVENT_NAME" = "push" ] && [[ "$GITHUB_REF" == refs/heads/batch/* ]]; then
+            # A batch lands only after everything main gates on passed on its
+            # exact tree (docs/merge-batcher.md "What a batch runs").
+            bun scripts/ci/impact.ts --full --output impact-plan.json
           elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ] ||
                { [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; }; then
             bun scripts/ci/impact.ts --full --output impact-plan.json
@@ -435,7 +471,10 @@ jobs:
           echo "browserd_real_e2e=$(jq -r '(.mode == "full") or any(.changedFiles[]; test("^(packages/(browserd|interaction)/|packages/contracts/src/interaction\\.ts$|packages/runtime/src/(interaction-tools|browser-action-json-schema)\\.ts$|packages/runtime/src/sandbox/browser-control-client\\.ts$|apps/api/src/routes/browser-sessions\\.ts$|packages/sdk/src/(interaction|client)\\.ts$)"))' impact-plan.json)" >> "$GITHUB_OUTPUT"
           artifact_runtime_required="$(jq -r .artifactRuntimeRequired impact-plan.json)"
           bake_images=false
-          if [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "$EVENT_NAME" = "push" ] &&
+             { [ "$GITHUB_REF" = "refs/heads/main" ] || [[ "$GITHUB_REF" == refs/heads/batch/* ]]; }; then
+            # Batches build every image (never pushed) so a landing has passed
+            # the same image gate as main.
             bake_images=true
             artifact_runtime_required=true
           elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
@@ -459,7 +498,10 @@ jobs:
           # adds balancing headroom without increasing any test/attempt budget.
           echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 12)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
-          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
+          # The same for E2E with its 720-second deadline: the complete set ran
+          # past it on run40747935590/shard1 with every test passing (one file
+          # alone takes about six minutes). Eight shards give it headroom.
+          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 8)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'
@@ -468,12 +510,6 @@ jobs:
             jq '{mode, changedFiles, affectedPackages, reasons, typecheckProjects, unitCount:(.unitTests|length), integrationTests, e2eTests, browserAcceptanceLanes, artifactRuntimeRequired, buildPackages, exampleBuildProjects}' impact-plan.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Verify identical-tree complete Batch unit coverage
-        id: unit_reuse
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bun scripts/ci/reuse-batch-units.ts
 
       - name: Record dependency cache outcome
         if: ${{ always() }}
@@ -489,9 +525,7 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-impact-plan
-          path: |
-            impact-plan.json
-            unit-reuse.json
+          path: impact-plan.json
           if-no-files-found: error
           retention-days: 7
 
@@ -540,7 +574,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -671,10 +706,6 @@ jobs:
 
       - name: Run exactly the explained source guards
         timeout-minutes: 16
-        env:
-          # The published-SDK compatibility guard boots the API on real
-          # PostgreSQL; fail closed instead of skipping when docker is missing.
-          OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards
@@ -713,9 +744,7 @@ jobs:
       # Finish independent shards so one failure cannot hide other regressions.
       fail-fast: false
       matrix:
-        # Keep the required unit-shards result contract, but proof reuse needs
-        # one verifier rather than twelve runners repeating the same read.
-        include: ${{ fromJSON(needs.plan.outputs.unit_reuse == 'true' && '[{"index":0,"number":1,"total":1}]' || needs.plan.outputs.unit_matrix) }}
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -725,7 +754,6 @@ jobs:
           persist-credentials: false
 
       - name: Restore complete checkout history without listing refs
-        if: ${{ needs.plan.outputs.unit_reuse != 'true' }}
         shell: bash
         timeout-minutes: 5
         env:
@@ -747,7 +775,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -779,7 +808,6 @@ jobs:
           bun-version-file: .bun-version
 
       - name: Cache Bun dependencies
-        if: ${{ needs.plan.outputs.unit_reuse != 'true' }}
         uses: actions/cache@v6.1.0
         with:
           path: ~/.bun/install/cache
@@ -788,7 +816,6 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        if: ${{ needs.plan.outputs.unit_reuse != 'true' }}
         run: bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 
       - name: Download exact impact plan
@@ -796,12 +823,7 @@ jobs:
         with:
           name: ci-impact-plan
 
-      - name: Verify reused complete unit proof for this main attempt
-        if: ${{ needs.plan.outputs.unit_reuse == 'true' }}
-        run: bun scripts/ci/reuse-batch-units.ts verify
-
       - name: Unit test shard
-        if: ${{ needs.plan.outputs.unit_reuse != 'true' }}
         timeout-minutes: 21
         env:
           # The per-subject FORCE-RLS/OCC suite remains fail-closed on every shard.
@@ -1001,7 +1023,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -1111,7 +1134,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -1190,7 +1214,7 @@ jobs:
           OPENGENI_ACCOUNT_EVIDENCE_DIR: /tmp/opengeni-account-acceptance
         run: |
           bun test --max-concurrency=1 --timeout 180000 \
-            ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \
+            ./packages/db/test/managed-auth-session-sets.test.ts \
             ./apps/api/test/managed-auth-session-sets.integration.test.ts
           if [ "$OPENGENI_ACCOUNT_BROWSER_ENGINE" = "chromium" ]; then
             bun scripts/run-browser-e2e.ts ./test/e2e/browser-account-request-observation.browser.e2e.ts
@@ -1485,7 +1509,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"
@@ -1790,8 +1815,10 @@ jobs:
 
   test:
     name: Typecheck and unit tests
-    needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images]
-    if: ${{ always() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
+    # An intermediate batch member runs no lanes and is never red; with no
+    # result here canary admission refuses it (docs/merge-batcher.md).
+    needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images, batch-receipt]
+    if: ${{ always() && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -2080,9 +2107,11 @@ jobs:
           terraform -chdir=deploy/terraform/aws fmt -check
           terraform -chdir=deploy/terraform/aws init -backend=false
           terraform -chdir=deploy/terraform/aws validate
+          terraform -chdir=deploy/terraform/aws test
           terraform -chdir=deploy/terraform/gcp fmt -check
           terraform -chdir=deploy/terraform/gcp init -backend=false
           terraform -chdir=deploy/terraform/gcp validate
+          terraform -chdir=deploy/terraform/gcp test
 
   artifact-runtime:
     name: Build exact artifact runtime inputs
@@ -2100,9 +2129,11 @@ jobs:
     # passed; a red build completes red instead of holding an approval wait.
     # The same required-results topology as the final aggregate applies, minus
     # the image results that do not exist yet: a failed, cancelled or wrongly
-    # skipped lane fails this job.
+    # skipped lane fails this job. A batch candidate has no approval to order,
+    # so it skips this gate and builds the API image alongside the lanes; the
+    # final aggregates still require every lane and image.
     needs: [automation-admission, plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && !startsWith(github.ref, 'refs/heads/batch/') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -2767,24 +2798,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
 
-      # GITHUB_TOKEN-created Version PRs do not emit pull_request workflows.
-      # Their authenticated full CI is stronger than the fast entry check.
-      # merge_group still tests their combined tree normally after enqueueing.
-      - name: Report queue entry check for the admitted Version PR
-        if: ${{ success() && needs.automation-admission.result == 'success' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ inputs.automation_head_sha }}
-          CONCLUSION: ${{ needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
-        run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
-            -f name='Queue ready' -f head_sha="$HEAD_SHA" -f status=completed \
-            -f conclusion="$CONCLUSION" \
-            -f details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
   merge-content:
     name: Verify landed merge content
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    # The batch's attested last commit verifies everything landed since the
+    # last full-green SHA, intermediate members included.
+    needs: [batch-receipt]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -2825,20 +2844,21 @@ jobs:
           BATCH_RUN_ID: ${{ needs.plan.outputs.batch_run_id }}
           BATCH_RUN_ATTEMPT: ${{ needs.plan.outputs.batch_run_attempt }}
           BATCH_HEAD_SHA: ${{ needs.plan.outputs.batch_head_sha }}
+          BATCH_BRANCH: ${{ needs.plan.outputs.batch_branch }}
           BATCH_TREE: ${{ needs.plan.outputs.batch_tree }}
         run: |
           set -euo pipefail
           url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
           description='Full tests, contracts and workload images passed for this exact main SHA'
           # Receipt schema and mode stay unchanged for every consumer; an
-          # attested run additionally names the identical-tree Batch attempt
-          # whose verdict replaced this push's test lanes.
+          # attested run additionally names the batch run that passed this
+          # exact tree in full and replaced this push's test lanes.
           attestation=null
           if [ "$ATTESTED" = true ]; then
-            attestation="$(jq -cn --arg run "$BATCH_RUN_ID" --arg attempt "$BATCH_RUN_ATTEMPT" \
-              --arg head "$BATCH_HEAD_SHA" --arg tree "$BATCH_TREE" \
-              '{workflow:".github/workflows/batch-ci.yml",batchRunId:$run,batchRunAttempt:$attempt,batchHeadSha:$head,tree:$tree}')"
-            description="Batch CI run $BATCH_RUN_ID/$BATCH_RUN_ATTEMPT passed this exact tree; images built"
+            attestation="$(jq -cn --arg branch "$BATCH_BRANCH" --arg run "$BATCH_RUN_ID" \
+              --arg attempt "$BATCH_RUN_ATTEMPT" --arg head "$BATCH_HEAD_SHA" --arg tree "$BATCH_TREE" \
+              '{workflow:".github/workflows/ci.yml",batchBranch:$branch,batchRunId:$run,batchRunAttempt:$attempt,batchHeadSha:$head,tree:$tree}')"
+            description="Batch run $BATCH_RUN_ID/$BATCH_RUN_ATTEMPT passed this exact tree in full; images built"
           fi
           jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
             --arg attempt "$GITHUB_RUN_ATTEMPT" --arg url "$url" --argjson attestation "$attestation" \

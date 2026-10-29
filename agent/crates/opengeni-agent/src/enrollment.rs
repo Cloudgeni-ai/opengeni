@@ -266,6 +266,23 @@ fn bearer_expiry(bearer: &str) -> Option<u64> {
     value.get("exp")?.as_u64()
 }
 
+/// The deployment's correlation id for a failed request, so the failure can be
+/// matched to its server log entry. Only a plain token is accepted, so a server
+/// cannot place arbitrary text in the machine's log.
+fn correlation_id(response: &reqwest::Response) -> Option<String> {
+    let value = response
+        .headers()
+        .get("x-opengeni-correlation-id")?
+        .to_str()
+        .ok()?;
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then(|| value.to_owned())
+}
+
 /// Refresh only this approved enrollment. The install key proves possession even
 /// when the machine was offline longer than the transport credential lifetime.
 pub(crate) async fn renew_connection(
@@ -290,6 +307,7 @@ pub(crate) async fn renew_connection(
     // Do not include an untrusted response body (potential credential echo) in logs.
     if !response.status().is_success() {
         let status = response.status().as_u16();
+        let correlation = correlation_id(&response);
         // Older servers' generic 401 also covers clock skew and configuration
         // outages. Only the new closed code is a definitive terminal decision.
         if status == 401 {
@@ -321,7 +339,10 @@ pub(crate) async fn renew_connection(
         return Err(EnrollmentError::Status {
             path: "/v1/enrollments/renew".into(),
             status,
-            body: "credential renewal unavailable".into(),
+            body: match correlation {
+                Some(id) => format!("credential renewal unavailable (correlation id {id})"),
+                None => "credential renewal unavailable".into(),
+            },
         });
     }
     let wire = response.json::<wire::ExchangeResponse>().await?;
@@ -893,6 +914,8 @@ mod tests {
             "expired",
             "denied",
             "redirect",
+            "unavailable",
+            "unavailable_bad_correlation",
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -971,6 +994,16 @@ mod tests {
                 .unwrap();
                 let (status, extra, response) = match case {
                     "denied" => ("401 Unauthorized", "", "DO-NOT-LOG-CREDENTIAL".into()),
+                    "unavailable" => (
+                        "500 Internal Server Error",
+                        "X-OpenGeni-Correlation-Id: a697386b-36df-4bda-b1dd-da96b5146f89\r\n",
+                        "DO-NOT-LOG-CREDENTIAL".into(),
+                    ),
+                    "unavailable_bad_correlation" => (
+                        "500 Internal Server Error",
+                        "X-OpenGeni-Correlation-Id: forged text; DO-NOT-LOG\r\n",
+                        String::new(),
+                    ),
                     "redirect" => (
                         "307 Temporary Redirect",
                         "Location: http://127.0.0.1:1/must-not-follow\r\n",
@@ -1002,6 +1035,14 @@ mod tests {
                 assert!(!error.contains("DO-NOT-LOG-CREDENTIAL"));
                 if case == "redirect" {
                     assert!(error.contains("307"));
+                }
+                if case == "unavailable" {
+                    assert!(error.contains("500"));
+                    assert!(error.contains("correlation id a697386b-36df-4bda-b1dd-da96b5146f89"));
+                }
+                if case == "unavailable_bad_correlation" {
+                    assert!(!error.contains("DO-NOT-LOG"));
+                    assert!(!error.contains("correlation id"));
                 }
             }
         }

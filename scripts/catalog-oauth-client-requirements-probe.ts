@@ -16,6 +16,7 @@ import {
 } from "../packages/network/src/mcp-oauth-discovery";
 import { normalizeCatalogSnapshot } from "./import-integrations-catalog";
 import { oauthClientRequirementsEntriesByMcpUrl } from "./catalog-oauth-client-requirements";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const TIMEOUT_MS = 15_000;
 const CONCURRENCY = 16;
@@ -86,7 +87,7 @@ if (import.meta.main) {
           failed.push({
             name: row.name,
             mcpUrl: row.mcpUrl,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       }

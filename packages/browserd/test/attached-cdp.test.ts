@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BrowserInteractionController,
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
@@ -114,6 +115,278 @@ describe("AttachedChromeCdpConnection", () => {
     expect(error).toBeInstanceOf(InteractionDefiniteDriverError);
     expect(error).toMatchObject({ code: "target_not_found" });
     gone.close();
+  });
+
+  test("reports Chrome refusing to debug a tab as a definite failure that says what to do", async () => {
+    const refusing = (failure: Error) => {
+      const bridge = new FakeBridge();
+      const request = bridge.request.bind(bridge);
+      bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
+        if (payload.type === "debugger.attach") {
+          bridge.commands.push({ ...payload });
+          throw failure;
+        }
+        return await request<T>(payload);
+      };
+      return {
+        bridge,
+        connection: new AttachedChromeCdpConnection(bridge, {
+          browserName: "Chrome",
+          browserVersion: "151.0.0.0",
+        }),
+      };
+    };
+    const attach = async (failure: Error) => {
+      const { bridge, connection } = refusing(failure);
+      try {
+        const error = await connection
+          .send("Target.attachToTarget", { targetId: "7" })
+          .catch((caught: unknown) => caught);
+        expect(bridge.commands.map((command) => command.type)).toContain("debugger.attach");
+        return error as Error & { code?: unknown; retryable?: unknown };
+      } finally {
+        connection.close();
+      }
+    };
+
+    // An older extension relays Chrome's refusal while a password manager's
+    // inline menu frame is in the page unchanged.
+    const frame = await attach(
+      new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "Cannot access a chrome-extension:// URL of different extension",
+        false,
+        { extensionCode: "driver_failed" },
+      ),
+    );
+    expect(frame).toBeInstanceOf(InteractionControllerError);
+    expect(frame).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(frame.message).toBe(
+      "Another browser extension has added its own frame to this page (password managers do this for their inline menu), and Chrome does not let the Opengeni Browser extension control a tab while it has one. Update the Opengeni Browser extension, turn off that extension's inline menu for this site, or use a managed browser",
+    );
+
+    // A newer extension explains its refusal itself; keep its words.
+    const explained = await attach(
+      new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "A password manager keeps adding its own frame to this page; turn off its inline menu",
+        false,
+        { extensionCode: "tab_unavailable" },
+      ),
+    );
+    expect(explained).toBeInstanceOf(InteractionControllerError);
+    expect(explained).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(explained.message).toBe(
+      "A password manager keeps adding its own frame to this page; turn off its inline menu",
+    );
+
+    // Any other refusal names Chrome's reason, bounded.
+    const otherReason = "Cannot access a chrome:// URL";
+    const other = await attach(
+      new AttachedBrowserBridgeError("driver_rejected", otherReason, false, {
+        extensionCode: "driver_failed",
+      }),
+    );
+    expect(other).toBeInstanceOf(InteractionControllerError);
+    expect(other).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(other.message).toBe(
+      "Chrome would not let the Opengeni Browser extension control this tab (Cannot access a chrome:// URL); retrying will not help until that changes. Use another tab or a managed browser",
+    );
+    const long = await attach(
+      new AttachedBrowserBridgeError("driver_rejected", "界".repeat(400), false),
+    );
+    expect(Buffer.byteLength(long.message)).toBeLessThanOrEqual(
+      Buffer.byteLength(other.message) - Buffer.byteLength(otherReason) + 300,
+    );
+    expect(long.message).toContain("界…); retrying will not help");
+
+    // Another debugger (DevTools, or a racing attach) can let go: retry.
+    const debugged = await attach(
+      new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "Another debugger is already attached to the tab with id: 7.",
+        false,
+        { extensionCode: "driver_failed" },
+      ),
+    );
+    expect(debugged).toBeInstanceOf(InteractionControllerError);
+    expect(debugged).toMatchObject({ code: "operation_conflict", retryable: true });
+    expect(debugged.message).toBe(
+      "Another debugger is attached to this tab, so the Opengeni Browser extension cannot control it right now. Try again in a moment; if it keeps happening, close DevTools for this tab or use another tab",
+    );
+
+    // A tab that is gone is not found, not a refusal, in both chrome.tabs'
+    // and chrome.debugger's wording.
+    for (const wording of ["No tab with id: 7.", "No tab with given id 7."]) {
+      const gone = await attach(new AttachedBrowserBridgeError("driver_rejected", wording, false));
+      expect(gone).toBeInstanceOf(InteractionDefiniteDriverError);
+      expect(gone).toMatchObject({ code: "target_not_found" });
+    }
+
+    // A lost connection or timeout stays a transport failure worth retrying.
+    const lost = await attach(
+      new AttachedBrowserBridgeError("transport_failed", "attached browser bridge closed", true),
+    );
+    expect(lost).toBeInstanceOf(CdpTransportError);
+  });
+
+  test("an observation of a tab Chrome will not debug fails with the refusal, not a retry", async () => {
+    const { AgentBrowserDriver } = await import("../src/cdp-driver");
+    const bridge = new FakeBridge();
+    const request = bridge.request.bind(bridge);
+    bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
+      if (payload.type === "debugger.attach")
+        throw new AttachedBrowserBridgeError(
+          "driver_rejected",
+          "Cannot access a chrome-extension:// URL of different extension",
+          false,
+          { extensionCode: "driver_failed" },
+        );
+      return await request<T>(payload);
+    };
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: crypto.randomUUID(),
+      controllerGeneration: "attach-refusal-test",
+      targetLifecycle: "cdp",
+      runner: {
+        async run<T>(args: readonly string[]): Promise<T> {
+          if (args[0] === "get") return { cdpUrl: "opengeni-attached://local" } as T;
+          return {} as T;
+        },
+      },
+      connect: async () => connection,
+    });
+    try {
+      const failure = await driver.observe("7").catch((error: unknown) => error);
+      // Before, this was a CDP protocol error that the controller answered as
+      // a retryable "browser observation unavailable".
+      expect(failure).not.toBeInstanceOf(CdpProtocolError);
+      expect(failure).toBeInstanceOf(InteractionControllerError);
+      expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
+      expect((failure as Error).message).toContain("password managers do this");
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });
+
+  test("every read and action on a tab Chrome will not debug fails with the refusal, never an unclassified error", async () => {
+    const { AgentBrowserDriver } = await import("../src/cdp-driver");
+    const bridge = new FakeBridge();
+    const request = bridge.request.bind(bridge);
+    let refusal = "Cannot access a chrome-extension:// URL of different extension";
+    bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
+      if (payload.type === "debugger.attach")
+        throw new AttachedBrowserBridgeError("driver_rejected", refusal, false, {
+          extensionCode: "driver_failed",
+        });
+      return await request<T>(payload);
+    };
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    const browserSessionId = crypto.randomUUID();
+    const controllerGeneration = "attach-refusal-actions-test";
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      targetLifecycle: "cdp",
+      runner: {
+        async run<T>(args: readonly string[]): Promise<T> {
+          if (args[0] === "get") return { cdpUrl: "opengeni-attached://local" } as T;
+          return {} as T;
+        },
+      },
+      connect: async () => connection,
+    });
+    const refused = (failure: unknown) => {
+      // Before, each of these was a CDP protocol error: the controller
+      // answered screenshots and tab state (activate and the action fence)
+      // with an unclassified 500.
+      expect(failure).not.toBeInstanceOf(CdpProtocolError);
+      expect(failure).toBeInstanceOf(InteractionControllerError);
+      expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
+      expect((failure as Error).message).toContain("password managers do this");
+    };
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      refused(await driver.targetState("7").catch((error: unknown) => error));
+      refused(await driver.captureScreenshot("7").catch((error: unknown) => error));
+      for (const action of [
+        { type: "pointer", action: "click", x: 10, y: 10 },
+        {
+          type: "fill",
+          locator: { kind: "css", selector: "input[type=password]" },
+          value: "hello",
+        },
+        { type: "type", locator: { kind: "css", selector: "input" }, text: "hello" },
+        { type: "press", key: "Enter" },
+      ] as const) {
+        const command = {
+          protocolVersion: 1,
+          actor: { kind: "agent", subjectId: "agent:test" },
+          operationId: crypto.randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: "7",
+          expectedTargetGeneration: "1",
+          expectedDocumentGeneration: "1",
+          expectedFrameId: "main",
+          observationMode: "none",
+          action,
+        } as const;
+        const receipt = await controller.run(command);
+        // No input reached the page, so the action definitely did not run;
+        // before, the controller answered with an unclassified failure.
+        expect(receipt.state).toBe("failed");
+        expect(receipt.error).toMatchObject({ code: "resource_unavailable", retryable: false });
+        expect(receipt.error?.message).toContain("password managers do this");
+        // Refused only at dispatch (the tab was detached since the
+        // controller's check), it is still a definite failure, not an
+        // unknown outcome.
+        const dispatched = await driver
+          .dispatch({ ...command, operationId: crypto.randomUUID() })
+          .catch((error: unknown) => error);
+        expect(dispatched).toBeInstanceOf(InteractionDefiniteDriverError);
+        expect(dispatched).toMatchObject({ code: "resource_unavailable", retryable: false });
+        expect((dispatched as Error).message).toContain("password managers do this");
+      }
+      // Another debugger holding the tab is a definite refusal worth retrying.
+      refusal = "Another debugger is already attached to the tab with id: 7.";
+      const busy = await driver
+        .dispatch({
+          protocolVersion: 1,
+          actor: { kind: "agent", subjectId: "agent:test" },
+          operationId: crypto.randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: "7",
+          expectedTargetGeneration: "1",
+          expectedDocumentGeneration: "1",
+          expectedFrameId: "main",
+          observationMode: "none",
+          action: { type: "press", key: "Enter" },
+        })
+        .catch((error: unknown) => error);
+      expect(busy).toBeInstanceOf(InteractionDefiniteDriverError);
+      expect(busy).toMatchObject({ code: "operation_conflict", retryable: true });
+      // Nothing reached the page.
+      expect(bridge.commands.some((command) => String(command.method).startsWith("Input."))).toBe(
+        false,
+      );
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
   });
 
   test("reports a tab's download browser-wide with the file Chrome saved", async () => {
@@ -591,6 +864,10 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Record<string, unknown>> = [];
   events: StreamEvent[] = [];
   sequence = 0;
+  // The extension worker's event stream, as newer extensions name it.
+  stream: string | undefined = undefined;
+  // Commands the stopped worker held fail as the agent fails them.
+  private failHeld: ((failure: Error) => void) | null = null;
   failingPolls = 0;
   pollFailure: Error = new AttachedBrowserBridgeError("timeout", "poll timed out", true);
   heldInput: Promise<void> | null = null;
@@ -600,6 +877,22 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
   push(method: string, params: Record<string, unknown> = {}): void {
     this.sequence += 1;
     this.events.push({ sequence: this.sequence, tabId: "7", sessionId: null, method, params });
+  }
+
+  /** Chrome stopped the extension's worker and started a new one: its event
+   * buffer starts again under a new stream, while Chrome kept the tab and its
+   * debugger attachment. The old worker's unanswered commands fail. */
+  restartWorker(stream: string): void {
+    this.failHeld?.(
+      new AttachedBrowserBridgeError(
+        "resource_unavailable",
+        "attached browser is unavailable",
+        true,
+      ),
+    );
+    this.stream = stream;
+    this.sequence = 0;
+    this.events = [];
   }
 
   /** Chrome emitted more events than the extension retains. */
@@ -631,7 +924,15 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
       case "debugger.detach":
         return { detached: true } as T;
       case "debugger.command":
-        if (payload.method === "Input.dispatchMouseEvent" && this.heldInput) await this.heldInput;
+        if (payload.method === "Input.dispatchMouseEvent" && this.heldInput) {
+          const failure = await Promise.race([
+            this.heldInput.then(() => null),
+            new Promise<Error>((resolveFailure) => {
+              this.failHeld = resolveFailure;
+            }),
+          ]);
+          if (failure) throw failure;
+        }
         if (payload.method === "Page.navigate" && this.heldNavigation) {
           await this.heldNavigation;
           throw new AttachedBrowserBridgeError("bridge_failed", "navigation reply lost", true);
@@ -651,6 +952,7 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
           events: page,
           cursor: page.at(-1)?.sequence ?? this.sequence,
           truncated: this.events.length > 0 && after < first - 1,
+          ...(this.stream === undefined ? {} : { stream: this.stream }),
         } as T;
       }
       default:
@@ -811,6 +1113,86 @@ describe("attached Chrome event stream recovery", () => {
       await expect(
         connection.send("Target.attachToTarget", { targetId: "7" }),
       ).rejects.toMatchObject({ code: "resource_unavailable", retryable: false });
+    } finally {
+      releaseInput();
+      connection.close();
+    }
+  });
+
+  test("resynchronizes when a new extension worker's buffer reaches the old cursor", async () => {
+    const bridge = new StreamBridge();
+    bridge.stream = "worker-1";
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    try {
+      const first = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+      });
+      const seen: string[] = [];
+      connection.on("Network.requestWillBeSent", () => seen.push("old"), first.sessionId);
+      bridge.push("Network.requestWillBeSent");
+      bridge.push("Network.requestWillBeSent");
+      await eventually(() => seen.length === 2, "the first worker's events");
+      const detached: Array<Record<string, unknown>> = [];
+      connection.on("Target.detachedFromTarget", (event) => detached.push(event.params));
+      // The new worker's buffer is back at the same sequence before the next
+      // poll: numbers alone do not show that anything in between was lost.
+      bridge.restartWorker("worker-2");
+      bridge.push("Page.frameNavigated", { frame: { id: "unseen" } });
+      bridge.push("Page.frameNavigated", { frame: { id: "unseen" } });
+      await eventually(() => detached.length > 0, "the resynchronized detach");
+      expect(detached).toEqual([
+        { sessionId: first.sessionId, targetId: "7", reason: "event_stream_resynchronized" },
+      ]);
+      const second = await eventuallyAttach(connection);
+      const navigated = new Promise<Record<string, unknown>>((resolveEvent) => {
+        connection.on("Page.frameNavigated", (event) => resolveEvent(event.params), second);
+      });
+      bridge.push("Page.frameNavigated", { frame: { id: "fresh" } });
+      await expect(navigated).resolves.toEqual({ frame: { id: "fresh" } });
+    } finally {
+      connection.close();
+    }
+  });
+
+  test("uses a tab again once a new extension worker replaced the one that held its input", async () => {
+    const bridge = new StreamBridge();
+    bridge.stream = "worker-1";
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    let releaseInput = () => {};
+    bridge.heldInput = new Promise<void>((resolveInput) => {
+      releaseInput = resolveInput;
+    });
+    try {
+      const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+      });
+      const click = connection
+        .send("Input.dispatchMouseEvent", { type: "mousePressed" }, { sessionId })
+        .catch((error: unknown) => error);
+      await eventually(
+        () =>
+          bridge.commands.some(
+            (command) =>
+              command.type === "debugger.command" && command.method === "Input.dispatchMouseEvent",
+          ),
+        "the click",
+      );
+      // Chrome stops the worker holding the click: whether it reached the
+      // page is unknown, and nothing of it can arrive later.
+      const detached = new Promise<void>((resolveEvent) => {
+        connection.on("Target.detachedFromTarget", () => resolveEvent());
+      });
+      bridge.restartWorker("worker-2");
+      expect(await click).toBeInstanceOf(Error);
+      await detached;
+      const again = await eventuallyAttach(connection);
+      expect(again).not.toBe(sessionId);
     } finally {
       releaseInput();
       connection.close();

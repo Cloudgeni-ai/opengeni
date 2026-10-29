@@ -9,17 +9,24 @@
 
 mod api;
 mod balloon;
+mod bounds;
+mod drives;
 mod holder;
 mod jail;
+mod logs;
 mod pager;
 mod process;
+mod room;
+mod run_state;
 mod runtime;
+mod snapshot;
 
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -31,15 +38,20 @@ use tokio::time::{Instant, sleep, timeout};
 use self::api::Api;
 pub use self::api::ApiError;
 use self::balloon::Balloon;
+use self::drives::drive_config;
 pub use self::jail::BINARY_NAME;
 use self::jail::{
     API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
 };
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
+use self::run_state::{RunState, set_run_state};
 use self::runtime::{Binary, chosen, readable, record_runtime, recorded_runtime};
+use self::snapshot::{
+    check_source, create_request, lacks_realtime_clock, load_failure, load_request,
+};
 use crate::Readable;
-use crate::cgroup::{Cgroup, MemoryStats};
+use crate::cgroup::{Cgroup, MemoryStats, Writes};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
@@ -142,66 +154,6 @@ fn machine_config(spec: &VmSpec, profile: MemoryProfile) -> Value {
     })
 }
 
-/// The `/snapshot/load` request for restoring `files` as the VM in `spec`.
-///
-/// Host-side paths and devices are taken from `spec`, not from the snapshot, so
-/// a snapshot restores the same way on another host or in another directory.
-/// Paths are the ones the jailed VMM sees. Page size and dirty tracking come
-/// from this host's profile, not from the host that took the snapshot: the
-/// image is plain memory either way. The profile must already allow
-/// `files.memory` (see [`check_source`]).
-fn load_request(
-    spec: &VmSpec,
-    jail: &Jail,
-    files: &RestoreFiles,
-    profile: MemoryProfile,
-) -> Result<Value, String> {
-    let backend = match &files.memory {
-        MemorySource::File(path) => {
-            json!({ "backend_type": "File", "backend_path": jail.inside(path)? })
-        }
-        MemorySource::Pager(pager) => {
-            json!({ "backend_type": "Uffd", "backend_path": jail.inside(&pager.socket)? })
-        }
-    };
-    let mut body = json!({
-        "snapshot_path": jail.inside(&files.state)?,
-        "mem_backend": backend,
-        "huge_pages": huge_pages(profile.pages),
-        "track_dirty_pages": profile.tracks_dirty_pages(),
-        "resume_vm": false,
-        "clock_realtime": true,
-        "vsock_override": { "uds_path": jail.inside(&spec.vsock_path())? },
-    });
-    if let Some(network) = &spec.network {
-        body["network_overrides"] = json!([{ "iface_id": "eth0", "host_dev_name": network.tap }]);
-    }
-    Ok(body)
-}
-
-/// Refuses memory sources the profile cannot back: Firecracker maps
-/// huge-page memory only through a fault handler.
-fn check_source(memory: &MemorySource, profile: MemoryProfile) -> Result<(), ProfileError> {
-    match memory {
-        MemorySource::File(_) if profile.needs_pager() => Err(ProfileError::FileBackedHugePages),
-        _ => Ok(()),
-    }
-}
-
-/// The `/snapshot/create` request writing `files`, as the jailed VMM sees
-/// them.
-fn create_request(jail: &Jail, files: &SnapshotFiles, kind: SnapshotKind) -> Result<Value, String> {
-    Ok(json!({
-        "snapshot_type": match kind {
-            SnapshotKind::Diff => "Diff",
-            SnapshotKind::Full => "Full",
-        },
-        "snapshot_path": jail.inside(&files.state)?,
-        "mem_file_path": jail.inside(&files.memory)?,
-        "sync_snapshot_files": true,
-    }))
-}
-
 /// How [`Firecracker`] runs VMs.
 #[derive(Clone, Debug)]
 pub struct FirecrackerConfig {
@@ -235,6 +187,15 @@ pub struct Firecracker {
     cgroup_relative: PathBuf,
     startup_timeout: Duration,
     memory: MemoryProfile,
+    /// Whether running VMs' memory may be compressed into zswap; see
+    /// [`Firecracker::with_running_compression`].
+    compress_running: bool,
+    /// Bytes the out-of-memory killer counts a VM's badness against when
+    /// the VMs' group reaches its `memory.max`: that limit and the swap
+    /// the group may use. `None` without such a limit.
+    oom_total: Option<u64>,
+    /// Keeps the reserve under the VMs' limit free of page cache.
+    room: Arc<room::Room>,
 }
 
 impl Firecracker {
@@ -284,6 +245,9 @@ impl Firecracker {
             cgroup_relative,
             startup_timeout: Duration::from_secs(5),
             memory: MemoryProfile::bare_metal(),
+            compress_running: false,
+            oom_total: None,
+            room: Arc::default(),
         })
     }
 
@@ -292,6 +256,64 @@ impl Firecracker {
     pub fn with_memory_profile(mut self, profile: MemoryProfile) -> Result<Self, ProfileError> {
         self.memory = profile.validate()?;
         Ok(self)
+    }
+
+    /// Lets the VMs hold at most `bytes` of memory together before the
+    /// kernel slows them down (the parent group's `memory.high`), or lifts
+    /// that for `None`, which also undoes what an earlier agent set. Their
+    /// VMMs, pagers and the page cache of their disks and images count,
+    /// as in each VM's own group. A guest past it waits on its own
+    /// allocations while the kernel reclaims from the VMs' groups first,
+    /// so the host's other processes keep their memory; nothing is ended.
+    /// Returns without waiting for the kernel to reclaim down to it; see
+    /// [`Cgroup::set_memory_high`].
+    pub fn with_memory_high(self, bytes: Option<u64>) -> io::Result<Self> {
+        self.cgroups.set_memory_high(bytes)?;
+        Ok(self)
+    }
+
+    /// Lets the VMs hold at most `bytes` of memory together, ever (the
+    /// parent group's `memory.max`), or lifts that for `None`, which also
+    /// undoes what an earlier agent set. Should they reach it, the kernel
+    /// ends one VM, never anything else on the host: the one furthest above
+    /// its request, since every VMM's out-of-memory score is lowered by its
+    /// request (see [`Firecracker::oom_score_adj`]). The host's last
+    /// defence, above [`Firecracker::with_memory_high`]; the agent bounds
+    /// sandboxes long before (ADR 24).
+    pub fn with_memory_max(mut self, bytes: Option<u64>) -> io::Result<Self> {
+        self.cgroups.set_memory_max(bytes)?;
+        self.oom_total = match bytes {
+            Some(bytes) => Some(bytes.saturating_add(crate::cgroup::swap_total()?)),
+            None => None,
+        };
+        Ok(self)
+    }
+
+    /// Lets the kernel compress running VMs' memory into zswap, never to a
+    /// disk, when the host is short or a VM is past its `memory.high`
+    /// (ADR 24). Their requests stay protected (`memory.low`). Needs a
+    /// profile that compresses, with zswap on and a swap device for its
+    /// slots; without, running VMs are never compressed, as before.
+    pub fn with_running_compression(mut self, on: bool) -> Result<Self, ProfileError> {
+        if on && !self.memory.compress {
+            return Err(ProfileError::CompressionDisabled);
+        }
+        self.compress_running = on;
+        Ok(self)
+    }
+
+    /// The out-of-memory score adjustment of the VMM of a VM that requests
+    /// `request` bytes: with a limit for the VMs together, its request in
+    /// thousandths of what the killer counts against, so that a VM's
+    /// badness is what it holds above its request. The VM furthest above
+    /// its request goes first, and one within it last of all. Without such
+    /// a limit, [`process::OOM_SCORE_ADJ`] for every VM.
+    fn oom_score_adj(&self, request: u64) -> i32 {
+        let Some(total) = self.oom_total.filter(|total| *total > 0) else {
+            return process::OOM_SCORE_ADJ;
+        };
+        let thousandths = u128::from(request) * 999 / u128::from(total);
+        -i32::try_from(thousandths.min(999)).unwrap_or(999)
     }
 
     /// The VM's own cgroup; it exists only while the jailer's work does.
@@ -331,6 +353,10 @@ impl Firecracker {
                 binary: &binary.path,
                 cgroup_parent: &self.cgroup_relative,
                 netns: netns.as_deref(),
+                // Only one that may borrow: what a VM guaranteed all of its
+                // memory holds above that is its VMM's, the host's cost.
+                compress_running: self.compress_running
+                    && spec.memory_request_mib < spec.memory_mib,
             },
         );
         let (console, log) = {
@@ -424,9 +450,11 @@ impl Firecracker {
                 cgroup.display()
             ));
         }
-        // The host's out-of-memory killer ends anything else first.
+        // The host's out-of-memory killer ends anything else first, and
+        // among VMs the one furthest above its request.
+        let request = u64::from(spec.memory_request_mib) << 20;
         process
-            .protect_from_oom()
+            .protect_from_oom(self.oom_score_adj(request))
             .map_err(|error| format!("protecting VMM {} from OOM: {error}", pid.as_raw_pid()))?;
         // Its guarantee counts for its parent group too.
         self.cgroup_of(spec)
@@ -444,8 +472,12 @@ impl Firecracker {
             api,
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
-            memory_low: AtomicU64::new(u64::from(spec.memory_request_mib) << 20),
+            memory_low: AtomicU64::new(request),
+            memory: u64::from(spec.memory_mib) << 20,
+            bounds: Arc::new(bounds::Bounds::default()),
+            compress_running: self.compress_running,
             runtime: recorded_runtime(jail),
+            console: spec.logs.join(logs::CONSOLE_LOG),
         })
     }
 
@@ -532,27 +564,6 @@ impl Firecracker {
     }
 }
 
-/// What a failed `/snapshot/load` means for the image. A VMM that answered
-/// and refused it, or exited while loading it, did not load it: the caller
-/// decides whether the image is at fault, which a refusal alone never
-/// proves (the host may have run short of memory, say). A request lost or
-/// late on the way did not even reach a verdict, so it is a transient
-/// failure and the image is tried again.
-fn load_failure(error: ApiError, running: bool) -> EngineError {
-    const OP: &str = "restore";
-    match error {
-        _ if !running => EngineError::new(
-            ErrorKind::MemoryLost,
-            OP,
-            "the VMM exited while loading the image",
-        ),
-        refused @ ApiError::Status { .. } => {
-            EngineError::caused_by(ErrorKind::MemoryLost, OP, refused)
-        }
-        lost => EngineError::caused_by(ErrorKind::Transient, OP, lost),
-    }
-}
-
 /// The error a launch ends with when it failed before the host held the
 /// VMM it may have started. Whatever it started was then discarded, with
 /// `discarded` saying how that went: only once that is proven, by the VM's
@@ -588,7 +599,7 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
 /// Readies the jail for a launch and opens the VMM's console and log.
 fn prepare(
     jail: &Jail,
-    logs: &Path,
+    dir: &Path,
     owned: &[(PathBuf, Owned)],
     uid: u32,
     gid: u32,
@@ -599,23 +610,7 @@ fn prepare(
     for (path, kind) in owned {
         crate::confined::hand_over(path, *kind, uid, gid)?;
     }
-    fs::create_dir_all(logs)?;
-    Ok((
-        fresh_log(&logs.join("console.log"))?,
-        fresh_log(&logs.join("vmm.log"))?,
-    ))
-}
-
-/// A new, empty file at `path` for a launch's log. A new file rather than
-/// the old one emptied: the host trims long logs from their start while
-/// VMs run, and a trim measured on the old file must never punch out what
-/// the new launch writes into the same file.
-fn fresh_log(path: &Path) -> io::Result<File> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    File::options().write(true).create_new(true).open(path)
+    logs::open(dir)
 }
 
 /// Removes what one launch leaves in the jail: the jailer's copy of the
@@ -648,9 +643,19 @@ pub struct FirecrackerVm {
     jail: Jail,
     /// Bytes of its memory protected from reclaim for others while it runs.
     memory_low: AtomicU64,
+    /// Bytes of guest memory it has.
+    memory: u64,
+    /// The bounds the host asks of it while it runs (ADR 24).
+    bounds: Arc<bounds::Bounds>,
+    /// Whether running VMs' memory may be compressed on this host; its own
+    /// is only while it requests less than all of it (see
+    /// [`FirecrackerVm::compressible`]).
+    compress_running: bool,
     balloon: Balloon,
     /// See [`Engine::vm_runtime`].
     runtime: String,
+    /// Its guest's serial console, written by this VM process alone.
+    console: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -746,93 +751,64 @@ impl FirecrackerVm {
         }
     }
 
-    /// Pauses or resumes the processors; see [`set_run_state`].
-    /// Gives the VM what a running VM has: no compression into zswap and
-    /// its memory guarantee.
+    /// Gives the VM what a running VM starts with: its memory guarantee
+    /// (its request as `memory.low`), no `memory.high`, and zswap open
+    /// only if it may be compressed while it runs. Drops any bound asked
+    /// before (see [`bounds`]), and lifts a `memory.high` an earlier
+    /// bound or an earlier agent left.
     fn guard_running(&self) -> io::Result<()> {
-        self.cgroup.close_zswap()?;
-        self.cgroup
-            .set_memory_low(self.memory_low.load(Ordering::Acquire))
+        self.bounds.reset(|| {
+            self.launched_zswap()?;
+            self.cgroup
+                .set_memory_low(self.memory_low.load(Ordering::Acquire))?;
+            self.lift_high()
+        })
+    }
+
+    /// Gives the VM the zswap it was launched with: open only if it may be
+    /// compressed while it runs. Its bounds may have closed or metered its
+    /// swap meanwhile (see [`bounds`]).
+    fn launched_zswap(&self) -> io::Result<()> {
+        if self.compressible() {
+            self.cgroup.open_zswap()
+        } else {
+            self.cgroup.close_zswap()
+        }
+    }
+
+    /// Whether its memory may be compressed while it runs: on a host that
+    /// compresses running VMs, and only while it requests less than all of
+    /// its memory, so that it may borrow (ADR 24). One guaranteed all of it
+    /// never borrows; what it holds above that is its VMM's own.
+    fn compressible(&self) -> bool {
+        self.compress_running && self.memory_low.load(Ordering::Acquire) < self.memory
+    }
+
+    /// Gives the VM what a paused VM has: no guarantee, no `memory.high`,
+    /// and zswap closed until something compresses it. Drops any bound
+    /// asked before.
+    fn guard_paused(&self) -> io::Result<()> {
+        self.bounds.reset(|| {
+            self.cgroup.close_zswap()?;
+            self.cgroup.set_memory_low(0)?;
+            self.lift_high()
+        })
+    }
+
+    /// Lifts the VM's own `memory.high` (ADR 24). A paused VM takes no
+    /// memory of its own: what it brings back is its save's, page by page
+    /// from zswap, and a high would have the kernel compress another of
+    /// its pages for each, so that the save reads them again. The VMs'
+    /// shared bounds still hold.
+    fn lift_high(&self) -> io::Result<()> {
+        if self.cgroup.memory_high()?.is_some() {
+            self.cgroup.set_memory_high(None)?;
+        }
+        Ok(())
     }
 
     async fn set_state(&self, operation: &'static str, run: RunState) -> Result<(), EngineError> {
         set_run_state(&self.api, || self.is_running(), operation, run).await
-    }
-}
-
-/// Pauses or resumes the processors so that a failure always means nothing
-/// changed. A request refused or never sent is a transient failure. A
-/// request whose answer was lost or late may still have taken effect, so the
-/// VMM is asked which state the VM is in. It answers requests one at a time,
-/// so once it answers, the earlier request has either taken effect or never
-/// will. If it cannot say in time, the VM is beyond control and counts as
-/// lost, since its guest may or may not be running.
-async fn set_run_state(
-    api: &Api,
-    alive: impl Fn() -> bool,
-    operation: &'static str,
-    run: RunState,
-) -> Result<(), EngineError> {
-    let body = json!({ "state": run.request() });
-    let error = match api.call("PATCH", "/vm", Some(&body)).await {
-        Ok(_) => return Ok(()),
-        Err(error @ (ApiError::Connect(_) | ApiError::Status { .. })) if alive() => {
-            return Err(EngineError::caused_by(
-                ErrorKind::Transient,
-                operation,
-                error,
-            ));
-        }
-        Err(error) => error,
-    };
-    let reported = api
-        .call("GET", "/", None)
-        .await
-        .ok()
-        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        .and_then(|info| info.get("state")?.as_str().map(str::to_owned));
-    match reported.as_deref() {
-        Some(state) if state == run.reported() => Ok(()),
-        Some(_) if alive() => Err(EngineError::caused_by(
-            ErrorKind::Transient,
-            operation,
-            error,
-        )),
-        _ if !alive() => Err(EngineError::new(
-            ErrorKind::MemoryLost,
-            operation,
-            "the VMM process has exited",
-        )),
-        _ => Err(EngineError::caused_by(
-            ErrorKind::MemoryLost,
-            operation,
-            error,
-        )),
-    }
-}
-
-/// The processor state asked of the VMM.
-#[derive(Clone, Copy)]
-enum RunState {
-    Paused,
-    Running,
-}
-
-impl RunState {
-    /// The value `PATCH /vm` takes.
-    const fn request(self) -> &'static str {
-        match self {
-            Self::Paused => "Paused",
-            Self::Running => "Resumed",
-        }
-    }
-
-    /// The value `GET /` reports once the change took effect.
-    const fn reported(self) -> &'static str {
-        match self {
-            Self::Paused => "Paused",
-            Self::Running => "Running",
-        }
     }
 }
 
@@ -863,13 +839,9 @@ impl Engine for Firecracker {
 
     async fn boot(&self, spec: &VmSpec) -> Result<FirecrackerVm, EngineError> {
         const OP: &str = "boot";
-        let owned = spec
-            .drives
-            .iter()
-            .filter(|drive| !drive.read_only)
-            .map(|drive| (drive.path.clone(), Owned::File))
-            .collect();
-        let vm = self.launch(spec, OP, owned, &self.binary).await?;
+        let vm = self
+            .launch(spec, OP, drives::owned(&spec.drives), &self.binary)
+            .await?;
         let configure = async {
             // A rejected configuration will not fix itself: fatal.
             let put = |path: &'static str, body: Value| {
@@ -888,21 +860,12 @@ impl Engine for Firecracker {
             )
             .await?;
             for drive in &spec.drives {
-                // No `cache_type`: Firecracker's default, `Unsafe`, offers
-                // the guest no flush, so the VMM syncs a drive only while
-                // it takes a snapshot. Callers that check a disk for lost
-                // writes around each snapshot rely on that.
                 vm.call(
                     OP,
                     ErrorKind::Fatal,
                     "PUT",
                     &format!("/drives/{}", drive.id),
-                    &json!({
-                        "drive_id": drive.id,
-                        "path_on_host": vm.inside(OP, &drive.path)?,
-                        "is_root_device": drive.root,
-                        "is_read_only": drive.read_only,
-                    }),
+                    &drive_config(drive, &vm.inside(OP, &drive.path)?),
                 )
                 .await?;
             }
@@ -959,35 +922,41 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let body = load_request(spec, &jail, files, self.memory)
-            .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let owned: Vec<(PathBuf, Owned)> = spec
-            .drives
-            .iter()
-            .filter(|drive| !drive.read_only)
-            .map(|drive| (drive.path.clone(), Owned::File))
-            .collect();
         // Saved state and memory are only read; they stay the host's, so the
         // VMM cannot change an image it restores from.
         let binary = self.binary_for(files.made_under.as_deref());
-        let vm = self.launch(spec, OP, owned, binary).await?;
-        if let MemorySource::Pager(pager) = &files.memory {
-            // The host's own failure: the image is not in question.
-            let started = async {
-                pager::start(pager, &vm, &spec.logs, spec.uid, spec.gid)
-                    .await
-                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))
+        // The guest's clock is moved on by the time the image was saved,
+        // unless the image recorded no realtime clock to move it by: a VMM
+        // that refused it for that is ended, and a new one loads the image
+        // with the clock left as saved.
+        let mut realtime = true;
+        loop {
+            let body = load_request(spec, &jail, files, self.memory, realtime)
+                .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
+            let vm = self
+                .launch(spec, OP, drives::owned(&spec.drives), binary)
+                .await?;
+            if let MemorySource::Pager(pager) = &files.memory {
+                // The host's own failure: the image is not in question.
+                let started = async {
+                    pager::start(pager, &vm, &spec.logs, spec.uid, spec.gid)
+                        .await
+                        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))
+                };
+                self.or_kill(&vm, started).await?;
+            }
+            let Err(error) = vm.api.call("PUT", "/snapshot/load", Some(&body)).await else {
+                return Ok(vm);
             };
-            self.or_kill(&vm, started).await?;
+            let again = realtime && lacks_realtime_clock(&error);
+            let failed = self.ended(&vm, load_failure(error, vm.is_running())).await;
+            // Only a VM that ended may be launched again; one that would not
+            // end makes the failure fatal.
+            if !again || failed.kind == ErrorKind::Fatal {
+                return Err(failed);
+            }
+            realtime = false;
         }
-        let load = async {
-            let answer = vm.api.call("PUT", "/snapshot/load", Some(&body)).await;
-            answer
-                .map(drop)
-                .map_err(|error| load_failure(error, vm.is_running()))
-        };
-        self.or_kill(&vm, load).await?;
-        Ok(vm)
     }
 
     async fn pause(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
@@ -997,7 +966,14 @@ impl Engine for Firecracker {
         // Idle, its guarantee goes to the VMs that run: the kernel may now
         // take its file pages before theirs. Best effort, since the pause
         // itself took effect; the next resume sets it again either way.
-        let _ = vm.cgroup.set_memory_low(0);
+        // A bound asked before the pause is dropped, so none lands after,
+        // and its high goes, so that a save is not slowed by it. Its swap
+        // goes back to what it was launched with.
+        let _ = vm.bounds.reset(|| {
+            vm.cgroup.set_memory_low(0)?;
+            vm.lift_high()?;
+            vm.launched_zswap()
+        });
         Ok(())
     }
 
@@ -1129,6 +1105,27 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("clean_up_left_behind", error))
     }
 
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        // The limit as it is now, not as the agent set it: an operator may
+        // lift it while the agent runs.
+        let Some(high) = self
+            .cgroups
+            .memory_high()
+            .map_err(|error| EngineError::io("memory_room", error))?
+        else {
+            return Ok(None);
+        };
+        let held = self
+            .cgroups
+            .memory_held()
+            .map_err(|error| EngineError::io("memory_room", error))?;
+        Ok(Some(high.saturating_sub(held)))
+    }
+
+    fn keep_memory_room(&self, reserve: u64) -> crate::RoomKept {
+        self.room.keep(&self.cgroups, reserve)
+    }
+
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
         // With huge pages, what counts is what the VM takes from the pool;
         // with base pages, what the VMM's group holds less the page cache
@@ -1149,9 +1146,34 @@ impl Engine for Firecracker {
         vm.cgroup
             .set_cpu_weight(cpu_weight)
             .map_err(|error| EngineError::io("set_guarantees", error))?;
-        // Applied by its next resume, as every running VM's is.
-        vm.memory_low
-            .store(u64::from(memory_request_mib) << 20, Ordering::Release);
+        // Applied by its next resume, as every running VM's is. Its
+        // out-of-memory score follows its request at once.
+        let request = u64::from(memory_request_mib) << 20;
+        vm.memory_low.store(request, Ordering::Release);
+        vm.process
+            .protect_from_oom(self.oom_score_adj(request))
+            .map_err(|error| EngineError::io("set_guarantees", error))?;
+        Ok(())
+    }
+
+    fn compresses_running(&self) -> bool {
+        self.compress_running
+    }
+
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        self.cgroups
+            .oom_kills()
+            .map(Some)
+            .map_err(|error| EngineError::io("oom_kills", error))
+    }
+
+    fn bound_memory(
+        &self,
+        vm: &FirecrackerVm,
+        low: u64,
+        high: Option<u64>,
+    ) -> Result<(), EngineError> {
+        vm.bounds.ask(&vm.cgroup, low, high);
         Ok(())
     }
 
@@ -1159,6 +1181,10 @@ impl Engine for Firecracker {
         vm.cgroup
             .set_memory_max(bytes)
             .map_err(|error| EngineError::io("set_memory_limit", error))
+    }
+
+    async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
+        drives::resize(vm, spec).await
     }
 
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {
@@ -1173,10 +1199,30 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("io_bytes", error))
     }
 
+    fn writes(&self, vm: &FirecrackerVm) -> Result<Writes, EngineError> {
+        vm.cgroup
+            .writes()
+            .map_err(|error| EngineError::io("writes", error))
+    }
+
+    fn settle_writes(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        drives::settled(vm.api.clone())
+    }
+
     fn memory_stats(&self, vm: &FirecrackerVm) -> Result<MemoryStats, EngineError> {
         vm.cgroup
             .memory_stats()
             .map_err(|error| EngineError::io("memory_stats", error))
+    }
+
+    fn halted(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        logs::halted(vm.console.clone(), vm.name.clone())
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
@@ -1248,17 +1294,14 @@ impl Firecracker {
         let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
         match timeout(ADOPT_TIMEOUT, vm.found()).await {
             Ok(Ok(Some(found))) => {
-                // Whatever an earlier agent left behind: zswap closed,
-                // since a compression it ran ended with it, and the
-                // guarantee as for the state found. Its processor share is
-                // today's for its request, which an earlier agent may have
-                // rounded otherwise.
+                // Whatever an earlier agent left behind: zswap as for the
+                // state found, since a compression it ran ended with it,
+                // the guarantee as for that state, and no bound of its
+                // memory. Its processor share is today's for its request,
+                // which an earlier agent may have rounded otherwise.
                 let guarded = match found {
                     Found::Running => vm.guard_running(),
-                    Found::Paused => vm
-                        .cgroup
-                        .close_zswap()
-                        .and_then(|()| vm.cgroup.set_memory_low(0)),
+                    Found::Paused => vm.guard_paused(),
                 }
                 .and_then(|()| vm.cgroup.set_cpu_weight(cpu_weight));
                 guarded.map_err(|error| unsure(format!("setting its guarantees: {error}")))?;

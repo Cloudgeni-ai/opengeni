@@ -12,6 +12,10 @@
  * `storeScope` or workspace starts a fresh recorder without remounting the
  * screens below, and the live snapshot, which changes several times a second
  * while recording, re-renders only the components that read it.
+ *
+ * A recording belongs to the workspace it started in: switching workspace
+ * while one is being captured leaves it recording there, and the recorder
+ * moves to the new workspace once it stops. A new account still ends it.
  */
 import { useRecorder, type UseRecorderResult } from "@opengeni/react/recordings";
 import {
@@ -21,6 +25,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
@@ -97,15 +102,28 @@ export function MeetingRecorderProvider({
   ...platformOptions
 }: MeetingRecorderProviderProps) {
   const store = useMemo(createRecorderStore, []);
+  const scope = platformOptions.storeScope ?? "";
+  const busy = useSyncExternalStore(
+    store.subscribe,
+    () => isCapturing(store.get()),
+    () => false,
+  );
+  // The host stays in the workspace a capture started in until it stops; a
+  // new account replaces it at once.
+  const [pinned, setPinned] = useState({ scope, workspaceId });
+  if (pinned.scope !== scope || (!busy && pinned.workspaceId !== workspaceId)) {
+    setPinned({ scope, workspaceId });
+  }
+  const hostWorkspaceId = pinned.scope === scope ? pinned.workspaceId : workspaceId;
   return (
     <MeetingRecorderContext.Provider value={store}>
       {children}
-      {workspaceId === null ? null : (
+      {hostWorkspaceId === null ? null : (
         <RecorderHost
-          key={`${platformOptions.storeScope ?? ""}\n${workspaceId ?? ""}`}
+          key={`${scope}\n${hostWorkspaceId ?? ""}`}
           store={store}
           {...(client ? { client } : {})}
-          {...(workspaceId ? { workspaceId } : {})}
+          {...(hostWorkspaceId ? { workspaceId: hostWorkspaceId } : {})}
           {...platformOptions}
         />
       )}

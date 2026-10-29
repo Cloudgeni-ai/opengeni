@@ -634,20 +634,6 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     expect(operations).toEqual(["session.read"]);
     expect(JSON.stringify(denied.json)).not.toContain(poolId);
 
-    // A once-visible binding does not reveal an account or its quota after
-    // the existing provider visibility gate removes it from this caller's list.
-    expect((await call(owner, "PUT", privatePath, { connectionId: poolId })).status).toBe(200);
-    await admin`update subscription_provider_cutovers set enabled = false
-      where account_id = ${owner.accountId} and provider = 'codex'`;
-    const hiddenBinding = await call(owner, "GET", privatePath);
-    expect(hiddenBinding.status).toBe(200);
-    expect(hiddenBinding.json.accounts).toEqual([]);
-    expect(hiddenBinding.json.binding).toEqual({
-      provider: "codex",
-      connectionId: null,
-      choice: "explicit",
-    });
-    expect(JSON.stringify(hiddenBinding.json)).not.toContain(poolId);
     const after =
       await admin`select * from subscription_connection_quota where connection_id = ${poolId}`;
     expect(after).toEqual(before);

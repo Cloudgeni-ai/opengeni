@@ -337,5 +337,3 @@ export function createSubscriptionPoolTables<Provider extends "xai" | "claude">(
   );
   return { credentials, rotationSettings, credentialLeases, sessionAccountPins, capacityWaiters };
 }
-
-export type SubscriptionPoolTables = ReturnType<typeof createSubscriptionPoolTables>;

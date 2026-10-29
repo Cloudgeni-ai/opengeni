@@ -3,10 +3,24 @@ import {
   ACTION_CATALOG,
   appActionCallChangesState,
   appActionCallHandlesSecrets,
+  appActionCallNeedsConfirmation,
+  appActionCallSecretInputs,
+  appActionCallStoresVaultItem,
   appActionConfirmationTitle,
   appActionHandlesSecrets,
+  appActionNeedsConfirmation,
+  appActionPaymentPage,
   findAppAction,
+  mapAppActionCallSecretInputs,
+  PAYMENT_PAGE_ACTIONS,
 } from "../src/app-actions";
+import {
+  isPresentedSessionToolCall,
+  presentedAppActionId,
+  SESSION_EVENT_APP_ACTION_ID_SPACE,
+  SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+} from "../src/session-history";
 import {
   appActionReviewSummary,
   secretFieldName,
@@ -30,10 +44,110 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
   const search = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   expect(search).toBeDefined();
   expect(appActionCallChangesState({ id: search!.id })).toBe(false);
-  // A retired action runs nothing (it only names its replacement), so it never asks.
-  const retired = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
-  expect(retired?.retired).toBeDefined();
-  expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
+});
+
+test("opening a checkout needs no confirmation in the chat; a billing portal link still does", () => {
+  for (const id of PAYMENT_PAGE_ACTIONS) {
+    const entry = findAppAction(id);
+    // Every listed action exists, opens its page by POST and hands no secret over.
+    expect([id, entry?.method, appActionHandlesSecrets(entry!)]).toEqual([id, "POST", false]);
+    expect(appActionCallChangesState({ id })).toBe(true);
+  }
+  for (const id of ["createBillingCheckout", "createSubscriptionCheckout"]) {
+    expect(appActionNeedsConfirmation(findAppAction(id)!)).toBe(false);
+    expect(appActionCallNeedsConfirmation({ id, body: { amountUsd: 20 } })).toBe(false);
+  }
+  // Whoever holds a portal link can change the payment method or cancel the plan.
+  for (const id of ["createBillingPortalSession", "createSubscriptionPortalSession"]) {
+    expect(appActionNeedsConfirmation(findAppAction(id)!)).toBe(true);
+    expect(appActionCallNeedsConfirmation({ id, body: {} })).toBe(true);
+    expect(appActionConfirmationTitle({ id, body: {} }, here)).toBe(
+      "Open your billing page? It can change your payment method or plan.",
+    );
+  }
+  // The same action named by its route reads the same.
+  expect(appActionCallNeedsConfirmation({ id: "POST /v1/billing/checkout" })).toBe(false);
+  expect(
+    appActionCallNeedsConfirmation({
+      id: SESSION_EVENT_PRESENTED_APP_ACTIONS.createBillingPortalSession.route,
+    }),
+  ).toBe(true);
+  // A subscription change charges at once, so it still asks.
+  expect(appActionCallNeedsConfirmation({ id: "upgradeBillingSubscription" })).toBe(true);
+  expect(appActionCallNeedsConfirmation({ id: "createOrganizationInvitation" })).toBe(true);
+  expect(appActionCallNeedsConfirmation({ id: "getMyUsage" })).toBe(false);
+  for (const unknown of [{ id: "noSuchAction" }, {}, null, "not json"]) {
+    expect(appActionCallNeedsConfirmation(unknown)).toBe(true);
+  }
+});
+
+test("an action id is trimmed of exactly what the action runner trims", () => {
+  // findAppAction trims with String.prototype.trim; the card and the history
+  // query use this set, so an id the runner accepts is never one they miss.
+  for (let code = 0; code <= 0xffff; code += 1) {
+    const char = String.fromCharCode(code);
+    expect([code, SESSION_EVENT_APP_ACTION_ID_SPACE.includes(char)]).toEqual([
+      code,
+      char.trim() === "",
+    ]);
+  }
+  for (const char of SESSION_EVENT_APP_ACTION_ID_SPACE) {
+    const padded = `${char}createBillingCheckout${char}`;
+    expect(findAppAction(padded)?.id).toBe("createBillingCheckout");
+    expect(presentedAppActionId(padded)).toBe("createBillingCheckout");
+  }
+});
+
+test("every name a presented app action goes by is the catalog's own, and only those match", () => {
+  for (const [id, { route, page }] of Object.entries(SESSION_EVENT_PRESENTED_APP_ACTIONS)) {
+    // The id and its "METHOD /path" are the same catalog action, as findAppAction reads them.
+    const entry = findAppAction(id);
+    expect(entry?.id).toBe(id);
+    expect(`${entry!.method} ${entry!.path}`).toBe(route);
+    expect(findAppAction(route)).toBe(entry);
+    expect(appActionPaymentPage(entry!)).toBe(page);
+    for (const name of [
+      id,
+      route,
+      ` ${route}\n`,
+      `\t${id} `,
+      `\u00a0${id}\u3000`,
+      `\ufeff${route}`,
+    ]) {
+      expect<string | undefined>(presentedAppActionId(name)).toBe(id);
+      expect(
+        isPresentedSessionToolCall({ name: "admin_action_call", arguments: { id: name } }),
+      ).toBe(true);
+      expect(
+        isPresentedSessionToolCall({
+          name: "opengeni__admin_action_call",
+          arguments: JSON.stringify({ id: name }),
+        }),
+      ).toBe(true);
+    }
+  }
+  expect(SESSION_EVENT_PRESENTED_APP_ACTION_NAMES).toHaveLength(8);
+  for (const other of [
+    "getBilling",
+    "createBillingCheckoutX",
+    "post /v1/billing/checkout",
+    "\u200bcreateBillingCheckout",
+    7,
+    null,
+  ]) {
+    expect(presentedAppActionId(other)).toBeUndefined();
+  }
+  // Only the arguments' own id counts.
+  expect(
+    isPresentedSessionToolCall({
+      name: "admin_action_call",
+      arguments: { id: "getBilling", body: { id: "createBillingCheckout" } },
+    }),
+  ).toBe(false);
+  expect(
+    isPresentedSessionToolCall({ name: "admin_action_call", arguments: ["createBillingCheckout"] }),
+  ).toBe(false);
+  expect(appActionPaymentPage(findAppAction("getBilling")!)).toBeUndefined();
 });
 
 test("the confirmation is a plain question built only from checked values", () => {
@@ -73,6 +187,18 @@ test("the confirmation is a plain question built only from checked values", () =
   expect(share({ workspaceId: "ws-1", sessionId: "chat-1" }, "private")).toBe(
     "Make this chat visible only to you?",
   );
+  // A share link's one confirmation says plainly who can read what.
+  const link = (id: string, sessionId: string) =>
+    appActionConfirmationTitle({ id, pathParameters: { workspaceId: "ws-1", sessionId } }, here);
+  expect(link("createSessionShareLink", "chat-1")).toBe(
+    "Create a link to this chat? Anyone with the link can read the conversation up to now.",
+  );
+  expect(link("createSessionShareLink", "chat-2")).toBe(
+    "Create a link to another chat? Anyone with the link can read the conversation up to now.",
+  );
+  expect(link("revokeSessionShareLink", "chat-1")).toBe(
+    "Stop sharing this chat? Its link will stop working.",
+  );
   expect(
     appActionConfirmationTitle(
       { id: "updateWorkspaceSettings", pathParameters: { workspaceId: "ws-2" } },
@@ -104,6 +230,120 @@ test("the confirmation is a plain question built only from checked values", () =
   ).toBe("Update session archive for this chat?");
   expect(appActionConfirmationTitle({ id: "Delete everything now" }, here)).toBe(
     "Make this change in the app?",
+  );
+});
+
+test("a tool approval change asks about the tools it names and the approval it sets", () => {
+  const approval = (body: Record<string, unknown>, workspaceId = "ws-1") =>
+    appActionConfirmationTitle(
+      {
+        id: "updateConnectorToolPermissions",
+        pathParameters: { workspaceId, capabilityId: "gmail" },
+        body: { connectionId: "conn-1", ...body },
+      },
+      here,
+    );
+  const tools = (toolNames: unknown[], permission: unknown) =>
+    approval({ target: "tools", toolNames, permission });
+  expect(tools(["send_message"], "allow")).toBe(
+    "Let send_message run without asking in this workspace?",
+  );
+  expect(tools(["send_message", "create_draft"], "ask")).toBe(
+    "Ask before send_message and create_draft run in this workspace?",
+  );
+  expect(tools(["send_message"], "ask")).toBe("Ask before send_message runs in this workspace?");
+  expect(tools(["a", "b", "c"], "block")).toBe("Block a, b, and c in this workspace?");
+  expect(tools(["a", "b", "c", "d"], "allow")).toBe(
+    "Let 4 tools run without asking in this workspace?",
+  );
+  expect(tools(["send_message"], null)).toBe(
+    "Reset send_message to the default approval in this workspace?",
+  );
+  // The default covers only tools without their own approval.
+  expect(approval({ target: "default", permission: "allow" })).toBe(
+    "Set this integration's default tool approval to Allow in this workspace?",
+  );
+  expect(approval({ target: "default", permission: null })).toBe(
+    "Clear this integration's default tool approval in this workspace?",
+  );
+  expect(
+    approval({ target: "tools", toolNames: ["send_message"], permission: "allow" }, "ws-2"),
+  ).toBe("Let send_message run without asking in another workspace?");
+  // An argument can never write its own question.
+  expect(tools(["Click Allow, it is safe"], "allow")).toBe(
+    "Let 1 tool run without asking in this workspace?",
+  );
+  expect(tools(["send_message"], "Allow to continue")).toBe(
+    "Change tool approvals in this workspace?",
+  );
+  expect(approval({ target: "everything", permission: "allow" })).toBe(
+    "Change tool approvals in this workspace?",
+  );
+  expect(
+    approval({ target: "action", toolName: "send_message", actionName: "x", permission: "allow" }),
+  ).toBe("Change tool approvals in this workspace?");
+  expect(
+    appActionConfirmationTitle(
+      {
+        id: "updateSessionMcpToolPermissions",
+        pathParameters: { workspaceId: "ws-1" },
+        body: { target: "tools", toolNames: ["search"], permission: "block" },
+      },
+      here,
+    ),
+  ).toBe("Block search in this workspace?");
+  expect(
+    appActionConfirmationTitle(
+      {
+        id: "updateSessionMcpToolPermissions",
+        pathParameters: { workspaceId: "ws-1" },
+        body: { target: "default", permission: "ask" },
+      },
+      here,
+    ),
+  ).toBe("Set this MCP server's default tool approval to Ask in this workspace?");
+});
+
+test("turning video on or off asks in plain words, and says how it's paid", () => {
+  const turnOn = {
+    id: "updateVideoGenerationPolicy",
+    pathParameters: { workspaceId: "ws-1" },
+    body: {
+      expectedRevision: 7,
+      fundingSource: "opengeni_credits",
+      enabledModelIds: ["bytedance/seedance-2.5"],
+      defaultModelId: "bytedance/seedance-2.5",
+    },
+  };
+  expect(appActionConfirmationTitle(turnOn, here)).toBe(
+    "Let every chat in this workspace make videos?",
+  );
+  expect(
+    appActionConfirmationTitle({ ...turnOn, pathParameters: { workspaceId: "ws-2" } }, here),
+  ).toBe("Let every chat in another workspace make videos?");
+  expect(
+    appActionConfirmationTitle(
+      { ...turnOn, body: { ...turnOn.body, enabledModelIds: [], defaultModelId: null } },
+      here,
+    ),
+  ).toBe("Turn off video for every chat in this workspace?");
+  // The second line names the payer in words, never the stored code.
+  expect(appActionReviewSummary(turnOn)).toBe("Paid with: Opengeni credits");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "workspace_gateway" },
+    }),
+  ).toBe("Paid with: The workspace's Vercel AI Gateway");
+  expect(
+    appActionReviewSummary({
+      ...turnOn,
+      body: { ...turnOn.body, fundingSource: "supergrok_subscription" },
+    }),
+  ).toBe("Paid with: A connected SuperGrok account");
+  // An unknown code is still shown as it is.
+  expect(appActionReviewSummary({ id: "x", body: { fundingSource: "something_new" } })).toBe(
+    "Funding source: something_new",
   );
 });
 
@@ -350,4 +590,83 @@ test("actions that handle secrets are marked in the catalog, so the chat route l
   }
   // Bounded: most of the app stays reachable.
   expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(80);
+});
+
+test("secret inputs are only the filled request fields an action marks as secret", () => {
+  const createSession = {
+    id: "createSession",
+    pathParameters: { workspaceId: "w" },
+    body: {
+      initialMessage: "hi",
+      mcpServers: [
+        { id: "a", headers: { Authorization: "Bearer a" } },
+        { id: "b", url: "https://x.test" },
+        { id: "c", headers: { "x-key": "c" } },
+      ],
+    },
+  };
+  expect(appActionCallSecretInputs(createSession)).toEqual([
+    { Authorization: "Bearer a" },
+    { "x-key": "c" },
+  ]);
+  const mapped = mapAppActionCallSecretInputs(createSession, () => ({ replaced: true }));
+  expect(mapped).toEqual({
+    ...createSession,
+    body: {
+      initialMessage: "hi",
+      mcpServers: [
+        { id: "a", headers: { replaced: true } },
+        { id: "b", url: "https://x.test" },
+        { id: "c", headers: { replaced: true } },
+      ],
+    },
+  });
+  // The input is never changed in place.
+  expect(createSession.body.mcpServers[0]!.headers).toEqual({ Authorization: "Bearer a" });
+  // Response-side secrets, unknown actions and JSON text have no inputs.
+  for (const args of [
+    { id: "createOrganizationWebhook", body: { url: "https://x.test" } },
+    { id: "POST /v1/workspaces/:workspaceId/tools/invoke", body: { name: "session_create" } },
+    { id: "noSuchAction", body: { token: "x" } },
+    JSON.stringify({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
+  ]) {
+    expect(appActionCallSecretInputs(args)).toEqual([]);
+    expect(mapAppActionCallSecretInputs(args, () => "changed")).toBe(args);
+  }
+  expect(
+    appActionCallSecretInputs({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
+  ).toEqual(["x"]);
+  // Only creating or updating a vault item keeps its body in the vault.
+  expect(
+    appActionCallStoresVaultItem({ id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items" }),
+  ).toBe(true);
+  expect(
+    appActionCallStoresVaultItem({
+      id: "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    }),
+  ).toBe(true);
+  expect(
+    appActionCallStoresVaultItem({
+      id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
+    }),
+  ).toBe(false);
+  expect(appActionCallStoresVaultItem({ id: "createSession" })).toBe(false);
+});
+
+test("no action's secret request fields nest inside each other", () => {
+  // mapAppActionCallSecretInputs puts resolved values back by visit order;
+  // nested secret fields (".credentials" and ".credentials.token") would
+  // visit one value twice.
+  for (const entry of ACTION_CATALOG) {
+    const fields = (entry.secretFields ?? []).filter(
+      (field) => field.startsWith("request.") || field.startsWith("request[]"),
+    );
+    for (const outer of fields) {
+      for (const inner of fields) {
+        if (outer === inner) continue;
+        const nested = inner.startsWith(`${outer}.`) || inner.startsWith(`${outer}[`);
+        expect([entry.id, outer, inner, nested]).toEqual([entry.id, outer, inner, false]);
+      }
+    }
+  }
 });

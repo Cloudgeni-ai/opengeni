@@ -602,3 +602,79 @@ async fn a_guard_that_cannot_write_its_count_vouches_for_no_miss() {
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
     lab.assert_clean();
 }
+
+/// A guest that halts or powers off says so as it stops, and never takes
+/// a connection again: it is ended at its first miss, as soon as a reboot
+/// would end it, rather than after all the misses a hung one is allowed.
+/// Its sandbox boots from its disk, with its files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_that_said_it_halted_is_ended_at_its_first_miss() {
+    // A hung guest would have far longer than the lab waits.
+    let lab = checked_lab(Arc::default(), Duration::from_millis(100), 1_000).await;
+    let sandbox = id(15);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set kept", "write on-disk"]).await;
+
+    assert_eq!(lab.run(sandbox, &["poweroff"]).await, ["ok"]);
+    lab.wait_until("the halted guest's VM to be ended", |status| {
+        ended(status, sandbox) && lab.world.live.lock().unwrap().is_empty()
+    })
+    .await;
+
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "on-disk"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}
+
+/// The words alone end nothing: a guest whose console ends with them, as
+/// one whose root wrote them does, but that still takes connections keeps
+/// its programs, even on a host that ends a guest at its first miss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_that_only_says_it_halted_keeps_its_programs() {
+    let every = Duration::from_millis(20);
+    let lab = checked_lab(Arc::default(), every, 1).await;
+    let sandbox = id(16);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set kept", "say-halted"]).await;
+
+    sleep(every * 50).await;
+    assert_eq!(lab.current(sandbox).await.level, LevelName::Running);
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+/// A guest that said it halted is ended at its first miss that counts,
+/// and not before: while the guard's count is odd, so that it may be
+/// freezing the VMs, no miss counts, whatever the guest's console says.
+/// Once the count is even again, the next check ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_halted_guest_is_ended_only_at_a_miss_that_counts() {
+    let world = Arc::new(World::default());
+    let (lab, guard) = guarded_lab(
+        Arc::clone(&world),
+        Duration::from_millis(20),
+        1_000,
+        open_lease(),
+    )
+    .await;
+    let sandbox = id(17);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set kept", "write on-disk"]).await;
+
+    // As the guard says before it freezes the VMs; here it never does.
+    guard.step();
+    assert_eq!(lab.run(sandbox, &["poweroff"]).await, ["ok"]);
+    sleep(Duration::from_millis(1_000)).await;
+    assert_eq!(lab.current(sandbox).await.level, LevelName::Running);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+
+    guard.step();
+    lab.wait_until("the halted guest's VM to be ended", |status| {
+        ended(status, sandbox)
+    })
+    .await;
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "on-disk"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}

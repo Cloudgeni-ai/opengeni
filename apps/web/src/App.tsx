@@ -11,7 +11,6 @@
 //                                               ?connection=<id>[&view=choose-vaults|replace-token])
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
-//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
@@ -25,6 +24,7 @@
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
+//   /workspaces/:id/bot-templates            → bot templates saved in the workspace (start, import, export)
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
 //   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
@@ -35,7 +35,7 @@
 //   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
-//   /billing?checkout=success|cancelled      → Stripe return → default organization
+//   /billing?checkout=success|cancelled      → Stripe return → default organization's billing
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
@@ -73,6 +73,7 @@ import {
 } from "@opengeni/react/app/lib/session-search-route";
 import {
   artifactReturnSearch,
+  siteViewArtifactsReturn,
   siteViewSearch,
   parseCheckoutOutcome,
   type CheckoutOutcome,
@@ -174,6 +175,10 @@ const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
 );
+const LazySharedSessionRoute = lazyRouteComponent(
+  () => import("@/routes/shared-session"),
+  "SharedSessionRoute",
+);
 const LazyExcelAddinRoute = lazyRouteComponent(
   () => import("@/routes/excel-addin"),
   "ExcelAddinRoute",
@@ -252,6 +257,10 @@ const LazyEventSourceDetailRoute = lazyRouteComponent(
 const LazyAutomationTemplatesRoute = lazyRouteComponent(
   () => import("@/routes/automations"),
   "AutomationTemplatesRoute",
+);
+const LazyBotTemplatesRoute = lazyRouteComponent(
+  () => import("@/routes/bot-templates"),
+  "BotTemplatesRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -333,10 +342,11 @@ const identityLinkRoute = createRoute({
       : {},
   component: IdentityLink,
 });
-// Stripe checkout return target. The API bakes `/billing?checkout=…` into every
-// checkout session's success_url/cancel_url; this top-level route forwards the
-// shopper onto their default workspace's organization settings (where the
-// balance lives) so the redirect resolves instead of hitting the not-found page.
+// Stripe return target: the billing portal's default return, and checkouts
+// made before they defaulted to the checkout-complete page. This top-level
+// route forwards the shopper onto their default workspace's organization
+// billing (where the balance lives) so the redirect resolves instead of
+// hitting the not-found page.
 const billingReturnRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "billing",
@@ -392,6 +402,13 @@ const resetPasswordRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { token?: string } =>
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
+});
+// A chat someone shared with a link. PUBLIC, like `/reset-password`: the
+// person opening it usually isn't signed in and may have no account.
+const sharedSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "share/$shareId",
+  component: SharedSession,
 });
 // How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
 // colleagues send this link to people who may not be signed in.
@@ -572,22 +589,6 @@ const workspaceSecretsItemRoute = createRoute({
   path: "$vaultId/$itemId",
   validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
     search.view === "edit" ? { view: "edit" } : {},
-});
-// Variable sets became Secrets (Q-48): old links land on the same place.
-const workspaceVariableSetsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets",
-  component: SecretsRedirect,
-});
-const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets/$variableSetId",
-  component: SecretsRedirect,
-});
-const workspaceEnvironmentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "environments",
-  component: SecretsRedirect,
 });
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -770,6 +771,11 @@ const workspaceAutomationTemplatesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "automations/templates",
   component: AutomationTemplates,
+});
+const workspaceBotTemplatesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "bot-templates",
+  component: BotTemplates,
 });
 // Automations were called Schedules; their links in old messages and
 // bookmarks still land on the same page.
@@ -1021,6 +1027,7 @@ const routeTree = rootRoute.addChildren([
   connectAgentRoute,
   teamsConnectRoute,
   resetPasswordRoute,
+  sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
   identityLinkRoute,
@@ -1051,9 +1058,6 @@ const routeTree = rootRoute.addChildren([
       workspaceSecretsVaultRoute,
       workspaceSecretsItemRoute,
     ]),
-    workspaceVariableSetsRoute,
-    workspaceVariableSetDetailRoute,
-    workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
@@ -1071,6 +1075,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
     workspaceLegacyScheduleDetailRoute,
@@ -1216,21 +1221,6 @@ function Secrets() {
   );
 }
 
-function SecretsRedirect() {
-  const { workspaceId, variableSetId } = useParams({ strict: false });
-  if (!workspaceId) return null;
-  // A variable set's id is kept by its vault, so its page maps one to one.
-  return variableSetId ? (
-    <Navigate
-      to="/workspaces/$workspaceId/secrets/$vaultId"
-      params={{ workspaceId, vaultId: variableSetId }}
-      replace
-    />
-  ) : (
-    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
-  );
-}
-
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
   const { view } = workspaceRigsRoute.useSearch();
@@ -1339,6 +1329,11 @@ function EventSourceDetail() {
 function AutomationTemplates() {
   const { workspaceId } = workspaceAutomationTemplatesRoute.useParams();
   return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
+}
+
+function BotTemplates() {
+  const { workspaceId } = workspaceBotTemplatesRoute.useParams();
+  return <LazyBotTemplatesRoute workspaceId={workspaceId} />;
 }
 
 function LegacySchedulesRedirect() {
@@ -1513,14 +1508,16 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
+  const search = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
-      conversation={conversation}
-      startNew={startNew === true}
+      conversation={search.conversation}
+      startNew={search.new === true}
+      page={search.page}
+      artifactsReturn={siteViewArtifactsReturn(search)}
     />
   );
 }
@@ -1635,6 +1632,11 @@ function ResetPassword() {
   return <LazyResetPasswordRoute token={token} />;
 }
 
+function SharedSession() {
+  const { shareId } = sharedSessionRoute.useParams();
+  return <LazySharedSessionRoute shareId={shareId} />;
+}
+
 function SetupAccount() {
   return <LazySetupAccountRoute />;
 }
@@ -1667,7 +1669,8 @@ function BillingReturnRoute() {
     <Navigate
       to="/workspaces/$workspaceId/organization"
       params={{ workspaceId }}
-      search={checkout ? { checkout } : {}}
+      // Billing, where the balance and this checkout's confirmation show.
+      search={{ section: "billing", ...(checkout ? { checkout } : {}) }}
       replace
     />
   );

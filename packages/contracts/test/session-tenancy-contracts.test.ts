@@ -26,8 +26,7 @@ describe("session tenancy public contracts", () => {
       ForkSessionRequest.safeParse({ ...request, sourceEventId: "not-an-event-id" }).success,
     ).toBe(false);
     expect(
-      ForkSessionRequest.safeParse({ ...request, sourceEventId: eventId, variableSetIds: [] })
-        .success,
+      ForkSessionRequest.safeParse({ ...request, sourceEventId: eventId, rigId: null }).success,
     ).toBe(false);
   });
   test("normalizes the required bounded idempotency key and epoch", () => {
@@ -81,27 +80,14 @@ describe("session tenancy public contracts", () => {
         visibility: "private",
         workspaceSharedAcknowledged: false,
         rigId: null,
-        variableSetIds: [
-          "55555555-5555-4555-8555-555555555555",
-          "66666666-6666-4666-8666-666666666666",
-        ],
       }),
-    ).toMatchObject({
-      rigId: null,
-      variableSetIds: [
-        "55555555-5555-4555-8555-555555555555",
-        "66666666-6666-4666-8666-666666666666",
-      ],
-    });
+    ).toMatchObject({ rigId: null });
     expect(
       ForkSessionRequest.safeParse({
         idempotencyKey: "restart-session-1",
         visibility: "private",
         workspaceSharedAcknowledged: false,
-        variableSetIds: [
-          "55555555-5555-4555-8555-555555555555",
-          "55555555-5555-4555-8555-555555555555",
-        ],
+        variableSetIds: [],
       }).success,
     ).toBe(false);
   });

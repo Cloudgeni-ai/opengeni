@@ -22,6 +22,7 @@ import { defineSchema } from "./define-schema";
  */
 import { z } from "zod";
 import { CUA_DESKTOP_TOOLS, isCuaDesktopModelTool } from "./cua-desktop-tools";
+import { FeatureUnavailableReason } from "./inference-residency";
 import { VaultPolicy } from "./vaults";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
@@ -245,6 +246,8 @@ export const ClientAgentConfig = /* @__PURE__ */ defineSchema(() =>
             id: AgentCapabilityId,
             available: primitives.boolean,
             reason: z.string().max(200).optional(),
+            /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+            code: FeatureUnavailableReason.optional(),
           })
           .strict(),
       ),
@@ -370,6 +373,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   secret_get: "secrets",
   secret_move: "secrets",
   secret_delete: "secrets",
+  secret_profile_get: "secrets",
+  secret_profile_set: "secrets",
   // Retired variable-set names select their secret_* successors.
   variable_set_list: "secrets",
   environment_list: "secrets",
@@ -394,6 +399,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   session_steer: "subagents",
   session_human_input_respond: "subagents",
   set_other_session_title: "subagents",
+  // Bot templates start new chats, like session_create.
+  bot_template_save: "subagents",
   session_set_model: "subagents",
 
   interaction_discover: "browser",
@@ -482,6 +489,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   scheduled_task_runs_list: "schedules",
   event_sources_list: "schedules",
   events_get: "schedules",
+  event_sources_create_webhook: "schedules",
+  event_sources_update: "schedules",
+  event_sources_delete: "schedules",
 
   artifacts_list: "artifacts",
   artifacts_get_source: "artifacts",

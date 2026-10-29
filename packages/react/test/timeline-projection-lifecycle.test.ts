@@ -1,11 +1,216 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
-import type { TimelineGroup } from "../src/timeline/types";
+import { toolRowPresentation } from "../src/timeline/tool-presentation";
+import { noticeDisplayText } from "../src/timeline/notice-presentation";
+import type {
+  NoticeItem,
+  SessionStatusItem,
+  TimelineGroup,
+  ToolCallItem,
+} from "../src/timeline/types";
 import { createOpenGeniText } from "../src/messages/runtime";
 import { coalesceSessionEventDeltas } from "@opengeni/events";
 
 const englishText = createOpenGeniText();
+
+describe("a tool call waiting for approval", () => {
+  const waiting = [
+    event(1, "turn.started"),
+    event(2, "agent.toolCall.created", { id: "call-1", name: "deploy_preview", arguments: {} }),
+    event(3, "session.requiresAction", {
+      approvals: [{ id: "approval-1", name: "deploy_preview", rawItem: { callId: "call-1" } }],
+    }),
+  ];
+  const call = (items: ReturnType<typeof buildTimeline>) =>
+    items.find((item): item is ToolCallItem => item.kind === "tool-call")!;
+
+  test("says it is waiting for the person, not that it is done", () => {
+    const item = call(buildTimeline(englishText, waiting));
+    expect(item.awaitingApproval).toBe(true);
+    const row = toolRowPresentation(englishText, item);
+    expect(row.preview).toEqual({ kind: "text", text: "Waiting for your approval" });
+    expect(row.running).toBe(false);
+    expect(row.iconTone).toBe("accent");
+  });
+
+  test("settles normally once its output arrives", () => {
+    const item = call(
+      buildTimeline(englishText, [
+        ...waiting,
+        event(4, "agent.toolCall.output", { id: "call-1", output: "Deployed" }),
+      ]),
+    );
+    expect(item.awaitingApproval).toBeUndefined();
+    expect(item.status).toBe("complete");
+  });
+
+  test("reads as not run when its turn is cancelled before a decision", () => {
+    const item = call(buildTimeline(englishText, [...waiting, event(4, "turn.cancelled")]));
+    expect(item.awaitingApproval).toBeUndefined();
+    expect(item.status).toBe("cancelled");
+  });
+
+  // Decisions carry no turn id on the wire.
+  const decide = (decision: "approve" | "reject") =>
+    event(
+      4,
+      "user.approvalDecision",
+      { approvalId: "call-1", decision },
+      null as unknown as string,
+    );
+
+  test("reads as running as soon as it is approved, before its output arrives", () => {
+    const item = call(buildTimeline(englishText, [...waiting, decide("approve")]));
+    expect(item.awaitingApproval).toBeUndefined();
+    expect(item.status).toBe("running");
+    expect(toolRowPresentation(englishText, item).running).toBe(true);
+  });
+
+  test("says it was rejected as soon as it is rejected, and after the rejection output", () => {
+    const rejected = [...waiting, decide("reject")];
+    const item = call(buildTimeline(englishText, rejected));
+    expect(item.awaitingApproval).toBeUndefined();
+    const row = toolRowPresentation(englishText, item);
+    expect(row.preview).toEqual({ kind: "text", text: "You rejected this" });
+    expect(row.running).toBe(false);
+    expect(row.cancelled).toBe(false);
+    const settled = call(
+      buildTimeline(englishText, [
+        ...rejected,
+        event(5, "agent.toolCall.output", {
+          id: "call-1",
+          output: "Tool approval was rejected. This proposed tool call was not run.",
+        }),
+        event(6, "turn.completed"),
+      ]),
+    );
+    expect(toolRowPresentation(englishText, settled).preview).toEqual({
+      kind: "text",
+      text: "You rejected this",
+    });
+  });
+});
+
+describe("an answered approval", () => {
+  const asking = (approvals: unknown[]) => [
+    event(1, "turn.started"),
+    event(2, "session.requiresAction", { approvals }),
+    event(3, "session.status.changed", { status: "requires_action" }),
+  ];
+  const sendEmail = {
+    id: "call-1",
+    name: "send_message",
+    display: { title: "Send email" },
+    rawItem: { callId: "call-1" },
+  };
+  const notice = (items: ReturnType<typeof buildTimeline>) =>
+    items.find((item): item is NoticeItem => item.kind === "notice" && item.approval === true)!;
+  // Decisions carry no turn id on the wire.
+  const decide = (sequence: number, approvalId: string, decision: "approve" | "reject") =>
+    event(sequence, "user.approvalDecision", { approvalId, decision }, null as unknown as string);
+
+  test("says what the person decided as soon as the decision is recorded", () => {
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      decide(4, "call-1", "approve"),
+    ]);
+    const item = notice(items);
+    // Answered before the run resumes: no longer a live wait.
+    expect(item.resolvedAt).toBe(new Date(Date.UTC(2026, 8, 30) + 4000).toISOString());
+    expect(noticeDisplayText(englishText, item)).toBe("You approved “Send email”.");
+    const status = items.find((each): each is SessionStatusItem => each.kind === "session-status");
+    expect(status?.resolvedAt).toBe(item.resolvedAt);
+  });
+
+  test("says a rejection, and stays answered when the run resumes", () => {
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      decide(4, "call-1", "reject"),
+      event(5, "session.status.changed", { status: "running" }),
+    ]);
+    const item = notice(items);
+    expect(noticeDisplayText(englishText, item)).toBe("You rejected “Send email”.");
+    expect(item.resolvedAt).toBe(new Date(Date.UTC(2026, 8, 30) + 4000).toISOString());
+  });
+
+  test("waits for every action of the request before reading as answered", () => {
+    const deploy = { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } };
+    const partial = buildTimeline(englishText, [
+      ...asking([sendEmail, deploy]),
+      decide(4, "call-1", "approve"),
+    ]);
+    expect(notice(partial).resolvedAt).toBeUndefined();
+    const answered = buildTimeline(englishText, [
+      ...asking([sendEmail, deploy]),
+      decide(4, "call-1", "approve"),
+      decide(5, "call-2", "reject"),
+    ]);
+    expect(noticeDisplayText(englishText, notice(answered))).toBe("You approved 1 and rejected 1.");
+  });
+
+  test("without a recorded decision, says only that it was answered", () => {
+    const item = notice(
+      buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        event(4, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(noticeDisplayText(englishText, item)).toBe("You responded to this approval.");
+  });
+
+  test("a rejection Opengeni made itself is never the person's", () => {
+    // An approval that expired, and a request Opengeni refused.
+    const expired = {
+      ...decide(4, "call-1", "reject"),
+      clientEventId: "system:interaction-intervention-expired:intervention-1",
+    };
+    const refused = event(
+      4,
+      "user.approvalDecision",
+      { approvalId: "call-1", decision: "reject", refusal: { code: "not_allowed" } },
+      null as unknown as string,
+    );
+    for (const decision of [expired, refused]) {
+      const items = buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        event(5, "agent.toolCall.created", { id: "call-1", name: "send_message", arguments: {} }),
+        decision,
+      ]);
+      expect(noticeDisplayText(englishText, notice(items))).toBe("Declined automatically.");
+    }
+    const mixed = buildTimeline(englishText, [
+      ...asking([sendEmail, { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } }]),
+      decide(4, "call-1", "approve"),
+      { ...decide(5, "call-2", "reject"), clientEventId: "system:interaction-request-refused:r" },
+    ]);
+    expect(noticeDisplayText(englishText, notice(mixed))).toBe("You responded to this approval.");
+  });
+});
+
+test("a call Opengeni declined itself says so, not that the person rejected it", () => {
+  const declined = buildTimeline(englishText, [
+    event(1, "turn.started"),
+    event(2, "agent.toolCall.created", { id: "call-1", name: "send_message", arguments: {} }),
+    event(3, "session.requiresAction", {
+      approvals: [{ id: "call-1", name: "send_message", rawItem: { callId: "call-1" } }],
+    }),
+    {
+      ...event(
+        4,
+        "user.approvalDecision",
+        { approvalId: "call-1", decision: "reject" },
+        null as unknown as string,
+      ),
+      clientEventId: "system:interaction-intervention-expired:intervention-1",
+    },
+  ]);
+  const item = declined.find((each): each is ToolCallItem => each.kind === "tool-call")!;
+  expect(toolRowPresentation(englishText, item).preview).toEqual({
+    kind: "text",
+    text: "Declined automatically",
+  });
+});
 
 test("an explicit empty-workspace selection is a durable notice, not an agent reply", () => {
   const text = "An empty workspace was selected. The old archive is retained.";

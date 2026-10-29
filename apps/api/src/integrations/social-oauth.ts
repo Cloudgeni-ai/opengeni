@@ -7,13 +7,12 @@ import {
   type SocialOAuthProviderId,
   type SocialOAuthStartRequest,
 } from "@opengeni/contracts";
-import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
+import { requireEnvironmentEncryption } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 import {
   consumeIntegrationOAuthStateNonce,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
-  getWorkspaceGrant,
   loadSocialConnectionCredential,
   updateSocialConnectionCredential,
   upsertSocialOAuthConnection,
@@ -27,10 +26,10 @@ import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import {
+  connectOwnerStateFields,
+  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
 import { requireConnectOwnerAuthority } from "@opengeni/core";
@@ -49,6 +48,12 @@ export const SOCIAL_USER_AGENT = "opengeni:social-connector:v0.1.0 (self-hosted)
 // Same bound as the Slack connector: a hung provider socket must not stall an
 // agent turn indefinitely.
 export const SOCIAL_TIMEOUT_MS = 10_000;
+
+/**
+ * A workspace-owned social account is a workspace setting: its OAuth start ran
+ * the full settings check, so the callback accepts a Personal workspace's owner.
+ */
+const SOCIAL_OWNER_SETTINGS = { personalOwnerSettings: true } as const;
 
 /** Token-endpoint failure that carries enough to tell invalid_grant from a blip. */
 export class SocialTokenRequestError extends Error {
@@ -214,13 +219,10 @@ export async function startSocialOAuth(
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
     kind: "social_oauth",
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    subjectId: context.subjectId,
-    ownership: context.payload.ownership,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: context.personalOwnershipAllowed,
+    ...connectOwnerStateFields(context, context.personalOwnershipAllowed),
+    ownership: context.payload.ownership,
     provider: provider.id,
     scopes,
     ...(verifier && key ? { encryptedPkceVerifier: encryptEnvironmentValue(key, verifier) } : {}),
@@ -312,16 +314,15 @@ export async function completeSocialOAuthCallback(
     if (!personalOwnerStateAccepted(state)) {
       throw new HTTPException(422, { message: PERSONAL_CONNECTION_PRINCIPAL_MESSAGE });
     }
-    const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
-    if (
-      !grant ||
-      grant.accountId !== state.accountId ||
-      (state.ownership === "workspace" && !hasPermission(grant.permissions, "workspace:admin"))
-    ) {
-      throw new HTTPException(403, {
-        message: "OAuth subject no longer has permission to connect social accounts",
-      });
-    }
+    // The shared owner re-check, not a bare membership lookup: a Personal
+    // workspace has no membership row, so only the signed claim finds its owner.
+    await requireConnectOwnerAuthority(
+      db,
+      state,
+      state.ownership === "workspace" ? "workspace:admin" : "workspace:read",
+      null,
+      SOCIAL_OWNER_SETTINGS,
+    );
   } catch (error) {
     logSocialOAuthFailure(observability, "grant_recheck", state, error);
     return {
@@ -362,6 +363,8 @@ export async function completeSocialOAuthCallback(
           tx,
           acceptedState,
           acceptedState.ownership === "workspace" ? "workspace:admin" : "workspace:read",
+          null,
+          SOCIAL_OWNER_SETTINGS,
         );
         return upsertSocialOAuthConnection(tx, {
           accountId: acceptedState.accountId,
@@ -419,6 +422,7 @@ async function completeSocialConnect(
       { ...state, ...(origin ? { externalContinuation: origin } : {}) },
       state.ownership === "workspace" ? "workspace:admin" : "workspace:read",
       origin,
+      SOCIAL_OWNER_SETTINGS,
     );
   };
   const operation = {

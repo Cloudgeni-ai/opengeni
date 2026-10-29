@@ -23,6 +23,7 @@ import {
   type RecorderPlatform,
   type RecorderSnapshot,
   type RecordingChunkStore,
+  type RecordingUploadStatus,
   type SystemAudioKind,
   type RecordingTransport,
   type OpenGeniRecordingsTransport,
@@ -167,6 +168,12 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   externalRef?: string;
   metadata?: Record<string, unknown>;
   transcription?: RecordingTranscriptionRequest;
+  /**
+   * The person recording's name, as your app knows it: their microphone's
+   * name in the transcript when computer or tab audio is recorded beside it
+   * and Opengeni has no name for them.
+   */
+  ownerName?: string;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /** Also record shared tab or system audio as its own track (Chromium). Default: off. */
@@ -208,6 +215,14 @@ export type UseRecorderResult = RecorderSnapshot & {
    * no audio, or failed for good.
    */
   recovered: string[];
+  /**
+   * The upload of every recording this device holds audio for, by recording
+   * id: the current one and those finished in the background, including one
+   * that failed and keeps its audio here until it is tried again.
+   */
+  uploads: Readonly<Record<string, RecordingUploadStatus>>;
+  /** Upload a failed recording again from the audio kept here. False when none failed. */
+  retryUpload: (recordingId: string) => boolean;
   /** Start a new recording; per-recording options override the hook's. */
   start: (
     overrides?: Pick<
@@ -220,6 +235,7 @@ export type UseRecorderResult = RecorderSnapshot & {
       | "transcription"
       | "externalRef"
       | "metadata"
+      | "ownerName"
     >,
   ) => Promise<void>;
   pause: () => void;
@@ -292,6 +308,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
   }, []);
   const [snapshot, setSnapshot] = useState<RecorderSnapshot>(IDLE_SNAPSHOT);
   const [recovered, setRecovered] = useState<string[]>([]);
+  const [uploads, setUploads] = useState<Readonly<Record<string, RecordingUploadStatus>>>({});
   const recorderRef = useRef<Recorder | null>(null);
   const uploaderRef = useRef<RecordingUploader | null>(null);
   const defaultPlatform = useMemo(() => browserRecorderPlatform(), []);
@@ -322,6 +339,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
         onStatus: (status) => {
           if (status.finalized) optionsRef.current.onFinished?.(status.recordingId);
+          setUploads((previous) => ({ ...previous, [status.recordingId]: status }));
           if (status.finalized || status.discarded || status.failed) {
             setRecovered((previous) =>
               previous.includes(status.recordingId)
@@ -407,6 +425,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),
         ...(merged.transcription ? { transcription: merged.transcription } : {}),
+        ...(merged.ownerName?.trim() ? { ownerName: merged.ownerName } : {}),
         ...(merged.microphone !== undefined ? { microphone: merged.microphone } : {}),
         ...(merged.systemAudio !== undefined ? { systemAudio: merged.systemAudio } : {}),
         ...(merged.timesliceMilliseconds
@@ -430,6 +449,16 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
     systemAudioSupported: support.systemAudio,
     systemAudioKind: support.systemAudioKind,
     recovered,
+    uploads,
+    retryUpload: useCallback((recordingId: string) => {
+      const retried = uploaderRef.current?.retry(recordingId) ?? false;
+      if (retried) {
+        setRecovered((previous) =>
+          previous.includes(recordingId) ? previous : [...previous, recordingId],
+        );
+      }
+      return retried;
+    }, []),
     start,
     pause: useCallback(() => recorderRef.current?.pause(), []),
     resume: useCallback(() => recorderRef.current?.resume(), []),
@@ -999,6 +1028,11 @@ export function useRecordingModels(
    * the server says, or when it is too old to.
    */
   language: string | null | undefined;
+  /**
+   * Whether the workspace's recorders start with the live transcript on, or
+   * undefined until the server says, or when it is too old to.
+   */
+  liveTranscript: boolean | undefined;
   loading: boolean;
   error: Error | null;
 } {
@@ -1021,6 +1055,7 @@ export function useRecordingModels(
     defaultModel: state.data?.default ?? null,
     pinned: state.data?.pinned === true,
     language: state.data ? state.data.language : undefined,
+    liveTranscript: state.data?.liveTranscript,
     loading: state.loading,
     error: state.error,
   };

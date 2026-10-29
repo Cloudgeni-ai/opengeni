@@ -54,9 +54,9 @@ import {
 
 import {
   assertConnectionOwnershipAllowedForPrincipal,
+  connectOwnerStateFields,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -67,6 +67,7 @@ import {
 } from "./oauth-client";
 
 const PROVIDER_OAUTH_CALLBACK_PATH = "/v1/integrations/provider-oauth/callback";
+const PROVIDER_OAUTH_STATE_KIND = "provider_oauth";
 const PROVIDER_OAUTH_TIMEOUT_MS = 15_000;
 const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
 const MICROSOFT_USERINFO_URL =
@@ -215,13 +216,11 @@ export async function startApiIntegrationProviderOAuth(
     input.payload.returnPath ?? workspaceIntegrationsPath(input.workspaceId),
   );
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    ownership,
+    kind: PROVIDER_OAUTH_STATE_KIND,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: input.personalOwnershipAllowed,
+    ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
+    ownership,
     definitionId: definition.id,
     definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,
@@ -703,6 +702,11 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     unknown
   > | null;
   if (!payload) throw new ProviderOAuthCallbackError("state_invalid");
+  // Same rule as Fiken: another flow's signed state is never this flow's; a
+  // kind-less state (minted before the kind existed) keeps the full re-check.
+  if (payload.kind !== undefined && payload.kind !== PROVIDER_OAUTH_STATE_KIND) {
+    throw new ProviderOAuthCallbackError("state_invalid");
+  }
   const iat = numberValue(payload.iat);
   const now = Math.floor(Date.now() / 1000);
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {

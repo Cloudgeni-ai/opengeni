@@ -5,6 +5,8 @@
 //! apps' audio. It writes mono 32-bit float PCM (little endian) to stdout at
 //! the rate it reports, and one JSON object per line to stderr:
 //!
+//! - `{"event":"awaiting_permission"}` (macOS, first time): the OS is asking
+//!   the person, and the start waits for their answer however long it takes
 //! - `{"event":"started","sampleRate":48000,"channels":1,"backend":"core-audio-tap"}`
 //! - `{"event":"error","code":"permission_denied","message":"..."}`
 //! - `{"event":"stopped","droppedSamples":0}`

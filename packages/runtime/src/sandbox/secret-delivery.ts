@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import {
   SecretReferenceError,
   containsSecretReference,
+  isCredentialProfileEnvName,
   referenceKey,
   secretValueAtDispatch,
   tokenizeSecretText,
@@ -43,6 +44,10 @@ import {
   type ShellDialect,
   type ShellSpliceResult,
 } from "@opengeni/vaults";
+import {
+  CREDENTIAL_PROFILE_VARS_VARIABLE,
+  type CredentialEnvironment,
+} from "./credential-profile-delivery";
 
 /** Total bytes of secret env values delivered to one command (D15). */
 export const SECRET_ENV_TOTAL_MAX_BYTES = 262_144;
@@ -74,6 +79,25 @@ export interface SecretExecCarry {
   readonly spliced: ShellSpliceResult | null;
   /** Attempt-scoped directory name under SECRET_FILE_ROOT. */
   readonly scope: string;
+  /**
+   * Credential profile variables for this command. They are added below
+   * every other variable Opengeni sets, and the command's own assignments
+   * win because they run after them.
+   */
+  readonly profileEnv?: Readonly<Record<string, string>>;
+  /**
+   * The carry holds only profile variables (the command has no reference):
+   * nothing is spliced, and it matches only the exact dispatched command
+   * (`match`, or `command` itself) so helper commands never receive it.
+   */
+  readonly profileOnly?: boolean;
+  readonly match?: string;
+  /**
+   * Notes the delivering session adds while dispatching (for example a
+   * managed sandbox that cannot receive the profile). It is the same array
+   * as `PreparedSecretText.notes`, so they reach the tool result.
+   */
+  readonly deliveryNotes?: string[];
 }
 
 /** Literal substitution for stdin (`write_stdin`, `command_input`). */
@@ -100,6 +124,13 @@ export function runWithSecretCarry<T>(carry: SecretCarry | null, fn: () => T): T
 export function secretExecCarryFor(cmd: unknown): SecretExecCarry | null {
   const carry = storage.getStore();
   if (!carry || carry.kind !== "exec" || typeof cmd !== "string") return null;
+  if (carry.profileOnly) {
+    // `match` is the unique cancellable wrapper around the command (it holds
+    // a per-call marker path); without one only the exact command matches.
+    return cmd === carry.command || (carry.match !== undefined && cmd.includes(carry.match))
+      ? carry
+      : null;
+  }
   const needle = carry.spliced ? carry.spliced.text : carry.command;
   return cmd.includes(needle) ? carry : null;
 }
@@ -215,7 +246,32 @@ export type PreparedSecretText<C> = {
   /** Text to send down (spliced, or unescaped when only escapes were present). */
   text: string;
   carry: C | null;
+  /** Credential profile notes for the tool result (variables skipped and why). */
+  notes?: string[];
 };
+
+/** True when the carry has references to splice (not only profile variables). */
+export function carryHasReferences(carry: SecretExecCarry): boolean {
+  return !carry.profileOnly;
+}
+
+/** Profile variables of a carry (empty when it has none). */
+export function profileEnvironmentOf(carry: SecretExecCarry | null): Record<string, string> {
+  return carry?.profileEnv ? { ...carry.profileEnv } : {};
+}
+
+/**
+ * Bind a profile-only carry to the exact text the wrapper dispatches (for
+ * example the cancellable shell wrapper around the command), so only that
+ * command receives the profile.
+ */
+export function bindSecretCarryToDispatch(
+  carry: SecretExecCarry | null,
+  dispatched: string,
+): SecretExecCarry | null {
+  if (!carry?.profileOnly || dispatched === carry.command) return carry;
+  return { ...carry, match: dispatched };
+}
 
 /**
  * Prepare one shell command. Returns null when the command holds no reference
@@ -228,6 +284,55 @@ export type PreparedSecretText<C> = {
  * Throws SecretReferenceError.
  */
 export async function prepareSecretExec(
+  command: string,
+  options: {
+    resolver: SecretResolver | null | undefined;
+    dialect: ShellDialect | null;
+    use: SecretExecUse;
+    /**
+     * The attempt's credential profile. Its variables join the carry after
+     * the command's references resolved (a reference failure dispatches
+     * nothing, so no profile value is read for it). Never fails the command.
+     */
+    credentials?: CredentialEnvironment | null;
+  },
+): Promise<PreparedSecretText<SecretExecCarry> | null> {
+  const prepared = await prepareSecretReferences(command, options);
+  if (!options.credentials) return prepared;
+  const profile = await options.credentials.forCommand(options.use);
+  if (Object.keys(profile.env).length === 0) {
+    return profile.notes.length === 0
+      ? prepared
+      : { text: prepared?.text ?? command, carry: prepared?.carry ?? null, notes: profile.notes };
+  }
+  // One array: notes the session adds while delivering join the result.
+  const notes = { notes: [...profile.notes] };
+  if (prepared?.carry) {
+    return {
+      ...prepared,
+      carry: { ...prepared.carry, profileEnv: profile.env, deliveryNotes: notes.notes },
+      ...notes,
+    };
+  }
+  const text = prepared?.text ?? command;
+  return {
+    text,
+    carry: {
+      kind: "exec",
+      command: text,
+      tokens: [],
+      values: new Map(),
+      spliced: null,
+      scope: options.resolver ? secretScopeFor(options.resolver) : "credential-profile",
+      profileEnv: profile.env,
+      profileOnly: true,
+      deliveryNotes: notes.notes,
+    },
+    ...notes,
+  };
+}
+
+async function prepareSecretReferences(
   command: string,
   options: {
     resolver: SecretResolver | null | undefined;
@@ -449,16 +554,29 @@ function posixSingleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-/** `export NAME='value'` lines for a POSIX env file (sourced, then deleted). */
-export function secretEnvFileContent(env: Readonly<Record<string, string>>): string {
-  return Object.entries(env)
-    .map(([name, value]) => {
-      if (!name.startsWith(SECRET_EXEC_ENV_PREFIX) || !/^[A-Z0-9_]+$/.test(name)) {
-        throw new Error("secret delivery: invalid binding name");
-      }
-      return `export ${name}=${posixSingleQuote(value)}\n`;
-    })
-    .join("");
+/**
+ * `export NAME='value'` lines for a POSIX env file (sourced, then deleted):
+ * the per-command `OPENGENI_SECRET_n` bindings, and credential profile
+ * variables (`profile`), which never use the reserved `OPENGENI_` prefix.
+ */
+export function secretEnvFileContent(
+  env: Readonly<Record<string, string>>,
+  profile: Readonly<Record<string, string>> = {},
+): string {
+  const bindings = Object.entries(env).map(([name, value]) => {
+    if (!name.startsWith(SECRET_EXEC_ENV_PREFIX) || !/^[A-Z0-9_]+$/.test(name)) {
+      throw new Error("secret delivery: invalid binding name");
+    }
+    return `export ${name}=${posixSingleQuote(value)}\n`;
+  });
+  const variables = Object.entries(profile).map(([name, value]) => {
+    if (!isCredentialProfileEnvName(name) && name !== CREDENTIAL_PROFILE_VARS_VARIABLE) {
+      throw new Error("secret delivery: invalid credential profile variable name");
+    }
+    return `export ${name}=${posixSingleQuote(value)}\n`;
+  });
+  // Profile variables first; the command's own assignments run after both.
+  return [...variables, ...bindings].join("");
 }
 
 export function secretEnvFilePath(scope: string): string {

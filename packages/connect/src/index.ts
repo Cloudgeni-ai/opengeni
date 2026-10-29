@@ -6,6 +6,7 @@ export {
   authorizeConnectAttempt,
   ConnectPopupClosedError,
   type ConnectNavigation,
+  type ConnectPopup,
 } from "./authorization";
 export {
   createBrowserConnectNavigation,
@@ -51,6 +52,8 @@ export class ConnectController {
     providerId: string;
     ownership: ConnectOwnership;
     returnUrl: string;
+    /** Sign-in runs in a popup: it ends on a page that closes the popup. */
+    finishInPopup?: true;
     idempotencyKey: string;
     reconnectAccountId?: string;
     installationTarget?: import("./types").ConnectInstallationTarget;

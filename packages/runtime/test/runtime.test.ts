@@ -71,6 +71,7 @@ import {
   buildOpenGeniAgent,
   restoreInterruptedRunState,
   withMcpToolDisplayMetadata,
+  HUMAN_INPUT_AGENT_DECIDES_NOTE,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   compactMcpResultCustomDataRunState,
@@ -924,6 +925,46 @@ describe("structured human-input runtime boundary", () => {
       outcome: "answered",
       answers: [{ questionId: "q", values: ["Because"] }],
     });
+  });
+
+  test("when the person lets the agent decide, the result tells it to choose and say what it chose", async () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const agent = buildOpenGeniAgent(settings, [], {
+      humanInputResponse: {
+        requestId: "00000000-0000-4000-8000-000000000002",
+        toolCallId: "human-call-2",
+        response: { outcome: "skipped", agentDecides: true },
+      },
+    });
+    const tool = agent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    if (!tool || tool.type !== "function") throw new Error("tool missing");
+    expect(tool.description).toContain("agentDecides");
+    expect(tool.description).toContain("message your parent agent instead");
+    const output = JSON.parse(
+      String(
+        await tool.invoke(
+          new RunContext(),
+          JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Which branch?" }] }),
+          {
+            toolCall: {
+              type: "function_call",
+              callId: "human-call-2",
+              name: HUMAN_INPUT_TOOL_NAME,
+              arguments: "{}",
+            },
+          },
+        ),
+      ),
+    );
+    expect(output).toEqual({
+      requestId: "00000000-0000-4000-8000-000000000002",
+      outcome: "skipped",
+      agentDecides: true,
+      note: HUMAN_INPUT_AGENT_DECIDES_NOTE,
+    });
+    expect(output.note).toContain("say in one short sentence what you chose");
   });
 
   test("returns malformed human-input arguments to the model instead of interrupting the turn", async () => {
@@ -3343,12 +3384,15 @@ describe("runtime event normalization", () => {
         }
         await result.completed;
         const searchOutput = JSON.stringify(model.requests[1]!.input);
-        // Two accounts' identical tools tie, so the search lists compact
-        // candidates; the notice still names the account it left out.
-        expect(searchOutput).toContain('\\"schemasLoaded\\":false');
+        // Two accounts' identical tools tie: the first is loaded, the other is
+        // listed by name, and the notice names the account it left out.
+        expect(searchOutput).toContain('\\"schemasLoaded\\":true');
         const reached = searchOutput.includes("Personal: alice@example.test")
           ? ["alice", "bob"]
           : ["bob", "alice"];
+        expect(searchOutput).toMatch(
+          /\\"suggestions\\":\[\{\\"name\\":\\"mcp_[0-9a-f]+__search_documents/,
+        );
         expect(searchOutput).toContain(
           `These tools reach Documents (${reached[0]}@example.test). Also connected: Documents (${reached[1]}@example.test). If the request could mean those accounts too`,
         );

@@ -1,3 +1,5 @@
+import { adminApprovalLink } from "../../../connect-setup-model";
+import { connectionServicePresentation } from "../../../connection-service-presentation";
 import { useEffect, useState, useRef } from "react";
 import {
   ConnectController,
@@ -62,6 +64,7 @@ export function NativeConnectSetup({
   onComplete(attempt: ConnectAttempt): void;
 }) {
   const [controller, setController] = useState<ConnectController | null>(null);
+  const [approvalPending, setApprovalPending] = useState(false);
   const [failed, setFailed] = useState(false);
   const [preparing, setPreparing] = useState(true);
   const [retry, setRetry] = useState(0);
@@ -139,6 +142,7 @@ export function NativeConnectSetup({
     if (!controller) return;
     const notify = () => {
       const attempt = controller.getSnapshot().attempt;
+      setApprovalPending(Boolean(attempt && adminApprovalLink(attempt)));
       const outcome = attempt ? connectAttemptOutcome(attempt) : null;
       if (outcome) journey.current?.finish(outcome);
       // A non-owner's request: remember it so the GitHub card can say it's
@@ -164,7 +168,7 @@ export function NativeConnectSetup({
       }}
     >
       <CapabilityDialogContent
-        className="max-h-[85dvh] overflow-y-auto sm:max-w-[36rem]"
+        className="w-full max-h-[85dvh] overflow-y-auto sm:max-w-[36rem]"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           heading.current?.focus();
@@ -176,9 +180,17 @@ export function NativeConnectSetup({
           }
         }}
       >
-        <DialogHeader className="flex-row items-center gap-4 border-b border-border px-6 py-6 pr-12 text-left">
+        <DialogHeader
+          className={`flex-row items-center gap-4 px-6 py-6 pr-12 text-left ${approvalPending ? "pb-2" : "border-b border-border"}`}
+        >
           <ConnectionLogo
-            src={request.logoUrl ?? null}
+            src={
+              request.logoUrl ??
+              connectionServicePresentation({
+                id: request.providerId,
+                label: request.displayName ?? request.providerId,
+              }).logo
+            }
             name={request.displayName ?? request.providerId}
           />
           <div className="min-w-0 space-y-1.5">
@@ -190,7 +202,9 @@ export function NativeConnectSetup({
               Connect{" "}
               {request.displayName ?? request.installationTarget?.displayName ?? request.providerId}
             </DialogTitle>
-            <DialogDescription className="text-sm leading-6 text-fg-muted">
+            <DialogDescription
+              className={approvalPending ? "sr-only" : "text-sm leading-6 text-fg-muted"}
+            >
               {request.description ?? "Authorize access to use this connection in Opengeni."}
             </DialogDescription>
           </div>
@@ -271,7 +285,12 @@ export function NativeConnectSetup({
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
               controller={controller}
-              {...(["github-app", "github-lens"].includes(request.providerId)
+              onRetry={() =>
+                controller.begin(
+                  nativeConnectApiInput({ ...request, idempotencyKey: crypto.randomUUID() }),
+                )
+              }
+              {...(request.providerId === "github-app"
                 ? {
                     onSelectAccount: (accountId: string) => {
                       const signal = navigation.current?.signal;

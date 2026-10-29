@@ -81,7 +81,6 @@ describe("Opengeni Slack bot UI connection filtering", () => {
       }),
       ...[
         "reactions:write",
-        "chat:write.customize",
         "users:read.email",
         "admin",
         "admin.users:read",

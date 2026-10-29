@@ -1,6 +1,7 @@
 import type { AccessGrant } from "@opengeni/contracts";
 import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/editable-artifacts";
 import {
+  EDITABLE_ARTIFACT_READ_BATCH_LIMIT,
   EditableArtifactCompatibilityError,
   EditableArtifactDurableExportError,
   EditableArtifactDomainError,
@@ -349,17 +350,43 @@ export function registerEditableArtifactRoutes(
     const artifactIds = normalizeArtifactIdList(candidateIds);
     const application = requireEditableArtifactApplication(deps);
     const artifacts: z.infer<typeof EditableArtifactResult>[] = [];
-    for (const artifactId of artifactIds) {
-      try {
-        const artifact = await application.readArtifact({
-          scope,
-          actor,
-          artifactId: editableArtifactId(artifactId),
-        });
-        artifacts.push(projectArtifact(artifact, scope));
-      } catch (error) {
-        if (isInvisibleListCandidate(error)) continue;
-        throw editableArtifactHttpError(error);
+    for (
+      let offset = 0;
+      offset < artifactIds.length;
+      offset += EDITABLE_ARTIFACT_READ_BATCH_LIMIT
+    ) {
+      const batch = artifactIds.slice(offset, offset + EDITABLE_ARTIFACT_READ_BATCH_LIMIT);
+      let outcomes: readonly PromiseSettledResult<EditableArtifact>[] | null = null;
+      if (application.readArtifacts) {
+        try {
+          outcomes = await application.readArtifacts({
+            scope,
+            actor,
+            artifactIds: batch.map(editableArtifactId),
+          });
+          if (outcomes.length !== batch.length) {
+            throw new Error("Artifact application returned mismatched batch results");
+          }
+        } catch (error) {
+          throw editableArtifactHttpError(error);
+        }
+      }
+      for (const [index, artifactId] of batch.entries()) {
+        try {
+          const outcome = outcomes?.[index];
+          if (outcome?.status === "rejected") throw outcome.reason;
+          const artifact = outcome
+            ? outcome.value
+            : await application.readArtifact({
+                scope,
+                actor,
+                artifactId: editableArtifactId(artifactId),
+              });
+          artifacts.push(projectArtifact(artifact, scope));
+        } catch (error) {
+          if (isInvisibleListCandidate(error)) continue;
+          throw editableArtifactHttpError(error);
+        }
       }
     }
     const result = EditableArtifactListResult.parse({ artifacts });

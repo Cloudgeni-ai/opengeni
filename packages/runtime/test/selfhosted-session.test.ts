@@ -18,6 +18,7 @@ import {
 } from "../src/sandbox";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { prepareSecretExec, runWithSecretCarry } from "../src/sandbox/secret-delivery";
+import { createCredentialEnvironment } from "../src/sandbox/credential-profile-delivery";
 import { isSecretReferenceError, type SecretReferenceError } from "@opengeni/contracts";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 
@@ -1945,5 +1946,66 @@ describe("SelfhostedSession.browserControlHttp", () => {
       },
     }));
     await expect(session.browserControlHttp(call)).rejects.toThrow(/length is invalid/);
+  });
+});
+
+describe("SelfhostedSession — credential profiles (native env path)", () => {
+  const TOKEN = "ghp_fakeNativeProfileToken";
+  const reference = ["{", "{secret:Token}}"].join("");
+  const credentials = () =>
+    createCredentialEnvironment({
+      resolver: createStaticSecretResolver({ Token: TOKEN, Canary: "native-canary" }),
+      load: async () => ({
+        entries: [{ name: "GH_TOKEN", reference, source: { scope: "workspace", sessionId: null } }],
+        gitHelper: false,
+      }),
+    });
+
+  async function execWithProfile(cmd: string, args: { shell?: string; login?: boolean } = {}) {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: "codemode-bearer" }),
+    });
+    const prepared = await prepareSecretExec(cmd, {
+      resolver: createStaticSecretResolver({ Token: TOKEN, Canary: "native-canary" }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+      credentials: credentials(),
+    });
+    await runWithSecretCarry(prepared?.carry ?? null, () =>
+      session.exec({ cmd: prepared?.text ?? cmd, ...args }),
+    );
+    return streamedExecRequest(mock);
+  }
+
+  test("profile variables ride ExecRequest.env; the command and shell are unchanged", async () => {
+    const exec = await execWithProfile("gh pr list", { login: true });
+    const plainMock = new MockAgentResponder();
+    await sessionWith(plainMock, 0, undefined, { workspaceRoot: "/home/user/project" }).exec({
+      cmd: "gh pr list",
+      login: true,
+    });
+    const plain = streamedExecRequest(plainMock);
+    expect(exec.command).toEqual(plain.command);
+    expect(exec.shell).toBe(plain.shell);
+    expect(exec.env).toEqual({
+      GH_TOKEN: TOKEN,
+      OPENGENI_CODEMODE_TOKEN: "codemode-bearer",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
+    expect(JSON.stringify(exec.command)).not.toContain(TOKEN);
+  });
+
+  test("with a reference too, both reach the process and only names are in the text", async () => {
+    const canary = ["{", "{secret:Canary}}"].join("");
+    const exec = await execWithProfile(`printf %s "${canary}"`);
+    expect(exec.command).toEqual(["/bin/sh", "-c", 'printf %s "${OPENGENI_SECRET_0}"']);
+    expect(exec.env).toEqual({
+      GH_TOKEN: TOKEN,
+      OPENGENI_CODEMODE_TOKEN: "codemode-bearer",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+      OPENGENI_SECRET_0: "native-canary",
+    });
   });
 });

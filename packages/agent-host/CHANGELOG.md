@@ -1,5 +1,52 @@
 # @opengeni/agent-host
 
+## 5.5.1
+
+### Patch Changes
+
+- 1908715: Dictation listens for a vocabulary, and dictation from anywhere keeps each dictation's speech to play and transcribe again.
+
+  - A dictation recording's `transcription` takes `keyterms` as well as `language`. The worker passes them to the voice input model when it takes keyterms: ElevenLabs Scribe and Azure Speech as keyterms, OpenAI and Azure OpenAI as the prompt (their text models now report `keyterms: true`, so meetings on them listen for keyterms too).
+  - `useVoiceInput` takes `keyterms` and `onAudio`, which hands over each dictation's microphone audio with its text, and returns `transcribe(blob)` to transcribe audio kept earlier as a new dictation.
+  - `@opengeni/sdk/recordings`: `uploadRecordingAudio()` uploads finished audio as a one-track recording.
+  - `@opengeni/desktop/dictation`: settings gain `vocabulary`, `retryShortcut` (transcribes the last dictation again and types it) and `cancelShortcut`; the status reports `actionShortcutErrors`. The history keeps each dictation's speech on the computer (private to the person, deleted with the history), and `historyAudio(id)` and `transcribeAgain(id)` play and re-transcribe it. While dictation is on, the app opens at login.
+  - `DesktopDictationSettings` offers the vocabulary, the retry and cancel shortcuts, and Play and Transcribe again on each recent dictation.
+
+- a18a2e2: The machine agent no longer migrates state from early releases. It stops reading the single-connection `credentials.json` file and the `nats_credentials` key, no longer recognises connections that were converted from that file (`legacy_origin`), and its renewal, update and `connections`/`disconnect` commands work only from the per-connection files. It also stops rewriting systemd units generated before coordinated browser shutdown and the `supervisor` subgroup, stops deleting old `systemctl set-property` drop-ins, and stops removing the Windows Service that early releases registered. A machine still on one of those shapes reconnects with `opengeni-agent connect` or reinstalls its service with `opengeni-agent service install --restart`. The API no longer treats a `legacy_origin` renewal failure as permanent.
+- Updated dependencies [fa7516a]
+- Updated dependencies [f23588a]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [cc59c02]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [8382bdb]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+  - @opengeni/sdk@5.5.0
+
+## 5.4.2
+
+### Patch Changes
+
+- 4641312: Turning on Computer use in a second workspace no longer fails with "this machine was first connected as a personal machine from another workspace". When the computer's existing connection was made without screen control, the app now turns screen control on for that connection (where it was made) and lets agents in the new workspace use it, instead of setting the computer up anew, which the server refuses for a person's own computer. On the server, a personal computer that was removed can now be connected again from any workspace its owner uses; before, it could only come back in the workspace it was first connected from.
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [4488c59]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [415c32b]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [d30a243]
+- Updated dependencies [de7087a]
+- Updated dependencies [a2ae2ce]
+- Updated dependencies [96502c5]
+- Updated dependencies [1320698]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+  - @opengeni/sdk@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

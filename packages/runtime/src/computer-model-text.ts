@@ -33,6 +33,7 @@ export type ComputerTextTarget = {
   bounds: { x: number; y: number; width: number; height: number } | null;
   focused: boolean;
   offScreen?: true | undefined;
+  personInputSecondsAgo?: number | undefined;
 };
 
 export type ComputerTextObservation = {
@@ -419,6 +420,8 @@ export function computerObservationText(observation: ComputerTextObservation): s
   ];
   if (observation.frameId) fence.push(`frame ${observation.frameId}`);
   lines.push(fence.join(", "));
+  const person = personInputLine([observation.target]);
+  if (person) lines.push(person);
   if (observation.capturedFrame) {
     const { width, height, region, regionFrame } = observation.capturedFrame;
     const measuredOn = regionFrame
@@ -553,6 +556,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
   clipboard: "clipboard",
   backgroundActions: "background actions",
   parallelApps: "parallel apps",
+  targetFocus: "window focus",
 };
 
 export function computerSessionLine(session: {
@@ -595,7 +599,21 @@ export function computerTargetsText(targets: readonly ComputerTextTarget[]): str
   if (targets.length === 0) return "No apps, windows or screens are available.";
   const lines = [`${plural(targets.length, "target")}:`, ...targets.map(computerTargetLine)];
   if (targets.some((target) => target.offScreen)) lines.push(OFF_SCREEN_NOTE);
+  const person = personInputLine(targets);
+  if (person) lines.push(person);
   return lines.join("\n");
+}
+
+/** Someone other than Opengeni (a person, or other software) used the
+ * computer within the last minute: an agent's input could meet theirs. Said
+ * once, however many targets carry it. */
+function personInputLine(targets: readonly ComputerTextTarget[]): string | null {
+  const seconds = targets.find(
+    (target) => target.personInputSecondsAgo !== undefined,
+  )?.personInputSecondsAgo;
+  return seconds === undefined
+    ? null
+    : `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${seconds} s ago and may be using it now.`;
 }
 
 /** Fixed text, so a listing renders identically for the same targets. */
@@ -644,6 +662,9 @@ export function computerActionText(
         error: ComputerTextError;
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
+        /** The driver delivered the action's raw input (a click, a key
+         * press) with nothing confirming that the app acted on it. */
+        unconfirmedInput?: true | undefined;
       }
     | {
         type: "batch";
@@ -653,6 +674,7 @@ export function computerActionText(
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         observationPrecedesStop?: boolean | undefined;
         roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
+        unconfirmedInput?: true | undefined;
       },
 ): string {
   if (receipt.type === "batch") return computerBatchText(receipt);
@@ -661,12 +683,35 @@ export function computerActionText(
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
   for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, false));
+  if (receipt.state === "completed" && unconfirmedWithoutChange(receipt))
+    lines.push(UNCONFIRMED_INPUT_LINE);
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
       `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
     );
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
+}
+
+const UNCONFIRMED_INPUT_LINE =
+  "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+
+/** The receipt's raw input (a click, a key press) went with nothing
+ * confirming that the app acted on it, and the target's observation after
+ * it shows no element changed or removed. */
+function unconfirmedWithoutChange(receipt: {
+  targetId: string;
+  observation: ComputerTextObservation | null;
+  unconfirmedInput?: true | undefined;
+}): boolean {
+  const semantic = receipt.observation?.semantic;
+  return (
+    receipt.unconfirmedInput === true &&
+    receipt.observation?.target.id === receipt.targetId &&
+    semantic?.kind === "diff" &&
+    semantic.changed.length === 0 &&
+    semantic.removedRefs.length === 0
+  );
 }
 
 function actionRange(first: number, last: number): string {
@@ -680,6 +725,9 @@ function computerBatchText(receipt: {
   observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
   observationPrecedesStop?: boolean | undefined;
   roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
+  /** An action of the batch delivered raw input with nothing confirming
+   * that the app acted on it. */
+  unconfirmedInput?: true | undefined;
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
@@ -691,6 +739,7 @@ function computerBatchText(receipt: {
       : null;
   if (last && last.state === "completed" && receipt.steps.length === receipt.actionCount) {
     lines.push(`Batch completed on ${receipt.targetId}: ${plural(receipt.actionCount, "action")}.`);
+    if (unconfirmedWithoutChange(receipt)) lines.push(UNCONFIRMED_INPUT_LINE);
   } else if (opened) {
     const at = receipt.steps.length;
     lines.push(

@@ -109,11 +109,11 @@ import {
   UpdateScheduledTaskRequest,
   GoalSpec,
   UpdateSessionGoalRequest,
-  UpdateSessionVariableSetsRequest,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
 } from "../src";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("API key descriptions", () => {
   test("accepts a bounded description and rejects blank or oversized values", () => {
@@ -524,7 +524,7 @@ describe("contracts", () => {
         },
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
     expect(message).toContain("policy.definitionVersion");
     expect(message).not.toContain(sensitiveMarker);
@@ -599,7 +599,7 @@ describe("contracts", () => {
           [TURN_EXECUTION_POLICY_METADATA_KEY]: malformedPolicy,
         });
       } catch (error) {
-        message = error instanceof Error ? error.message : String(error);
+        message = errorMessage(error);
       }
       expect(message).toContain(`policy.${testCase.nestedPath}`);
       for (const marker of testCase.sensitiveMarkers) {
@@ -956,40 +956,6 @@ describe("contracts", () => {
       CreateSessionRequest.parse({ initialMessage: "private work", visibility: "private" })
         .visibility,
     ).toBe("private");
-  });
-
-  test("normalizes ordered Variable Set selections and rejects ambiguous precedence", () => {
-    const first = "00000000-0000-4000-8000-000000000011";
-    const last = "00000000-0000-4000-8000-000000000012";
-    expect(
-      CreateSessionRequest.parse({ initialMessage: "inspect", variableSetId: last }),
-    ).toMatchObject({ variableSetIds: [last], variableSetId: last });
-    expect(
-      CreateSessionRequest.parse({
-        initialMessage: "inspect",
-        variableSetIds: [first, last],
-        variableSetId: last,
-      }),
-    ).toMatchObject({ variableSetIds: [first, last], variableSetId: last });
-    expect(
-      CreateSessionRequest.safeParse({
-        initialMessage: "inspect",
-        variableSetIds: [first, last],
-        variableSetId: first,
-      }).success,
-    ).toBe(false);
-    expect(
-      CreateSessionRequest.safeParse({
-        initialMessage: "inspect",
-        variableSetIds: [first, first],
-      }).success,
-    ).toBe(false);
-    expect(UpdateSessionVariableSetsRequest.parse({ variableSetIds: [first, last] })).toEqual({
-      variableSetIds: [first, last],
-    });
-    expect(
-      UpdateSessionVariableSetsRequest.safeParse({ variableSetIds: [last, last] }).success,
-    ).toBe(false);
   });
 
   test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {

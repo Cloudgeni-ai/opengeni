@@ -1,5 +1,83 @@
 # @opengeni/events
 
+## 5.5.1
+
+### Patch Changes
+
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [9e8fb2f]
+- Updated dependencies [83bd1e4]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [d450fe5]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/db@5.5.0
+
+## 5.4.2
+
+### Patch Changes
+
+- Updated dependencies [931325b]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [8a13aa9]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [2408444]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [4024f23]
+- Updated dependencies [0b76a0a]
+- Updated dependencies [801743c]
+- Updated dependencies [01188c9]
+- Updated dependencies [7ba1be6]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [f721495]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [a8b429e]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [51915c3]
+- Updated dependencies [5f332c1]
+- Updated dependencies [3cd4985]
+- Updated dependencies [fd43805]
+- Updated dependencies [bd71666]
+- Updated dependencies [ba4c9dc]
+- Updated dependencies [e4eaded]
+- Updated dependencies [24b71c6]
+- Updated dependencies [50989e2]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [f5b8289]
+- Updated dependencies [30b9cd2]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/db@5.4.0
+
 ## 5.3.1
 
 ### Patch Changes

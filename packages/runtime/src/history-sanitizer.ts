@@ -331,6 +331,15 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
  */
 export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
 
+/**
+ * Durable field on a reply copy that compaction retained after a request:
+ * the turn that originally gave the reply. The copy's row is stored without a
+ * turn id, so turn-keyed readers (a message fork's reply boundary) only ever
+ * see the original reply row, while a later compaction can still pair the copy
+ * with its request. Stripped at the model wire like the other Opengeni fields.
+ */
+export const RETAINED_REPLY_TURN_FIELD = "opengeni_retained_reply_turn";
+
 /** Remove Opengeni-only durable fields before an SDK/provider sees the item. */
 export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   const withoutResume = stripInternalResumeMarker(item);
@@ -339,7 +348,8 @@ export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
     !(MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD in withoutResume) &&
     !(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD in withoutResume) &&
     !(MODEL_ATTACHMENT_REFS_FIELD in withoutResume) &&
-    !(MODEL_TIMELINE_ANNOTATIONS_FIELD in withoutResume)
+    !(MODEL_TIMELINE_ANNOTATIONS_FIELD in withoutResume) &&
+    !(RETAINED_REPLY_TURN_FIELD in withoutResume)
   ) {
     return withoutResume;
   }
@@ -349,6 +359,7 @@ export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   delete clone[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
   delete clone[MODEL_ATTACHMENT_REFS_FIELD];
   delete clone[MODEL_TIMELINE_ANNOTATIONS_FIELD];
+  delete clone[RETAINED_REPLY_TURN_FIELD];
   return clone as T;
 }
 

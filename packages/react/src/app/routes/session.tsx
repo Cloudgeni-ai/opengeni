@@ -8,16 +8,25 @@ import {
 import { isModelUnavailableSubmissionError } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
+import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
 import { loadSessionFeedback } from "../../session-feedback-model";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../../interactive-answer-model";
 import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
 import { useReadSessionInbox } from "../lib/inbox";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
-import { getComposerSendBlocker } from "../lib/composer-send-blocking";
+import {
+  useSessionComposerDelivery,
+  useSessionSendGate,
+  type SessionSendState,
+} from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
@@ -30,6 +39,7 @@ import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { isPaymentRequiredError } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
@@ -63,7 +73,12 @@ import {
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
-import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  sessionTurnKeepsRunControl,
+} from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
@@ -170,6 +185,7 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "../components/session/banners";
+import { HumanInputDelegationRecord } from "../components/session/human-input-delegation-record";
 import {
   ReadOnlySessionNotice,
   sessionReadOnlyArchive,
@@ -183,7 +199,21 @@ import { SessionWorkspace } from "../components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "../components/session/artifact-link-boundary";
 import { Button } from "../../ui/button";
 import { EmptyState } from "../../ui/empty-state";
-import { useAppContext } from "../app-context";
+import {
+  createSessionEventFeedStore,
+  useAppContext,
+  type SessionCreationHandoff,
+} from "../app-context";
+import { useLiveSessionEvents } from "../../hooks/use-live-session-events";
+import {
+  sessionRouteAppState,
+  sessionRouteCreationHandoff,
+  type SessionRoutePlacement,
+} from "../lib/session-route-placement";
+import { SessionStartupProvider } from "../../lib/session-startup";
+import { useFindShortcut } from "../lib/find-shortcut";
+import type { InitialComposerDraft } from "../../hooks/use-composer";
+import { cn } from "../lib/utils";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
 import type {
   SessionEditableArtifactSummary,
@@ -216,11 +246,32 @@ import {
 } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
+  isCodexUsageLimitFailure,
+  latestTurnFailedOnUsageLimit,
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
 } from "../lib/unavailable-session-model";
 import { UnavailableModelNotice } from "../components/session/unavailable-model-notice";
+import {
+  CodexUsageNotice,
+  ModelSwitchHeadsUp,
+  type CodexUsageChoice,
+} from "../components/session/codex-usage-notice";
+import { isCodexProductModel } from "../lib/session-model";
+import { useCodexUsageModelSwitch } from "../lib/use-codex-usage-model-switch";
+import {
+  CONTEXT_CHECKPOINT_EVENT_TYPES,
+  codexUsageContinueAtResetAction,
+  codexUsageContinuesAtReset,
+  codexUsageNoticeApplies,
+  codexUsageResetText,
+  codexUsageResetsAt,
+  codexWaitIsUsageLimit,
+  latestCheckpointIsCompaction,
+  modelSwitchHeadsUpText,
+  needsModelSwitchHeadsUp,
+} from "../lib/codex-model-switch";
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
@@ -338,6 +389,12 @@ const LazyCreditRefusalNotice = lazy(() =>
     default: module.CreditRefusalNotice,
   })),
 );
+// Add credits from the chat opens checkout here; paying returns to this chat.
+const LazyCreditTopupPrompt = lazy(() =>
+  import("../components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
+  })),
+);
 
 const LazyAgentConfigurationPanel = lazy(() =>
   import("../components/session/agent-configuration-panel").then(({ AgentConfigurationPanel }) => ({
@@ -374,28 +431,59 @@ export function SessionRoute({
   launch = EMPTY_COMPOSER_LAUNCH,
   realtimeAutostartModel,
   searchTarget = EMPTY_SEARCH_TARGET,
+  placement = "page",
+  onEvent,
+  messageContext,
+  creationHandoff: givenCreationHandoff,
+  initialDraft,
+  onNewSession,
+  onRealtimeAutostartConsumed,
 }: {
   workspaceId: string;
   sessionId: string;
   launch?: ComposerLaunchSearch | undefined;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   searchTarget?: SessionSearchRoute | undefined;
+  /**
+   * `panel`: this chat sits beside another view (the Site view) in a narrow
+   * panel, so it uses narrower gutters and is not remembered as the last
+   * session route. Whatever else differs is the host's: it turns off the
+   * session panel with `SessionUiFeaturesOff` and passes the callbacks below.
+   */
+  placement?: SessionRoutePlacement | undefined;
+  /** Each event newer than the loaded history, in order. */
+  onEvent?: ((event: SessionEvent) => void) | undefined;
+  /** The host view's per-message model context, read at send time. */
+  messageContext?: (() => string | undefined) | undefined;
+  /** A conversation the host view just created, shown at once with its first prompt. */
+  creationHandoff?: SessionCreationHandoff | null | undefined;
+  /** What the person typed in the host view's new-chat composer while it was created. */
+  initialDraft?: InitialComposerDraft | undefined;
+  /** Start a new chat; defaults to the new-chat page. */
+  onNewSession?: (() => void) | undefined;
+  /** The voice call a new chat asked for has started; defaults to dropping it from the address. */
+  onRealtimeAutostartConsumed?: (() => void) | undefined;
 }) {
   const uiEvents = useUiEventTarget("document");
   const dockEnabled = useSessionUiFeature("dock");
   useReadSessionInbox(sessionId);
   const context = useAppContext();
+  const routed = placement === "page";
   const rail = useRail();
   const navigate = useNavigate();
   const page = usePage();
   const consumeRealtimeAutostart = useCallback(() => {
+    if (onRealtimeAutostartConsumed) {
+      onRealtimeAutostartConsumed();
+      return;
+    }
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId, sessionId },
       search: {},
       replace: true,
     });
-  }, [navigate, sessionId, workspaceId]);
+  }, [navigate, onRealtimeAutostartConsumed, sessionId, workspaceId]);
   // The session-search origin only labels the navigation that opened the find
   // bar. Drop it once the bar closes so a reload or shared link starts plain.
   const hasSearchOrigin = searchTarget.searchOrigin === "session-search";
@@ -434,8 +522,10 @@ export function SessionRoute({
   // Consented funnel telemetry: a session this page started reached its first
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
+  useLiveSessionEvents(sessionId, events, initialHistoryReady, onEvent);
   // The embedding host follows the open chat from this stream.
-  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
+  // A chat in a panel beside another view isn't the page's open chat.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading }, routed);
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -474,6 +564,7 @@ export function SessionRoute({
     loadError,
     restoredSessionId,
     leave: leaveRestoredSession,
+    enabled: routed,
   });
   useEffect(
     () => () =>
@@ -485,10 +576,13 @@ export function SessionRoute({
       context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
     }
   }, [context.sessionChannelProjectionAuthority, loadError]);
-  const creationHandoff =
-    context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
-      ? context.sessionCreationHandoff
-      : null;
+  const creationHandoff = sessionRouteCreationHandoff({
+    sessionId,
+    given: givenCreationHandoff,
+    app: context.sessionCreationHandoff,
+    appSession: context.session,
+    routed,
+  });
   const pendingCreationHandoff = creationHandoffReconciled(creationHandoff, events)
     ? null
     : creationHandoff;
@@ -625,14 +719,16 @@ export function SessionRoute({
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
+  // A chat in a panel beside another view (the Site view) isn't the page's
+  // open chat: the header, the sidebar's projections and the command menu
+  // keep following the page, so it keeps its state to itself.
+  const [panelEventFeed] = useState(createSessionEventFeedStore);
+  const { client, captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
   const {
-    client,
-    captureWorkspaceInvocation,
-    ownsWorkspaceInvocation,
     setSession: setContextSession,
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
-  } = context;
+  } = sessionRouteAppState(placement, context, panelEventFeed);
   const acknowledgedProjectionRef = useRef<string | null>(null);
   const confirmedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
@@ -1313,6 +1409,9 @@ export function SessionRoute({
       realtimeAutostartModel={realtimeAutostartModel}
       onRealtimeAutostartConsumed={consumeRealtimeAutostart}
       onSearchOriginConsumed={consumeSearchOrigin}
+      placement={placement}
+      messageContext={messageContext}
+      initialDraft={initialDraft}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -1380,11 +1479,13 @@ export function SessionRoute({
             });
         }
       }}
-      onNewSession={() =>
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions",
-          params: { workspaceId },
-        })
+      onNewSession={
+        onNewSession ??
+        (() =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions",
+            params: { workspaceId },
+          }))
       }
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
@@ -1392,7 +1493,8 @@ export function SessionRoute({
       onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
-      onOpenSandboxFile={openSandboxFile}
+      // A file link opens the session panel's Files tab; without the panel it is plain text.
+      onOpenSandboxFile={dockEnabled ? openSandboxFile : undefined}
       // Both open the session panel's Agent tab; without the panel, neither shows.
       onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}
       onOpenUsageLimit={dockEnabled ? openUsageLimit : undefined}
@@ -1400,10 +1502,10 @@ export function SessionRoute({
     />
   );
 
-  return (
+  const routeView = (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       {reconnectRequest && (
-        <Suspense fallback={<LoadingPanel label="Opening connection setup" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening connection setup" />}>
           <NativeConnectSetup
             transport={reconnectTransport}
             workspaceId={workspaceId}
@@ -1413,7 +1515,10 @@ export function SessionRoute({
               setReconnectRequest(null);
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
-                void context.refreshGitHub(workspaceId, undefined, { sync: true });
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
                 return;
               }
               toast.success("Connection updated", {
@@ -1421,7 +1526,7 @@ export function SessionRoute({
               });
             }}
           />
-        </Suspense>
+        </LazyPart>
       )}
       <SessionDock
         workspaceId={workspaceId}
@@ -1429,7 +1534,16 @@ export function SessionRoute({
         session={session}
         events={events}
         connectionState={connectionState}
-        primary={chatPane}
+        primary={
+          <ChatPaymentPages
+            accountId={
+              session?.accountId ??
+              context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId
+            }
+          >
+            {chatPane}
+          </ChatPaymentPages>
+        }
         onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
@@ -1443,6 +1557,13 @@ export function SessionRoute({
         }}
       />
     </div>
+  );
+  // The shell times the page's open chat; a panel chat times its own start, so
+  // its "starting" and "retrying" rows show too.
+  return routed ? (
+    routeView
+  ) : (
+    <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
   );
 
   async function approve(approvalId: string, decision: "approve" | "reject") {
@@ -1460,11 +1581,16 @@ export function SessionRoute({
   }
 }
 
-/** The embedding page's per-message context, as a send extra. */
-function withHostMessageContext(messageContext: (() => string | undefined) | undefined): {
+/** The embedding page's and the host view's per-message context, as a send extra. */
+function withHostMessageContext(
+  ...sources: ReadonlyArray<(() => string | undefined) | undefined>
+): {
   modelContext?: string;
 } {
-  const value = messageContext?.();
+  const value = sources
+    .map((source) => source?.())
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
   return value ? { modelContext: value } : {};
 }
 
@@ -1650,7 +1776,7 @@ function SessionDockPanel(props: SessionDockProps) {
           }
         : {}),
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
           <LazySessionEditableArtifactsWorkspace
             key={props.sessionId}
             workspaceId={props.workspaceId}
@@ -1677,7 +1803,7 @@ function SessionDockPanel(props: SessionDockProps) {
                 : undefined
             }
           />
-        </Suspense>
+        </LazyPart>
       ),
     },
   ];
@@ -1687,7 +1813,7 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Agent",
       icon: <BotIcon />,
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening agent settings" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening agent settings" />}>
           <LazyAgentConfigurationPanel
             key={props.session.id}
             session={props.session}
@@ -1697,7 +1823,7 @@ function SessionDockPanel(props: SessionDockProps) {
             usageLimitFocusRequest={usageLimitFocus}
             goalPausedAtUsageLimit={goalPausedAtLimit}
           />
-        </Suspense>
+        </LazyPart>
       ),
     });
   }
@@ -1707,14 +1833,14 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Debug",
       icon: <BugIcon />,
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
             session={props.session}
             events={props.events}
             connectionState={props.connectionState}
             onReloadSession={props.onReloadSession}
           />
-        </Suspense>
+        </LazyPart>
       ),
     });
   }
@@ -1922,6 +2048,12 @@ function useSessionEditableArtifactSummaries(input: {
 
 function SessionChatPane(props: {
   session: Session;
+  /** A narrow panel beside another view gets narrower gutters. */
+  placement: SessionRoutePlacement;
+  /** The host view's per-message model context, beside the embedding host's. */
+  messageContext: (() => string | undefined) | undefined;
+  /** What the person typed while the host view created this chat. */
+  initialDraft: InitialComposerDraft | undefined;
   /** Keep the raw detail snapshot: the general route projection prefers queue control. */
   admissionSessionControl: Session["effectiveControl"];
   events: SessionEvent[];
@@ -1975,7 +2107,7 @@ function SessionChatPane(props: {
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
-  onOpenSandboxFile: (path: string, line?: number) => void;
+  onOpenSandboxFile: ((path: string, line?: number) => void) | undefined;
   /** Composer + > Chat settings: open this chat's Agent tab. */
   onOpenAgentSettings: (() => void) | undefined;
   /** The usage limit notice's Change limit: open the Agent tab at Usage limit. */
@@ -1983,12 +2115,26 @@ function SessionChatPane(props: {
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
 }) {
   const findEvents = useUiEventTarget("document");
-  const findShortcutScope = usePortalContainer();
+  const portalContainer = usePortalContainer();
+  // A chat in a panel beside another view takes the find shortcut only while
+  // focus is inside it, so the view (or the browser) keeps its own find.
+  const [panelRoot, setPanelRoot] = useState<HTMLDivElement | null>(null);
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
-  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
+  const navigate = useNavigate();
+  // `session:` chat links in agent text open the chat here; ⌘/Ctrl-click opens its page.
+  const openSession = useCallback(
+    (workspaceId: string, sessionId: string) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
+      }),
+    [navigate],
+  );
+  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId, openSession);
   const hostMessageContext = useHostMessageContext();
+  const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
   const realtimeClient = useMemo(
@@ -2054,31 +2200,10 @@ function SessionChatPane(props: {
     props.searchTarget.matchOffset,
     openFind,
   ]);
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        !(event.ctrlKey || event.metaKey) ||
-        event.altKey ||
-        event.shiftKey ||
-        event.key.toLowerCase() !== "f"
-      )
-        return;
-      const target = event.target;
-      // Dialogs and embedded editors own their own keyboard search behavior.
-      if (
-        target instanceof Element &&
-        target.closest('[role="dialog"], .cm-editor, .xterm, [data-native-find]')
-      )
-        return;
-      event.preventDefault();
-      openFind();
-    };
-    // An embedded app takes the shortcut only while focus is inside it, so
-    // the host page keeps its own find.
-    const scope = findShortcutScope ?? window;
-    scope.addEventListener("keydown", onKeyDown as EventListener);
-    return () => scope.removeEventListener("keydown", onKeyDown as EventListener);
-  }, [findShortcutScope, openFind]);
+  useFindShortcut(
+    props.placement === "panel" ? { scope: panelRoot } : { scope: portalContainer ?? window },
+    openFind,
+  );
   const fundingRevision = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index]!;
@@ -2116,6 +2241,7 @@ function SessionChatPane(props: {
   // Moved to long-term storage after a long idle period: readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
   const terminal = cancelled || readOnlyArchive !== null;
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const focusEvents = useUiEventTarget("window");
@@ -2302,9 +2428,7 @@ function SessionChatPane(props: {
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments({
     scope:
-      props.session.tenancy?.visibility === "private" ||
-      props.session.memoryScope === "user" ||
-      context.workspaces.find((w) => w.id === props.session.workspaceId)?.kind === "personal"
+      props.session.tenancy?.visibility === "private" || props.session.memoryScope === "user"
         ? "personal"
         : "workspace",
   });
@@ -2385,6 +2509,10 @@ function SessionChatPane(props: {
     context.accessContext === undefined ||
     hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
   const reloadSessionAfterMachineChange = props.onReloadSession;
+  // A saved message approved for another of the person's machines already
+  // carries that machine's consent, so moving the chat back only repoints it
+  // (no "use this machine" message); the notice rechecks and re-reads right after.
+  const moveSavedMessage = runsOnAttach;
   const moveRunsOn = useCallback(
     async (machine: MachineView): Promise<string | null> => {
       if (!isPersonalMachine(machine)) {
@@ -2467,7 +2595,6 @@ function SessionChatPane(props: {
       afterConnectionSetup,
     ],
   );
-  const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
   const launchEffort = launch.effort;
@@ -2613,7 +2740,9 @@ function SessionChatPane(props: {
       durableToolSelection,
     ],
   );
-  const composerPolicyValidRef = useRef(false);
+  // Send's guard; whether the model choice can run is worked out below from
+  // the composer's own policy (see useSessionSendGate).
+  const sendGate = useSessionSendGate();
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const loadSkillReview = useCallback(
@@ -2654,27 +2783,26 @@ function SessionChatPane(props: {
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,
   });
-  const composerSendBlocker = () =>
-    getComposerSendBlocker({
-      uploadPending: attachments.hasUnresolved,
-      repositoryError: repositories.error,
-      policyValid: composerPolicyValidRef.current,
-      personalDecision:
-        personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
-      machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
-      personalLoading:
-        durableToolsSaving ||
-        durableToolsSaveInFlight.current ||
-        !durableToolsHydrated ||
-        personalAttachment.loading ||
-        personalAttachment.refreshing ||
-        connectionAccounts.loading ||
-        connectionAccounts.error !== null,
-    });
+  const sendState: SessionSendState = {
+    uploadPending: attachments.hasUnresolved,
+    repositoryError: repositories.error,
+    personalDecision:
+      personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
+    machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
+    loading:
+      durableToolsSaving ||
+      durableToolsSaveInFlight.current ||
+      !durableToolsHydrated ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing ||
+      connectionAccounts.loading,
+    loadFailed: connectionAccounts.error !== null,
+  };
+  const composerSendBlocker = () => sendGate.blocker(sendState);
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
-      ...withHostMessageContext(hostMessageContext),
+      ...withHostMessageContext(hostMessageContext, props.messageContext),
       resources: [...attachments.readyResources, ...repositories.pendingResources],
       connectionAccounts: [
         ...connectionAccounts.selections,
@@ -2694,8 +2822,14 @@ function SessionChatPane(props: {
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
-      props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: props.session.status,
+        activeTurnId: props.session.activeTurnId,
+        queuedPrompts: props.queue.queue.length,
+        admissionBlock: props.session.admissionBlock,
+      }),
     busySend: resolveWorkspaceBusySend(workspace?.settings),
+    ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
     offerQueue: true,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
@@ -2845,7 +2979,7 @@ function SessionChatPane(props: {
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
-    <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
+    <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
       {
         failedSessionCopy(
           props.failure,
@@ -2879,8 +3013,6 @@ function SessionChatPane(props: {
   );
   const catalogComboValid = Boolean(
     selectedPolicyRow?.selectable &&
-    (props.session.codexCompactionMode !== "remote_v2" ||
-      selectedPolicyRow.catalog.source === "codex") &&
     effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
     (latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
@@ -2924,7 +3056,6 @@ function SessionChatPane(props: {
         ? "This model is no longer available. Select a different model to continue."
         : "Choose a model, reasoning level, and speed supported by this session."
       : null;
-  composerPolicyValidRef.current = composerPolicyValid;
 
   // Preselect a runnable model for the next message when the composer still
   // names an unavailable one. Accepted turns and history keep their frozen
@@ -2936,7 +3067,6 @@ function SessionChatPane(props: {
             rows: modelCatalog.rows,
             defaultSelection: modelCatalog.defaultSelection,
             latencyMode,
-            codexOnly: props.session.codexCompactionMode === "remote_v2",
           })
         : null,
     [
@@ -2945,33 +3075,40 @@ function SessionChatPane(props: {
       modelCatalog.rows,
       modelCatalog.defaultSelection,
       latencyMode,
-      props.session.codexCompactionMode,
     ],
   );
-  useEffect(() => {
-    if (!composerModelUnavailable || !unavailableReplacement) return;
-    if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
+  const replacesUnavailableModel = Boolean(
+    composerModelUnavailable &&
+    unavailableReplacement &&
+    !composerDraftLoading &&
+    hasComposerPolicy &&
+    !modelPickerDisabled &&
+    !terminal &&
     // A failed session keeps its model until the person chooses: the
     // failure banner's Retry re-runs that turn with the composer's model.
-    if (!canControlSession || props.failure) return;
+    canControlSession &&
+    !props.failure,
+  );
+  useEffect(() => {
+    if (!replacesUnavailableModel || !unavailableReplacement) return;
     setComposerModel(unavailableReplacement.model);
     setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
     if (unavailableReplacement.latencyMode) {
       setComposerLatencyMode(unavailableReplacement.latencyMode);
     }
   }, [
-    canControlSession,
-    props.failure,
-    composerDraftLoading,
-    composerModelUnavailable,
-    hasComposerPolicy,
-    modelPickerDisabled,
+    replacesUnavailableModel,
     setComposerLatencyMode,
     setComposerModel,
     setComposerReasoningEffort,
-    terminal,
     unavailableReplacement,
   ]);
+  const composerDelivery = useSessionComposerDelivery(composerView, sendGate, {
+    policyValid: composerPolicyValid,
+    catalogLoading: modelCatalog.loading,
+    replacingModel: replacesUnavailableModel,
+    send: sendState,
+  });
   const unavailableModelNotice =
     (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
       <UnavailableModelNotice
@@ -3173,6 +3310,207 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  // A ChatGPT/Codex plan out of usage blocks this chat's Codex model. The
+  // chat can wait for the reset, or switch to any model in place (a Codex
+  // remote compaction chat rebuilds its context for it) and carry on.
+  const codexUsageBlocked =
+    isCodexProductModel(props.session.model) &&
+    (props.session.status === "waiting_capacity" ||
+      (props.session.status === "failed"
+        ? isCodexUsageLimitFailure(props.failure?.failureCode)
+        : props.session.status === "idle" && latestTurnFailedOnUsageLimit(props.events)));
+  const codexUsageChoices = codexUsageBlocked && workspacePermissions.includes("sessions:control");
+  const codexUsageResetsAtValue = useMemo(
+    () => (codexUsageChoices ? codexUsageResetsAt(props.events) : null),
+    [codexUsageChoices, props.events],
+  );
+  const [usageContinuationState, setUsageContinuation] = useState<{
+    sessionId: string;
+    pending: boolean;
+    error: string | null;
+  } | null>(null);
+  // One continuation at a time, even for two calls within one render.
+  const usageContinuationInFlight = useRef(false);
+  const usageContinuation =
+    usageContinuationState?.sessionId === props.session.id ? usageContinuationState : null;
+  // Whether Codex already compacted this remote_v2 chat. Another model then
+  // rebuilds its earlier messages from a summary, which the switch line says.
+  const remoteV2Chat = props.session.codexCompactionMode === "remote_v2";
+  const loadedCheckpointIsCompaction = useMemo(
+    () => (remoteV2Chat ? latestCheckpointIsCompaction(props.events) : null),
+    [remoteV2Chat, props.events],
+  );
+  const [fetchedCodexCompaction, setFetchedCodexCompaction] = useState<{
+    sessionId: string;
+    compacted: boolean;
+  } | null>(null);
+  useEffect(() => {
+    // The loaded page may start after the latest checkpoint: read the newest ones.
+    if (!remoteV2Chat || loadedCheckpointIsCompaction !== null) return;
+    let stale = false;
+    const sessionId = props.session.id;
+    context.client
+      .listEvents(props.session.workspaceId, sessionId, {
+        includeTypes: CONTEXT_CHECKPOINT_EVENT_TYPES,
+        // Newest first: only the latest checkpoint matters.
+        direction: "before",
+        limit: 20,
+        payloadMode: "none",
+      })
+      .then((events) => {
+        if (!stale)
+          setFetchedCodexCompaction({
+            sessionId,
+            compacted: latestCheckpointIsCompaction(events) === true,
+          });
+      })
+      .catch(() => undefined);
+    return () => {
+      stale = true;
+    };
+  }, [
+    context.client,
+    loadedCheckpointIsCompaction,
+    props.session.id,
+    props.session.workspaceId,
+    remoteV2Chat,
+  ]);
+  const codexCompacted =
+    loadedCheckpointIsCompaction ??
+    (fetchedCodexCompaction?.sessionId === props.session.id && fetchedCodexCompaction.compacted);
+  const switchHeadsUp = (target: string | null | undefined, label: string) =>
+    needsModelSwitchHeadsUp({
+      codexCompactionMode: props.session.codexCompactionMode,
+      codexCompacted,
+      model: target,
+    })
+      ? modelSwitchHeadsUpText(label)
+      : null;
+  // Run the blocked work on `policy`: the chat's own Codex model to continue
+  // at the reset (its turn parks until then), or the model the person picked.
+  // A paused chat is resumed first, so the work isn't held back.
+  const continueAfterUsageLimit = async (
+    policy: Parameters<typeof retryFailedSession>[1],
+    options: { resumeFirst?: boolean } = {},
+  ) => {
+    if (usageContinuationInFlight.current) return;
+    usageContinuationInFlight.current = true;
+    const sessionId = props.session.id;
+    setUsageContinuation({ sessionId, pending: true, error: null });
+    let error: string | null = null;
+    try {
+      // A failed resume stops here (the server would hold the work) and
+      // shows its error in the notice.
+      if (options.resumeFirst)
+        await context.client.resumeSession(props.session.workspaceId, sessionId, {
+          clientEventId: crypto.randomUUID(),
+          // Never undo a pause made after this page last read the control.
+          expectedControlEtag: admissionControl.controlEtag,
+        });
+      if (
+        props.session.status === "failed" &&
+        props.failure?.failureEventId &&
+        retryHasRetainedTurn
+      ) {
+        // Retry runs the failed turn again on that model.
+        await retryFailedSession(props.failure.failureEventId, policy);
+      } else {
+        // A turn waiting for Codex is replaced by this message (a Steer);
+        // after a usage-limit failure, or a failed turn that cannot be
+        // retried, it is the next message.
+        const chat = readChatSendContext();
+        if (chat.blocked) error = chat.blocked;
+        else {
+          const message = {
+            text: "Continue",
+            ...chat.extras,
+            ...policy,
+            clientEventId: crypto.randomUUID(),
+          };
+          if (props.session.status === "waiting_capacity")
+            await context.client.steerMessage(props.session.workspaceId, sessionId, message);
+          else await context.client.sendMessage(props.session.workspaceId, sessionId, message);
+        }
+      }
+    } catch (failure) {
+      error = userErrorText(failure, "Try again.");
+    } finally {
+      usageContinuationInFlight.current = false;
+      setUsageContinuation({ sessionId, pending: false, error });
+      await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+    }
+  };
+  // A Codex turn refused for usage waits for capacity and continues at the
+  // reset by default; switching that off pauses the chat, so it waits for the
+  // person. A chat the limit stopped instead (failed or idle) is not waiting:
+  // switching it on runs the work again on Codex, which waits for the reset.
+  const usagePaused = admissionControl.state === "paused";
+  const continueAtReset = codexUsageContinuesAtReset({
+    status: props.session.status,
+    paused: usagePaused,
+  });
+  const setContinueAtReset = (next: boolean) => {
+    const action = codexUsageContinueAtResetAction({
+      status: props.session.status,
+      paused: usagePaused,
+      next,
+    });
+    if (action === "pause") void composer.pause();
+    else if (action === "resume") void composer.resume();
+    else if (action === "run_on_codex" || action === "resume_and_run_on_codex")
+      void continueAfterUsageLimit(
+        {
+          model: props.session.model,
+          reasoningEffort: props.session.reasoningEffort,
+          latencyMode: props.session.latencyMode,
+        },
+        { resumeFirst: action === "resume_and_run_on_codex" },
+      );
+  };
+  // Picking another model in the picker continues the blocked chat with it.
+  const usageModelSwitch = useCodexUsageModelSwitch({
+    sessionId: props.session.id,
+    sessionModel: props.session.model,
+    composerModel: model,
+    enabled: codexUsageChoices,
+    closePicker: () => setModelPickerSession(null),
+    onContinue: (picked) =>
+      void continueAfterUsageLimit(
+        { model: picked, reasoningEffort, latencyMode },
+        // A Steer resumes a paused waiting chat itself; resuming first would
+        // wake its Codex wait for nothing.
+        { resumeFirst: usagePaused && props.session.status !== "waiting_capacity" },
+      ),
+  });
+  // A wait with no reset in sight keeps the server's own wait message; the
+  // picker still continues the chat with another model.
+  const codexUsageChoice: CodexUsageChoice | undefined =
+    codexUsageChoices &&
+    codexUsageNoticeApplies({
+      status: props.session.status,
+      resetsAt: codexUsageResetsAtValue,
+      usageWait: codexWaitIsUsageLimit(props.events),
+    })
+      ? {
+          resetText: codexUsageResetText(codexUsageResetsAtValue),
+          continueAtReset,
+          pending: usageContinuation?.pending || composer.pausing || composer.resuming,
+          error: usageContinuation?.error,
+          onContinueAtResetChange: setContinueAtReset,
+        }
+      : undefined;
+  // A failed chat shows these choices in its failure banner.
+  const codexUsageNotice =
+    codexUsageChoice && props.session.status !== "failed" && !terminal ? (
+      <CodexUsageNotice choice={codexUsageChoice} />
+    ) : null;
+  // The chosen model is about to rebuild a chat Codex compacted.
+  const chosenModelHeadsUp = !terminal
+    ? switchHeadsUp(model, selectedPolicyRow?.label ?? unavailableModelName(model))
+    : null;
+  const modelSwitchHeadsUp = chosenModelHeadsUp ? (
+    <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
+  ) : null;
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
@@ -3319,6 +3657,16 @@ function SessionChatPane(props: {
       renderContext: { searchTarget: TimelineSearchTarget | null },
     ) => {
       if (item.kind === "user-message") {
+        if (item.humanInputDelegation) {
+          return (
+            <HumanInputDelegationRecord
+              client={context.client}
+              workspaceId={props.session.workspaceId}
+              item={{ ...item, humanInputDelegation: item.humanInputDelegation }}
+              viewerSubjectId={context.accessContext.subjectId}
+            />
+          );
+        }
         return (
           <UserMessageBody
             sessionId={props.session.id}
@@ -3344,6 +3692,8 @@ function SessionChatPane(props: {
       );
     },
     [
+      context.accessContext.subjectId,
+      context.client,
       props.onOpenSandboxFile,
       props.session.id,
       props.session.workspaceId,
@@ -3356,6 +3706,24 @@ function SessionChatPane(props: {
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
+  const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  const creditTopupPrompt =
+    canBuyCredits && workspaceAccountId ? (
+      <Suspense fallback={null}>
+        {creditTopupOpen ? (
+          <LazyCreditTopupPrompt
+            purpose="topup"
+            open
+            workspaceId={props.session.workspaceId}
+            accountId={workspaceAccountId}
+            canBuyCredits
+            onOpenChange={setCreditTopupOpen}
+            beforeLeave={composer.flushDraft}
+          />
+        ) : null}
+      </Suspense>
+    ) : null;
   const canConnectModel = hasWorkspacePermission(
     context.accessContext,
     props.session.workspaceId,
@@ -3380,6 +3748,7 @@ function SessionChatPane(props: {
               `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
             }
             canChooseModel={canChooseRecoveryModel}
+            codexUsage={codexUsageChoice}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
@@ -3389,6 +3758,7 @@ function SessionChatPane(props: {
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={canBuyCredits}
+            onAddCredits={openCreditTopup}
             canConnectModel={canConnectModel}
             sandboxRecovery={
               needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
@@ -3471,9 +3841,16 @@ function SessionChatPane(props: {
           })}
           message={sessionCreditRefusal.message}
           workspaceId={props.session.workspaceId}
+          accountId={workspaceAccountId}
+          canReadBilling={
+            Boolean(workspaceAccountId) &&
+            hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:read")
+          }
           canBuyCredits={canBuyCredits}
           canConnectModel={canConnectModel}
+          continuing
           onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
+          onAddCredits={openCreditTopup}
           onDismiss={() => setCreditRefusal(null)}
         />
       </Suspense>
@@ -3507,9 +3884,14 @@ function SessionChatPane(props: {
     Fragment,
     null,
     reviewDetailPane,
+    creditTopupPrompt,
     createElement(
       "div",
-      { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
+      {
+        className: reviewDetails ? "hidden" : "contents",
+        ...inertProps(Boolean(reviewDetails)),
+        ...(props.placement === "panel" ? { ref: setPanelRoot } : {}),
+      },
       createElement(
         LightboxProvider,
         null,
@@ -3519,7 +3901,7 @@ function SessionChatPane(props: {
           onFiles={attachments.addFiles}
         >
           {findMounted ? (
-            <Suspense fallback={null}>
+            <LazyPart fallback={null}>
               <ConversationFind
                 workspaceId={props.session.workspaceId}
                 sessionId={props.session.id}
@@ -3531,15 +3913,15 @@ function SessionChatPane(props: {
                 onTarget={setActiveSearchTarget}
                 onJump={props.onJumpToSequence}
               />
-            </Suspense>
+            </LazyPart>
           ) : null}
           {cancelled ? (
-            <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+            <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
               <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
             </div>
           ) : readOnlyArchive ? (
-            <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+            <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <ReadOnlySessionNotice
                 session={props.session}
                 idleDays={context.clientConfig.sessionArchive?.idleDays}
@@ -3570,150 +3952,159 @@ function SessionChatPane(props: {
                       load={loadRecordedToolReview}
                       onViewDetails={viewToolReviewDetails}
                     >
-                      <MessageTimeline
-                        resolveLink={resolveLink}
-                        renderMessageSender={renderMessageSender}
-                        allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
-                        trailingState={
-                          <>
-                            {/* Recovery follows the failed request, only in the latest history window.
+                      <InteractiveAnswerProvider
+                        send={composer.send}
+                        scope={props.session.id}
+                        store={answerStore}
+                        readOnly={terminal}
+                      >
+                        <MessageTimeline
+                          resolveLink={resolveLink}
+                          renderMessageSender={renderMessageSender}
+                          allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                          trailingState={
+                            <>
+                              {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
-                            {failureRecovery}
-                            {props.approvals.length > 0 &&
-                              props.session.status === "requires_action" && (
-                                <ApprovalSurface
-                                  approvals={props.approvals}
-                                  selectedApprovalId={selectedApprovalId}
-                                  onSelectedApprovalChange={setSelectedApprovalId}
-                                  loadReview={loadToolReview}
-                                  onViewDetails={viewToolReviewDetails}
-                                  onApprove={(approval) => decideApproval(approval.id, "approve")}
-                                  onReject={(approval) => decideApproval(approval.id, "reject")}
-                                />
-                              )}
-                            <Suspense fallback={null}>
-                              <SessionSkillReviews
-                                key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
-                                context={context}
-                                workspaceId={props.session.workspaceId}
-                                sessionId={props.session.id}
-                                events={props.events}
-                              />
-                            </Suspense>
-                            {props.humanInput.requests.length > 0 &&
-                            props.session.status === "requires_action" ? (
-                              <div className="pb-1" data-human-input-timeline-surface="">
-                                <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                                  <HumanInputSurface
-                                    loadSkillReview={loadSkillReview}
-                                    allowedSaveTo={secretSaveTargets(
-                                      context.accessContext,
-                                      props.session.workspaceId,
-                                    )}
-                                    requests={props.humanInput.requests}
-                                    respondingRequestId={props.humanInput.respondingRequestId}
-                                    error={props.humanInput.mutationError?.message}
-                                    onSubmit={async (requestId, response) => {
-                                      // A failed send resolves null. Reject so the card
-                                      // keeps what was typed (including a secret) to retry.
-                                      if (!(await props.humanInput.respond(requestId, response))) {
-                                        throw new Error("Your answer wasn't sent. Try again.");
-                                      }
-                                    }}
+                              {failureRecovery}
+                              {props.approvals.length > 0 &&
+                                props.session.status === "requires_action" && (
+                                  <ApprovalSurface
+                                    approvals={props.approvals}
+                                    selectedApprovalId={selectedApprovalId}
+                                    onSelectedApprovalChange={setSelectedApprovalId}
+                                    loadReview={loadToolReview}
+                                    onViewDetails={viewToolReviewDetails}
+                                    onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                    onReject={(approval) => decideApproval(approval.id, "reject")}
                                   />
-                                </Suspense>
-                              </div>
-                            ) : null}
-                          </>
-                        }
-                        turnSummary={{ rolling: true }}
-                        key={props.session.id}
-                        className="h-full"
-                        items={timelineWithStartup}
-                        searchTarget={activeSearchTarget}
-                        focusSequence={momentSequence}
-                        events={props.events}
-                        status={props.session.status}
-                        computeLabel={computeLabel}
-                        renderMessageText={renderMessageText}
-                        renderMessageActions={renderMessageActions}
-                        onAnnotate={composer.addAnnotation}
-                        draftAnnotations={composer.annotations}
-                        onDraftAnnotationSelect={composer.requestAnnotationReview}
-                        onOpenSession={props.onOpenSession}
-                        resolveSessionTitle={props.resolveSessionTitle}
-                        onMemoryClick={props.onMemoryClick}
-                        onReconnect={props.onReconnect}
-                        renderAuthNeeded={renderAuthNeeded}
-                        resolveProviderLogo={props.resolveProviderLogo}
-                        loadRetainedScreenshot={loadRetainedScreenshot}
-                        loadRetainedArtifact={loadRetainedArtifact}
-                        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                        hasOlder={props.hasOlder}
-                        loadingOlder={props.loadingOlder}
-                        onLoadOlder={props.onLoadOlder}
-                        hasNewer={props.hasNewer}
-                        loadingNewer={props.loadingNewer}
-                        onLoadNewer={props.onLoadNewer}
-                        loadingOldest={props.loadingOldest}
-                        onJumpToStart={async () => {
-                          await props.onJumpToStart();
-                        }}
-                        onJumpToLatest={props.onJumpToLatest}
-                        emptyState={
-                          // Clear view hides history, not the retained failure or retry operation.
-                          failureRecovery ??
-                          (props.queue.stoppingPreviousAttempt ? (
-                            <EmptyState
-                              className="min-h-[24rem]"
-                              icon={
-                                <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                              }
-                              title={
-                                props.queue.effectiveControl?.state === "paused"
-                                  ? "Stopping current work"
-                                  : "Stopping previous work"
-                              }
-                              description={
-                                props.queue.effectiveControl?.state === "paused"
-                                  ? "Waiting for the current command to stop safely. Queued work stays saved."
-                                  : "Your direction is saved. It starts after the previous command stops safely."
-                              }
-                            />
-                          ) : props.initialLoading ? (
-                            <div className="flex min-h-[24rem]">
-                              <LoadingPanel />
-                            </div>
-                          ) : props.historyReloadFailed ? (
-                            <ProblemPanel
-                              title="Conversation couldn't be loaded"
-                              description="Your saved messages are unchanged. Try loading them again."
-                              action={
-                                <Button
-                                  variant="outline"
-                                  onClick={() => void props.onJumpToLatest()}
-                                >
-                                  Retry conversation
-                                </Button>
-                              }
-                            />
-                          ) : (
-                            <EmptyState
-                              className="min-h-[24rem]"
-                              icon={
-                                props.session.status === "running" ||
-                                props.session.status === "recovering" ? (
+                                )}
+                              <LazyPart fallback={null}>
+                                <SessionSkillReviews
+                                  key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                                  context={context}
+                                  workspaceId={props.session.workspaceId}
+                                  sessionId={props.session.id}
+                                  events={props.events}
+                                />
+                              </LazyPart>
+                              {props.humanInput.requests.length > 0 &&
+                              props.session.status === "requires_action" ? (
+                                <div className="pb-1" data-human-input-timeline-surface="">
+                                  <LazyPart fallback={<LoadingPanel label="Loading questions…" />}>
+                                    <HumanInputSurface
+                                      loadSkillReview={loadSkillReview}
+                                      allowedSaveTo={secretSaveTargets(
+                                        context.accessContext,
+                                        props.session.workspaceId,
+                                      )}
+                                      requests={props.humanInput.requests}
+                                      respondingRequestId={props.humanInput.respondingRequestId}
+                                      error={props.humanInput.mutationError?.message}
+                                      onSubmit={async (requestId, response) => {
+                                        // A failed send resolves null. Reject so the card
+                                        // keeps what was typed (including a secret) to retry.
+                                        if (
+                                          !(await props.humanInput.respond(requestId, response))
+                                        ) {
+                                          throw new Error("Your answer wasn't sent. Try again.");
+                                        }
+                                      }}
+                                    />
+                                  </LazyPart>
+                                </div>
+                              ) : null}
+                            </>
+                          }
+                          turnSummary={{ rolling: true }}
+                          key={props.session.id}
+                          className="h-full"
+                          items={timelineWithStartup}
+                          searchTarget={activeSearchTarget}
+                          focusSequence={momentSequence}
+                          events={props.events}
+                          status={props.session.status}
+                          computeLabel={computeLabel}
+                          renderMessageText={renderMessageText}
+                          renderMessageActions={renderMessageActions}
+                          onAnnotate={composer.addAnnotation}
+                          draftAnnotations={composer.annotations}
+                          onDraftAnnotationSelect={composer.requestAnnotationReview}
+                          onOpenSession={props.onOpenSession}
+                          resolveSessionTitle={props.resolveSessionTitle}
+                          onMemoryClick={props.onMemoryClick}
+                          onReconnect={props.onReconnect}
+                          renderAuthNeeded={renderAuthNeeded}
+                          resolveProviderLogo={props.resolveProviderLogo}
+                          loadRetainedScreenshot={loadRetainedScreenshot}
+                          loadRetainedArtifact={loadRetainedArtifact}
+                          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                          hasOlder={props.hasOlder}
+                          loadingOlder={props.loadingOlder}
+                          onLoadOlder={props.onLoadOlder}
+                          hasNewer={props.hasNewer}
+                          loadingNewer={props.loadingNewer}
+                          onLoadNewer={props.onLoadNewer}
+                          loadingOldest={props.loadingOldest}
+                          onJumpToStart={async () => {
+                            await props.onJumpToStart();
+                          }}
+                          onJumpToLatest={props.onJumpToLatest}
+                          emptyState={
+                            // Clear view hides history, not the retained failure or retry operation.
+                            failureRecovery ??
+                            (props.queue.stoppingPreviousAttempt ? (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
                                   <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                                ) : (
-                                  <MessagesSquareIcon className="size-4" />
-                                )
-                              }
-                              title={timelineEmptyStateCopy.title}
-                              description={timelineEmptyStateCopy.description}
-                            />
-                          ))
-                        }
-                      />
+                                }
+                                title={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Stopping current work"
+                                    : "Stopping previous work"
+                                }
+                                description={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Waiting for the current command to stop safely. Queued work stays saved."
+                                    : "Your direction is saved. It starts after the previous command stops safely."
+                                }
+                              />
+                            ) : props.initialLoading ? (
+                              <div className="flex min-h-[24rem]">
+                                <LoadingPanel />
+                              </div>
+                            ) : props.historyReloadFailed ? (
+                              <ProblemPanel
+                                title="Conversation couldn't be loaded"
+                                description="Your saved messages are unchanged. Try loading them again."
+                                action={
+                                  <Button
+                                    variant="outline"
+                                    onClick={() => void props.onJumpToLatest()}
+                                  >
+                                    Retry conversation
+                                  </Button>
+                                }
+                              />
+                            ) : (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
+                                  props.session.status === "running" ||
+                                  props.session.status === "recovering" ? (
+                                    <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                                  ) : (
+                                    <MessagesSquareIcon className="size-4" />
+                                  )
+                                }
+                                title={timelineEmptyStateCopy.title}
+                                description={timelineEmptyStateCopy.description}
+                              />
+                            ))
+                          }
+                        />
+                      </InteractiveAnswerProvider>
                     </ToolReviewHistoryProvider>
                   </KnowledgeActivityProvider>
                 </LearningRefusalActionsProvider>
@@ -3722,7 +4113,7 @@ function SessionChatPane(props: {
           }
 
           {forkEventId ? (
-            <Suspense fallback={null}>
+            <LazyPart fallback={null}>
               <MessageForkDialog
                 key={forkEventId}
                 session={props.session}
@@ -3730,14 +4121,14 @@ function SessionChatPane(props: {
                 sourceEventId={forkEventId}
                 onForkClose={() => setForkEventId(null)}
               />
-            </Suspense>
+            </LazyPart>
           ) : null}
 
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
           {/* One slim status row above the composer: the agent's wait, queue,
           goal and activity. Hides entirely when there are no signals. */}
-          <div className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6">
+          <div className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}>
             <div className="mx-auto w-full max-w-3xl">
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
@@ -3752,6 +4143,8 @@ function SessionChatPane(props: {
                     move={moveRunsOn}
                   />
                 }
+                machines={runsOn.fleet.machines}
+                onMoveToMachine={runsOn.fleet.canAttach ? moveSavedMessage : undefined}
                 canControl={workspacePermissions.includes("sessions:control")}
                 paused={admissionControl.state === "paused"}
                 refreshRequired={admissionRefreshRequired}
@@ -3798,13 +4191,14 @@ function SessionChatPane(props: {
                 }}
               />
               {waitingSubSessions.length > 0 ? (
-                <Suspense fallback={null}>
+                <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
                   <OpenGeniLinkProvider resolveLink={resolveLink}>
                     <DescendantRequests
                       client={context.client}
                       workspaceId={props.session.workspaceId}
                       parentSessionId={props.session.id}
+                      events={props.events}
                       waiting={waitingSubSessions}
                       onResolved={props.onDescendantResolved}
                       refreshSignal={props.descendantRefreshSignal}
@@ -3815,7 +4209,7 @@ function SessionChatPane(props: {
                       )}
                     />
                   </OpenGeniLinkProvider>
-                </Suspense>
+                </LazyPart>
               ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
@@ -3829,23 +4223,23 @@ function SessionChatPane(props: {
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
                 commandsPanel={
-                  <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
+                  <LazyPart fallback={<LoadingPanel label="Loading commands…" />}>
                     <SessionCommands
                       key={props.session.id}
                       sessionId={props.session.id}
                       readOnly={terminal}
                     />
-                  </Suspense>
+                  </LazyPart>
                 }
                 agentsSignal={agentsSignal}
                 agentsPanel={
                   props.agentNodes.length > 0 ? (
-                    <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                    <LazyPart fallback={<LoadingPanel label="Loading agents…" />}>
                       <SubagentTree
                         workspaceId={props.session.workspaceId}
                         nodes={props.agentNodes}
                       />
-                    </Suspense>
+                    </LazyPart>
                   ) : null
                 }
               />
@@ -3856,7 +4250,12 @@ function SessionChatPane(props: {
           <div
             ref={composerRegionRef}
             data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
-            className={`shrink-0 px-4 pb-4 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+            className={cn(
+              "shrink-0",
+              props.placement === "panel" ? "pb-3" : "pb-4",
+              gutter,
+              readOnlyArchive && "hidden",
+            )}
           >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface
@@ -3867,12 +4266,16 @@ function SessionChatPane(props: {
               <ConsoleComposer
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
-                composer={composerView}
+                composer={composerDelivery}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
-                running={usageLimitTreeActive || props.pendingWake}
+                running={
+                  usageLimitTreeActive ||
+                  sessionTurnKeepsRunControl(props.session.status) ||
+                  props.pendingWake
+                }
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,
@@ -3882,6 +4285,8 @@ function SessionChatPane(props: {
                 disabled={terminal}
                 header={
                   unavailableModelNotice ||
+                  codexUsageNotice ||
+                  modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
@@ -3903,6 +4308,8 @@ function SessionChatPane(props: {
                         />
                       ) : null}
                       {unavailableModelNotice}
+                      {codexUsageNotice}
+                      {modelSwitchHeadsUp}
                       {usageLimitNotice}
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
@@ -3938,10 +4345,7 @@ function SessionChatPane(props: {
                           ? {
                               workspaceId: props.session.workspaceId,
                               sessionId: props.session.id,
-                              scope: chatLearningScope(
-                                props.session,
-                                isPersonalWorkspace(workspace, context.managedSelfContext),
-                              ),
+                              scope: chatLearningScope(props.session),
                               canEdit: workspacePermissions.includes("sessions:control"),
                               onOpen: props.onOpenAgentSettings,
                             }
@@ -4037,7 +4441,7 @@ function SessionChatPane(props: {
                 }
                 actions={
                   !terminal ? (
-                    <Suspense fallback={null}>
+                    <LazyPart onLoadFailure="hide" fallback={null}>
                       <LazyCodexRealtimeControl
                         client={realtimeClient}
                         workspaceId={props.session.workspaceId}
@@ -4053,7 +4457,7 @@ function SessionChatPane(props: {
                         onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
                         onVoiceActiveChange={onVoiceActiveChange}
                       />
-                    </Suspense>
+                    </LazyPart>
                   ) : null
                 }
                 placeholder={
@@ -4095,8 +4499,10 @@ function SessionChatPane(props: {
                       claudeSubscriptionAvailable={
                         context.clientConfig.claudeSubscriptionEnabled === true
                       }
-                      codexOnly={props.session.codexCompactionMode === "remote_v2"}
-                      onModelChange={composer.setModel}
+                      onModelChange={(modelId) => {
+                        composer.setModel(modelId);
+                        usageModelSwitch.modelPicked(modelId);
+                      }}
                       onEffortChange={composer.setReasoningEffort}
                       onLatencyModeChange={composer.setLatencyMode}
                     />

@@ -11,6 +11,7 @@ import {
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
   resolveWorkspaceVoiceInputEnabled,
+  recordingMicrophoneIsOwner,
   resolveWorkspaceRecordingSettings,
   SaveRecordingNoteRequest,
   UpdateRecordingRequest,
@@ -24,9 +25,9 @@ import {
   type RecordingTranscriptionOptions,
   type RecordingTranscriptionRequest,
   type WorkspaceRecordingSettings,
+  REGION_RESTRICTED,
 } from "@opengeni/contracts";
 import {
-  DEFAULT_RECORDING_LIVE_TRANSCRIPTION,
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
   RecordingTranscriptionError,
@@ -46,11 +47,15 @@ import {
   getRecordingTrackPreparedObject,
   getRecordingTranscriptPage,
   getWorkspace,
+  workspaceMemberDisplayName,
   listRecordingChunks,
   listRecordingLiveSegments,
   listRecordingNotes,
   listRecordingPeople,
-  listRecordings,
+  listRecordingsWithOwnElsewhere,
+  ownRecordingHome,
+  ownRecordingWorkspaces,
+  recordingVisible,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
@@ -78,10 +83,12 @@ import {
   createSpeechToTextDeployment,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextServesMeetings,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
@@ -113,6 +120,12 @@ function storedTranscription(
   return { ...rest, ...(language ? { language } : {}) };
 }
 
+/** The billing code a credit refusal carries (insufficient_credits, allowance_exhausted, ...). */
+function refusalCode(refused: ApiHttpError): string {
+  const code = refused.details?.code;
+  return typeof code === "string" && code ? code : refused.code;
+}
+
 /**
  * Recordings: captured conversations made of audio tracks. Clients record
  * locally, upload chunks straight to storage with presigned URLs, then
@@ -139,16 +152,94 @@ export function registerRecordingRoutes(
   const registry = deployment.registry;
   const base = "/v1/workspaces/:workspaceId/recordings";
 
+  /**
+   * Who is asking, in which workspace. On a meeting's own routes that is the
+   * workspace storing it: the person's own Only me meeting from another
+   * workspace of the same organization opens in place in every workspace of it
+   * they belong to, so it is read and changed where it is stored, as them, and
+   * only with the access this request has there (the same permission, for the
+   * same person). Without it the meeting is not found.
+   */
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
-    return {
+    const actor = {
       workspaceId,
       subjectId: grant.subjectId,
       accountId: grant.accountId,
       /** Who a deployment-funded transcript this request asks for is billed to. */
       creditAttribution: creditDebitAttributionForGrant(grant),
+      /** The workspace that stores the meeting, when it is another than this one. */
+      sourceWorkspace: null as { id: string; name: string } | null,
     };
+    const recordingId = c.req.param("recordingId");
+    if (
+      !recordingId ||
+      !z.string().uuid().safeParse(recordingId).success ||
+      (await recordingVisible(db, { ...actor, recordingId }))
+    ) {
+      return actor;
+    }
+    const home = await ownRecordingHome(db, {
+      subjectId: actor.subjectId,
+      recordingId,
+      workspaces: await ownRecordingWorkspaces(db, actor),
+    });
+    const there = home ? await sameGrantIn(c, home.id, permission, actor) : null;
+    if (!home || !there) return actor;
+    return {
+      ...actor,
+      workspaceId: home.id,
+      accountId: there.accountId,
+      creditAttribution: creditDebitAttributionForGrant(there),
+      sourceWorkspace: { id: home.id, name: home.name },
+    };
+  }
+
+  /**
+   * This request's grant in another workspace of the organization, for the
+   * same person, with the permission; null without one (a key or delegation
+   * scoped to this workspace, a narrower role there, or no access).
+   */
+  async function sameGrantIn(
+    c: Context,
+    workspaceId: string,
+    permission: "sessions:read" | "sessions:create",
+    actor: { subjectId: string; accountId: string },
+  ) {
+    const grant = await requireAccessGrant(c, deps, workspaceId, permission).catch(() => null);
+    return grant && grant.subjectId === actor.subjectId && grant.accountId === actor.accountId
+      ? grant
+      : null;
+  }
+
+  /** The person's other workspaces of the organization this request may list meetings in. */
+  async function ownListableElsewhere(
+    c: Context,
+    actor: { workspaceId: string; subjectId: string; accountId: string },
+  ): Promise<{ id: string; name: string }[]> {
+    const candidates = await ownRecordingWorkspaces(db, actor);
+    const allowed: { id: string; name: string }[] = [];
+    for (let start = 0; start < candidates.length; start += 8) {
+      const batch = candidates.slice(start, start + 8);
+      const grants = await Promise.all(
+        batch.map((workspace) => sameGrantIn(c, workspace.id, "sessions:read", actor)),
+      );
+      batch.forEach((workspace, index) => {
+        if (grants[index]) allowed.push({ id: workspace.id, name: workspace.name });
+      });
+    }
+    return allowed;
+  }
+
+  /** A meeting as the workspace the request came through shows it. */
+  function shownHere<T extends Recording>(
+    recording: T,
+    actor: { sourceWorkspace: { id: string; name: string } | null },
+  ): T {
+    return actor.sourceWorkspace
+      ? { ...recording, sourceWorkspace: actor.sourceWorkspace }
+      : recording;
   }
 
   /**
@@ -214,7 +305,13 @@ export function registerRecordingRoutes(
   async function transcriptionChoice(
     actor: { workspaceId: string; accountId: string; subjectId: string },
     requested: RecordingTranscriptionRequest,
-  ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+  ): Promise<{
+    providerId: string;
+    model: string;
+    options: RecordingTranscriptionOptions;
+    /** Nobody chose the model: not the request, the workspace or a pinned deployment. */
+    automatic: boolean;
+  }> {
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     // A request that names its provider takes no default, not even its model.
@@ -249,20 +346,26 @@ export function registerRecordingRoutes(
       providerId,
       model: found.spec.model,
       options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+      automatic: !requested.providerId && !settings.transcription && deployment.pinned === null,
     };
   }
 
   /**
    * A dictation is transcribed by the workspace's voice input: its preferred
-   * provider, else the first ready one, as text without speakers. The
-   * version records the provider and the model it runs; the worker may
-   * still fall over to another provider that refused before hearing it.
+   * provider, else the first ready one, as text without speakers, in the
+   * language the dictation was started in (detected when none), listening for
+   * the person's vocabulary when the model takes one. The version records the
+   * provider and the model it runs; the worker may still fall over to another
+   * provider that refused before hearing it.
    */
-  async function dictationChoice(actor: {
-    workspaceId: string;
-    accountId: string;
-    subjectId: string;
-  }): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+  async function dictationChoice(
+    actor: {
+      workspaceId: string;
+      accountId: string;
+      subjectId: string;
+    },
+    recording: Recording,
+  ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const voiceInput = await dictationPolicy(actor.workspaceId);
     const service = deps.transcription!;
     const providerId = service.selectProvider
@@ -278,7 +381,16 @@ export function registerRecordingRoutes(
     const model =
       dictationProviders(deployment).find((provider) => provider.id === providerId)?.model.model ??
       "voice-input";
-    return { providerId, model, options: {} };
+    const language = recording.transcription?.language;
+    const keyterms = recording.transcription?.keyterms;
+    return {
+      providerId,
+      model,
+      options: {
+        ...(language ? { language } : {}),
+        ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
+      },
+    };
   }
 
   /** The workspace's voice input settings, refusing when voice input can't run. */
@@ -311,7 +423,11 @@ export function registerRecordingRoutes(
    * The transcription a recording's next version uses, with who it is
    * billed to. A model the deployment pays for is admitted against the
    * payer's credits first, where credit billing is on, so a payer without
-   * credits is refused before any audio is sent.
+   * credits is refused before any audio is sent. When nobody chose that
+   * model, a usable one the deployment doesn't pay for (a connected
+   * subscription or the workspace's own key) runs instead. Otherwise a
+   * meeting's refusal is returned, not thrown, so finalizing still ends
+   * capture and stores a failed transcript that says why.
    */
   async function versionChoice(
     actor: {
@@ -322,40 +438,88 @@ export function registerRecordingRoutes(
     },
     recording: Recording,
     requested: RecordingTranscriptionRequest,
-  ) {
-    const choice =
+  ): Promise<{
+    providerId: string;
+    model: string;
+    options: RecordingTranscriptionOptions;
+    creditAttribution: CreditDebitAttribution;
+    /** The credit refusal a meeting's transcript can't start without fixing. */
+    refused: ApiHttpError | null;
+  }> {
+    const { automatic, ...choice } =
       recording.purpose === "dictation"
-        ? await dictationChoice(actor)
+        ? { ...(await dictationChoice(actor, recording)), automatic: false }
         : await transcriptionChoice(actor, requested);
+    // EU-only: refused before the version exists, so no audio is ever sent.
+    await deployment.assertRegion(
+      choice.providerId,
+      actor,
+      recording.purpose === "dictation" ? "voice_input" : "meeting_transcription",
+    );
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
-    if (
+    const refused =
       provider?.funding === "deployment" &&
       voiceInputCreditBillingActive(deps.settings) &&
       (recording.purpose === "dictation" || spec?.creditPricing)
-    ) {
-      await admitCredits(() =>
-        deps.transcription?.admit?.({
-          providerId: choice.providerId,
-          accountId: actor.accountId,
-          workspaceId: actor.workspaceId,
-          attribution: actor.creditAttribution,
-        }),
-      );
+        ? await creditRefusal(() =>
+            deps.transcription?.admit?.({
+              providerId: choice.providerId,
+              accountId: actor.accountId,
+              workspaceId: actor.workspaceId,
+              attribution: actor.creditAttribution,
+            }),
+          )
+        : null;
+    if (refused && automatic) {
+      const free = await meetingModelWithoutCreditsFor(deployment, {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+      });
+      const found = free
+        ? findRecordingTranscriptionModel(registry, free.providerId, free.model)
+        : null;
+      // Work that spends no credits still counts against a usage allowance
+      // that prices it at list price; a used-up one is the refusal instead.
+      const overAllowance =
+        free && found
+          ? await admitRecordingUsage(actor).then(
+              () => null,
+              (error: unknown) => {
+                if (error instanceof ApiHttpError) return error;
+                throw error;
+              },
+            )
+          : null;
+      if (overAllowance) {
+        return { ...choice, creditAttribution: actor.creditAttribution, refused: overAllowance };
+      }
+      if (free && found) {
+        return {
+          ...choice,
+          providerId: free.providerId,
+          model: found.spec.model,
+          creditAttribution: actor.creditAttribution,
+          refused: null,
+        };
+      }
     }
-    return {
-      ...choice,
-      creditAttribution: actor.creditAttribution,
-    };
+    // A dictation is the composer's: it shows the refusal where the person typed.
+    if (refused && recording.purpose === "dictation") throw refused;
+    return { ...choice, creditAttribution: actor.creditAttribution, refused };
   }
 
-  /** A credit refusal as the same 402 or 429 a session admission gives. */
-  async function admitCredits(admit: () => Promise<void> | undefined): Promise<void> {
+  /** A credit refusal as the same 402 or 429 a session admission gives; null when admitted. */
+  async function creditRefusal(
+    admit: () => Promise<void> | undefined,
+  ): Promise<ApiHttpError | null> {
     try {
       await admit();
+      return null;
     } catch (error) {
       if (!(error instanceof TranscriptionBillingRefusedError)) throw error;
-      throw new ApiHttpError(error.status, {
+      return new ApiHttpError(error.status, {
         code:
           error.code === "allowance_exhausted"
             ? "allowance_exhausted"
@@ -390,15 +554,21 @@ export function registerRecordingRoutes(
     providerId?: string | undefined;
     model?: string | undefined;
   }) {
-    const providerId = requested.providerId ?? DEFAULT_RECORDING_LIVE_TRANSCRIPTION.providerId;
+    const fallback = deployment.liveDefault;
+    const providerId = requested.providerId ?? fallback?.providerId;
     const model =
       requested.model ??
       (requested.providerId
-        ? registry.get(providerId)?.models.find((spec) => spec.capabilities.live)?.model
-        : DEFAULT_RECORDING_LIVE_TRANSCRIPTION.model);
-    // A pinned deployment sends audio only to its one provider.
+        ? registry.get(requested.providerId)?.models.find((spec) => spec.capabilities.live)?.model
+        : fallback?.model);
+    // A pinned deployment sends audio only to its one provider, or to the
+    // live model its operator named.
+    const allowed =
+      !deployment.pinned ||
+      deployment.pinned.providerId === providerId ||
+      (fallback !== null && fallback.providerId === providerId && fallback.model === model);
     const found =
-      model && (!deployment.pinned || deployment.pinned.providerId === providerId)
+      providerId && model && allowed
         ? findRecordingTranscriptionModel(registry, providerId, model, "live")
         : null;
     if (!found) {
@@ -406,7 +576,7 @@ export function registerRecordingRoutes(
         code: "validation_failed",
         message: "This live transcription model is not offered here.",
         retryable: false,
-        details: { code: "unknown_model", providerId, model: model ?? null },
+        details: { code: "unknown_model", providerId: providerId ?? null, model: model ?? null },
       });
     }
     return found;
@@ -438,20 +608,33 @@ export function registerRecordingRoutes(
       if (Number.isNaN(parsed.getTime())) throw invalid(`${name} must be a date and time`);
       return parsed;
     };
-    return c.json(
-      await listRecordings(db, {
-        workspaceId: actor.workspaceId,
-        subjectId: actor.subjectId,
-        query: query || undefined,
-        person: person || undefined,
-        startedFrom: instant("startedFrom"),
-        startedTo: instant("startedTo"),
-        externalRef: externalRef || undefined,
-        purpose: purpose.data,
-        before,
-        limit: Number.isFinite(limit) ? limit : 50,
+    // With the person's own Only me meetings from their other workspaces of
+    // this organization, each saying where it is stored.
+    const page = await listRecordingsWithOwnElsewhere(db, {
+      elsewhere:
+        (purpose.data ?? "meeting") === "meeting" && !externalRef
+          ? await ownListableElsewhere(c, actor)
+          : [],
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      query: query || undefined,
+      person: person || undefined,
+      startedFrom: instant("startedFrom"),
+      startedTo: instant("startedTo"),
+      externalRef: externalRef || undefined,
+      purpose: purpose.data,
+      before,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    return c.json({
+      recordings: page.recordings.map((recording) => {
+        const name = page.sourceWorkspaces.get(recording.workspaceId);
+        return name === undefined
+          ? recording
+          : { ...recording, sourceWorkspace: { id: recording.workspaceId, name } };
       }),
-    );
+      nextBefore: page.nextBefore,
+    });
   });
 
   app.post(base, async (c) => {
@@ -464,7 +647,15 @@ export function registerRecordingRoutes(
       if (body.tracks.length !== 1 || body.tracks[0]!.source !== "microphone") {
         throw invalid("A dictation has exactly one microphone track");
       }
-      if (body.transcription) throw invalid("A dictation uses the workspace's voice input model");
+      // The workspace's voice input picks the model; the dictation names only
+      // the language it is spoken in (or none to detect it) and the words to
+      // listen for.
+      const { language, keyterms, ...other } = body.transcription ?? {};
+      if (Object.keys(other).length > 0) {
+        throw invalid(
+          "A dictation uses the workspace's voice input model; only its language and keyterms can be set",
+        );
+      }
       const result = await guard(() =>
         createRecording(db, {
           ...actor,
@@ -476,6 +667,14 @@ export function registerRecordingRoutes(
           externalRef: body.externalRef,
           metadata: body.metadata,
           tracks: body.tracks,
+          ...(language || keyterms?.length
+            ? {
+                transcription: {
+                  ...(language ? { language } : {}),
+                  ...(keyterms?.length ? { keyterms } : {}),
+                },
+              }
+            : {}),
         }),
       );
       if (result.recording.purpose !== "dictation") {
@@ -500,6 +699,21 @@ export function registerRecordingRoutes(
             ...(language ? { language } : {}),
           }
         : undefined;
+    // Computer or tab audio makes the microphone the owner, named in the live
+    // preview and the transcript. The name Opengeni has for them comes first;
+    // an embedding app's own users may have none, so theirs is next.
+    const ownerName = recordingMicrophoneIsOwner(body.tracks)
+      ? ((await workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
+          // The recording starts regardless; the microphone stays unnamed until then.
+          observability?.warn("couldn't read the recording owner's name", {
+            workspaceId: actor.workspaceId,
+            error: errorMessage(error),
+          });
+          return null;
+        })) ??
+        body.ownerName ??
+        null)
+      : null;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
@@ -511,6 +725,7 @@ export function registerRecordingRoutes(
         metadata: body.metadata,
         tracks: body.tracks,
         transcription,
+        ownerName,
       }),
     );
     if (result.recording.purpose !== "meeting") {
@@ -527,7 +742,10 @@ export function registerRecordingRoutes(
   app.get(`${base}/:recordingId`, async (c) => {
     const actor = await actorFor(c, "sessions:read");
     return c.json(
-      await guard(() => getRecording(db, { ...actor, recordingId: recordingIdParam(c) })),
+      shownHere(
+        await guard(() => getRecording(db, { ...actor, recordingId: recordingIdParam(c) })),
+        actor,
+      ),
     );
   });
 
@@ -535,7 +753,18 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, UpdateRecordingRequest);
-    return c.json(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })));
+    // Sharing shares with the workspace that stores the meeting, so it is
+    // done there, where everyone it is shared with sees it.
+    if (actor.sourceWorkspace && body.visibility !== undefined && body.visibility !== "private") {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "Share this meeting from the workspace it was recorded in.",
+        retryable: false,
+      });
+    }
+    return c.json(
+      shownHere(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })), actor),
+    );
   });
 
   app.delete(`${base}/:recordingId`, async (c) => {
@@ -679,7 +908,14 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await versionChoice(actor, current, current.transcription);
+    // Capture always ends here. A transcript the payer can't pay for is stored
+    // failed with the refusal's code, so the meeting says what to fix and can
+    // be transcribed again once it is fixed, instead of staying unfinished.
+    const { refused, ...transcription } = await versionChoice(
+      actor,
+      current,
+      current.transcription,
+    );
     const result = await guard(() =>
       finalizeRecording(db, {
         ...actor,
@@ -688,6 +924,7 @@ export function registerRecordingRoutes(
         tracks: body.tracks,
         transcription,
         versionId: crypto.randomUUID(),
+        transcriptRefusedCode: refused ? refusalCode(refused) : undefined,
       }),
     );
     // Finalizing again restarts a lost start; a running workflow is left alone.
@@ -715,11 +952,12 @@ export function registerRecordingRoutes(
     }
     // Dictations are paid for with credits, which their ledger debit counts.
     if (recording.purpose !== "dictation") await admitRecordingUsage(actor);
-    const transcription = await versionChoice(
+    const { refused, ...transcription } = await versionChoice(
       actor,
       recording,
       body.transcription ?? recording.transcription,
     );
+    if (refused) throw refused;
     const version = await guard(() =>
       createRecordingTranscriptVersion(db, {
         ...actor,
@@ -952,47 +1190,111 @@ export function registerRecordingRoutes(
   app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
-    const defaults = await meetingModelFor(
-      deployment,
-      resolveWorkspaceRecordingSettings(workspace?.settings).transcription,
-      { accountId: actor.accountId, workspaceId: actor.workspaceId, subjectId: actor.subjectId },
-    );
-    const offered = deployment.pinned
-      ? [registry.get(deployment.pinned.providerId)!]
+    const recordingSettings = resolveWorkspaceRecordingSettings(workspace?.settings);
+    const defaults = await meetingModelFor(deployment, recordingSettings.transcription, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+    });
+    const pinned = deployment.pinned;
+    const liveDefault = deployment.liveDefault;
+    const offered = pinned
+      ? [
+          registry.get(pinned.providerId)!,
+          ...(liveDefault && liveDefault.providerId !== pinned.providerId
+            ? [registry.get(liveDefault.providerId)!]
+            : []),
+        ]
       : [...registry.values()];
-    const availability = new Map(
+    const scope = {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+    };
+    // Per provider: whether it serves this workspace, and whether EU-only
+    // inference lets it, for meetings and for the live transcript (whose
+    // client connects to the provider itself). A failed EU-only read fails
+    // the request; it never becomes a wrong label.
+    const perProvider = new Map(
       await Promise.all(
-        offered.map(
-          async (provider) =>
-            [
-              provider.id,
-              await deployment.available(provider.id, {
-                accountId: actor.accountId,
-                workspaceId: actor.workspaceId,
-                subjectId: actor.subjectId,
-              }),
-            ] as const,
-        ),
+        offered.map(async (provider) => {
+          const hasLive = provider.models.some((spec) => spec.capabilities.live);
+          const [available, liveAvailable, region, liveRegion] = await Promise.all([
+            deployment.available(provider.id, scope),
+            hasLive
+              ? deployment.available(provider.id, scope, "live_transcription")
+              : Promise.resolve(false),
+            deployment.regionAllowed(provider.id, actor),
+            hasLive
+              ? deployment.regionAllowed(provider.id, actor, "live_transcription")
+              : Promise.resolve(true),
+          ]);
+          return [provider.id, { available, liveAvailable, region, liveRegion }] as const;
+        }),
       ),
     );
     // The models a meeting can use: each places every word in time, or the
-    // deployment does it for them.
+    // deployment does it for them. Live models stream the live transcript;
+    // a pinned deployment offers its own provider's and the one its operator
+    // named, as the live session route does.
     const models: RecordingTranscriptionModel[] = offered.flatMap((provider) =>
-      provider.models
-        .filter((spec) => !deployment.pinned || spec.model === deployment.pinned.model)
-        .filter((spec) => speechToTextServesMeetings(deployment, spec))
-        .map((spec) => ({
-          providerId: provider.id,
-          providerName: provider.name,
-          model: spec.model,
-          name: spec.name,
-          available: availability.get(provider.id) ?? false,
-          funding: provider.funding,
-          capabilities: spec.capabilities,
-          usdPerHour: spec.usdPerHour,
-        })),
+      provider.models.flatMap((spec) => {
+        const meeting =
+          spec.capabilities.batch &&
+          (!pinned || (provider.id === pinned.providerId && spec.model === pinned.model)) &&
+          speechToTextServesMeetings(deployment, spec);
+        const live =
+          spec.capabilities.live &&
+          (!pinned ||
+            provider.id === pinned.providerId ||
+            (liveDefault?.providerId === provider.id && liveDefault.model === spec.model));
+        if (!meeting && !live) return [];
+        const state = perProvider.get(provider.id);
+        // Each entry offers what the region allows; with nothing left it
+        // stays listed, switched off, so clients show "Not supported in EU".
+        const meetingRegion = meeting && state?.region !== false;
+        const liveRegion = live && state?.liveRegion !== false;
+        const restricted = !meetingRegion && !liveRegion;
+        // The same test the worker charges by.
+        const chargedInCredits = Boolean(
+          provider.funding === "deployment" &&
+          voiceInputCreditBillingActive(deps.settings) &&
+          spec.creditPricing,
+        );
+        return [
+          {
+            providerId: provider.id,
+            providerName: provider.name,
+            model: spec.model,
+            name: spec.name,
+            available: restricted
+              ? false
+              : ((meetingRegion ? state?.available : state?.liveAvailable) ?? false),
+            ...(restricted ? { unavailableReason: REGION_RESTRICTED } : {}),
+            funding: provider.funding,
+            capabilities: restricted
+              ? { ...spec.capabilities, batch: meeting, live }
+              : { ...spec.capabilities, batch: meetingRegion, live: liveRegion },
+            // A price only where this workspace pays it: its own key, or credits
+            // charged for a deployment's model. Otherwise the hour costs it nothing.
+            usdPerHour:
+              provider.funding === "workspace_key" || chargedInCredits ? spec.usdPerHour : null,
+            chargedInCredits,
+          },
+        ];
+      }),
     );
     const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+    const liveModels = models.filter((model) =>
+      offered.some(
+        (provider) =>
+          provider.id === model.providerId &&
+          provider.models.some((spec) => spec.model === model.model && spec.capabilities.live),
+      ),
+    );
+    const liveRegionRestricted =
+      liveModels.length > 0 &&
+      liveModels.every((model) => perProvider.get(model.providerId)?.liveRegion === false);
     const preferred = voiceInput?.preferredProvider
       ? dictationProviders(deployment).find(
           (provider) =>
@@ -1012,7 +1314,9 @@ export function registerRecordingRoutes(
       default: defaults,
       dictationDefault,
       pinned: !!deployment.pinned,
-      language: resolveWorkspaceRecordingSettings(workspace?.settings).language ?? null,
+      language: recordingSettings.language ?? null,
+      // Recorders don't start it where EU-only inference refuses every live route.
+      liveTranscript: recordingSettings.liveTranscript === true && !liveRegionRestricted,
     });
   });
 
@@ -1026,12 +1330,15 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
     const { provider, spec } = liveModelChoice(body);
+    // EU-only: the client takes the minted secret straight to the provider,
+    // past the server's transport guard, so the secret itself is refused.
+    await deployment.assertRegion(provider.id, actor, "live_transcription");
     await admitRecordingUsage(actor);
     const resolved = await deployment.credentials(provider.id, actor);
-    const credentials = resolved === "missing" ? null : resolved.credentials;
     const liveLabels = { provider: provider.id, model: spec.model, funding: provider.funding };
     const liveHelp = "Live transcript sessions asked for, by outcome.";
-    if (!credentials) {
+    // Deployment accounts hold their own credential; only a key provider needs the workspace's.
+    if (resolved === "missing") {
       count("opengeni_recording_live_sessions_total", liveHelp, {
         ...liveLabels,
         outcome: "no_credentials",
@@ -1056,7 +1363,7 @@ export function registerRecordingRoutes(
     try {
       grant = await provider.createLiveSession!(
         { model: spec.model, language: language ?? undefined },
-        credentials,
+        resolved.credentials,
       );
     } catch (error) {
       count("opengeni_recording_live_sessions_total", liveHelp, {
@@ -1085,6 +1392,8 @@ export function registerRecordingRoutes(
       model: spec.model,
       protocol: grant.protocol,
       url: grant.url,
+      ...(grant.token ? { token: grant.token } : {}),
+      ...(grant.webrtcUrl ? { webrtcUrl: grant.webrtcUrl } : {}),
       audio: grant.audio,
       expiresAt: grant.expiresAt.toISOString(),
     };

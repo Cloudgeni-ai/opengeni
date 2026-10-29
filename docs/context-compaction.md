@@ -5,8 +5,8 @@ Opengeni freezes a per-session compaction mode at create time
 
 | Mode | When | Mechanism |
 | --- | --- | --- |
-| `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so Opengeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` (API only); `remote_v2` sessions after their first non-Codex turn | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the same 20k budget as portable compaction. The Agents SDK rejects a bare trigger item, so Opengeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. While the session stays on Codex models it stays `remote_v2`; see "Switching a remote_v2 session to another model" below. |
 
 There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -15,7 +15,41 @@ overflow retry is described below. Azure / OpenAI platform remote compact APIs
 are out of scope.
 
 Workspace setting `codexCompactionDefault` only affects **new** Codex sessions;
-later setting changes never move an already-frozen session.
+later setting changes never move an already-frozen session. It has no UI: any
+session may switch models, so there is no portability choice to make up front.
+A workspace that set `"portable"` earlier keeps it until the API sets
+`"remote_v2"` again.
+
+### Switching a remote_v2 session to another model
+
+Admission accepts any model on any session. When a turn on a non-Codex model
+claims a `remote_v2` session, the worker
+(`convertSessionToPortableCompactionForModelSwitch`) switches it to `portable`
+at once if no Codex checkpoint is active; otherwise it requests a forced
+compaction and runs that turn as portable. That write is fenced to the exact
+claiming turn attempt. The pre-turn compaction sees the
+opaque checkpoint in active history and rebuilds from the stored transcript
+instead (`readActiveSessionHistory(..., { rows: "stored_transcript" })`): every
+row since the latest context clear, including rows a compaction superseded,
+minus the rows any compaction inserted (identified by the
+`session.context.compacted` receipt's checkpoint position, its
+`replacementFromPosition`, and their shared insert transaction). A clear
+marker that a compaction retained is one of those inserted rows, never a new
+clear. Both bounds are resolved once per read, so the row filter compares
+constants. Compaction
+never deletes rows, so only Codex's opaque checkpoint and encrypted reasoning
+are unreadable; the portable path drops those as usual. The newest complete
+work units that fit the new model's checkpoint request are summarized
+(`portableSwitchTranscriptStart`); older ones are left out, and the receipt
+records how many (`modelSwitchEarlierItemsOmitted`). The replacement is
+installed with `implementation: "portable_model_switch"` (the timeline says
+"Earlier messages summarized for the new model") and switches
+`codex_compaction_mode` to `portable` in the same transaction, so a failed
+rebuild is requested again by the next non-Codex turn. A session never returns
+to `remote_v2`. A rebuild that installs nothing fails the turn
+(`EmptyCompactionSummaryError`, stage `portable_model_switch`) instead of
+running the new model on Codex's checkpoint, and every non-Codex turn omits
+`{ type: "compaction" }` items from its model input as a backstop.
 
 The portable path follows Codex CLI 0.146.0 local compaction (upstream tag
 `rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`) and is used
@@ -294,6 +328,27 @@ not `stop` cannot replace active history, even if it contains partial text.
 Provider-specific output ceilings are not in the model catalog; a provider
 that rejects this cap fails compaction with the existing active history intact.
 
+Both rebuilds (portable and remote v2) keep the answer of a retained request.
+
+- **Pairing.** Each history row carries the turn that wrote it. A retained
+  person message is followed by a text-only copy of the last assistant reply of
+  that same turn. The copy keeps the reply's start and end, at most 512 tokens,
+  and is charged to the same retained budget, so the retained window overshoots
+  that budget by at most one bounded reply.
+- **What is never paired.**
+  - The turn running the compaction, whose request may still be open.
+  - A reply from a different turn.
+  - A message whose turn is unknown: rows an earlier compaction rewrote before
+    turn ids were kept, and deferred rows.
+- **Duplicates.** A turn's reply follows only its last retained request.
+- **Repeated compactions.** Retained messages keep their original turn id in
+  `session_history_items.turn_id`. A reply copy is stored with a null turn id
+  and records its turn in `opengeni_retained_reply_turn` on the item, which is
+  stripped at the model wire. A later compaction pairs them again from these,
+  while turn-keyed readers such as a message fork's reply boundary see only the
+  original reply row. The summary row keeps the compacting turn, and deferred
+  rows stay unattributed.
+
 Explicit compaction is a new accepted logical turn and therefore records the
 same deterministic workspace instruction-policy and preference-descriptor
 governance as an ordinary agent turn (as a history item, see below). Its
@@ -459,6 +514,14 @@ system-role batches share the cleartext retention budget (user/system for
 portable, user/system/developer for remote v2). This preserves frozen goal
 snapshots, timestamps, update identities and direction chronologically, without
 promoting them to user intent, rebuilding mutable goals or replaying updates.
+Both modes use one 20,000-token budget (smaller on small models). Remote v2
+previously kept up to 64,000 tokens, following the Codex CLI, whose retained
+messages are short typed requests. In agent-driven sessions that window filled
+with platform updates the checkpoint already summarizes, leaving about 80,000
+tokens after each compaction instead of about 20,000.
+Turn-scoped operational notices are retained verbatim only for the turn running
+the compaction, or when one is the newest input; older notices are left to the
+checkpoint, because each applies only to its own turn.
 Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.
@@ -693,7 +756,7 @@ summary setting, alongside its exact instructions and tool schemas. Omitting the
 reasoning configuration can change provider-side instructions before the long
 history is summarized. Durable turn-scoped operational notices remain at their
 original positions in the compaction input. The resulting summarized history is
-still a deliberate new prefix.
+still a deliberate new prefix, and keeps only the current turn's notices.
 
 ### Reasoning effort updates (opt-in)
 

@@ -11,6 +11,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   type ConnectorToolPermissionsResponse,
 } from "@opengeni/sdk";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
@@ -233,7 +234,7 @@ describe("custom API control center browser acceptance", () => {
       expect(diagnostics).toEqual([]);
     } catch (error) {
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}\nRuntime diagnostics:\n${diagnostics.join("\n") || "(none)"}`,
+        `${errorMessage(error)}\nRuntime diagnostics:\n${diagnostics.join("\n") || "(none)"}`,
         { cause: error },
       );
     } finally {
