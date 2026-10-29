@@ -1236,7 +1236,10 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
         '","description":"Installed test Skill"}',
     );
     expect(captured.modelVisibleSkillCatalogText).toContain(
-      "Entries with an instructions field show that Skill's complete instructions",
+      "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions",
+    );
+    expect(captured.modelVisibleSkillCatalogText).not.toContain(
+      "The following entries are descriptors, not the Skill instructions.",
     );
   });
   test("omitted video descriptor reads no video policy at turn start", async () => {

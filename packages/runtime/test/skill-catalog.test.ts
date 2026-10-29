@@ -97,7 +97,7 @@ describe("sandbox-independent Skill catalog", () => {
     );
   });
 
-  test("shows short instructions in full, first, under one notice", () => {
+  test("shows short instructions in full, first, under one combined notice", () => {
     const catalog = formatSkillCatalog([
       deploy,
       management,
@@ -110,8 +110,8 @@ describe("sandbox-independent Skill catalog", () => {
     ]);
     expect(catalog).toBe(
       [
-        ...header,
-        "Entries with an instructions field show that Skill's complete instructions: follow them whenever the description applies, without skill_read.",
+        ...header.slice(0, -1),
+        "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions: follow them whenever its description applies, without skill_read. Use the id when names are ambiguous.",
         '- {"id":"skill-1","name":"reply-in-norwegian","description":"Applies in every conversation with this user.","instructions":"Always reply in Norwegian.\\nKeep code and quotes as they are."}',
         '- {"id":"builtin:skill-management","name":"skill-management","description":"Manage Skills"}',
         '- {"id":"workspace:deploy","name":"deploy","description":"Deploy services"}',
@@ -175,7 +175,58 @@ describe("sandbox-independent Skill catalog", () => {
     ).toBe("# Norwegian\n\nReply in Norwegian.");
     expect(skillInstructionsBody("Plain body\r\n")).toBe("Plain body");
     expect(skillInstructionsBody("---\nname: x\ndescription: y\n---\n  \n")).toBeNull();
-    expect(skillInstructionsBody("---\nunterminated")).toBe("---\nunterminated");
+  });
+
+  test("treats line endings alike and never shows unclosed frontmatter", () => {
+    const expected = "# Norwegian\nReply in Norwegian.";
+    expect(skillInstructionsBody("# Norwegian\r\nReply in Norwegian.\r\n")).toBe(expected);
+    expect(skillInstructionsBody("# Norwegian\rReply in Norwegian.")).toBe(expected);
+    expect(
+      skillInstructionsBody(
+        "---\r\nname: x\r\ndescription: y\r\n---\r\n# Norwegian\r\nReply in Norwegian.",
+      ),
+    ).toBe(expected);
+    expect(skillInstructionsBody("---\nname: x\ndescription: y\n# Norwegian\nReply.")).toBeNull();
+    expect(skillInstructionsBody("---\r\nunterminated")).toBeNull();
+  });
+
+  test("bounds instructions by their rendered, escaped size", () => {
+    // 1,024 plain bytes render as 1,024 and are shown; one escaped newline more is not.
+    const plain = "a".repeat(SKILL_CATALOG_INLINE_MAX_BYTES);
+    expect(formatSkillCatalog([management, { ...deploy, instructions: plain }])).toContain(
+      `"instructions":"${plain}"`,
+    );
+    const escapedOver = `${"a".repeat(SKILL_CATALOG_INLINE_MAX_BYTES - 2)}\nb`;
+    expect(formatSkillCatalog([management, { ...deploy, instructions: escapedOver }])).toBe(
+      formatSkillCatalog([management, deploy]),
+    );
+    // 200 control characters are 200 raw bytes but 1,200 rendered ones.
+    const control = `x${"\u0001".repeat(200)}x`;
+    expect(formatSkillCatalog([management, { ...deploy, instructions: control }])).toBe(
+      formatSkillCatalog([management, deploy]),
+    );
+    // The total counts rendered bytes too: five bodies of 819 raw bytes would
+    // fit 4,096, but with 11 newlines each renders 830 bytes, so four fit.
+    const body = `${"y\n".repeat(11)}${"z".repeat(797)}`;
+    expect(Buffer.byteLength(body) * 5).toBeLessThanOrEqual(SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES);
+    const entries = Array.from({ length: 5 }, (_, index) => ({
+      id: `p-${index}`,
+      name: `p-${index}`,
+      description: "Preference",
+      instructions: body,
+    }));
+    const catalog = formatSkillCatalog([management, ...entries]);
+    expect(catalog.split("\n").filter((line) => line.includes('"instructions"')).length).toBe(4);
+    const shown = catalog
+      .split("\n")
+      .filter((line) => line.startsWith("- {"))
+      .map((line) => JSON.parse(line.slice(2)) as { instructions?: string })
+      .filter((entry) => entry.instructions !== undefined);
+    const rendered = shown.reduce(
+      (sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry.instructions)) - 2,
+      0,
+    );
+    expect(rendered).toBeLessThanOrEqual(SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES);
   });
 
   test("composes through the ordinary no-sandbox instruction path", () => {

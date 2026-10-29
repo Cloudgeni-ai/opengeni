@@ -13,27 +13,40 @@ export type SkillCatalogDescriptor = Readonly<{
 
 export const SKILL_CATALOG_MAX_BYTES = 32 * 1024;
 export const SKILL_CATALOG_MAX_ENTRIES = 128;
-/** Largest instructions one entry may show in full, in UTF-8 bytes. */
+/**
+ * Largest instructions one entry may show in full, in UTF-8 bytes of the
+ * rendered (JSON-escaped) text, so escapes count as the index shows them.
+ */
 export const SKILL_CATALOG_INLINE_MAX_BYTES = 1024;
-/** Largest total of instructions shown in full across the index, in UTF-8 bytes. */
+/** Largest total of rendered instructions shown in full across the index, in UTF-8 bytes. */
 export const SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES = 4096;
 
-const INLINE_NOTICE =
-  "Entries with an instructions field show that Skill's complete instructions: follow them whenever the description applies, without skill_read.";
+const DESCRIPTOR_NOTICE =
+  "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.";
+/** Replaces the descriptor notice only when some entry is shown in full. */
+const DESCRIPTOR_AND_INLINE_NOTICE =
+  "The following entries are descriptors, except that an instructions field holds that Skill's complete instructions: follow them whenever its description applies, without skill_read. Use the id when names are ambiguous.";
 
 /**
  * The SKILL.md body without its frontmatter, as the index shows it in full.
- * Null when the remaining text is empty.
+ * Line endings are normalised the same way with or without frontmatter. Null
+ * when the remaining text is empty or the frontmatter has no closing line.
  */
 export function skillInstructionsBody(markdown: string): string | null {
-  const lines = markdown.split(/\r?\n/u);
-  let body = markdown;
+  const lines = markdown.split(/\r\n?|\n/u);
+  let body = lines.join("\n");
   if (lines[0]?.trim() === "---") {
     const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-    if (end !== -1) body = lines.slice(end + 1).join("\n");
+    if (end === -1) return null;
+    body = lines.slice(end + 1).join("\n");
   }
   const trimmed = body.trim();
   return trimmed ? trimmed : null;
+}
+
+/** UTF-8 bytes of a string as the index renders it inside a JSON string. */
+function renderedBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
 }
 
 /**
@@ -72,7 +85,7 @@ export function formatSkillCatalog(descriptors: readonly SkillCatalogDescriptor[
   for (const entry of sorted) {
     const text = entry.instructions?.trim();
     if (!text) continue;
-    const size = Buffer.byteLength(text, "utf8");
+    const size = renderedBytes(text);
     if (size > SKILL_CATALOG_INLINE_MAX_BYTES) continue;
     if (inlineBytes + size > SKILL_CATALOG_INLINE_TOTAL_MAX_BYTES) continue;
     inline.set(entry.id, text);
@@ -88,8 +101,7 @@ export function formatSkillCatalog(descriptors: readonly SkillCatalogDescriptor[
     byId.has("builtin:skill-management")
       ? "For finding, installing, creating, or editing Skills, read the skill-management Skill. Management tools are lazy and available through tool search."
       : "Management tools are lazy and available through tool search.",
-    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
-    ...(inline.size > 0 ? [INLINE_NOTICE] : []),
+    inline.size > 0 ? DESCRIPTOR_AND_INLINE_NOTICE : DESCRIPTOR_NOTICE,
   ].join("\n");
   const lines = [header];
   if (ordered.length === 0) lines.push("No configured Skills are currently available.");
