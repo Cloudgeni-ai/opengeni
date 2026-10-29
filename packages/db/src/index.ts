@@ -945,6 +945,9 @@ import {
 
 import {
   approvalIdentifier,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  resolveMcpElicitationContent,
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -28769,6 +28772,12 @@ export type ConnectorActionInvocation = {
   actionName?: string;
   /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
+  /**
+   * This execution only tells the provider that the person declined the
+   * question it asked mid-call (MCP elicitation). It is admitted once, from
+   * the rejected round of a request that asked.
+   */
+  deliversDecline?: true;
 };
 
 export type PrepareConnectorActionApprovalResult =
@@ -29859,6 +29868,35 @@ export async function beginConnectorActionExecution(
           actionFingerprint: row.actionFingerprint,
         } as const;
       }
+      if (row.status === "rejected" && row.inputRound > 0 && invocation.deliversDecline) {
+        // The person declined the provider's question: the call runs once
+        // more under that rejection, only to tell the provider so.
+        const [executing] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "executing",
+            executionAttemptId: identity.attemptId,
+            executionAttemptGeneration: identity.executionGeneration,
+            executionStartedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, row.id))
+          .returning();
+        if (!executing) throw new Error("Declined connector action request disappeared");
+        row = executing;
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.execution_started",
+          subjectId: identity.initiator.subjectId,
+          extra: { outcome: "decline_delivery", inputRound: row.inputRound },
+        });
+        return {
+          allowed: true,
+          managed: true,
+          requestId: row.id,
+          actionFingerprint: row.actionFingerprint,
+        } as const;
+      }
       if (row.status === "executing") {
         if (inserted) {
           return {
@@ -29921,7 +29959,13 @@ export async function completeConnectorActionExecution(
     workspaceId: string;
     requestId: string;
     attemptId: string;
-    outcome: "completed" | "uncertain" | "not_executed";
+    /**
+     * `input_required`: the provider stopped before finishing to ask the
+     * person a question (MCP elicitation). The request opens its next input
+     * round as an undecided `pending` request, so the answer is that round's
+     * approval decision and the retry executes once under it.
+     */
+    outcome: "completed" | "uncertain" | "not_executed" | "input_required";
   },
 ): Promise<void> {
   await runConnectorActionLedgerTransaction(
@@ -29941,11 +29985,22 @@ export async function completeConnectorActionExecution(
             and(
               eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
               eq(schema.connectorActionRequests.id, input.requestId),
-              eq(schema.connectorActionRequests.executionAttemptId, input.attemptId),
             ),
           );
       const [located] = await request().limit(1);
-      if (!located) throw new Error("Connector action request not found for completion");
+      // Asking the person releases the executing attempt, so a repeated
+      // settlement of the same question finds an undecided round instead.
+      const settledQuestion = (row: typeof located) =>
+        input.outcome === "input_required" &&
+        row?.status === "pending" &&
+        row.inputRound > 0 &&
+        row.executionAttemptId === null;
+      if (
+        !located ||
+        (located.executionAttemptId !== input.attemptId && !settledQuestion(located))
+      ) {
+        throw new Error("Connector action request not found for completion");
+      }
       // Settlement is not admission: it takes the canonical prefix but never the
       // Pause/Steer write fence, so an interrupted attempt still settles.
       await lockPrefix({
@@ -29955,6 +30010,43 @@ export async function completeConnectorActionExecution(
       });
       const [existing] = await request().for("update").limit(1);
       if (!existing) throw new Error("Connector action request not found for completion");
+      if (settledQuestion(existing)) return;
+      if (existing.executionAttemptId !== input.attemptId) {
+        throw new Error("Connector action request not found for completion");
+      }
+      if (input.outcome === "input_required") {
+        if (existing.status !== "executing") {
+          throw new Error(`Connector action request cannot ask from ${existing.status}`);
+        }
+        const [row] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "pending",
+            inputRound: existing.inputRound + 1,
+            // The new question is decided and executed afresh; earlier
+            // rounds' decisions stay in the audit log.
+            decision: null,
+            decisionBySubjectId: null,
+            decisionByKind: null,
+            decisionBySignedInPerson: false,
+            decisionEventId: null,
+            decidedAt: null,
+            executionAttemptId: null,
+            executionAttemptGeneration: null,
+            executionStartedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, existing.id))
+          .returning();
+        if (!row) throw new Error("Connector action request disappeared while asking");
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.approval_requested",
+          subjectId: row.initiatorSubjectId,
+          extra: { outcome: "input_required", inputRound: row.inputRound },
+        });
+        return;
+      }
       // A not-executed completion is a terminal failure whose provider
       // request never happened; it keeps the existing status vocabulary.
       // Reaching the terminal status is idempotent even when a concurrent
@@ -42829,6 +42921,8 @@ export type OpenSuffixPendingToolCall = {
   tiedReasoningItems: Array<Record<string, unknown>>;
   resultItem: Record<string, unknown> | null;
   modelToolOutputTruncationTokens: number | null;
+  /** Private state of the MCP server question that paused this call, if any. */
+  mcpInputRequest?: Record<string, unknown> | null;
 };
 
 function asOpenSuffixInterruptionKind(value: string | null): OpenSuffixInterruptionKind | null {
@@ -42852,6 +42946,8 @@ export async function attachOpenSuffixToPendingToolCalls(
       callId: string;
       interruptionKind: OpenSuffixInterruptionKind;
       reasoningItems: Array<Record<string, unknown>>;
+      /** The MCP server question that paused this call, kept outside events. */
+      mcpInputRequest?: Record<string, unknown>;
     }>;
   },
 ): Promise<{ accepted: boolean; attached: number }> {
@@ -42913,6 +43009,7 @@ export async function attachOpenSuffixToPendingToolCalls(
                 {
                   interruptionKind: member.interruptionKind,
                   tiedReasoningItems: member.reasoningItems,
+                  ...(member.mcpInputRequest ? { mcpInputRequest: member.mcpInputRequest } : {}),
                 },
                 "tiedReasoningItems",
                 "tiedReasoningItemsCodecVersion",
@@ -42962,6 +43059,7 @@ export async function listTurnOpenSuffixToolCalls(
         tiedReasoningItems: Array.isArray(row.tiedReasoningItems) ? row.tiedReasoningItems : [],
         resultItem: row.resultItem ?? null,
         modelToolOutputTruncationTokens: row.modelToolOutputTruncationTokens,
+        mcpInputRequest: row.mcpInputRequest ?? null,
       };
     });
   });
@@ -42991,6 +43089,53 @@ export async function listRecordedInteractionToolCallIds(
       );
     return new Set(rows.flatMap((row) => (row.toolCallId ? [row.toolCallId] : [])));
   });
+}
+
+/**
+ * The MCP server answered a resumed call with another question: replace the
+ * paused call's stored question so the next approval answers the new one. The
+ * call stays open; only the attempt that resumed it may write.
+ */
+export async function replacePendingToolCallMcpInputRequest(
+  db: Database,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    callId: string;
+    mcpInputRequest: Record<string, unknown>;
+  },
+): Promise<{ accepted: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          rowProjection: "event",
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) return { accepted: false };
+        const updated = await tx
+          .update(schema.sessionPendingToolCalls)
+          .set({ mcpInputRequest: input.mcpInputRequest })
+          .where(
+            and(
+              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+              eq(schema.sessionPendingToolCalls.callId, input.callId),
+              isNull(schema.sessionPendingToolCalls.resultItem),
+            ),
+          )
+          .returning({ id: schema.sessionPendingToolCalls.id });
+        if (updated.length !== 1) {
+          throw new Error(`Paused call ${input.callId} is no longer open`);
+        }
+        return { accepted: true };
+      }),
+  );
 }
 
 /**
@@ -89647,6 +89792,43 @@ export type AcceptSessionApprovalDecisionResult =
     }
   | { action: "conflict"; sessionStatus: SessionStatus };
 
+/** The answer to an approval's MCP server questions does not fit their forms. */
+export class SessionApprovalAnswerError extends Error {
+  override readonly name = "SessionApprovalAnswerError";
+}
+
+/**
+ * The decision payload to record for one pending approval. An approval with
+ * MCP server questions records the complete answer (the forms' defaults plus
+ * what the person entered), checked against each form; a rejection carries no
+ * answer. `content` for an approval without questions is refused.
+ */
+function approvalDecisionPayloadWithAnswer(
+  pending: unknown,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const elicitation =
+    pending && typeof pending === "object"
+      ? (pending as { elicitation?: unknown }).elicitation
+      : undefined;
+  const { content, ...withoutContent } = payload;
+  if (elicitation === undefined) {
+    if (content !== undefined) {
+      throw new SessionApprovalAnswerError("This approval has no questions to answer");
+    }
+    return payload;
+  }
+  if (payload.decision !== "approve") return withoutContent;
+  const request = McpElicitationApprovalRequest.parse(elicitation);
+  const given = content === undefined ? undefined : McpElicitationContent.safeParse(content);
+  if (given && !given.success) {
+    throw new SessionApprovalAnswerError("The answer is not a set of form values");
+  }
+  const resolution = resolveMcpElicitationContent(request, given?.data);
+  if (!resolution.ok) throw new SessionApprovalAnswerError(resolution.problem);
+  return { ...withoutContent, content: resolution.content };
+}
+
 /**
  * Accept exactly one decision for the currently waiting approval boundary.
  * The session and active turn are locked with the append so concurrent Pause,
@@ -89682,7 +89864,8 @@ export async function acceptSessionApprovalDecision(
 ): Promise<AcceptSessionApprovalDecisionResult> {
   // Defense in depth for internal callers: this field is ingress-only even
   // when a caller accidentally passes the complete public request payload.
-  const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = input.payload;
+  const { mcpCredentialUpdates: _writeOnlyCredentials, ...requestedPayload } = input.payload;
+  let payload = requestedPayload;
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -89805,19 +89988,20 @@ export async function acceptSessionApprovalDecision(
           )
           .orderBy(desc(schema.agentRunStates.stateVersion))
           .limit(1);
-        if (
-          typeof approvalId !== "string" ||
-          !runState ||
-          !fromPostgresLosslessJson(
-            runState.pendingApprovals,
-            runState.pendingApprovalsCodecVersion,
-          ).some((pending) => approvalIdentifier(pending) === approvalId)
-        ) {
+        const pendingApproval =
+          typeof approvalId === "string" && runState
+            ? fromPostgresLosslessJson(
+                runState.pendingApprovals,
+                runState.pendingApprovalsCodecVersion,
+              ).find((pending) => approvalIdentifier(pending) === approvalId)
+            : undefined;
+        if (typeof approvalId !== "string" || pendingApproval === undefined) {
           return {
             action: "conflict",
             sessionStatus: "requires_action",
           } as const;
         }
+        payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
           const expectedInteractionDecision =
             input.interactionIntervention.outcome === "completed" ? "approve" : "reject";
@@ -89945,7 +90129,12 @@ export async function acceptSessionApprovalDecision(
               row: connectorRequest,
               action: "connector.action.approval_decided",
               subjectId: input.subjectId,
-              extra: { decision: approvalDecision },
+              extra: {
+                decision: approvalDecision,
+                ...(connectorRequest.inputRound > 0
+                  ? { inputRound: connectorRequest.inputRound }
+                  : {}),
+              },
             });
           }
         }

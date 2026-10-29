@@ -11043,6 +11043,166 @@ for (const audience of ["private", "shared"] as const) {
   }, 90_000);
 }
 
+test("an MCP server's question shows in private Slack; a confirmation or a page to open is answered there and a form in the session", async () => {
+  if (!available) throw new Error("Real database is required");
+  const value = await fixture({ linkOther: true });
+  const rootTimestamp = "1770000000.000001";
+  await postEvent(value.app, {
+    teamId: value.teamId,
+    eventId: `E_QUESTION_${crypto.randomUUID()}`,
+    event: {
+      type: "message",
+      channel_type: "im",
+      user: value.ownerSlackUserId,
+      channel: "D_SERVER_QUESTION",
+      ts: rootTimestamp,
+      text: `<@${value.botUserId}> Share the plan`,
+    },
+  });
+  await drainAll(value.deps);
+  const [route] = await interactions(value.owner.workspaceId);
+  if (!route) throw new Error("Fixture interaction missing");
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+    sessionId: route.session_id,
+    workflowId: `session-${route.session_id}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("Fixture claim unavailable");
+  const confirmationId = crypto.randomUUID();
+  const formId = crypto.randomUUID();
+  const pageId = crypto.randomUUID();
+  const question = (message: string, properties: Record<string, unknown>) => ({
+    server: "Docs",
+    requests: [{ id: "q1", message, requestedSchema: { type: "object", properties } }],
+  });
+  await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+    sessionId: route.session_id,
+    turnId: claimed.turn.id,
+    triggerEventId: claimed.turn.triggerEventId,
+    attemptId,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: claimed.turn.id,
+    runState: {
+      serializedRunState: "{}",
+      pendingApprovals: [
+        { id: confirmationId, source: "codemode" },
+        { id: formId, source: "codemode" },
+        { id: pageId, source: "codemode" },
+      ],
+      humanInputRequests: [],
+    },
+    events: [
+      {
+        type: "session.requiresAction",
+        payload: {
+          approvals: [
+            {
+              id: confirmationId,
+              name: "docs__share",
+              arguments: { doc: "plan" },
+              elicitation: question("Share the plan with the whole team?", {}),
+            },
+            {
+              id: formId,
+              name: "docs__share",
+              arguments: { doc: "budget" },
+              elicitation: question("Which folder should the budget go in?", {
+                folder: { type: "string", title: "Folder" },
+              }),
+            },
+            {
+              id: pageId,
+              name: "docs__export",
+              arguments: { doc: "plan" },
+              elicitation: {
+                server: "Docs",
+                requests: [
+                  {
+                    id: "q1",
+                    mode: "url",
+                    message: "Sign in to Docs to export the plan.",
+                    url: "https://accounts.example.com/sign-in?account=work",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      { type: "session.status.changed", payload: { status: "requires_action" } },
+    ],
+  });
+  await drainAll(value.deps);
+  const post = value.slack.posts.at(-1)!;
+  const rendered = JSON.stringify(post);
+  expect(rendered).toContain(JSON.stringify("Docs asks:\nShare the plan with the whole team?"));
+  expect(rendered).toContain(JSON.stringify("Docs asks:\nWhich folder should the budget go in?"));
+  expect(rendered).toContain(
+    `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route.session_id}|Answer in Opengeni>`,
+  );
+  // Allow for the confirmation, the page's link and Continue, and Decline for all three.
+  expect(rendered).toContain(JSON.stringify("Docs asks:\nSign in to Docs to export the plan."));
+  expect(rendered).toContain(
+    JSON.stringify({
+      type: "button",
+      action_id: "opengeni.approval.open_page.0",
+      url: "https://accounts.example.com/sign-in?account=work",
+      text: { type: "plain_text", text: "Open accounts.example.com" },
+    }),
+  );
+  const handles = await shared!.admin<{ action_kind: string; target_id: string }[]>`
+    select action_kind, target_id from slack_interaction_action_handles
+    where message_operation_id = ${post.clientMessageId}::uuid order by action_kind, target_id`;
+  expect(handles.map((handle) => `${handle.action_kind}:${handle.target_id}`).sort()).toEqual(
+    [
+      `approval_approve:${confirmationId}`,
+      `approval_reject:${confirmationId}`,
+      `approval_reject:${formId}`,
+      `approval_approve:${pageId}`,
+      `approval_reject:${pageId}`,
+    ].sort(),
+  );
+  expect(rendered.match(/"text":"Allow"/gu)?.length).toBe(1);
+  expect(rendered.match(/"text":"Continue"/gu)?.length).toBe(1);
+  expect(rendered.match(/"text":"Decline"/gu)?.length).toBe(3);
+  // Opening the page is the browser's job: the click is acknowledged and ignored.
+  const inboxBefore = await shared!.admin<{ count: number }[]>`
+    select count(*)::int as count from slack_interaction_inbox`;
+  await pressSlackButton(value, {
+    post,
+    rootTimestamp,
+    actionId: "opengeni.approval.open_page.0",
+    handleId: "",
+    actionTs: "1770000000.090001",
+  });
+  expect(
+    await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from slack_interaction_inbox`,
+  ).toEqual(inboxBefore);
+  const [confirmationHandle] = await shared!.admin<{ id: string }[]>`
+    select id from slack_interaction_action_handles
+    where message_operation_id = ${post.clientMessageId}::uuid
+      and action_kind = 'approval_approve' and target_id = ${confirmationId}`;
+  await pressSlackButton(value, {
+    post,
+    rootTimestamp,
+    actionId: "opengeni.approval.approve",
+    handleId: confirmationHandle!.id,
+    actionTs: "1770000000.100001",
+  });
+  await drainAll(value.deps);
+  const decisions = await shared!.admin<{ approval_id: string; decision: string }[]>`
+    select payload->>'approvalId' as approval_id, payload->>'decision' as decision
+    from session_events
+    where session_id = ${route.session_id} and type = 'user.approvalDecision'`;
+  expect(decisions).toEqual([{ approval_id: confirmationId, decision: "approve" }]);
+}, 90_000);
+
 describe("Slack event source", () => {
   test("records channel activity for automations and keeps direct messages private", async () => {
     if (!available) return;

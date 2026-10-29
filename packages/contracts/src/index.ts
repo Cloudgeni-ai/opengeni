@@ -176,6 +176,8 @@ export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
+export * from "./mcp-elicitation";
+import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,
@@ -17010,6 +17012,21 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     eventSequence: z.number().int().positive().nullable().optional(),
     /** One-tap answers for a single short choice question; empty otherwise. */
     choices: z.array(z.object({ id: primitives.string, label: primitives.string })).max(4),
+    /**
+     * An approval whose tool's MCP server asks the person a question in the
+     * middle of the call: which server asks and how the person answers. A
+     * `confirm` is answered in one tap; `url` asks them to open `url` first
+     * and then continue; `form` has fields, answered in its form. The item's
+     * title is then the server's question. Null otherwise.
+     */
+    serverQuestion: z
+      .object({
+        server: primitives.string,
+        kind: z.enum(["confirm", "form", "url"]),
+        url: primitives.string.optional(),
+      })
+      .nullable()
+      .default(null),
     urgency: NotificationUrgency,
     status: InboxItemStatus,
     /** True while the person has not seen the item's current content. */
@@ -19962,6 +19979,12 @@ export type SessionApprovalRequestPublicFields = {
   id: string;
   name: string;
   arguments: unknown;
+  /**
+   * Present when an MCP server asked the person a question in the middle of
+   * this call (form elicitation). Approving answers it; see `content` on
+   * `user.approvalDecision`.
+   */
+  elicitation?: McpElicitationApprovalRequest;
 };
 
 export function withPublicApprovalFields<T>(
@@ -20041,6 +20064,12 @@ export const ClientSessionEvent = /* @__PURE__ */ defineSchema(() =>
         approvalId: primitives.nonEmptyString.max(SESSION_OPERATION_KEY_MAX_CHARS),
         decision: z.enum(["approve", "reject"]),
         message: z.string().optional(),
+        /**
+         * Answers to an approval's `elicitation` questions, keyed by request
+         * id. Checked against each form; omitted fields take the server's
+         * defaults, so a form without required fields needs no content.
+         */
+        content: McpElicitationContent.optional(),
         // Write-only header rotation committed with the response before resume.
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
       }),

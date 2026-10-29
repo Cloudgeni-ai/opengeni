@@ -26,6 +26,10 @@
       "types": "./src/automation-templates.ts",
       "default": "./src/automation-templates.ts"
     },
+    "./mcp-elicitation": {
+      "types": "./src/mcp-elicitation.ts",
+      "default": "./src/mcp-elicitation.ts"
+    },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
       "default": "./src/prepared-mcp-setup.ts"

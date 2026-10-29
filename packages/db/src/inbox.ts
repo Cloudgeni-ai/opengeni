@@ -20,6 +20,8 @@ export type InboxItemRow = {
   link: { url: string; label: string } | null;
   eventSequence: number | null;
   choices: Array<{ id: string; label: string }>;
+  /** An approval its tool's MCP server asks a question about (1101); null otherwise. */
+  serverQuestion: { server: string; kind: "confirm" | "form" | "url"; url?: string } | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   unread: boolean;
@@ -44,6 +46,7 @@ type InboxItemRecord = {
   link: unknown;
   event_sequence: number | null;
   choices: unknown;
+  server_question: unknown;
   urgency: InboxItemRow["urgency"];
   status: InboxItemRow["status"];
   unread: boolean;
@@ -71,6 +74,15 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
     const { id, label } = choice as { id?: unknown; label?: unknown };
     return typeof id === "string" && typeof label === "string" ? [{ id, label }] : [];
   });
+}
+
+function serverQuestionOf(value: unknown): InboxItemRow["serverQuestion"] {
+  const parsed = jsonValue(value);
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { server, kind, url } = parsed as { server?: unknown; kind?: unknown; url?: unknown };
+  if (typeof server !== "string" || !server) return null;
+  if (kind === "url" && typeof url === "string") return { server, kind, url };
+  return { server, kind: kind === "confirm" ? "confirm" : "form" };
 }
 
 function jsonValue(value: unknown): unknown {
@@ -105,7 +117,7 @@ export async function listInboxItems(
 ): Promise<InboxItemRow[]> {
   const rows = await rawRows<InboxItemRecord>(
     db,
-    sql`select * from opengeni_private.list_inbox_items_v3(
+    sql`select * from opengeni_private.list_inbox_items_v4(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -122,6 +134,7 @@ export async function listInboxItems(
     link: linkOf(row.link),
     eventSequence: row.event_sequence ?? null,
     choices: choicesOf(row.choices),
+    serverQuestion: serverQuestionOf(row.server_question),
     urgency: row.urgency,
     status: row.status,
     unread: row.unread,

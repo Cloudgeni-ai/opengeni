@@ -100,6 +100,8 @@ async function actOnNotification(
   const item = open[0];
   if (open.length !== 1 || !item) return false;
   if (kind === "approval") {
+    // An MCP server's form or page to open is answered in the app.
+    if (item.serverQuestion && item.serverQuestion.kind !== "confirm") return false;
     await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
       approvalId: item.sourceKey,
       decision: action === APPROVE_ACTION ? "approve" : "reject",

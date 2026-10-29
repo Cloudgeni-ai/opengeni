@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { toolReviewAction, toolReviewFields, type ToolActionReview } from "@opengeni/contracts";
 import {
+  isSlackServerQuestionPageAction,
+  slackServerQuestion,
   slackToolReviewBlocks,
   slackToolReviewCanDecide,
 } from "../src/integrations/slack-tool-review";
@@ -64,4 +66,55 @@ test("a single oversized fact links to complete review rather than truncating or
   const oversized = { ...review, effects: ["x".repeat(2801)] };
   expect(slackToolReviewCanDecide(oversized)).toBe(false);
   expect(JSON.stringify(slackToolReviewBlocks(oversized, true))).not.toContain("x".repeat(2801));
+});
+
+test("a server question is answerable in Slack when it is a confirmation or a page to open", () => {
+  const confirm = slackServerQuestion({
+    server: "Docs",
+    requests: [
+      { id: "q1", message: "Share it?", requestedSchema: { type: "object", properties: {} } },
+    ],
+  });
+  expect(confirm).toMatchObject({ kind: "confirm", answerableInSlack: true, pageButtons: [] });
+  const page = slackServerQuestion({
+    server: "Docs",
+    requests: [
+      {
+        id: "q1",
+        mode: "url",
+        message: "Sign in first.",
+        url: "https://accounts.example.com/sign-in?account=work",
+      },
+    ],
+  });
+  expect(page).toMatchObject({ kind: "url", answerableInSlack: true });
+  expect(page.pageButtons).toEqual([
+    {
+      type: "button",
+      action_id: "opengeni.approval.open_page.0",
+      url: "https://accounts.example.com/sign-in?account=work",
+      text: { type: "plain_text", text: "Open accounts.example.com" },
+    },
+  ]);
+  const form = slackServerQuestion({
+    server: "Docs",
+    requests: [
+      {
+        id: "q1",
+        message: "Which folder?",
+        requestedSchema: { type: "object", properties: { folder: { type: "string" } } },
+      },
+    ],
+  });
+  expect(form).toMatchObject({ kind: "form", answerableInSlack: false, pageButtons: [] });
+});
+
+test("a click on a page link is recognized so it is acknowledged, never queued", () => {
+  const click = (actionId: string) => ({
+    type: "block_actions",
+    actions: [{ action_id: actionId, action_ts: "1" }],
+  });
+  expect(isSlackServerQuestionPageAction(click("opengeni.approval.open_page.0"))).toBe(true);
+  expect(isSlackServerQuestionPageAction(click("opengeni.approval.approve"))).toBe(false);
+  expect(isSlackServerQuestionPageAction({ type: "view_submission" })).toBe(false);
 });

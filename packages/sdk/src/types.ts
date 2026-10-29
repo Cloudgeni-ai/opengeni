@@ -38,6 +38,14 @@ import type {
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
 export type {
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationRequestedSchema,
+  McpElicitationValue,
+} from "@opengeni/contracts";
+import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
+export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -6829,6 +6837,14 @@ export type InboxItem = {
   eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
+  /**
+   * An approval whose tool's MCP server asks the person a question in the
+   * middle of the call: the title is then the server's question. Only a
+   * `confirm` is answered in one tap; a `url` question asks the person to open
+   * `url` first, and a `form` has fields to fill in (load it with
+   * `getToolActionReview`). Null or absent otherwise.
+   */
+  serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   /** True while the person has not seen the item's current content. */
@@ -6857,6 +6873,17 @@ export type InboxItemLink = { url: string; label: string };
 
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
+
+/**
+ * The MCP server asking about an approval in the inbox, and how the person
+ * answers: in one tap (`confirm`), after opening `url` (`url`), or in a form.
+ */
+export type InboxItemServerQuestion = {
+  server: string;
+  kind: "confirm" | "form" | "url";
+  /** The https page a `url` question asks the person to open. */
+  url?: string;
+};
 
 export type ListInboxResponse = {
   items: InboxItem[];
@@ -10317,6 +10344,13 @@ export type SessionApprovalRequest = {
   name: string;
   /** Tool arguments as the model produced them (usually a JSON string). */
   arguments: unknown;
+  /**
+   * Present when the tool's MCP server stopped mid-call to ask the person
+   * (form elicitation). Approving sends the answers as `content`, keyed by
+   * `requests[].id` and then by field name; omitted fields take the form's
+   * defaults. Rejecting declines the question and ends the call.
+   */
+  elicitation?: McpElicitationApprovalRequest | undefined;
   [compatibilityField: string]: unknown;
 };
 
@@ -10328,6 +10362,8 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Answers to the approval's `elicitation` forms; only with `approve`. */
+    content?: McpElicitationContent | undefined;
     /** Server-owned header rotation applied atomically when the response is accepted. */
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };

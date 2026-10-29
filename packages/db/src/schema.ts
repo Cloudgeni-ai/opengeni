@@ -8969,6 +8969,9 @@ export const connectorActionRequests = pgTable(
       withTimezone: true,
     }),
     outcome: text("outcome"),
+    // 1102: times the provider stopped this call to ask the person (MCP
+    // elicitation). Each round has its own decision and single execution.
+    inputRound: integer("input_round").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -10430,6 +10433,8 @@ export const sessionPendingToolCalls = pgTable(
     eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
+    /** Private state of an MCP server question that paused this call; never in events. */
+    mcpInputRequest: jsonb("mcp_input_request").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
