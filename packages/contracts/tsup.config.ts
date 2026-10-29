@@ -81,6 +81,7 @@ export default defineConfig({
     "src/event-triggers.ts",
     "src/automation-templates.ts",
     "src/mcp-elicitation.ts",
+    "src/mcp-elicitation-model.ts",
   ],
   format: ["esm"],
   target: "es2022",

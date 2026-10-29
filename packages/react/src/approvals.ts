@@ -4,9 +4,9 @@ import {
   type SessionEvent,
 } from "@opengeni/sdk";
 import {
-  McpElicitationApprovalRequest,
+  parseMcpElicitationApprovalRequest,
   type McpElicitationApprovalRequest as McpElicitation,
-} from "@opengeni/contracts/mcp-elicitation";
+} from "@opengeni/contracts/mcp-elicitation-model";
 
 /* ----------------------------------------------------------------------------
    Pending-approvals projection
@@ -65,16 +65,14 @@ export function approvalsFromRequiresAction(payload: unknown): PendingApproval[]
         : {};
     const display = parseToolDisplayMetadata(raw.display);
     const elicitation =
-      raw.elicitation === undefined
-        ? undefined
-        : McpElicitationApprovalRequest.safeParse(raw.elicitation);
+      raw.elicitation === undefined ? null : parseMcpElicitationApprovalRequest(raw.elicitation);
     return {
       // Mirror the runtime's canonical interruption identity before retaining
       // the legacy top-level callId fallback for already-normalized payloads.
       id: String(rawItem.callId ?? rawItem.id ?? raw.id ?? raw.callId ?? raw.name ?? index),
       name: String(raw.name ?? raw.toolName ?? rawItem.name ?? "approval"),
       ...(display ? { display } : {}),
-      ...(elicitation?.success ? { elicitation: elicitation.data } : {}),
+      ...(elicitation ? { elicitation } : {}),
       arguments: raw.arguments ?? rawItem.arguments,
       raw: approval,
     };

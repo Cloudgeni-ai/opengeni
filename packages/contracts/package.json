@@ -30,6 +30,10 @@
       "types": "./src/mcp-elicitation.ts",
       "default": "./src/mcp-elicitation.ts"
     },
+    "./mcp-elicitation-model": {
+      "types": "./src/mcp-elicitation-model.ts",
+      "default": "./src/mcp-elicitation-model.ts"
+    },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
       "default": "./src/prepared-mcp-setup.ts"

@@ -6,7 +6,7 @@ import {
   type McpElicitationContent,
   type McpElicitationField,
   type McpElicitationValue,
-} from "@opengeni/contracts/mcp-elicitation";
+} from "@opengeni/contracts/mcp-elicitation-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { Selector } from "./selector";

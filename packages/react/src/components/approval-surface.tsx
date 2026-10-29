@@ -25,7 +25,7 @@ import { McpElicitationRequest } from "./mcp-elicitation-request";
 import type {
   McpElicitationAnswer,
   McpElicitationContent,
-} from "@opengeni/contracts/mcp-elicitation";
+} from "@opengeni/contracts/mcp-elicitation-model";
 
 export type ApprovalSurfaceMessages = {
   title: string;

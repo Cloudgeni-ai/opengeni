@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import type { z } from "zod";
+import * as model from "../src/mcp-elicitation-model";
 import {
   MCP_ELICITATION_MAX_ROUNDS,
   McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationQuestion,
+  McpElicitationRequestedSchema as RequestedSchemaSchema,
+  McpElicitationValue as ValueSchema,
   mcpElicitationChoices,
   mcpElicitationDefaults,
   mcpElicitationKind,
@@ -197,5 +204,83 @@ describe("MCP elicitation questions", () => {
   test("the kind of question says how the person answers it", () => {
     expect(mcpElicitationKind(request(confirm))).toBe("confirm");
     expect(mcpElicitationKind(request(confirm, details))).toBe("form");
+  });
+});
+
+/** True only when a schema infers exactly the zod-free model's type. */
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+describe("the zod-free model", () => {
+  test("each schema infers exactly the model's type", () => {
+    const proofs: [
+      Same<z.infer<typeof McpElicitationField>, model.McpElicitationField>,
+      Same<z.infer<typeof RequestedSchemaSchema>, model.McpElicitationRequestedSchema>,
+      Same<z.infer<typeof McpElicitationQuestion>, model.McpElicitationQuestion>,
+      Same<z.infer<typeof McpElicitationApprovalRequest>, model.McpElicitationApprovalRequest>,
+      Same<z.infer<typeof ValueSchema>, model.McpElicitationValue>,
+      Same<z.infer<typeof McpElicitationContent>, model.McpElicitationContent>,
+    ] = [true, true, true, true, true, true];
+    expect(proofs.every(Boolean)).toBe(true);
+  });
+
+  test("the structural parser accepts what the schema accepts and refuses broken shapes", () => {
+    const valid = [request(confirm), request(details), request(confirm, details)];
+    for (const question of valid) {
+      expect(McpElicitationApprovalRequest.safeParse(question).success).toBe(true);
+      expect(model.parseMcpElicitationApprovalRequest(question)).toEqual(question);
+    }
+    const base = request(details);
+    const broken: unknown[] = [
+      null,
+      "Calendar",
+      { ...base, server: "" },
+      { ...base, round: 0 },
+      { ...base, round: MCP_ELICITATION_MAX_ROUNDS + 1 },
+      { ...base, round: 1.5 },
+      { ...base, requests: [] },
+      { ...base, requests: [{ id: "q1", mode: "url", message: "?", url: "https://x" }] },
+      { ...base, requests: [{ id: "", message: "?", requestedSchema: confirm }] },
+      {
+        ...base,
+        requests: [{ id: "q1", message: "?", requestedSchema: { ...confirm, required: ["a"] } }],
+      },
+      {
+        ...base,
+        requests: [
+          {
+            id: "q1",
+            message: "?",
+            requestedSchema: { ...confirm, properties: { a: { type: "file" } } },
+          },
+        ],
+      },
+      {
+        ...base,
+        requests: [
+          {
+            id: "q1",
+            message: "?",
+            requestedSchema: { ...confirm, properties: { a: { type: "boolean", default: "yes" } } },
+          },
+        ],
+      },
+      {
+        ...base,
+        requests: [
+          {
+            id: "q1",
+            message: "?",
+            requestedSchema: {
+              ...confirm,
+              properties: { a: { type: "array", items: { type: "string", enum: [] } } },
+            },
+          },
+        ],
+      },
+    ];
+    for (const value of broken) {
+      expect(McpElicitationApprovalRequest.safeParse(value).success).toBe(false);
+      expect(model.parseMcpElicitationApprovalRequest(value)).toBeNull();
+    }
   });
 });

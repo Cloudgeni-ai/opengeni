@@ -5,7 +5,10 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import type { PendingApproval } from "@opengeni/react/session";
-import { mcpElicitationKind, type McpElicitationAnswer } from "@opengeni/contracts/mcp-elicitation";
+import {
+  mcpElicitationKind,
+  type McpElicitationAnswer,
+} from "@opengeni/contracts/mcp-elicitation-model";
 import {
   approvalAnswerLabels,
   approvalArgumentsText,

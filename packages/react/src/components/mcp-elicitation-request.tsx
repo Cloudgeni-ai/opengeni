@@ -8,7 +8,7 @@ import {
   type McpElicitationContent,
   type McpElicitationField,
   type McpElicitationValue,
-} from "@opengeni/contracts/mcp-elicitation";
+} from "@opengeni/contracts/mcp-elicitation-model";
 import { cn } from "../lib/cn";
 import { useOpenGeniText } from "../messages/runtime";
 import { DecisionActions, DecisionButton } from "./decision-card";
