@@ -182,8 +182,8 @@ export function RootRouteComponent() {
         ? "excel"
         : "general",
   });
-  // Public surfaces render ahead of auth/config gates. `/reset-password` is
-  // always public; DEV visual harnesses are public and need no session.
+  // Public surfaces render ahead of auth/config gates. `/reset-password` and
+  // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
@@ -193,6 +193,7 @@ export function RootRouteComponent() {
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
+    pathname.startsWith("/share/") ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
     pathname === EXCEL_ADDIN_PATH ||

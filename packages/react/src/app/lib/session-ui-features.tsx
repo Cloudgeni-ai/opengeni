@@ -31,6 +31,11 @@ export type SessionUiFeatures = Readonly<{
    */
   starters: boolean;
   /**
+   * Share in the chat header: a read-only link to the chat's conversation
+   * so far, which anyone holding it can open. The server can turn links off.
+   */
+  shareLinks: boolean;
+  /**
    * The "Add credits" button on the new-chat page, for people who manage
    * billing where Opengeni bills by card. Off, the credits notice still shows
    * when the chosen model's credits run out.
@@ -49,6 +54,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: true,
     brand: true,
     starters: true,
+    shareLinks: true,
     addCredits: true,
   },
   /**
@@ -62,12 +68,13 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: false,
     brand: true,
     starters: true,
+    shareLinks: true,
     addCredits: false,
   },
   /**
    * A customer product page (the default): the chat list, chats and composer,
    * without Opengeni's brand and suggested tasks, the session panel, admin
-   * access or page-wide shortcuts until the host turns them on.
+   * access, share links or page-wide shortcuts until the host turns them on.
    */
   embed: {
     chatList: true,
@@ -76,6 +83,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: false,
     brand: false,
     starters: false,
+    shareLinks: false,
     addCredits: true,
   },
 };

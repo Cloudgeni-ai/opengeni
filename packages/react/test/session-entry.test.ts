@@ -69,6 +69,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/secret-use-approval",
       // The timeline's task usage-limit stop: a zod-free refusal leaf.
       "@opengeni/sdk/session-usage-limits",
+      // Timeline ordering shared with server-side conversation snapshots.
+      "@opengeni/sdk/timeline-order",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);
@@ -100,6 +102,7 @@ describe("session-only entry", () => {
             "@opengeni/sdk",
             "@opengeni/sdk/allowance-refusal",
             "@opengeni/sdk/learning-refusal",
+            "@opengeni/sdk/timeline-order",
           ],
         },
       },
