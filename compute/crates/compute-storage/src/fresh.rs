@@ -30,16 +30,18 @@
 //! a condition. Only rule 2 rests on clocks, which may disagree by up to
 //! [`CLOCK_SKEW`], well within its day of margin. In a fleet every writer
 //! and sweep reads one clock, the database's ([`Clock::following`]), so a
-//! host whose own clock runs wrong cannot break it.
+//! host whose own clock runs wrong, or is stepped while it runs, cannot
+//! break it.
 //!
 //! Objects in the old layout, named by content alone, are never written
 //! again. One no pointer names is deleted once it was last stored more
-//! than [`LEGACY_SWEEP_AFTER`] before the sweep began.
+//! than [`LEGACY_SWEEP_AFTER`] before the sweep began, and only once the
+//! pointers that may name it have been where the sweep reads them for as
+//! long (see [`crate::sweep::sweep`]).
 
 use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 const DAY: Duration = Duration::from_secs(86_400);
 
@@ -83,11 +85,12 @@ impl Clock {
         Self(Arc::new(now))
     }
 
-    /// The system clock moved by `offset_ms` (which may be negative), read
-    /// again on every call: another clock, as last compared with this one.
+    /// Another clock, as `heard` last heard it, moved on since by this
+    /// process's monotonic clock: a step of the system clock does not move
+    /// it. The system clock until it is first heard.
     #[must_use]
-    pub fn following(offset_ms: Arc<AtomicI64>) -> Self {
-        Self::from_fn(move || shifted(SystemTime::now(), offset_ms.load(Ordering::Relaxed)))
+    pub fn following(heard: Arc<Heard>) -> Self {
+        Self::from_fn(move || heard.now())
     }
 
     #[must_use]
@@ -134,6 +137,36 @@ impl fmt::Debug for Clock {
     }
 }
 
+/// Another clock as last heard: the time it told, in milliseconds since
+/// 1970, and when that was on this process's monotonic clock.
+#[derive(Debug, Default)]
+pub struct Heard(Mutex<Option<(Instant, u64)>>);
+
+impl Heard {
+    /// Heard as telling `now_ms` just now.
+    #[must_use]
+    pub fn at(now_ms: u64) -> Self {
+        let heard = Self::default();
+        heard.note(now_ms);
+        heard
+    }
+
+    /// Notes that the other clock tells `now_ms` now.
+    pub fn note(&self, now_ms: u64) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), now_ms));
+    }
+
+    /// The other clock now: as last heard, moved on by the time since on the
+    /// monotonic clock; the system clock if it was never heard.
+    #[must_use]
+    pub fn now(&self) -> SystemTime {
+        let heard = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        heard.map_or_else(SystemTime::now, |(at, ms)| {
+            SystemTime::UNIX_EPOCH + Duration::from_millis(ms) + at.elapsed()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,17 +198,44 @@ mod tests {
         assert_eq!(shifted(at, offset), ahead);
         assert_eq!(shifted(ahead, -offset), at);
         assert_eq!(shifted(at, i64::MIN), SystemTime::UNIX_EPOCH);
-        let followed = Arc::new(AtomicI64::new(-86_400_000));
-        let clock = Clock::following(Arc::clone(&followed));
         let near = |a: SystemTime, b: SystemTime| {
             a.duration_since(b)
                 .or_else(|_| b.duration_since(a))
                 .unwrap()
                 < Duration::from_secs(60)
         };
+        let followed = Arc::new(Heard::default());
+        let clock = Clock::following(Arc::clone(&followed));
+        assert!(
+            near(clock.now(), SystemTime::now()),
+            "unheard, the system's"
+        );
+        let behind = SystemTime::now() - DAY;
+        followed.note(
+            u64::try_from(
+                behind
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap(),
+        );
         assert!(near(clock.now() + DAY, SystemTime::now()));
-        followed.store(0, Ordering::Relaxed);
+        let earlier = clock.now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(clock.now() > earlier, "it moves on by the monotonic clock");
+        followed.note(millis_now());
         assert!(near(clock.now(), SystemTime::now()));
+    }
+
+    fn millis_now() -> u64 {
+        u64::try_from(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use compute_fleet::{HostState, Stamp};
-use compute_storage::fresh::{offset_ms, shifted};
+use compute_storage::fresh::offset_ms;
 use compute_storage::pointer_store::{Kept, ObjectPointers, PointerStore, Version};
 use compute_storage::store::SETTLE;
 use futures::future::BoxFuture;
@@ -30,8 +30,8 @@ use crate::store::{Found, Import, PointerRow, Store, StoreError};
 /// How many pointers an import reads from the object store at once.
 const READ_AT_ONCE: usize = 16;
 
-/// How long a replica goes by its own clock, moved by how far the fleet's
-/// was ahead when it last read it, before it reads the fleet's again.
+/// How long a replica goes by the fleet's clock as it last read it, moved
+/// on by its own monotonic clock, before it reads the fleet's again.
 const CLOCK_FOR: Duration = Duration::from_secs(30);
 
 /// How far a replica's clock may be from the fleet's before it warns.
@@ -53,9 +53,8 @@ pub struct Pointers<S> {
     /// Set once the store says they were imported, which it never unsays.
     imported: AtomicBool,
     /// When this replica last read the fleet's clock, on its monotonic
-    /// clock, and how far ahead of its own system clock it was, in
-    /// milliseconds.
-    compared: Mutex<Option<(Instant, i64)>>,
+    /// clock, and what it read then, in milliseconds since 1970.
+    compared: Mutex<Option<(Instant, u64)>>,
 }
 
 impl<S> fmt::Debug for Pointers<S> {
@@ -77,30 +76,31 @@ impl<S: Store> Pointers<S> {
     }
 
     /// The fleet's clock now, in milliseconds since 1970: the store's,
-    /// read again every [`CLOCK_FOR`].
+    /// read again every [`CLOCK_FOR`] and moved on by the monotonic clock
+    /// in between, so a step of this replica's system clock does not move
+    /// it.
     pub async fn now_ms(&self) -> Result<u64, Unanswered> {
         let compared = *self.compared.lock().unwrap_or_else(PoisonError::into_inner);
-        let offset = match compared {
-            Some((at, offset)) if at.elapsed() < CLOCK_FOR => offset,
-            _ => {
-                let asked = SystemTime::now();
-                let fleet = self.store.clock_ms().await?;
-                let answered = SystemTime::now();
-                let midway = asked + answered.duration_since(asked).unwrap_or_default() / 2;
-                let offset = offset_ms(fleet, midway);
-                if offset.saturating_abs() > CLOCK_WARN_MS {
-                    tracing::warn!(
-                        offset_ms = offset,
-                        "this replica's clock is far from the fleet's (its database's); \
-                         hosts and sweeps go by the fleet's"
-                    );
-                }
-                *self.compared.lock().unwrap_or_else(PoisonError::into_inner) =
-                    Some((Instant::now(), offset));
-                offset
-            }
-        };
-        Ok(millis(shifted(SystemTime::now(), offset)))
+        if let Some((at, fleet)) = compared
+            && at.elapsed() < CLOCK_FOR
+        {
+            return Ok(fleet.saturating_add(elapsed_ms(at)));
+        }
+        let asked = Instant::now();
+        let fleet = self.store.clock_ms().await?;
+        // Read about midway through the request.
+        let fleet = fleet.saturating_add(elapsed_ms(asked) / 2);
+        let offset = offset_ms(fleet, SystemTime::now());
+        if offset.saturating_abs() > CLOCK_WARN_MS {
+            tracing::warn!(
+                offset_ms = offset,
+                "this replica's clock is far from the fleet's (its database's); \
+                 hosts and sweeps go by the fleet's"
+            );
+        }
+        *self.compared.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Instant::now(), fleet));
+        Ok(fleet)
     }
 
     /// Answers whether the fleet's pointers are in the store, asking it
@@ -137,12 +137,9 @@ impl<S: Store> Pointers<S> {
     }
 }
 
-/// `at` in milliseconds since 1970.
-fn millis(at: SystemTime) -> u64 {
-    at.duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+/// Milliseconds since `at`, on the monotonic clock.
+fn elapsed_ms(at: Instant) -> u64 {
+    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn storage(error: &Unanswered) -> compute_storage::Error {
@@ -202,6 +199,9 @@ impl<S: Store> PointerStore for Pointers<S> {
 /// names `url`, into the store once no live or draining host keeps its
 /// pointers there, trying every `every` until that is done; from then on
 /// `pointers` answers. Every replica may run it: the store imports once.
+/// Then it adopts what an import on an object store still catching up
+/// missed ([`adopt`]) at once and a few times over the next hour, so such a
+/// sandbox can be woken long before the next sweep would adopt it.
 pub async fn import<S: Store>(
     pointers: Arc<Pointers<S>>,
     from: ObjectPointers,
@@ -220,7 +220,7 @@ pub async fn import<S: Store>(
                     at_ms = imported.at_ms,
                     "the fleet's pointers are in the service"
                 );
-                return;
+                break;
             }
             Ok(Import::Waiting(hosts)) => {
                 metrics.pointers(false, hosts.len());
@@ -239,7 +239,23 @@ pub async fn import<S: Store>(
         }
         tokio::time::sleep(every).await;
     }
+    for after in ADOPT_AFTER {
+        tokio::time::sleep(after).await;
+        if let Err(error) = adopt(&*pointers.store, &from).await {
+            tracing::warn!(%error, "adopting pointers an import missed failed; a later pass or the next sweep tries again");
+        }
+    }
 }
+
+/// When a replica adopts what an import missed, each after the one before:
+/// at once, then over the next hour.
+const ADOPT_AFTER: [Duration; 5] = [
+    Duration::ZERO,
+    Duration::from_secs(120),
+    Duration::from_secs(480),
+    Duration::from_secs(1_200),
+    Duration::from_secs(1_800),
+];
 
 /// Imports once if it can; reads the object store only once no host
 /// seems to keep its pointers there, and the store checks that again,
@@ -262,11 +278,8 @@ async fn import_once<S: Store>(
     if !waiting.is_empty() {
         return Ok(Import::Waiting(waiting));
     }
-    let at_ms = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis(),
-    )?;
+    // By the fleet's clock, as a sweep reads when it was.
+    let at_ms = store.clock_ms().await?;
     // Marked before it is read: a sweep by the pointers left there, which
     // nothing updates from now on, would delete what the service's name.
     from.mark_moved(at_ms).await?;
@@ -469,10 +482,52 @@ mod tests {
     #[tokio::test]
     async fn the_fleets_clock_is_the_stores() {
         let pointers = Pointers::new(Arc::new(MemoryStore::new()));
-        let now = millis(SystemTime::now());
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
         let fleet = pointers.now_ms().await.unwrap();
         assert!(fleet.abs_diff(now) < 5_000, "{fleet} {now}");
         // Read again within the window, the offset is reused.
         assert!(pointers.now_ms().await.unwrap() >= fleet);
+    }
+
+    /// An import on an object store still catching up can miss a pointer
+    /// it lists only later. The replica adopts it within minutes of the
+    /// move, so that sandbox wakes long before the next sweep would have
+    /// adopted it.
+    #[tokio::test(start_paused = true)]
+    async fn a_pointer_an_import_missed_is_adopted_within_minutes() {
+        let from = ObjectPointers::new(Arc::new(InMemory::new()), Path::from("fleet"));
+        from.write("s-listed", stamp(1, 1), Bytes::from_static(b"one"), None)
+            .await
+            .unwrap()
+            .expect("created");
+        let store = Arc::new(MemoryStore::new());
+        let pointers = Arc::new(Pointers::new(Arc::clone(&store)));
+        let task = tokio::spawn(import(
+            Arc::clone(&pointers),
+            from.clone(),
+            "memory://fleet".into(),
+            Duration::from_secs(5),
+            Arc::new(Metrics::default()),
+        ));
+        while store.pointers_imported().await.unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(pointers.read("s-listed").await.unwrap().is_some());
+        // Only now does the object store show this one.
+        from.write("s-late", stamp(1, 1), Bytes::from_static(b"late"), None)
+            .await
+            .unwrap()
+            .expect("created");
+        tokio::time::sleep(Duration::from_secs(121)).await;
+        let adopted = pointers.read("s-late").await.unwrap().expect("adopted");
+        assert_eq!(adopted.pointer, b"late");
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+        assert!(task.is_finished(), "the passes end within the hour");
     }
 }

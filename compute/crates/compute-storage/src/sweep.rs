@@ -8,7 +8,8 @@
 //! earlier can replace it, asks which objects each one names, and deletes
 //! the other chunks and manifests whose day ended a whole day before it
 //! began ([`crate::fresh::sweepable`]); one of the old layout once it was
-//! last stored more than [`LEGACY_SWEEP_AFTER`] before. Deletes carry no
+//! last stored more than [`LEGACY_SWEEP_AFTER`] before, and the pointers
+//! were kept where the sweep reads them for as long. Deletes carry no
 //! condition: nothing writes those names again. [`crate::fresh`] explains
 //! why that is safe while archives run. Anything it cannot read stops it
 //! before it deletes anything: a pointer it could not read may name
@@ -19,6 +20,7 @@
 //! pointer once; one sweep covers one store prefix.
 
 use std::collections::HashSet;
+use std::time::SystemTime;
 
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 
@@ -62,15 +64,33 @@ pub struct Report {
 /// bytes keeps; [`crate::copy::names`] for sandboxes' stored copies. With
 /// `delete` false nothing is deleted or written, and the report says what
 /// would be deleted.
-pub async fn sweep<F, Fut>(store: &ChunkStore, names: F, delete: bool) -> Result<Report>
+///
+/// `pointers_since` is when the pointers began to be kept where `store`
+/// reads them: when a fleet's were moved into its control service. Objects
+/// of the old layout, which only pointers from before then name, are kept
+/// until [`LEGACY_SWEEP_AFTER`] after it, so a pointer every listing of a
+/// store still catching up missed has that long to be adopted before what
+/// it names may go.
+pub async fn sweep<F, Fut>(
+    store: &ChunkStore,
+    names: F,
+    delete: bool,
+    pointers_since: SystemTime,
+) -> Result<Report>
 where
     F: Fn(Vec<u8>) -> Fut,
     Fut: Future<Output = Result<Vec<String>>>,
 {
     let started = store.now();
-    let legacy_before = started
+    let legacy_window = started
         .checked_sub(LEGACY_SWEEP_AFTER)
         .ok_or(Error::Invalid("the clock is earlier than the sweep window"))?;
+    // Nothing of the old layout goes while the pointers are newer than that.
+    let legacy_before = if pointers_since <= legacy_window {
+        legacy_window
+    } else {
+        SystemTime::UNIX_EPOCH
+    };
     // Listed after `started`: a pointer missing from the list was first
     // kept by an archive that began after it.
     let pointers = store.pointer_names().await?;

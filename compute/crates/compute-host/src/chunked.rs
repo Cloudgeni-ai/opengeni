@@ -313,12 +313,14 @@ impl Chunked {
 
     /// Deletes the chunks and manifests no sandbox's stored copy names any
     /// more, or with `delete` false only reports them (see
-    /// [`compute_storage::sweep`]).
+    /// [`compute_storage::sweep`]). A host on its own sweeps by the
+    /// pointers in its object store, which were always there.
     pub async fn sweep(&self, delete: bool) -> Result<Report, StorageError> {
         compute_storage::sweep::sweep(
             &self.chunks,
             |pointer| async move { self.names(&pointer).await },
             delete,
+            std::time::SystemTime::UNIX_EPOCH,
         )
         .await
     }

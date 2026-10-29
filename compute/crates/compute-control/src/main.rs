@@ -740,11 +740,10 @@ async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<
         "a memory store keeps no fleet's pointers"
     );
     let store = Arc::new(postgres(database).await?);
-    anyhow::ensure!(
-        store.pointers_imported().await?.is_some(),
+    let imported = store.pointers_imported().await?.context(
         "the fleet's pointers are not in the service yet: it moves them in once no host \
-         of an earlier release is live, and nothing is swept before"
-    );
+         of an earlier release is live, and nothing is swept before",
+    )?;
     let chunks = ChunkStore::from_url(url)
         .with_context(|| format!("the archive store {url}"))?
         .with_context(|| format!("{url} names no object store"))?;
@@ -769,18 +768,19 @@ async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<
     }
     let pointers = Arc::new(compute_control::pointers::Pointers::new(store));
     let fleet_ms = pointers.now_ms().await?;
-    let offset = compute_storage::fresh::offset_ms(fleet_ms, std::time::SystemTime::now());
     let chunks =
         chunks
             .with_pointers(pointers)
             .with_clock(compute_storage::fresh::Clock::following(Arc::new(
-                std::sync::atomic::AtomicI64::new(offset),
+                compute_storage::fresh::Heard::at(fleet_ms),
             )));
     let chunks = &chunks;
+    let moved = std::time::UNIX_EPOCH + std::time::Duration::from_millis(imported.at_ms);
     let report = compute_storage::sweep::sweep(
         chunks,
         |pointer| async move { compute_storage::copy::names(chunks, &pointer).await },
         delete,
+        moved,
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&report)?);

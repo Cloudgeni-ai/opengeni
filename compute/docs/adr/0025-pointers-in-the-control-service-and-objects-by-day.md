@@ -72,10 +72,15 @@ order, which write lands.
   sweep reads it before it starts. So a host whose clock is a day out
   cannot write a name a sweep takes as old, and the hour of disagreement
   the rule allows is left to the time a request takes. A host on its own
-  goes by its own clock, which its sweep reads too.
+  goes by its own clock, which its sweep reads too. Between answers the
+  fleet's clock moves on by the host's monotonic clock, so a step of the
+  host's system clock in the middle of an archive does not move it.
   Objects in the old layout (`chunks/v1`, `manifests/v1`) are never
   written again; one no pointer names is deleted once it was last stored
-  more than a week before the sweep, as before.
+  more than a week before the sweep, as before, and in a fleet only once
+  its pointers were imported a week before: only pointers from before the
+  import name them, and that week leaves many passes to adopt one every
+  listing missed.
 - **The sweep runs from the control image**, `compute-control sweep
   --store ... --delete` with the service's database, daily as before.
   `compute-host sweep` remains for a host on its own.
@@ -104,11 +109,14 @@ order, which write lands.
   service's pointers name, so `compute-host sweep`, and a host on its own,
   refuse a marked store. A service whose import has not happened refuses
   to sweep.
-- **A sweep adopts what an import missed.** Before it fences, a sweep that
-  deletes copies into the table every `pointers/v3` object the table has
-  no row of, as the import would have (rows are never removed, so such a
-  name was never moved in). A store that listed a pointer late during the
-  import then cannot leave the copy it names to the sweep.
+- **What an import missed is adopted.** Right after the import, a few
+  times over the next hour, and before it fences in every sweep that
+  deletes, the service copies into the table every `pointers/v3` object
+  the table has no row of, as the import would have (rows are never
+  removed, so such a name was never moved in). A store that listed a
+  pointer late during the import then cannot leave the copy it names to
+  the sweep, and its sandbox wakes again within minutes, not at the next
+  sweep.
 - **Stored copies get format 4**, whose manifest names carry their day; a
   host reads formats 3 and 4 and writes 4.
 - **A read waits for a store that is catching up.** Something names every

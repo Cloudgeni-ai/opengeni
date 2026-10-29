@@ -8,7 +8,8 @@
 //! what it stores by that clock ([`ControlPointers::clock`]), not by its
 //! own: an archive begins with a pointer request, so the clock is fresh
 //! when it names anything, and a host whose own clock is a day out cannot
-//! name an object a sweep takes as old.
+//! name an object a sweep takes as old. Between answers it moves on by the
+//! host's monotonic clock, so a step of the system clock does not move it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -20,7 +21,7 @@ use compute_protocol::fleet::{
     POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite, PointerWritten,
 };
 use compute_storage::Error;
-use compute_storage::fresh::{Clock, offset_ms};
+use compute_storage::fresh::{Clock, Heard, offset_ms};
 use compute_storage::pointer_store::{Kept, PointerStore, Version};
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -43,9 +44,8 @@ pub struct ControlPointers {
     control: String,
     /// Holds the registration the host's requests are made under.
     gate: LeaseGate,
-    /// How far the fleet's clock was ahead of this host's at the last
-    /// answer, in milliseconds.
-    offset_ms: Arc<AtomicI64>,
+    /// The fleet's clock, as the last answer told it.
+    fleet: Arc<Heard>,
     /// The offset last warned about, so a host far off warns once, not
     /// at every answer.
     warned_ms: Arc<AtomicI64>,
@@ -68,23 +68,23 @@ impl ControlPointers {
             http,
             control: control.trim_end_matches('/').to_owned(),
             gate,
-            offset_ms: Arc::new(AtomicI64::new(0)),
+            fleet: Arc::new(Heard::default()),
             warned_ms: Arc::new(AtomicI64::new(0)),
         }
     }
 
-    /// The fleet's clock, as the service last told it: this host's moved by
-    /// how far the fleet's was ahead at the last answer. A chunk store in a
-    /// fleet names the day of what it stores by it.
+    /// The fleet's clock, as the service last told it, moved on since by
+    /// this host's monotonic clock. A chunk store in a fleet names the day
+    /// of what it stores by it.
     #[must_use]
     pub fn clock(&self) -> Clock {
-        Clock::following(Arc::clone(&self.offset_ms))
+        Clock::following(Arc::clone(&self.fleet))
     }
 
     /// Notes the fleet's clock, `now_ms`, as an answer just told it.
     fn heard(&self, now_ms: u64) {
+        self.fleet.note(now_ms);
         let offset = offset_ms(now_ms, SystemTime::now());
-        self.offset_ms.store(offset, Ordering::Relaxed);
         let warned = self.warned_ms.load(Ordering::Relaxed);
         if offset.saturating_abs() > CLOCK_WARN_MS
             && offset.saturating_sub(warned).saturating_abs() > CLOCK_WARN_MS

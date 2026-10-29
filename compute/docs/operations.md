@@ -801,14 +801,20 @@ before users move to compute from Modal:
   every host soon after the service. `compute_control_pointers_imported`
   says whether the move happened and
   `compute_control_pointers_waiting_hosts` how many hosts of an earlier
-  release it waits for. Each sweep first adopts any pointer the object
-  store still holds that the service has none of (one an import missed
-  on a store that listed it late), and says so. Copying a fleet's archive
-  to another store is then a copy of its `chunks/` and `manifests/`.
+  release it waits for; `OpenGeniComputePointersWaiting` fires when that
+  stays above zero for 30 minutes. Right after the move, again a few
+  times over the next hour, and before each sweep that deletes, the
+  service adopts any pointer the object store still holds that it has
+  none of (one an import missed on a store that listed it late), and says
+  so. Objects of the old layout, which only those pointers name, are not
+  swept until a week after the move. Copying a fleet's archive to another
+  store is then a copy of its `chunks/` and `manifests/`.
 - **One clock.** Hosts in a fleet name the day of what they store by the
   fleet's clock, the database's, which the service tells with every
-  pointer answer; the sweep starts by it too. A host or replica whose own
-  clock is more than a minute from it logs a warning, but stores safely.
+  pointer answer, moved on between answers by the host's monotonic clock,
+  so a step of its system clock changes nothing; the sweep starts by it
+  too. A host or replica whose own clock is more than a minute from it
+  logs a warning, but stores safely.
 - **The archive store must keep what it acknowledges.** A host drops its
   local copy once the store holds the chunks, so a store that acknowledges
   a write before it is durable (Garage in its `dangerous` consistency
