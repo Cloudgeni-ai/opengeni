@@ -4397,6 +4397,8 @@ export const BrowserPasskeyCredentialMaterial = /* @__PURE__ */ defineSchema(() 
       userDisplayName: z.string().max(512).nullable(),
       privateKey: passkeyBinary,
       signCount: z.number().int().nonnegative().max(0xffff_ffff),
+      backupEligibility: z.boolean().optional(),
+      backupState: z.boolean().optional(),
     })
     .strict(),
 );

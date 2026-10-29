@@ -78,6 +78,14 @@ precisely what it is:
   that hides passwords from the account also withholds its passkeys, and an
   item that needs approval for each use is never loaded into a browser. Only
   ECDSA P-256 passkeys, the kind these providers create, can be used.
+  Browser imports preserve per-credential backup eligibility (BE) and backup
+  state (BS) when supplied. Bitwarden/Vaultwarden credentials use BE=true and
+  BS=true, matching the Bitwarden authenticator; a false BE on an imported
+  assertion can be rejected even when its signature is correct. Hosted
+  registrations retain the flags Chromium reported. Older hosted items and
+  providers that do not supply flags retain the existing false defaults; do
+  not change all authenticators to backed-up credentials, because a relying
+  party requires BE to match the original registration.
   1Password's SDK does not expose passkeys, so a 1Password login's passkey is
   kept untouched by every update but not usable: agents sign in with that
   item's password or one-time password, or the passkey is kept in a provider
