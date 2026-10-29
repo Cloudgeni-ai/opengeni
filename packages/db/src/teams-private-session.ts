@@ -1,3 +1,4 @@
+import type { TeamsGroupAudience } from "./teams-conversations";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
@@ -25,7 +26,13 @@ export async function requireTeamsConversationProof(
     personal?: boolean;
     proof: TeamsConversationProof;
   },
-): Promise<{ tenantId: string; personal: boolean; channelId: string | null }> {
+): Promise<{
+  tenantId: string;
+  personal: boolean;
+  channelId: string | null;
+  conversationId: string;
+  groupAudience: TeamsGroupAudience | null;
+}> {
   return withRlsContext(db, input, async (tx) => {
     // The native admission transaction already owns the canonical workspace
     // prefix. Standalone preflight takes the same prefix before provider rows.
@@ -47,11 +54,14 @@ export async function requireTeamsConversationProof(
     // native session/workspace -> installation -> route -> inbox -> link.
     const [route] = await rawRows<{
       personal: boolean;
+      conversation_id: string;
+      group_audience: TeamsGroupAudience | null;
+      group_active: boolean;
       channel_id: string | null;
       actor_id: string;
     }>(
       tx,
-      sql`select personal,channel_id,actor_id from teams_bot_routes
+      sql`select personal,channel_id,actor_id,conversation_id,group_audience,group_active from teams_bot_routes
         where route_id=${input.proof.routeId} and account_id=${input.accountId}::uuid
           and workspace_id=${input.workspaceId}::uuid and tenant_id=${installation.tenant_id}::uuid
           and generation=${input.proof.installationGeneration}::uuid
@@ -61,7 +71,8 @@ export async function requireTeamsConversationProof(
           and lease_token=${input.proof.leaseToken}::uuid and lease_until>clock_timestamp()
         for share`,
     );
-    if (!route) throw new Error("teams_private_session_proof_invalid");
+    if (!route || (route.group_audience && !route.group_active))
+      throw new Error("teams_private_session_proof_invalid");
     const [event] = await rawRows<{ actor_id: string }>(
       tx,
       sql`
@@ -81,6 +92,21 @@ export async function requireTeamsConversationProof(
         and workspace_id=${input.workspaceId}::uuid and actor_id=${event.actor_id}::uuid
         and subject_id=${input.subjectId} for share`,
     );
+    if (route.group_audience) {
+      if (
+        !route.group_audience.some(
+          (x) => x.actorId === event.actor_id && x.subjectId === input.subjectId,
+        )
+      )
+        throw new Error("teams_private_session_proof_invalid");
+      for (const member of route.group_audience) {
+        const matched = await rawRows(
+          tx,
+          sql`select actor_id from teams_bot_links where tenant_id=${installation.tenant_id}::uuid and actor_id=${member.actorId}::uuid and subject_id=${member.subjectId} for share`,
+        );
+        if (!matched.length) throw new Error("teams_private_session_proof_invalid");
+      }
+    }
     // A lock wait may outlast the lease; check wall-clock validity again once
     // every mutable authority row is locked.
     const lease = await rawRows(
@@ -93,6 +119,8 @@ export async function requireTeamsConversationProof(
       tenantId: installation.tenant_id,
       personal: route.personal,
       channelId: route.channel_id,
+      conversationId: route.conversation_id,
+      groupAudience: route.group_audience,
     };
   });
 }

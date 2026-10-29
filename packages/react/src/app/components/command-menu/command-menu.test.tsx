@@ -46,6 +46,7 @@ const searchPage = (_workspaceId: string, options: SearchOptions) => ({
           parentSessionId: null,
           title: "Usage report follow-up",
           titleSource: "user",
+          avatar: { kind: "emoji", emoji: "📈", hue: 150 },
           status: "idle",
           pinned: false,
           archived: false,
@@ -107,6 +108,7 @@ function env(overrides: Partial<ActionEnv> = {}): ActionEnv {
     workspacePanel: true,
     workspaces: [{ id: workspaceId, name: "Product", organization: "Acme", personal: false }],
     canForkCurrentChat: false,
+    meetings: null,
     newChat: noop,
     openChat: noop,
     openSite: (siteId) => opened.push(siteId),
@@ -435,6 +437,14 @@ test("typing still lists chats first, then matching Sites in their own group, wi
   );
 });
 
+test("a chat with an avatar shows it, the way its sidebar row does", async () => {
+  await openMenu();
+  await type("usage");
+  const row = option("Usage report follow-up");
+  expect(row.querySelector('[data-session-avatar="emoji"]')?.textContent).toBe("📈");
+  expect(row.querySelector("svg.lucide-message-square")).toBeNull();
+});
+
 test("with no matching chats, Sites lead; Enter opens one in the app, the way its sidebar row does", async () => {
   await openMenu();
   await type("pricing");
@@ -569,4 +579,39 @@ test("one letter matches the sidebar's Sites without asking the server", async (
   await type("r");
   expect(catalogCalls).toEqual([]);
   expect(groups().find((group) => group.label === "Sites")?.options).toContain("Roadmap");
+});
+
+test("Start recording is a general action where meetings record, and finds by meeting", async () => {
+  const started: string[] = [];
+  const meetings: NonNullable<ActionEnv["meetings"]> = {
+    state: "idle",
+    start: () => started.push("start"),
+    show: () => started.push("show"),
+    stop: () => {},
+  };
+  currentEnv = env({ meetings });
+  await openMenu();
+  const general = groups().find((group) => group.label === "Go to");
+  expect(general?.options).toContain("Start recording");
+  expect(general?.options).not.toContain("Stop recording");
+  await type("meeting");
+  expect(groups().find((group) => group.label === "Actions")?.options).toContain("Start recording");
+});
+
+test("while a meeting records, the action goes to it and Stop recording joins it", async () => {
+  currentEnv = env({
+    meetings: { state: "recording", start: () => {}, show: () => {}, stop: () => {} },
+  });
+  await openMenu();
+  const general = groups().find((group) => group.label === "Go to");
+  expect(general?.options).toContain("Go to recording");
+  expect(general?.options).toContain("Stop recording");
+  expect(general?.options).not.toContain("Start recording");
+});
+
+test("without meetings, neither recording action is listed", async () => {
+  await openMenu();
+  const options = groups().flatMap((group) => group.options);
+  expect(options).not.toContain("Start recording");
+  expect(options).not.toContain("Stop recording");
 });

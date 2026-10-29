@@ -286,6 +286,8 @@ export function transcriptErrorText(
       return msg("meetings.recordings.errorInvalidAudio");
     case "storage_unavailable":
       return msg("meetings.recordings.errorStorageUnavailable");
+    case "region_restricted":
+      return msg("inferenceRegion.notSupportedInEu");
     case "insufficient_credits":
       return model
         ? msg("meetings.recordings.errorInsufficientCreditsFor", { modelName: model.modelName })

@@ -14,6 +14,7 @@ import {
   updateSessionProfile,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import { getSessionVisibility } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { requireUsableSessionAvatar } from "../routes/session-avatar";
@@ -114,7 +115,7 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Save a bot template that people can start new bots from, usually when the person asks you to make a template of yourself or this chat. A template is a name, a one-line description, an optional avatar and setup instructions, which become the first message of every new chat started from it. Write the setup instructions to that new agent from what this chat has established: its job, the Skills to install, the connections and machines it needs, the schedules and event triggers to create, and the standing rules and preferences it was given. Leave out one-off tasks, history, personal details and secrets. When setup differs per person, tell the new agent to ask how they work today and set up what fits; when it is simple, name exactly what to install and create so the agent can set itself up without asking. Show the person your draft first unless they asked you to save it directly. avatar takes the same shapes as in set_session_title.",
+        "Save a bot template that people can start new bots from, usually when the person asks you to make a template of yourself or this chat. A template is a name, a one-line description, an optional avatar and setup instructions, which become the first message of every new chat started from it. Write the setup instructions to that new agent from what this chat has established: its job, the Skills and plugins to install, the connections and machines it needs, the schedules and event triggers to create, and the standing rules and preferences it was given. Leave out one-off tasks, history, personal details and secrets. When setup differs per person, tell the new agent to ask how they work today and set up what fits; when it is simple, name exactly what to install and create so the agent can set itself up without asking. Show the person your draft first unless they asked you to save it directly. The template is shared like this chat: from an Only me chat only the person sees it until they share it from Bot templates; otherwise everyone in the workspace can start bots from it. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(BOT_TEMPLATE_NAME_MAX_LENGTH),
         description: z4.string().max(SESSION_DESCRIPTION_MAX_LENGTH).optional(),
@@ -125,19 +126,35 @@ export function registerBotTemplateTools(input: {
     async ({ name, description, avatar, setupInstructions }) => {
       await input.authorize();
       const exactAvatar = avatarFromToolInput(avatar) ?? null;
-      await requireUsableSessionAvatar(deps, grant, exactAvatar, { sharedWithWorkspace: true });
+      // A template is shared like the chat it was saved from, so what an Only
+      // me chat writes into one is never shown to the workspace by the agent.
+      const visibility =
+        (await getSessionVisibility(deps.db, grant.workspaceId, sessionId)) === "user_private"
+          ? "private"
+          : "workspace";
+      await requireUsableSessionAvatar(deps, grant, exactAvatar, {
+        sharedWithWorkspace: visibility === "workspace",
+      });
       const request = CreateBotTemplateRequest.parse({
         name,
         description: description ?? "",
         avatar: exactAvatar,
         setupInstructions,
+        visibility,
         sourceSessionId: sessionId,
       });
+      const viewer = await botTemplateViewerForGrant(deps.db, grant);
+      if (visibility === "private" && viewer.subjectId === null) {
+        throw new HTTPException(422, {
+          message:
+            "This chat is Only me and no person is behind this run, so its template would belong to nobody. Ask the person to save it from Bot templates.",
+        });
+      }
       const template = await createBotTemplateForViewer({
         db: deps.db,
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        viewer: await botTemplateViewerForGrant(deps.db, grant),
+        viewer,
         request,
       });
       return input.json({ ok: true, template });

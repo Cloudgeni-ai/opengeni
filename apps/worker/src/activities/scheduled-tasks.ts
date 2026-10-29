@@ -62,6 +62,7 @@ import {
   recordSessionCreated,
   recordUserMessageAccepted,
   scheduledOccurrenceEvents,
+  WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
   type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
@@ -896,6 +897,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
         };
         const machine = await getSandbox(db, access, resolvedMachineTarget.targetSandboxId);
+        if (machine?.scope === "user" && task.agentConfig.executionTarget === "workspace_default") {
+          // Following a default never counts as consent to run unattended on a
+          // personal machine; the automation has to choose it.
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
+          );
+        }
         // A personal machine runs only its owner's Only me schedule. The scoped
         // lookup returns a personal machine to its owner alone, and every attempt
         // re-proves the owner's membership, workspace access and grant in the
@@ -904,9 +914,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           !machine ||
           machine.kind !== "selfhosted" ||
           !machine.enrollmentId ||
-          (machine.scope === "user" &&
-            (task.agentConfig.executionTarget === "workspace_default" ||
-              !personalMachineScheduleOwner(task, access.subjectId)))
+          (machine.scope === "user" && !personalMachineScheduleOwner(task, access.subjectId))
         ) {
           return await refuseAdmission(
             "machine_target_unavailable",
@@ -1976,6 +1984,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (
               scheduledUpdate.reason === "session_cancelled" ||
               scheduledUpdate.reason === "session_not_idle" ||
+              scheduledUpdate.reason === "session_waiting_capacity" ||
               scheduledUpdate.reason === "session_paused" ||
               scheduledUpdate.reason === "workspace_paused"
             ) {
@@ -2129,6 +2138,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (
               bundled.reason === "session_cancelled" ||
               bundled.reason === "session_not_idle" ||
+              bundled.reason === "session_waiting_capacity" ||
               bundled.reason === "session_paused" ||
               bundled.reason === "workspace_paused"
             ) {
@@ -2418,16 +2428,19 @@ function scheduledSessionRejectionError(
   rejectionReason:
     | "session_cancelled"
     | "session_not_idle"
+    | "session_waiting_capacity"
     | "session_paused"
     | "workspace_paused"
     | null,
 ):
   | "session_cancelled"
   | "scheduled_session_not_idle"
+  | "scheduled_session_waiting_capacity"
   | "scheduled_session_paused"
   | "scheduled_workspace_paused" {
   if (rejectionReason === "session_paused") return "scheduled_session_paused";
   if (rejectionReason === "workspace_paused") return "scheduled_workspace_paused";
+  if (rejectionReason === "session_waiting_capacity") return "scheduled_session_waiting_capacity";
   return rejectionReason === "session_not_idle"
     ? "scheduled_session_not_idle"
     : "session_cancelled";
@@ -3181,6 +3194,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
   if (
     scheduledUpdate.reason === "session_cancelled" ||
     scheduledUpdate.reason === "session_not_idle" ||
+    scheduledUpdate.reason === "session_waiting_capacity" ||
     scheduledUpdate.reason === "session_paused" ||
     scheduledUpdate.reason === "workspace_paused"
   ) {

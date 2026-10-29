@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -198,9 +198,11 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
       if (!available) throw new Error("renewal acceptance requires PostgreSQL");
       const { accountId, workspaceId } = await freshWorkspace();
       const keys = generateKeyPairSync("ed25519");
-      const rawKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
-        "base64",
-      );
+      const keyBytes = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url");
+      // Exactly what the agent sends (`STANDARD_NO_PAD`): 43 characters, no "=".
+      // Padded fixtures hid a renewal that failed for every real machine.
+      const rawKey = keyBytes.toString("base64").replace(/=+$/u, "");
+      expect(rawKey).toHaveLength(43);
       const enrollment = await createEnrollment(db, {
         accountId,
         workspaceId,
@@ -255,6 +257,7 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
       expect(proofs).toHaveLength(1);
       expect(proofs[0]!.account_id).toBe(accountId);
       expect(proofs[0]!.credential_generation).toBe(enrollment.credentialGeneration);
+      expect(proofs[0]!.key_hash).toBe(createHash("sha256").update(keyBytes).digest("hex"));
       await request();
       expect(
         await admin`select * from promotion_machine_proofs where enrollment_id=${enrollment.id}`,

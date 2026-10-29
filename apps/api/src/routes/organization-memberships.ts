@@ -5,6 +5,7 @@ import {
   cancelExternalWorkspaceMemberGrantForRequest,
   updateExternalWorkspaceMemberForRequest,
   getOrganizationPrivacySettings,
+  MissingPermissionRefusal,
   OrganizationPrivacyLockedError,
   privacyDeploymentLimits,
   updateOrganizationPrivacySettings,
@@ -148,7 +149,7 @@ async function requirePrivateSessionAdministrator(
       (grant) => grant.accountId === organizationId && grant.permissions.includes("account:admin"),
     )
   ) {
-    throw new HTTPException(403, { message: "organization administration requires account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   return { subjectId: access.subjectId };
 }

@@ -92,7 +92,7 @@ describe("company-profile human mutation authorization", () => {
     for (const role of ["admin", "member"] as const) {
       expectForbidden(
         () => requireDirectAccountAdmin(authorization({ role })),
-        "missing permission: account:admin",
+        "You don't have permission to manage this organization.",
       );
     }
   });

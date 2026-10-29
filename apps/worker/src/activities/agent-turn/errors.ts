@@ -2609,13 +2609,14 @@ export function humanizeResetWindow(resetsInSeconds: number | null): string {
 /**
  * Build the turn.failed payload for a ChatGPT/Codex usage cap: a precise,
  * actionable message naming the reset window, the stable `codex_usage_limit_reached`
- * code, and retryable:false (an auto-retry would just re-hit the cap).
+ * code, retryable:false (an auto-retry would just re-hit the cap), and the
+ * reset instant as `resetsAt` when known, so a chat can say when it resets.
  */
 export function codexUsageLimitFailurePayload(
   info: { resetsInSeconds: number | null },
   detail: string,
-  opts?: { allAccounts?: boolean },
-): { error: string; code: string; retryable: false; detail?: string } {
+  opts?: { allAccounts?: boolean; now?: Date },
+): { error: string; code: string; retryable: false; resetsAt?: string; detail?: string } {
   // P3: when EVERY connected subscription is rate-limited the message names the
   // earliest reset across accounts; the single-account message is unchanged.
   const error = opts?.allAccounts
@@ -2623,10 +2624,16 @@ export function codexUsageLimitFailurePayload(
       `You can switch this session to a different model in the meantime, or wait for a subscription to reset.`
     : `Your ChatGPT/Codex subscription usage limit has been reached. Access resets ${humanizeResetWindow(info.resetsInSeconds)}. ` +
       `You can switch this session to a different model in the meantime, or wait for the limit to reset.`;
+  const resetsIn = info.resetsInSeconds;
+  const resetsAt =
+    resetsIn !== null && Number.isFinite(resetsIn) && resetsIn > 0
+      ? new Date((opts?.now ?? new Date()).getTime() + Math.ceil(resetsIn) * 1000).toISOString()
+      : null;
   return {
     error,
     code: "codex_usage_limit_reached",
     retryable: false,
+    ...(resetsAt ? { resetsAt } : {}),
     ...(detail ? { detail } : {}),
   };
 }

@@ -18,6 +18,7 @@ import {
   defaultHumanInputFormMessages,
   mergeHumanInputFormMessages,
   emptyDraft,
+  humanInputAgentMayDecide,
   humanInputHeading,
   initialDrafts,
   isActionableHumanInputRequest,
@@ -533,7 +534,18 @@ function HumanInputForm({
               ) : undefined
             }
             lead={
-              request.allowSkip ? (
+              humanInputAgentMayDecide(request) ? (
+                <DecisionLink
+                  label={messages.letAgentDecide ?? t("humanInputModel.letTheAgentDecide")}
+                  disabled={busy}
+                  onPress={() =>
+                    void submit({
+                      outcome: "skipped",
+                      agentDecides: true,
+                    } as SubmitHumanInputResponseRequest)
+                  }
+                />
+              ) : request.allowSkip ? (
                 <DecisionLink
                   label={messages.skip}
                   disabled={busy}

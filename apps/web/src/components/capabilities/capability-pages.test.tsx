@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import {
   capabilityDescription,
+  catalogConnectAccess,
   isCommunityCapability,
   personalOnlyCapability,
 } from "./capability-copy";
@@ -401,6 +402,71 @@ describe("CatalogItemPage", () => {
     expect(text).toContain("Who can use it?");
     expect(text).toContain("Everyone in this workspace");
     expect(text).toContain("Community");
+    await view.unmount();
+  });
+
+  test("a member asks an admin to turn on a custom server before anything is signed in", async () => {
+    const custom = item({
+      id: "mcp:team-tools",
+      source: "manual",
+      name: "Team tools",
+      providerDomain: null,
+      mcpUrl: "https://tools.example/mcp",
+      endpointUrl: "https://tools.example/mcp",
+      authKind: null,
+      workspaceId: "ws",
+      metadata: {},
+    } as Partial<CapabilityCatalogItem>);
+    const access = catalogConnectAccess(
+      custom,
+      { permissions: ["connections:read", "connections:write"] },
+      "shared",
+    );
+    const onConnectAccount = mock(() => {});
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={custom}
+        personalOnly={access.personalOnly}
+        setupUnavailable={access.blocked ? { tone: "muted", ...access.blocked } : undefined}
+        onAction={() => {}}
+        onConnectAccount={onConnectAccount}
+      />,
+    );
+    const text = visibleText(view.container);
+    expect(text).toContain("Ask an admin to turn on Team tools");
+    expect(text).not.toContain("You choose when you connect");
+    expect(buttons(view.container, "Connect Team tools")).toHaveLength(0);
+    expect(onConnectAccount).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test("in a Personal workspace a connection is only yours: no choice, and it says so", async () => {
+    const acme = item({
+      id: "mcp:acme",
+      name: "Acme",
+      providerDomain: "acme.dev",
+      mcpUrl: "https://mcp.acme.dev",
+      endpointUrl: "https://mcp.acme.dev",
+      authKind: "api_key",
+      metadata: {},
+    });
+    const personal = catalogConnectAccess(acme, { permissions: ["workspace:admin"] }, "personal");
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        workspaceId="personal-workspace"
+        workspaces={[{ id: "personal-workspace", name: "Mia", kind: "personal" }]}
+        personalOnly={personal.personalOnly}
+        item={acme}
+        onAction={() => {}}
+      />,
+    );
+    const text = view.container.textContent ?? "";
+    expect(text).not.toContain("Who can use it?");
+    expect(text).not.toContain("Everyone in this workspace");
+    expect(text).not.toContain("You choose when you connect");
+    expect(text).toContain("Only you");
     await view.unmount();
   });
 

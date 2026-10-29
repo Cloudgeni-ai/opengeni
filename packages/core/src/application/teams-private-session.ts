@@ -69,10 +69,32 @@ export async function authorizeTeamsConversationAdmission(
     }
     if (
       !source.personal &&
+      !source.groupAudience &&
       (!source.channelId ||
         !deps.settings.teamsBotAllowedChannelIds.includes(`${source.tenantId}:${source.channelId}`))
     ) {
       throw new HTTPException(403, { message: "teams_channel_disabled" });
+    }
+    if (source.groupAudience) {
+      if (
+        !deps.settings.teamsBotAllowedGroupChatIds.includes(
+          `${source.tenantId}:${source.conversationId}`,
+        )
+      )
+        throw new HTTPException(403, { message: "teams_group_disabled" });
+      for (const member of source.groupAudience) {
+        const memberGrant = await getWorkspaceGrant(db, member.subjectId, accepted.workspaceId);
+        if (
+          !memberGrant ||
+          memberGrant.accountId !== accepted.accountId ||
+          !(await namedSubjectHasLiveWorkspaceAuthority(db, {
+            ...accepted,
+            subjectId: member.subjectId,
+          }))
+        )
+          throw new HTTPException(403, { message: "teams_group_audience_changed" });
+        requirePermission(memberGrant, "sessions:read");
+      }
     }
     const audience = await getSessionAuthorityProjection(
       db,

@@ -8,13 +8,13 @@ import type { AccessGrant, CapabilityCatalogItem, Session } from "@opengeni/cont
 import {
   integrationDefinitionCapabilityRecommendations,
   integrationDefinitionIdFromCapabilityId,
+  listApiIntegrationsWithPersonalExtension,
   requireLiveAgentAttemptAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   apiIntegrationConnected,
   getSession,
-  listInstalledApiIntegrations,
   type ApiIntegrationRuntime,
   type Database,
 } from "@opengeni/db";
@@ -64,11 +64,13 @@ export async function integrationDefinitionSetupContext(
 ): Promise<IntegrationDefinitionSetupContext> {
   const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
   const [instances, session] = await Promise.all([
-    listInstalledApiIntegrations(
-      deps.db,
-      grant.workspaceId,
-      attempt.initiatingHumanSubjectId ?? grant.subjectId,
-    ),
+    // Includes the instances a Personal workspace carries for its owner.
+    listApiIntegrationsWithPersonalExtension(deps.db, {
+      workspaceId: grant.workspaceId,
+      subjectId: attempt.initiatingHumanSubjectId ?? grant.subjectId,
+      accountId: grant.accountId,
+      deploymentMcpServerIds: deps.settings.mcpServers.map((server) => server.id),
+    }),
     getSession(deps.db, grant.workspaceId, sessionId),
   ]);
   return { instances, chatIncludes: chatToolSelectionIncludes(session) };
@@ -174,7 +176,13 @@ export async function integrationDefinitionSetupItem(
     (entry) => entry.id === definitionId,
   );
   if (!definition) return undefined;
-  const connected = (await listInstalledApiIntegrations(db, workspaceId, subjectId)).filter(
+  const connected = (
+    await listApiIntegrationsWithPersonalExtension(db, {
+      workspaceId,
+      subjectId,
+      deploymentMcpServerIds: settings.mcpServers.map((server) => server.id),
+    })
+  ).filter(
     (instance) => instance.definitionId === definition.id && apiIntegrationConnected(instance),
   );
   if (connected.length === 0) return undefined;

@@ -2343,16 +2343,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "GET /v1/organizations/:organizationId/inference-residency",
+    "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
-    "path": "/v1/organizations/:organizationId/inference-residency",
+    "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "request": [],
     "response": []
   },
   {
-    "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
+    "id": "GET /v1/public/session-avatars/:file",
     "method": "GET",
-    "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
+    "path": "/v1/public/session-avatars/:file",
     "request": [],
     "response": []
   },
@@ -3478,6 +3478,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getMyDefaultExecutionTarget",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
+  },
+  {
     "id": "getMyUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/usage/me",
@@ -3569,6 +3579,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GetOrganizationCredentialProviderResponse"
+    ]
+  },
+  {
+    "id": "getOrganizationInferenceResidency",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/inference-residency",
+    "request": [],
+    "response": [
+      "OrganizationInferenceResidency"
     ]
   },
   {
@@ -6345,15 +6364,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "PATCH /v1/organizations/:organizationId/inference-residency",
-    "method": "PATCH",
-    "path": "/v1/organizations/:organizationId/inference-residency",
-    "request": [
-      "UpdateOrganizationInferenceResidencyRequest"
-    ],
-    "response": []
-  },
-  {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits",
@@ -6753,6 +6763,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/rigs/:rigId/versions",
     "request": [
       "RigDefinitionEditPayload"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/secret-redactions",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/secret-redactions",
+    "request": [
+      "SecretRedactionRequest"
     ],
     "response": []
   },
@@ -8476,6 +8495,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:admin"
   },
   {
+    "id": "setMyDefaultExecutionTarget",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [
+      "UpdateMemberDefaultExecutionTargetRequest"
+    ],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
+  },
+  {
     "id": "setOpenGeniSlackBotOrganizationAccess",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/slack-bot/organization-access",
@@ -9365,6 +9396,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateOrganizationInferenceResidency",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/inference-residency",
+    "request": [
+      "UpdateOrganizationInferenceResidencyRequest"
+    ],
+    "response": [
+      "OrganizationInferenceResidency"
+    ]
+  },
+  {
     "id": "updateOrganizationIntegrationPolicy",
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/integration-policy",
@@ -9690,6 +9732,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SiteLimitProfile"
     ]
+  },
+  {
+    "id": "updateSiteProject",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/channel",
+    "request": [
+      "UpdateSiteProjectRequest"
+    ],
+    "response": [
+      "SiteProjectResponse"
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSiteSidebarState",

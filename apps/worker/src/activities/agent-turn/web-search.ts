@@ -1,6 +1,9 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
   WEB_FETCH_TOOL_NAME,
+  isSideFeatureRouteId,
+  webSearchEndpointTarget,
+  sideFeatureProcessingResidency,
   WEB_SEARCH_TOOL_NAME,
   webSearchCallPricing,
   webSearchCreditMicros,
@@ -34,6 +37,11 @@ import {
   webSearchInputSchema,
   type WebPage,
 } from "@opengeni/runtime/web-search";
+import {
+  sideFeatureRegionRestrictedError,
+  sideFeatureRequiresEu,
+  sideFeatureRouteRunnable,
+} from "@opengeni/runtime";
 import { hostedWebSearchForTurn } from "./tool-policy";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -206,6 +214,7 @@ type CallOutcome<T> = { ok: true; value: T } | { ok: false; message: string };
  * provider failed or was refused.
  */
 async function callWithFailover<Adapter, T>(input: {
+  settings: WebSearchSettings;
   operation: Operation;
   candidates: readonly Candidate<Adapter>[];
   health: WebProviderHealth;
@@ -222,8 +231,23 @@ async function callWithFailover<Adapter, T>(input: {
   const label = input.operation === "search" ? "Web search" : "Web fetch";
   let lastFailure: WebSearchProviderError | null = null;
   let refusal: WebSearchBillingRefusedError | null = null;
+  let regionRestricted = false;
   for (const [index, candidate] of ordered.entries()) {
     const provider = candidate.endpoint.provider;
+    // EU-only inference, checked again at the call: a provider whose route is
+    // not EU (for the endpoint it calls) is never called, and failover never
+    // moves to one.
+    const route = isSideFeatureRouteId(`web_search.${provider}`)
+      ? webSearchEndpointTarget(candidate.endpoint, input.operation)
+      : null;
+    if (
+      route
+        ? !sideFeatureRouteRunnable(input.settings, route)
+        : sideFeatureRequiresEu(input.settings)
+    ) {
+      regionRestricted = true;
+      continue;
+    }
     try {
       await input.billing.admit(input.scope, candidate.pricing.providerMicros);
     } catch (error) {
@@ -243,15 +267,18 @@ async function callWithFailover<Adapter, T>(input: {
       const value = await input.call(candidate.adapter);
       recordWebSearchCall(input.observability, input.operation, provider, "ok", startedAt);
       input.health.succeeded(input.operation, provider);
-      await input.settle(
-        settledCost(
+      await input.settle({
+        ...settledCost(
           input.operationId,
           input.operation,
           provider,
           candidate.pricing,
           input.reportedCostMicros(value),
         ),
-      );
+        ...(route
+          ? { processingResidency: sideFeatureProcessingResidency(input.settings, route) }
+          : {}),
+      });
       return { ok: true, value };
     } catch (error) {
       if (input.signal?.aborted) throw error;
@@ -280,7 +307,10 @@ async function callWithFailover<Adapter, T>(input: {
   }
   if (lastFailure)
     return { ok: false, message: `${label} failed: ${providerFailure(lastFailure)}` };
-  return { ok: false, message: refusal?.message ?? `${label} is not available.` };
+  if (refusal) return { ok: false, message: refusal.message };
+  if (regionRestricted)
+    return { ok: false, message: sideFeatureRegionRestrictedError("web_search").message };
+  return { ok: false, message: `${label} is not available.` };
 }
 
 /**
@@ -318,6 +348,7 @@ export function webSearchToolDefinitions(input: {
     }
   };
   const shared = {
+    settings: input.settings,
     health,
     scope: input.scope,
     billing: input.billing,

@@ -12,7 +12,11 @@ import {
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
-import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
+import {
+  startWorkspaceClientConfigRefresh,
+  withWorkspaceClientConfig,
+  type WorkspaceClientConfig,
+} from "./lib/workspace-client-config";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
 import {
@@ -23,7 +27,8 @@ import {
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
-import { useEmbedded, useHostMessageContext } from "./lib/app-host";
+import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
+import { createWithOpeningContext } from "./lib/message-context";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
@@ -314,6 +319,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const embedded = useEmbedded();
   const hostMessageContext = useRef(messageContext);
   hostMessageContext.current = messageContext;
+  const messageContextTools = useHostMessageContextTools();
+  const hostMessageContextTools = useRef(messageContextTools);
+  hostMessageContextTools.current = messageContextTools;
   const {
     captureProductEvent,
     checkDeploymentRevision,
@@ -339,8 +347,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
-    useState<ClientConfig["voiceInput"]>(undefined);
+  const [workspaceConfig, setWorkspaceConfig] = useState<WorkspaceClientConfig | undefined>(
+    undefined,
+  );
+  const [workspaceConfigVersion, setWorkspaceConfigVersion] = useState(0);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -611,7 +621,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
-      setWorkspaceVoiceInput(undefined);
+      setWorkspaceConfig(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -642,10 +652,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     const workspaceId = workspaceStateOwnerId;
     const accepted = captureWorkspaceInvocation(workspaceId);
     if (!accepted) return;
-    return startWorkspaceVoiceCapabilityRefresh({
+    return startWorkspaceClientConfigRefresh({
       read: (signal) => fetchClientConfig(signal, workspaceId),
       ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
-      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      apply: setWorkspaceConfig,
       subscribeFocus: (refresh) => {
         window.addEventListener("focus", refresh);
         return () => window.removeEventListener("focus", refresh);
@@ -656,11 +666,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clientConfigurationReady,
     authReady,
     workspaceStateOwnerId,
+    workspaceConfigVersion,
     accessContext?.subjectId,
     accessKeyVersion,
     captureWorkspaceInvocation,
     ownsWorkspaceInvocation,
   ]);
+  const refreshWorkspaceConfig = useCallback(
+    () => setWorkspaceConfigVersion((version) => version + 1),
+    [],
+  );
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -1859,9 +1874,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // spoken turn does.
       const hostContext =
         attempt.request.startMode === "realtime" ? undefined : hostMessageContext.current?.();
-      const created = await client.createSession(
-        workspaceId,
-        hostContext ? { ...attempt.request, modelContext: hostContext } : attempt.request,
+      const created = await createWithOpeningContext(
+        (request) => client.createSession(workspaceId, request),
+        attempt.request,
+        hostContext,
+        hostContext ? hostMessageContextTools.current?.() : undefined,
       );
       // Do not clear a newer concurrent attempt that replaced this one.
       if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
@@ -2521,14 +2538,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig: {
-            ...clientConfig,
-            voiceInput:
-              workspaceVoiceInput ??
-              (clientConfig.voiceInput
-                ? { ...clientConfig.voiceInput, available: false, providers: [] }
-                : undefined),
-          },
+          clientConfig: withWorkspaceClientConfig(clientConfig, workspaceConfig),
+          refreshWorkspaceConfig,
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2639,7 +2650,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clearSlackLinkContinuation,
     client,
     clientConfig,
-    workspaceVoiceInput,
+    workspaceConfig,
+    refreshWorkspaceConfig,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,

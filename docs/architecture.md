@@ -2610,6 +2610,26 @@ without it (the machine was removed there), the status is `not_connected` with
 `errorCode: "removed"` (shown as computer use off) and turning it on enrolls
 afresh with a new token instead of reusing the stale local connection; a read that fails (network,
 sign-in, server error) is reported as such and never taken as removal.
+While it is on but not yet usable (`reconnecting`), the status says what it
+waits for (`waitingOn`: the agent starting, another agent copy, the server
+seeing it online, a sign-in the server turned down, or a move into the app),
+read from the agent's service state and the authentication line under each
+connection in `opengeni-agent connections`. `useThisComputer` marks such a
+wait `stalled` after a minute, and the switch then shows that reason with
+**Try again**, which restarts an agent that is already running. A connection
+the agent has stopped retrying (`Reconnect required`) is
+`errorCode: "reconnect_required"` at once, and turning on enrolls it again.
+When the refused connection was made in another workspace and this one uses
+it (`alsoIn`) while the server still lists it there, turning on enrolls it
+again in the workspace where it was made (a personal computer has one live
+connection on a server) and lets this workspace, and every other one that used
+it, use the new connection. A computer removed where it was made is never
+enrolled there again: it is set up in this workspace instead, as it is when
+that workspace no longer allows it. A listing that can't be read asks to try
+again, and a grant refused here after enrolling there is reported as such.
+`summary()` reports such a connection as `needsReconnect`, and the menu bar
+says the computer needs reconnecting, with **Reconnect This Computer…**
+opening the app, instead of "connecting…".
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
@@ -2895,7 +2915,9 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   vault and write its reference, or a `[masked <kind>]` marker when capture is
   not possible. Known-value and shape masking supersede the 5 August 2026
   "keep content exact" decision for these two cases, approved on 26 October
-  2026.
+  2026. A workspace admin can remove a known secret or a built-in secret
+  shape from chosen sessions' stored history afterwards; see
+  docs/secrets.md, "Removing secrets from stored history".
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
@@ -3077,7 +3099,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
-| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
+| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
@@ -3102,59 +3124,21 @@ persistent checkpoint/lock volume; the independent operator image is published
 separately from runtime images. See [database backups](backups.md) for retention,
 validation, isolated restoration and coverage limits.
 
-The standalone merge batcher (`scripts/merge-batcher/`) is an operational
-controller, not part of the API or Temporal workers. Active mode requires an
-explicitly operator-initialized ledger, never automatically recreated. Initialization
-requires proven stopped/zero-instance operation. The controller reconstructs state
-from Git objects and GitHub, builds one merge commit per admitted PR without checking
-out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
-run-attempt receipts distinguish assertion failures from infrastructure and
-cancellation. Landing requires the exact tested tree, a fast-forward base fence and
-a final head/readiness reread. Normally the tested tip itself lands; a narrowly
-verified merge-main-only head refresh may append same-tree ancestry commits for
-native PR merge identity, retaining immutable tested-tip/run evidence and explicit
-old/new-head linkage. `scripts/merge-batcher/head-refresh.ts` proves clean main-only
-merge ancestry and whole-batch tree identity; the final executor recomputes it
-before CAS. Late PR-head races require post-land reconciliation,
-never a claim that the newer head was tested. Post-merge CI retains its full test
-inventory and independent service/e2e/image gates. Main pushes can reuse complete
-unit coverage from a successful Batch attempt only with identical-tree, canonical
-manifest, exact attempt and archive-digest proof (`scripts/ci/reuse-batch-units.ts`).
-Impact-selected subsets or missing/unknown evidence run the ordinary main units;
-the full-green release receipt contract is unchanged.
-Separately, a non-Version, non-control-plane, non-CI-definition batcher landing whose exact tree passed
-a trusted `queue/live` Batch attempt skips main's test lanes by attestation
-(`scripts/ci/batch-attestation.ts`); artifacts, images and the unchanged receipts
-still run; release admission refuses such receipts. This is a documented
-coverage reduction (see docs/merge-batcher.md).
-Candidate plan/source/selected-unit/ready success may land on red or unknown
-full-main CI. A two-hour latency breaker retains raw measurements and deducts only
-bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
-trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
-parked without attribution, while unrelated ready heads proceed. Parking survives
-main advancement and label churn for the same PR head; new heads or explicit native
-auto-merge re-enables after parking can re-enter. Intake accepts a current native
-auto-merge request or queue-ready label with exact-head checks. Parking durably
-disables auto-merge; native MERGED readback is distinct from ledger landing/closure.
-Comparable base evidence and trusted same-way failure fingerprints are not yet
-available; neither full-main success nor matching job names proves member blame.
-`queue-health.yml` records provider batch timing separately from the controller's
-admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
-writes. The separately authorized CI-shadow stage pushes candidate refs only,
-with one hosted candidate in flight; it never updates main or PR readiness.
-Its portable container and deployment/rollback boundary are documented in
-[merge batcher](merge-batcher.md); the historical measurements and inactive
-native/vendor configurations remain in [merge queue](merge-queue.md).
-The offline [administration bundle](merge-batcher-admin/README.md) keeps legacy
-version 3 plans verifiable and offers explicit version 4 App-only plans with an
-App-bound guiding check. Both retain exact saved Manual rollback; an offline
-plan is not authorization or qualification for a live policy transition.
+The merge batcher (`scripts/batcher/`, run by `.github/workflows/merge-batcher.yml`)
+is a stateless GitHub Actions pass, not part of the API or Temporal workers. Each
+pass reads the queued PRs, the `batch/<id>` branch and that branch's CI from
+GitHub, takes the next step and exits. It builds a candidate with GitHub's merge
+API, tests it with ordinary `ci.yml` planned from the candidate's base, and lands
+each member as one squash commit through the pull request merge API after checking
+that every landed tree equals the tested tree. Main runs the full suite on a
+cadence (`scripts/ci/main-approval-superseded.ts`); that run, not a batch, is the
+release gate. See [merge batcher](merge-batcher.md) and [main CI](main-ci.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
-| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
-| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
+| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`main-ci.md`](main-ci.md) |
+| Merge batcher and batch CI | `scripts/batcher/`, `.github/workflows/merge-batcher.yml`, `.github/workflows/ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---
@@ -3309,3 +3293,12 @@ post-commit fanout uses the existing durable control outboxes. Shared-chat contr
 authority is independent of creator identity. Restore never resumes, and explicit
 Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
 background-command semantics.
+
+Teams group chats use a separate native workspace-visible session namespace.
+The Connector roster freezes exact Teams actor-to-Opengeni human mappings in
+`teams_bot_routes.group_audience`; a membership revision fences roster lookup
+against authenticated membership changes. Changes retire the old route rather
+than transferring history. Native admission rechecks all linked members, sender
+permissions and the exact group allowlist; each outbound part revalidates the
+provider roster. Personal routes and private-session authority remain separate.
+See [Teams release readiness](microsoft-teams-release-readiness.md).

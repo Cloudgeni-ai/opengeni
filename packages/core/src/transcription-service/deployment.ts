@@ -1,10 +1,17 @@
 import {
   deploymentAzureEntraCredential,
   resolveVoiceInputProviderRegistry,
+  sideFeatureProcessingResidency,
+  sideFeatureRouteAllowed,
   type Settings,
+  type SideFeatureProcessingResidency,
+  type SideFeatureTarget,
 } from "@opengeni/config";
+import type { InferenceFeatureId } from "@opengeni/contracts";
+import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
 import {
   getWorkspace,
+  isWorkspaceEuOnly,
   getWorkspaceProviderApiKeyConnectionMetadata,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
@@ -85,13 +92,45 @@ export type SpeechToTextDeployment = {
   ): Promise<{ credentials: RecordingTranscriptionCredentials | null } | "missing">;
   /**
    * Whether the provider can serve this workspace now. Without a workspace,
-   * whether the deployment offers it at all.
+   * whether the deployment offers it at all. The region check is for
+   * `feature`'s route (meetings and dictation by default).
    */
   available(
     providerId: string,
     scope?: { accountId?: string; workspaceId: string; subjectId?: string },
+    feature?: SpeechToTextRegionFeature,
   ): Promise<boolean>;
+  /**
+   * The side-feature route the provider sends audio over, by how the
+   * deployment configured it; null for a provider it cannot place (never EU).
+   */
+  route(providerId: string): SideFeatureTarget | null;
+  /** Where the provider's live-transcript clients connect; null when it has no live route (never EU). */
+  liveRoute(providerId: string): SideFeatureTarget | null;
+  /**
+   * EU-only inference: whether this workspace may send audio to the provider.
+   * Always true outside EU-only workspaces; under EU only for a provider whose
+   * route has an EU residency record. `available` already includes this.
+   * For `live_transcription` the route is the provider's live one: its client
+   * connects to the provider directly, so the server never sees that audio.
+   */
+  regionAllowed(
+    providerId: string,
+    scope: { accountId?: string; workspaceId: string },
+    feature?: SpeechToTextRegionFeature,
+  ): Promise<boolean>;
+  /** Throw `region_restricted` before any audio is sent when `regionAllowed` is false. */
+  assertRegion(
+    providerId: string,
+    scope: { accountId?: string; workspaceId: string },
+    feature: SpeechToTextRegionFeature,
+  ): Promise<void>;
 };
+
+export type SpeechToTextRegionFeature = Extract<
+  InferenceFeatureId,
+  "voice_input" | "meeting_transcription" | "live_transcription"
+>;
 
 export type SpeechToTextDeploymentOptions = {
   fetch?: typeof fetch;
@@ -105,6 +144,8 @@ export type SpeechToTextDeploymentOptions = {
   }) => boolean | Promise<boolean>;
   /** Extra or replacement providers, such as fakes in tests. */
   providers?: readonly RecordingTranscriptionProvider[];
+  /** Test seam: the workspace's EU-only setting. */
+  isEuOnly?: (scope: { accountId?: string; workspaceId: string }) => Promise<boolean>;
   /** Test seam: a workspace key lookup that needs no database. */
   loadWorkspaceKey?: (
     providerId: string,
@@ -123,13 +164,24 @@ export function createSpeechToTextDeployment(
   const fetchOption = options.fetch ? { fetch: options.fetch } : {};
   const providers: RecordingTranscriptionProvider[] = [];
   const order: string[] = [];
-  const add = (provider: RecordingTranscriptionProvider) => {
+  // Each provider's route, from the kind of account the deployment set up
+  // for it (never from its id or name).
+  const routes = new Map<string, SideFeatureTarget>();
+  // Where a provider's live-transcript clients connect, for providers that
+  // offer one; a provider without an entry never runs a live transcript under EU.
+  const liveRoutes = new Map<string, SideFeatureTarget>();
+  const add = (provider: RecordingTranscriptionProvider, route: SideFeatureTarget) => {
     if (providers.some((existing) => existing.id === provider.id)) return;
     providers.push(provider);
     order.push(provider.id);
+    routes.set(provider.id, route);
   };
   const azure = azureSpeechAccount(settings, options);
   const entraToken = deploymentEntraAccessToken(settings, options);
+  const azureSpeechTarget: SideFeatureTarget = {
+    route: "transcription.azure-speech",
+    endpoint: settings.recordingAzureSpeechEndpoint,
+  };
   const elevenLabs = createElevenLabsRecordingTranscriptionProvider(fetchOption);
   const voiceConfigs = resolveVoiceInputProviderRegistry(settings);
   // The order may name the recording providers too; they keep that place.
@@ -141,14 +193,18 @@ export function createSpeechToTextDeployment(
   const azurePosition = Math.min(position("azure-speech"), position("azure-mai"));
   const elevenLabsPosition = position("elevenlabs");
   const placeNamedRecordingProviders = (before: number) => {
-    if (azure && azurePosition < before) add(azure);
-    if (elevenLabsPosition < before) add(elevenLabs);
+    if (azure && azurePosition < before) add(azure, azureSpeechTarget);
+    if (elevenLabsPosition < before) add(elevenLabs, "transcription.elevenlabs");
   };
   for (const config of voiceConfigs) {
     placeNamedRecordingProviders(config.kind === "azure-mai" ? azurePosition : position(config.id));
     switch (config.kind) {
       case "openai":
-        add(createOpenAiTranscriptionProvider({ ...config, ...fetchOption }));
+        add(
+          createOpenAiTranscriptionProvider({ ...config, ...fetchOption }),
+          "transcription.openai",
+        );
+        liveRoutes.set(config.id, "transcription.openai-realtime");
         break;
       case "azure-openai":
         add(
@@ -157,7 +213,17 @@ export function createSpeechToTextDeployment(
             accessToken: config.apiKey || config.adToken ? null : entraToken,
             ...fetchOption,
           }),
+          {
+            route: "transcription.azure-openai",
+            endpoint: config.endpoint,
+            deployment: config.deployment,
+          },
         );
+        liveRoutes.set(config.id, {
+          route: "transcription.azure-openai-realtime",
+          endpoint: config.endpoint,
+          deployment: config.deployment,
+        });
         break;
       case "azure-mai":
         // The voice input's MAI account and the recordings' Speech account
@@ -171,6 +237,9 @@ export function createSpeechToTextDeployment(
               credentials: async () => ({ apiKey: config.apiKey }),
               ...fetchOption,
             }),
+          azure
+            ? azureSpeechTarget
+            : { route: "transcription.azure-speech", endpoint: config.endpoint },
         );
         break;
       case "codex-subscription":
@@ -182,23 +251,32 @@ export function createSpeechToTextDeployment(
             ...(options.codexFetch ? { fetch: options.codexFetch } : {}),
             ...(options.probeCodex ? { probe: options.probeCodex } : {}),
           }),
+          "transcription.codex-subscription",
         );
         break;
       case "supergrok-subscription":
         if (!db) break;
-        add(createXaiSubscriptionTranscriptionProvider({ settings, db, ...fetchOption }));
+        add(
+          createXaiSubscriptionTranscriptionProvider({ settings, db, ...fetchOption }),
+          "transcription.supergrok-subscription",
+        );
         break;
     }
   }
-  const recordingProviders: [number, RecordingTranscriptionProvider | null][] = [
-    [azurePosition, azure],
-    [elevenLabsPosition, elevenLabs],
+  const recordingProviders: [number, RecordingTranscriptionProvider | null, SideFeatureTarget][] = [
+    [azurePosition, azure, azureSpeechTarget],
+    [elevenLabsPosition, elevenLabs, "transcription.elevenlabs"],
   ];
-  for (const [, provider] of recordingProviders.sort((a, b) => (a[0] === b[0] ? 0 : a[0] - b[0]))) {
-    if (provider) add(provider);
+  for (const [, provider, route] of recordingProviders.sort((a, b) =>
+    a[0] === b[0] ? 0 : a[0] - b[0],
+  )) {
+    if (provider) add(provider, route);
   }
   for (const provider of options.providers ?? []) {
     const index = providers.findIndex((existing) => existing.id === provider.id);
+    // A replacement keeps no route: it is not the account configured here.
+    routes.delete(provider.id);
+    liveRoutes.delete(provider.id);
     if (index >= 0) providers[index] = provider;
     else {
       providers.push(provider);
@@ -256,6 +334,41 @@ export function createSpeechToTextDeployment(
         }))
       );
     });
+  const readWorkspaceEuOnly =
+    options.isEuOnly ??
+    (async (scope: { accountId?: string; workspaceId: string }) => {
+      // Without a database the setting cannot be read: fail closed.
+      if (!db) return true;
+      const accountId = scope.accountId ?? (await getWorkspace(db, scope.workspaceId))?.accountId;
+      // A workspace that cannot be placed is treated as EU-only: fail closed.
+      if (!accountId) return true;
+      return await isWorkspaceEuOnly(db, { accountId, workspaceId: scope.workspaceId });
+    });
+  // Concurrent checks for one workspace (every provider of a picker) share
+  // one read; nothing is kept once it settles, so a changed setting applies
+  // to the next call.
+  const inFlightEuOnly = new Map<string, Promise<boolean>>();
+  const workspaceEuOnly = (scope: { accountId?: string; workspaceId: string }) => {
+    const key = `${scope.accountId ?? ""}:${scope.workspaceId}`;
+    const pending = inFlightEuOnly.get(key);
+    if (pending) return pending;
+    const read = readWorkspaceEuOnly(scope).finally(() => inFlightEuOnly.delete(key));
+    inFlightEuOnly.set(key, read);
+    return read;
+  };
+  const regionAllowed = async (
+    providerId: string,
+    scope: { accountId?: string; workspaceId: string },
+    feature?: SpeechToTextRegionFeature,
+  ): Promise<boolean> => {
+    if (settings.requiredModelGeography !== "eu" && !(await workspaceEuOnly(scope))) return true;
+    const route =
+      feature === "live_transcription" ? liveRoutes.get(providerId) : routes.get(providerId);
+    return (
+      route !== undefined &&
+      sideFeatureRouteAllowed({ ...settings, requiredModelGeography: "eu" }, route)
+    );
+  };
   return {
     registry,
     order,
@@ -270,10 +383,19 @@ export function createSpeechToTextDeployment(
       const apiKey = await loadWorkspaceKey(providerId, scope);
       return apiKey ? { credentials: { apiKey } } : "missing";
     },
-    async available(providerId, scope) {
+    route: (providerId) => routes.get(providerId) ?? null,
+    liveRoute: (providerId) => liveRoutes.get(providerId) ?? null,
+    regionAllowed,
+    async assertRegion(providerId, scope, feature) {
+      if (!(await regionAllowed(providerId, scope, feature))) {
+        throw sideFeatureRegionRestrictedError(feature);
+      }
+    },
+    async available(providerId, scope, feature) {
       const provider = registry.get(providerId);
       if (!provider) return false;
       try {
+        if (scope && !(await regionAllowed(providerId, scope, feature))) return false;
         if (provider.funding === "workspace_key") {
           if (!scope) return true;
           const kind = KEY_PROVIDER_CONNECTIONS[providerId];
@@ -449,6 +571,16 @@ export async function meetingModelFor(
     if (await available) return candidate;
   }
   return fallback;
+}
+
+/** Where a speech-to-text call ran: its route's claim, unknown without a route. */
+export function speechToTextProcessingResidency(
+  settings: Settings,
+  route: SideFeatureTarget | null,
+): SideFeatureProcessingResidency {
+  return route
+    ? sideFeatureProcessingResidency(settings, route)
+    : { geography: "unknown", deploymentType: "provider_default", regions: [] };
 }
 
 /**

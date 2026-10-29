@@ -2567,7 +2567,9 @@ export type HumanInputAnswer = {
 
 export type HumanInputResponse =
   | { outcome: "answered"; answers: HumanInputAnswer[] }
-  | { outcome: "skipped" | "expired" | "cancelled" };
+  /** `agentDecides`: the person chose "Let the agent decide". */
+  | { outcome: "skipped"; agentDecides?: true | undefined }
+  | { outcome: "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
   | {
@@ -2576,7 +2578,12 @@ export type SubmitHumanInputResponseRequest =
       /** Write-only secret values; never echoed in events or responses. */
       secretAnswers?: HumanInputSecretAnswer[] | undefined;
     }
-  | { outcome: "skipped" };
+  /**
+   * `agentDecides`: "Let the agent decide". The asking agent makes its own best
+   * choice; accepted even when the request does not allow an ordinary skip, but
+   * never for secret questions, Skill reviews or secret approvals.
+   */
+  | { outcome: "skipped"; agentDecides?: true | undefined };
 
 export type SessionHumanInputRequest = {
   id: string;
@@ -3922,6 +3929,14 @@ export type CreateSessionRequest = {
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   /**
+   * First-party tools `modelContext` is for, such as the tool that reaches the
+   * open document it names. The first turn loads them before its first model
+   * request, as a tool search by name would, so it can use them without
+   * searching; the session's tools are unchanged. Decided once at creation;
+   * names outside the session's tool selection are ignored.
+   */
+  modelContextTools?: string[] | undefined;
+  /**
    * IANA time zone of the person sending `initialMessage` (for example
    * `Europe/Oslo`), so the model sees the message's local time. In a browser
    * or app the client fills in the device's zone when this is omitted;
@@ -4419,6 +4434,11 @@ export type ClientModel = {
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
+  /**
+   * Transient availability hint. `reason: "region_restricted"`: the workspace
+   * is EU-only and this model's route is not EU by its residency record.
+   */
+  availability?: ModelAvailabilityV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -4433,6 +4453,7 @@ export type ModelAvailabilityV1 = {
     | "policy_blocked"
     | "unsupported"
     | "credits_disabled"
+    | "region_restricted"
     | null;
   checkedAt: string | null;
 };
@@ -4967,6 +4988,59 @@ export type OrganizationAgentAdminAccess = {
 export type UpdateOrganizationAgentAdminAccessRequest = {
   sessionAdminAccessAllowed?: boolean;
   chatActionsAllowed?: boolean;
+};
+
+/**
+ * The organization's EU-only inference setting. When on, every model call for
+ * its workspaces runs on an EU route or not at all. Any member can read it;
+ * owners and admins can turn it on, and only an owner or admin in the app in a
+ * browser can turn it off (`canTurnOff`).
+ */
+export type OrganizationInferenceResidency = {
+  organizationId: string;
+  euOnly: boolean;
+  /** 0 until the setting is first changed. */
+  version: number;
+  updatedAt: string | null;
+  /** Whether the caller may turn EU-only off: only an owner or admin in a browser. */
+  canTurnOff: boolean;
+  changed?: boolean | undefined;
+};
+
+/**
+ * Turn EU-only on or off. `expectedVersion` is the current `version` (a stale
+ * one is `409`); `operationId` makes a retry safe. Changes answer `503` while
+ * the deployment doesn't allow them yet.
+ */
+export type UpdateOrganizationInferenceResidencyRequest = {
+  euOnly: boolean;
+  expectedVersion: number;
+  operationId: string;
+};
+
+/** Model-backed features besides the chat model, as reported in `ClientConfig.inferenceFeatures`. */
+export type InferenceFeatureId =
+  | "web_search"
+  | "image_generation"
+  | "video_generation"
+  | "realtime_voice"
+  | "voice_input"
+  | "meeting_transcription"
+  | "live_transcription"
+  | "knowledge_embeddings"
+  | "code_search";
+
+/**
+ * Why the server switched a feature off. `region_restricted`: the workspace
+ * is EU-only and the feature has no EU route here ("Not supported in EU").
+ */
+export type FeatureUnavailableReason = "region_restricted";
+
+/** One feature's availability for the caller's workspace. */
+export type InferenceFeatureAvailability = {
+  id: InferenceFeatureId;
+  available: boolean;
+  unavailableReason: FeatureUnavailableReason | null;
 };
 
 /**
@@ -5601,6 +5675,13 @@ export type ClientConfig = {
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   /**
+   * EU-only inference: each model-backed feature's region availability for the
+   * caller's workspace. `unavailableReason: "region_restricted"` means the
+   * workspace is EU-only and the feature has no EU route here. Absent on older
+   * servers.
+   */
+  inferenceFeatures?: InferenceFeatureAvailability[] | undefined;
+  /**
    * Present only when this deployment archives idle sessions: after `idleDays`
    * without activity a session (unless kept live) becomes read-only.
    */
@@ -6224,6 +6305,17 @@ export type Workspace = {
 export type WorkspaceDefaultExecutionTarget =
   | { kind: "managed" }
   | { kind: "machine"; targetSandboxId: string };
+
+/**
+ * `GET/PUT /v1/workspaces/:id/my-default-execution-target`: the caller's own
+ * placement for the new chats they start in the workspace ("Your default
+ * machine"). Null follows the workspace default. `usable` is false when the
+ * saved machine is no longer available to them.
+ */
+export type MemberDefaultExecutionTarget = {
+  target: WorkspaceDefaultExecutionTarget | null;
+  usable: boolean;
+};
 
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
@@ -7244,6 +7336,12 @@ export type NewSessionDraft = {
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
+  /**
+   * Read-only: the caller's own default placement for new chats ("Your default
+   * machine") when usable now. A fresh form starts on it ahead of the
+   * workspace default. Older servers omit it.
+   */
+  memberDefaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   updatedAt: string | null;
 };
 
@@ -7559,7 +7657,7 @@ export type SubmitComposerDraftResponse = {
 
 export type SaveNewSessionDraftRequest = Omit<
   NewSessionDraft,
-  "revision" | "selectionHistory" | "updatedAt"
+  "revision" | "selectionHistory" | "updatedAt" | "memberDefaultExecutionTarget"
 > & {
   expectedRevision: number;
 };
@@ -8302,6 +8400,8 @@ export type VideoGenerationFundingOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** `region_restricted` when EU-only inference switched this source off. */
+  unavailableCode?: FeatureUnavailableReason | undefined;
 };
 
 export type WorkspaceVideoGenerationSettings = {
@@ -9399,6 +9499,11 @@ export type ApiIntegrationInstallationSummary = {
   approvalRequiredToolCount: number;
   revisionId: string;
   contentSha256: string;
+  /**
+   * Set on an instance a Personal workspace carries for its owner from another
+   * workspace where they connected it "Only me"; it is managed there.
+   */
+  personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
 };
 
 export type ListApiIntegrationsResponse = {
@@ -10499,6 +10604,19 @@ export type SessionMachineAccess = {
    *  brings them to the agent; moving the chat to a machine the sender may
    *  use runs them. Older servers omit it. */
   waitingMessages?: SessionWaitingMessages[] | undefined;
+  /** The next saved message is the machine owner's own and was approved for
+   *  other machines, not this one, so it can't start here and no recheck
+   *  helps: it runs after the chat moves to a machine it was approved for, or
+   *  it is removed and sent again here. Older servers omit it. */
+  queuedTurnNotApprovedHere?: boolean | undefined;
+  /** Where that message may run: the owner's personal machines it was
+   *  approved for. Listed only for its sender; empty for everyone else. */
+  queuedTurnApprovedMachines?: SessionApprovedMachine[] | undefined;
+};
+
+export type SessionApprovedMachine = {
+  sandboxId: string;
+  machineName: string;
 };
 
 export type SessionWaitingMessages = {
@@ -10958,6 +11076,8 @@ export type ClientAgentConfig = {
     id: AgentCapabilityId;
     available: boolean;
     reason?: string | undefined;
+    /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+    code?: FeatureUnavailableReason | undefined;
   }>;
 };
 

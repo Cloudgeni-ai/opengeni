@@ -865,8 +865,13 @@ this; their `language` option (and `ComposerTranscriptionControl`'s
 `useVoiceInput`'s `keyterms` the words it listens for. Taking
 the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
-insert the same speech twice. Cancel or Escape keeps anything longer than
-three seconds to insert later. A client without the recordings API (only
+insert the same speech twice. Cancel or Escape deletes the dictation, while
+it records or while it is being heard, so nothing offers it again; a host
+that keeps speech (the desktop app) gets its copy first, through `onAudio`
+with `cancelled: true`, when it is longer than three seconds. Something
+other than the person ending the dictation, such as live voice taking over
+or another chat opening, calls `setAside()` instead, which keeps anything
+longer than three seconds to insert later. A client without the recordings API (only
 `transcribeAudio` or, on a phone, `transcribeExpoRecording`, both of which
 also take a `language`) records in memory and
 sends one request, as before.
@@ -877,8 +882,9 @@ In the desktop app, a shortcut dictates into whatever app has the cursor:
 press it, speak, press it again (or hold it while speaking), and the text is
 typed there. Each dictation is an ordinary dictation recording of the
 signed-in person, so it is kept the same way: a failed transcription offers
-Retry, and a dismissed or cancelled one (after the first few seconds) stays
-saved for the composer to offer. The pieces:
+Retry, and a dismissed one stays saved for the composer to offer. A
+cancelled one is deleted; its speech (after the first few seconds) is kept
+only in the app's recent dictations. The pieces:
 
 - The main process (`@opengeni/desktop/dictation`) owns the shortcuts, a
   small window at the bottom of the screen that shows the dictation's
@@ -899,7 +905,10 @@ saved for the composer to offer. The pieces:
   settings page the person can copy a text, play its speech, or transcribe
   it again; transcribing again uploads the kept speech as a new dictation
   (`uploadRecordingAudio` in `@opengeni/sdk/recordings`) and replaces the
-  text. Clearing the history deletes the speech too.
+  text. A cancelled dictation is kept there too, marked "Cancelled, not
+  transcribed", with its speech and no text until it is transcribed again;
+  the retry shortcut transcribes the newest kept dictation, cancelled or
+  not, and types it. Clearing the history deletes the speech too.
 - While dictation is on, the app opens (without a window) when the person
   logs in, so the shortcuts work from the start.
 - `DesktopDictationHost` (`@opengeni/react/desktop-dictation`), mounted once

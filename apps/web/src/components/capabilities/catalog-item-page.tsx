@@ -18,6 +18,7 @@ import {
   OWNERSHIP_HELP,
   personalOnlyCapability,
 } from "@/components/capabilities/capability-copy";
+import { personalExtensionOrigin } from "@/components/capabilities/catalog-presentation";
 import {
   CredentialForm,
   FikenConnectorControls,
@@ -50,6 +51,7 @@ import {
   type CatalogConnectedAccountsManagement,
   type CatalogConnectedAccountsProps,
 } from "./catalog-connected-accounts";
+import type { AccountOriginWorkspace } from "@opengeni/react/app/components/capabilities/connection-account-rows";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
@@ -104,6 +106,8 @@ export function CatalogItemPage({
   socialSetupAvailable = true,
   connectionAccounts,
   accountManagement,
+  personalOnly: onlyMine = false,
+  workspaces,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -129,12 +133,19 @@ export function CatalogItemPage({
   /** Per-account Reconnect / Remove / Add. Omit to show the accounts read-only. */
   accountManagement?: Pick<
     CatalogConnectedAccountsManagement,
-    "viewerSubjectId" | "canWrite" | "onRemove"
+    "viewerSubjectId" | "canWrite" | "canRemoveOwnIn" | "canReconnectOwnIn" | "onRemove"
   >;
+  /** Only the person's own account can be connected here (a Personal
+   * workspace, or no permission to connect a shared one): no ownership choice. */
+  personalOnly?: boolean;
+  /** The workspaces the person can see, to name where an account was added. */
+  workspaces?: readonly AccountOriginWorkspace[];
 }) {
   const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  const personalOnly = personalOnlyCapability(item);
+  const personalOnly = onlyMine || personalOnlyCapability(item);
+  const personalWorkspace =
+    workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
   const defaultOwnership = personalOnly ? "personal" : defaultCapabilityConnectionOwnership(item);
   const [ownership, setOwnership] = useState<ConnectionOwnership>(defaultOwnership);
   useEffect(() => setOwnership(defaultOwnership), [item.id, defaultOwnership]);
@@ -143,6 +154,7 @@ export function CatalogItemPage({
 
   const title = capabilityTitle(item);
   const description = capabilityDescription(item);
+  const carriedFrom = personalExtensionOrigin(item);
   const publisher = capabilityPublisher(item);
   const community = isCommunityCapability(item);
   const category = capabilityCategoryLabel(item.category);
@@ -392,25 +404,31 @@ export function CatalogItemPage({
       setup = (
         <DetailSection title={socialAccounts.length ? "Accounts" : `Connect ${title}`}>
           <div className="grid gap-5">
-            <ChoiceCards
-              label="Who can use it?"
-              value={ownership}
-              onValueChange={(value) => setOwnership(value as ConnectionOwnership)}
-              disabled={busy}
-            >
-              <ChoiceCard
-                value="workspace"
-                title="Everyone in this workspace"
-                description={OWNERSHIP_HELP.workspace}
-                disabled={!canManageSocial}
-                disabledReason={
-                  canManageSocial
-                    ? undefined
-                    : "Only workspace admins can connect a shared account."
-                }
-              />
-              <ChoiceCard value="personal" title="Only me" description={OWNERSHIP_HELP.personal} />
-            </ChoiceCards>
+            {personalOnly ? null : (
+              <ChoiceCards
+                label="Who can use it?"
+                value={ownership}
+                onValueChange={(value) => setOwnership(value as ConnectionOwnership)}
+                disabled={busy}
+              >
+                <ChoiceCard
+                  value="workspace"
+                  title="Everyone in this workspace"
+                  description={OWNERSHIP_HELP.workspace}
+                  disabled={!canManageSocial}
+                  disabledReason={
+                    canManageSocial
+                      ? undefined
+                      : "Only workspace admins can connect a shared account."
+                  }
+                />
+                <ChoiceCard
+                  value="personal"
+                  title="Only me"
+                  description={OWNERSHIP_HELP.personal}
+                />
+              </ChoiceCards>
+            )}
             {socialAccounts.length ? (
               <ul className="m-0 list-none divide-y divide-border p-0">
                 {socialAccounts.map((connection) => (
@@ -600,14 +618,17 @@ export function CatalogItemPage({
           name={title}
           items={[
             publisher ? { label: "Made by", value: publisher } : null,
-            !isSkill && item.kind === "mcp"
+            // Nothing to choose while setup can't start here.
+            !isSkill && item.kind === "mcp" && (connectedScope || !setupBlocked)
               ? {
                   label: "Who can use it",
                   value: connectedScope
                     ? ownershipLabel(connectedScope)
-                    : personalOnly
-                      ? "Each person connects their own account"
-                      : "You choose when you connect",
+                    : personalWorkspace
+                      ? ownershipLabel("personal")
+                      : personalOnly
+                        ? "Each person connects their own account"
+                        : "You choose when you connect",
                 }
               : null,
             community ? { label: "Source", value: "Community - not reviewed by Opengeni" } : null,
@@ -663,7 +684,11 @@ export function CatalogItemPage({
         ) : null}
         {connectedScope ? (
           <p className="mt-4 mb-0 text-xs leading-4.5 text-fg-muted">
-            {connectedScope === "personal" ? OWNERSHIP_HELP.personal : OWNERSHIP_HELP.workspace}
+            {carriedFrom
+              ? `You connected it only for yourself in ${carriedFrom}. ${OWNERSHIP_HELP.personal}`
+              : connectedScope === "personal"
+                ? OWNERSHIP_HELP.personal
+                : OWNERSHIP_HELP.workspace}
           </p>
         ) : null}
       </DetailSection>
@@ -697,6 +722,8 @@ export function CatalogItemPage({
       {connectionAccounts ? (
         <CatalogConnectedAccounts
           item={item}
+          workspaceId={workspaceId}
+          workspaces={workspaces}
           {...connectionAccounts}
           {...(accountManagement
             ? {

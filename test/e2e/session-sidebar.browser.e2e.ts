@@ -1355,7 +1355,104 @@ test("Archive hides a Site row for this person with Undo; a spawned row archives
   await sidebar().locator(`a[data-session-row="${parentId}"]`).waitFor();
 }, 30_000);
 
-test("right-click and the touch overflow menu offer Pin and Archive on every row", async () => {
+const ipoSiteId = "00000000-0000-4000-a000-000000000002";
+const pricingSiteId = "00000000-0000-4000-a000-000000000003";
+const siteInProject = (project: string, siteId: string) =>
+  group(project).locator(`[data-site-row="${siteId}"]`);
+
+/** Drag a row onto a project's header, as a person does. */
+async function dragRowToProject(row: Locator, project: string) {
+  await row.locator("a").first().hover();
+  await page.mouse.down();
+  try {
+    const header = group(project).locator(":scope > div[draggable]").first();
+    // Deliver dragover after entering the target before releasing the mouse.
+    await header.hover();
+    await header.hover();
+  } finally {
+    await page.mouse.up();
+  }
+}
+
+test("a Site row moves to another project or Default like a chat row, by menu or by dragging", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light`);
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+
+  // Right-click offers the chat row's Move to project list, current project checked.
+  await siteInProject("Website redesign", pricingSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  const menu = page.getByRole("menu");
+  await menu.getByText("Move to project", { exact: true }).waitFor();
+  expect(await menu.getByRole("menuitem").allInnerTexts()).toEqual([
+    "Pin",
+    "Archive",
+    "Default",
+    "Website redesign",
+    "Bugfixes",
+  ]);
+  expect(
+    await menu
+      .getByRole("menuitem", { name: "Website redesign", exact: true })
+      .getAttribute("aria-current"),
+  ).toBe("true");
+  await capture("site-row-move-menu");
+  await menu.getByRole("menuitem", { name: "Bugfixes", exact: true }).click();
+  await siteInProject("Bugfixes", pricingSiteId).waitFor();
+  expect(await siteInProject("Website redesign", pricingSiteId).count()).toBe(0);
+  expect(await page.evaluate(() => window.sessionSidebarQa.siteProjectCalls)).toEqual([
+    { siteId: pricingSiteId, fromChannelId: redesignId, channelId: bugfixesId },
+  ]);
+
+  // Default takes a Site out of its project, with its conversation; the Site
+  // is not archived.
+  await siteInProject("Website redesign", ipoSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Default", exact: true }).click();
+  await page.waitForFunction(() => window.sessionSidebarQa.siteProjectCalls.length === 2);
+  await page.waitForFunction(
+    (siteId) =>
+      !document.querySelector(`[aria-label="Website redesign"] [data-site-row="${siteId}"]`),
+    ipoSiteId,
+  );
+  if ((await siteInProject("Default", ipoSiteId).count()) === 0) await showMore("Default").click();
+  await siteInProject("Default", ipoSiteId)
+    .getByRole("button", { name: "Expand 1 conversation from IPO research dashboard", exact: true })
+    .click();
+  await railConversation("Compare IPO filings").waitFor();
+  expect(await railConversation("Compare IPO filings").count()).toBe(1);
+  expect(await page.evaluate(() => window.sessionSidebarQa.siteSidebarCalls)).toEqual([]);
+
+  // Dragging a Site row onto a project header moves it there.
+  await dragRowToProject(siteInProject("Bugfixes", pricingSiteId), "Website redesign");
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+  expect(await siteInProject("Bugfixes", pricingSiteId).count()).toBe(0);
+  expect((await page.evaluate(() => window.sessionSidebarQa.siteProjectCalls)).at(-1)).toEqual({
+    siteId: pricingSiteId,
+    fromChannelId: bugfixesId,
+    channelId: redesignId,
+  });
+
+  // A refused move puts the row back where it was, as for a chat.
+  await page.evaluate(() => {
+    window.sessionSidebarQa.failSiteProject = true;
+  });
+  await siteInProject("Website redesign", pricingSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Bugfixes", exact: true }).click();
+  await page
+    .getByText("Couldn't move the Site. Its previous project was restored.", { exact: true })
+    .waitFor();
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+  expect(await siteInProject("Bugfixes", pricingSiteId).count()).toBe(0);
+}, 30_000);
+
+test("right-click and the touch overflow menu offer Pin, Archive and Move on every row", async () => {
   await openRowActions();
   for (const target of [
     { row: siteRowBox(usageSiteId), archive: "Archive" },
@@ -1379,6 +1476,14 @@ test("right-click and the touch overflow menu offer Pin and Archive on every row
     await row.getByRole("button", { name: "Actions for Opengeni usage", exact: true }).click();
     await touchPage.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
     await touchPage.getByRole("menuitem", { name: "Archive", exact: true }).waitFor();
+    // And the same Move to project list as a chat row's.
+    await touchPage.getByRole("menu").getByText("Move to project", { exact: true }).waitFor();
+    expect(
+      await touchPage
+        .getByRole("menuitem", { name: "Default", exact: true })
+        .getAttribute("aria-current"),
+    ).toBe("true");
+    await touchPage.getByRole("menuitem", { name: "Bugfixes", exact: true }).waitFor();
   } finally {
     await touch.close();
   }

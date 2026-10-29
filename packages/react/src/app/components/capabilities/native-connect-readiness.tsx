@@ -195,6 +195,8 @@ function primaryProviderId(modelId: string, slackBotMode: boolean): string | nul
       return "microsoft-outlook-contacts";
     case "onedrive":
       return "microsoft-onedrive";
+    case "sharepoint":
+      return "microsoft-sharepoint";
     // Historical native Atlassian is absent from the Connect catalog but still
     // owns a disconnect surface. Unknown/custom providers keep their own flow.
     default:

@@ -311,6 +311,7 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_update_superseded: "automations.run.error.turnInterrupted",
   scheduled_turn_withdrawn_for_edit: "automations.run.error.turnWithdrawn",
   scheduled_session_not_idle: "automations.run.error.chatBusy",
+  scheduled_session_waiting_capacity: "automations.run.error.chatWaitingForAccount",
   scheduled_session_paused: "automations.run.error.chatPaused",
   session_cancelled: "automations.run.error.chatEnded",
   scheduled_target_session_unavailable: "automations.run.error.chatGone",

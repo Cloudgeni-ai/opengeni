@@ -46,6 +46,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "git smart-HTTP passthrough and plain-text broker errors",
   },
+  "session-avatar-image.ts": {
+    count: 1,
+    userContent: false,
+    why: "server-drawn PNG avatar for Slack; image avatars are re-encoded, never passed through",
+  },
   "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
   "site-runtime.ts": {
     count: 1,

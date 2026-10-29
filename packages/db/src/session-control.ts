@@ -1,4 +1,9 @@
-import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import {
+  childRequiresActionRouteTx,
+  parentOutboxAuthorityTx,
+  recordedChildNoticeTargetTx,
+  type ChildRequiresActionRoute,
+} from "./child-outbox-authority";
 import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -23,6 +28,7 @@ import {
   childLifecycleNoticesEnabled,
   childPausedDedupeKey,
   childPausedSummary,
+  childRequiresActionDedupeKey,
   childRequiresActionResolvedDedupeKey,
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
@@ -2809,8 +2815,9 @@ export async function registerSessionWorkflowWakeInTransaction(
  * to now alone leaves the input waiting for the periodic dispatcher. The signal
  * is only a hint: the workflow re-reads PostgreSQL, one claim consumes the
  * whole pending batch, and the admission-aware acknowledgement keeps this
- * revision open until it does. Terminal background-command settlement does not
- * signal from its settlement callers yet, so the dispatcher delivers that wake.
+ * revision open until it does. Terminal background-command settlement returns
+ * its committed wakes so each settlement caller signals them after commit; the
+ * dispatcher delivers any a caller could not signal.
  */
 export async function registerInternalUpdateWakeInTransaction(
   db: Database,
@@ -3234,6 +3241,8 @@ async function insertChildOutboxRowInTransaction(
     summary: string;
     payload: Record<string, unknown> & { type: string };
     lineage?: Record<string, unknown>;
+    /** A resolution follows its question to the ancestor that received it. */
+    route?: ChildRequiresActionRoute;
   },
 ): Promise<void> {
   const parentSessionId = input.childSession.parentSessionId;
@@ -3249,10 +3258,13 @@ async function insertChildOutboxRowInTransaction(
       `Child outbox ${input.kind} payload discriminator mismatch`,
     );
   }
+  const targetSessionId = input.route?.targetSessionId ?? parentSessionId;
   const authority = await parentOutboxAuthorityTx(db, input.workspaceId, {
-    ...input.childSession,
-    parentSessionId,
+    ...(input.route?.via ?? input.childSession),
+    parentSessionId: targetSessionId,
   });
+  const routeLineage =
+    targetSessionId !== parentSessionId ? { childSessionId: input.childSession.id } : {};
   const inserted = await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -3262,7 +3274,7 @@ async function insertChildOutboxRowInTransaction(
             accountId: input.childSession.accountId,
             workspaceId: input.workspaceId,
             sourceSessionId: input.childSession.id,
-            targetSessionId: parentSessionId,
+            targetSessionId,
             dedupeKey: input.dedupeKey,
             kind: input.kind,
             classification: input.classification,
@@ -3270,7 +3282,7 @@ async function insertChildOutboxRowInTransaction(
             summary: input.summary,
             payload: input.payload,
             ...authority,
-            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
+            lineage: { ...authority.lineage, ...routeLineage, ...(input.lineage ?? {}) },
           },
           "summary",
           "summaryCodecVersion",
@@ -3388,6 +3400,27 @@ async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
       outcome: "cancelled" as const,
       respondedByKind: "system" as const,
     };
+    const parentSessionId = input.rootSession.parentSessionId;
+    const recordedTarget = parentSessionId
+      ? await recordedChildNoticeTargetTx(
+          db,
+          input.workspaceId,
+          childRequiresActionDedupeKey({
+            childSessionId: input.rootSession.id,
+            turnId: humanInput.turnId,
+            turnGeneration: humanInput.turnGeneration,
+          }),
+        )
+      : null;
+    const route =
+      parentSessionId && recordedTarget && recordedTarget !== parentSessionId
+        ? await childRequiresActionRouteTx(
+            db,
+            input.workspaceId,
+            { ...input.rootSession, parentSessionId },
+            recordedTarget,
+          )
+        : undefined;
     await insertChildOutboxRowInTransaction(db, {
       workspaceId: input.workspaceId,
       childSession: input.rootSession,
@@ -3404,6 +3437,7 @@ async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
       summary: childRequiresActionResolvedSummary(input.rootSession.id, payload),
       payload,
       lineage: { turnId: humanInput.turnId },
+      ...(route ? { route } : {}),
     });
   }
 }
@@ -3785,6 +3819,37 @@ export class SessionArchiveConfirmationRequiredError extends Error {
   }
 }
 
+/**
+ * Whether a chat or anything it started still has work: a turn, a wait for
+ * input, an active goal or a running background command. Archive asks before
+ * pausing such a chat.
+ */
+export async function sessionWorkstreamHasActiveWork(
+  db: Database | SessionActivityDatabase,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [activity] = await db.execute<{ active: boolean }>(sql`
+    select exists (
+      select 1 from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId}
+        and (session.id = ${sessionId} or session.root_session_id = ${sessionId})
+        and (
+          session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+          or session.active_turn_id is not null
+          or session.input_wait_turn_id is not null
+          or exists (select 1 from ${schema.sessionGoals} goal
+            where goal.workspace_id = session.workspace_id and goal.session_id = session.id
+              and goal.status = 'active')
+          or exists (select 1 from ${schema.sessionBackgroundCommands} command
+            where command.workspace_id = session.workspace_id and command.session_id = session.id
+              and command.state in ('running', 'stopping'))
+        )
+    ) as active
+  `);
+  return activity?.active === true;
+}
+
 export async function mutateSessionControlInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -3917,26 +3982,8 @@ export async function mutateSessionControlInTransaction(
     };
   }
   if (input.requireIdleForArchive && input.action === "pause") {
-    {
-      const [activity] = await db.execute<{ active: boolean }>(sql`
-        select exists (
-          select 1 from ${schema.sessions} session
-          where session.workspace_id = ${input.workspaceId}
-            and (session.id = ${input.sessionId} or session.root_session_id = ${input.sessionId})
-            and (
-              session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
-              or session.active_turn_id is not null
-              or session.input_wait_turn_id is not null
-              or exists (select 1 from ${schema.sessionGoals} goal
-                where goal.workspace_id = session.workspace_id and goal.session_id = session.id
-                  and goal.status = 'active')
-              or exists (select 1 from ${schema.sessionBackgroundCommands} command
-                where command.workspace_id = session.workspace_id and command.session_id = session.id
-                  and command.state in ('running', 'stopping'))
-            )
-        ) as active
-      `);
-      if (activity?.active) throw new SessionArchiveConfirmationRequiredError();
+    if (await sessionWorkstreamHasActiveWork(db, input.workspaceId, input.sessionId)) {
+      throw new SessionArchiveConfirmationRequiredError();
     }
   }
   if (input.actor.type === "agent_attempt") {

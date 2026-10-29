@@ -709,6 +709,12 @@ export type {
 } from "./model-policy";
 export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
 export {
+  REGION_RESTRICTED,
+  inferenceFeatureRestriction,
+  isRegionRestricted,
+  regionRestrictedText,
+} from "./inference-region";
+export {
   humanizeModelSlug,
   isRawModelLabel,
   modelDisplayName,
@@ -919,3 +925,11 @@ export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+export { InteractiveAnswer, type InteractiveAnswerProps } from "./components/interactive-answer";
+export {
+  browserInteractiveAnswerStore,
+  INTERACTIVE_ANSWER_FENCE,
+  InteractiveAnswerProvider,
+  type InteractiveAnswerHost,
+  type InteractiveAnswerStore,
+} from "./interactive-answer-model";

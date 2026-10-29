@@ -470,13 +470,6 @@ else, so each is a broken feature, not an authority hole:
   `resolveCodexAppsCredentialIdForRun`
   (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
   execution.
-- The OAuth-callback grant rechecks over the signed `state.subjectId` in
-  `apps/api/src/integrations/{google-drive,atlassian,fiken,social-oauth}.ts`
-  and `apps/api/src/routes/connections.ts`. The generic MCP and curated API
-  Integration callbacks (`oauth-client` and `provider-oauth`) now resolve the
-  exact signed human's live personal-workspace pointer through the narrow
-  `resolveNamedManagedPersonalWorkspaceGrant` seam; the remaining provider
-  callbacks still deny personal-workspace setup rather than leaking authority.
 - SQL seams without the personal-workspace disjunct: the xAI subscription
   authority views/functions in 0234. Migration 0303 repairs
   `transition_session_visibility` and `fork_session_content` with the exact
@@ -490,6 +483,20 @@ else, so each is a broken feature, not an authority hole:
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
   disjunct.)
+
+The OAuth/install callback re-checks over the signed `state.subjectId` are
+repaired; do not add them back to this list. Every callback (MCP OAuth,
+Integration Definition OAuth, Google Drive, Atlassian, personal GitHub, GitHub
+App Connect, social OAuth, Fiken, and the Slack bot) re-checks its owner
+through `requireConnectOwnerAuthority`, which resolves the exact signed human's
+live personal-workspace pointer through the narrow
+`resolveNamedManagedPersonalWorkspaceGrant` seam. That works only because every
+owner-bound state signs the `personalOwnerVerified` claim through
+`connectOwnerStateFields`, and `ConnectOwner` makes the claim required on every
+re-check. Fiken and the Slack bot once omitted the claim and the legacy social
+callback used a bare `getWorkspaceGrant`; each failed only in Personal
+workspaces. `apps/api/test/connect-owner-state-surface.test.ts` keeps new
+connectors on both paths.
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
@@ -1530,6 +1537,26 @@ uses its accepted attempt snapshot), and the session-status and workspace
 checks are unchanged. Any other set is a 42501 denial with its denial fact,
 which the terminal, Files, Git and viewer routes answer as a 403 rather than a
 500.
+
+Disconnects of model subscriptions and connectors are audited in the
+transaction that performs them (`packages/db/src/disconnect-audit.ts`): each
+successful disconnect writes one disconnect `audit_events` row, either
+`subscription_connection.disconnected` (Codex, Claude and SuperGrok accounts,
+workspace or organization) or `connection.disconnected` (workspace
+connections, 1Password and vault-provider connections, social connections,
+GitHub installations, the Teams bot and organization connected agents). The
+existing Slack bot lifecycle record is kept alongside it. The
+row's subject is the acting person or principal, its workspace is null for an
+organization-level removal, and its metadata names the target's provider and
+the `source`: `app` for a person signed in to the app, `api` for API,
+organization or personal keys and service principals, and `agent` for an
+agent attempt (with its session, turn and attempt ids) or an agent acting for
+a person through organization actions. The API derives the source only from
+authenticated provenance (`apps/api/src/http/disconnect-audit-actor.ts`).
+A refused, missing or repeated disconnect writes nothing, metadata never
+carries credentials, and a failed audit insert rolls the disconnect back.
+System revocations (refresh failures, setup rollbacks, deletion cascades) are
+not person-initiated disconnects and are not recorded this way.
 
 Signed object-storage URLs are the remaining deliberately-bounded bearer
 surface: provider-native signing has no revocation, so revocation prevents

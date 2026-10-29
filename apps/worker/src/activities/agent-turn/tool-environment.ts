@@ -29,7 +29,9 @@ import {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
+  createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
+  sideFeatureRouteRunnable,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
@@ -86,6 +88,7 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
+import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -575,7 +578,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           videoGenerationEnabled:
             skillConfiguration !== null &&
             skillConfiguration.defaultModelId !== null &&
-            skillConfiguration.enabledModelIds.length > 0,
+            skillConfiguration.enabledModelIds.length > 0 &&
+            sideFeatureRouteRunnable(
+              runSettings,
+              videoGenerationRoute(skillConfiguration.fundingSource),
+            ),
         });
   const selectedSkills = [
     ...bundledSkills,
@@ -750,6 +757,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionId: input.sessionId,
         turnId: turn.id,
         turnAttemptId: input.attemptId,
+        processingResidency: decisionModelProcessingResidency(runSettings, true),
       };
       if (usage.decisionInputTokens !== null)
         await recordUsageEvent(db, {
@@ -810,6 +818,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,
   });
+  const firstPartyInteractionInput = {
+    settings: runSettings,
+    ...(credentialRestriction ? { credentialRestriction } : {}),
+    scope: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
+    selectedTools: selectedFirstPartyMcpTools,
+    subjectId: "worker:first-party-mcp",
+    subjectLabel: "Opengeni worker",
+  };
+  // A person-handoff request that leaves its generations out records the
+  // target as it is when the turn pauses.
+  eventing.interactionRequestTargetReader = createFirstPartyInteractionRequestTargetReader(
+    firstPartyInteractionInput,
+  );
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -876,20 +905,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
-      settings: runSettings,
-      ...(credentialRestriction ? { credentialRestriction } : {}),
-      scope: {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: attempt.executionGeneration,
-      },
-      ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
-      selectedTools: selectedFirstPartyMcpTools,
-      subjectId: "worker:first-party-mcp",
-      subjectLabel: "Opengeni worker",
+      ...firstPartyInteractionInput,
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),

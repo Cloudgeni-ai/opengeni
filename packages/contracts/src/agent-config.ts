@@ -22,6 +22,7 @@ import { defineSchema } from "./define-schema";
  */
 import { z } from "zod";
 import { CUA_DESKTOP_TOOLS, isCuaDesktopModelTool } from "./cua-desktop-tools";
+import { FeatureUnavailableReason } from "./inference-residency";
 import { VaultPolicy } from "./vaults";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
@@ -245,6 +246,8 @@ export const ClientAgentConfig = /* @__PURE__ */ defineSchema(() =>
             id: AgentCapabilityId,
             available: primitives.boolean,
             reason: z.string().max(200).optional(),
+            /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+            code: FeatureUnavailableReason.optional(),
           })
           .strict(),
       ),

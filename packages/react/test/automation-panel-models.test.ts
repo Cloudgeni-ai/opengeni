@@ -161,6 +161,12 @@ describe("automation words", () => {
     expect(automationRunErrorText(t, " scheduled_session_not_idle ")).toBe(
       t("automations.run.error.chatBusy"),
     );
+    expect(automationRunErrorText(t, "scheduled_session_waiting_capacity")).toBe(
+      t("automations.run.error.chatWaitingForAccount"),
+    );
+    expect(t("automations.run.error.chatWaitingForAccount")).toContain(
+      "Pick another model in the chat",
+    );
     // Refusals before a run starts share the words of the codes they mean.
     expect(automationRunErrorText(t, "machine_enrollment_inactive")).toBe(
       automationRunErrorText(t, "scheduled_machine_unavailable"),
@@ -185,6 +191,7 @@ describe("automation words", () => {
       "scheduled_turn_withdrawn_for_edit",
       "scheduled_update_failed",
       "scheduled_session_not_idle",
+      "scheduled_session_waiting_capacity",
       "scheduled_session_paused",
       "session_cancelled",
       "scheduled_target_session_unavailable",

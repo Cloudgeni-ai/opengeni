@@ -134,7 +134,9 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -405,6 +407,8 @@ import type {
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
   UpdateOrganizationPrivacySettingsRequest,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceModelCatalogResponse,
@@ -743,6 +747,8 @@ import type {
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  MemberDefaultExecutionTarget,
+  WorkspaceDefaultExecutionTarget,
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   Channel,
@@ -2119,6 +2125,24 @@ export class OpenGeniClient {
     return this.requestJson(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
+    );
+  }
+
+  /**
+   * Move a Site's sidebar row from one project to another (null is Default),
+   * like moving a chat: its conversations in that project move with it, and the
+   * Site itself moves for everyone when the row is its own project's. Needs
+   * `sessions:control`; the Site stays published and in Artifacts.
+   */
+  async updateSiteProject(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteProjectRequest,
+  ): Promise<SiteProjectResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/channel`,
       request,
     );
   }
@@ -6227,6 +6251,31 @@ export class OpenGeniClient {
     );
   }
 
+  /** The organization's EU-only inference setting. Any member. */
+  async getOrganizationInferenceResidency(
+    organizationId: string,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "GET",
+      `/v1/organizations/${organizationId}/inference-residency`,
+    );
+  }
+
+  /**
+   * Turn EU-only inference on (an owner or admin) or off (an owner or admin in
+   * the app in a browser, never an agent or API key).
+   */
+  async updateOrganizationInferenceResidency(
+    organizationId: string,
+    request: UpdateOrganizationInferenceResidencyRequest,
+  ): Promise<OrganizationInferenceResidency> {
+    return await this.requestJson<OrganizationInferenceResidency>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/inference-residency`,
+      request,
+    );
+  }
+
   /** Fully replace the workspace's hard provider/model allowlist. */
   async updateWorkspaceModelAccessPolicy(
     workspaceId: string,
@@ -6895,6 +6944,11 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Creates an inactive draft revision. Empty (or blank) content is stored as
+   * "" and, once activated, clears the target: prompts get no policy for it,
+   * history keeps the earlier versions, and rollback can restore one.
+   */
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
@@ -8631,6 +8685,26 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/settings`,
       request,
+    );
+  }
+
+  /** The caller's own default placement for new chats ("Your default machine"). */
+  async getMyDefaultExecutionTarget(workspaceId: string): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+    );
+  }
+
+  /** Saves the caller's own default placement; null follows the workspace default. */
+  async setMyDefaultExecutionTarget(
+    workspaceId: string,
+    target: WorkspaceDefaultExecutionTarget | null,
+  ): Promise<MemberDefaultExecutionTarget> {
+    return await this.requestJson<MemberDefaultExecutionTarget>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/my-default-execution-target`,
+      { target },
     );
   }
 
@@ -11319,14 +11393,21 @@ export class OpenGeniClient {
     );
   }
 
-  /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
-  async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
-    // A JSON body even though the route reads none: signed-in browsers are
-    // admitted to subscription mutations only as same-origin JSON requests.
+  /**
+   * Begin device-code login: show `userCode` at `verificationUri`, then poll
+   * with `state`. `scope: "user"` connects the person's own subscription from
+   * this workspace; it is kept in their own Personal workspace.
+   */
+  async codexConnectStart(
+    workspaceId: string,
+    options: { scope?: "user" } = {},
+  ): Promise<CodexConnectStart> {
+    // Always a JSON body: signed-in browsers are admitted to subscription
+    // mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
-      {},
+      options.scope ? { scope: options.scope } : {},
     );
   }
 

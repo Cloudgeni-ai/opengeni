@@ -82,10 +82,12 @@ export async function recordRigAuditEvent(
   });
 }
 
-// Version attribution string for an API (user-authenticated) mutation. The MCP
-// session path (M4) will use `session:<id>` instead.
+// Version attribution string for an API (user-authenticated) mutation: the
+// caller's subject as is (`user:<id>`). It already names its kind, so it is not
+// prefixed again; versions written before this say `user:user:<id>`, which the
+// console still reads as that person. The MCP session path uses `session:<id>`.
 export function rigActorForGrant(grant: AccessGrant): string {
-  return `user:${grant.subjectId}`;
+  return grant.subjectId;
 }
 
 export async function requireRigForApi(

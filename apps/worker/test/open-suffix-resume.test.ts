@@ -218,13 +218,18 @@ describe("open suffix approval results", () => {
     } satisfies OpenSuffixPendingToolCall;
     return {
       calls,
-      resume: (decision: string | undefined, message?: unknown) =>
+      resume: (decision: string | undefined, message?: unknown, refusal?: unknown) =>
         resultItemForOpenSuffixMember({
           agent,
           row,
           trigger: {
             type: "user.approvalDecision",
-            payload: { approvalId: row.callId, decision, message },
+            payload: {
+              approvalId: row.callId,
+              decision,
+              message,
+              ...(refusal !== undefined ? { refusal } : {}),
+            },
           },
           humanInputResume: null,
         }),
@@ -291,6 +296,23 @@ describe("open suffix approval results", () => {
     const { resume, calls } = fixture({ kind: "interaction_intervention" });
     const reason = "Stop the interaction; prior actions are not rolled back.";
     expectInterruptedResult(await resume("reject", reason), reason);
+    expect(calls).toEqual([]);
+  });
+
+  test("an intervention refused at its pause reads as that refusal, not an interruption", async () => {
+    const { resume, calls } = fixture({ kind: "interaction_intervention" });
+    const refusal =
+      "Nothing was requested: browser tab T1 was not found. Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.";
+    expectPairedResult(await resume("reject", undefined, refusal), refusal);
+    expect(calls).toEqual([]);
+  });
+
+  test("only an interaction intervention reads a pause refusal", async () => {
+    const { resume, calls } = fixture();
+    expectPairedResult(
+      await resume("reject", undefined, "Nothing was requested."),
+      rejectedDefault,
+    );
     expect(calls).toEqual([]);
   });
 

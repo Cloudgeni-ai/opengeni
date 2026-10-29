@@ -46,6 +46,7 @@ import {
 } from "../../realtime";
 import {
   OpenGeniApiError,
+  type NewSessionDraft,
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
@@ -888,7 +889,11 @@ function SessionsIndexRouteContent({
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
-    (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
+    (
+      remote: NewSessionDraftEditable,
+      history: NewSessionSelectionHistory,
+      memberTarget: NewSessionDraft["memberDefaultExecutionTarget"] | null,
+    ) => {
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -913,6 +918,7 @@ function SessionsIndexRouteContent({
       setSelectedProjectChannelId(projectSelection.channelId);
       const compute = initialWorkspaceMachineCompute({
         settings: workspace?.settings,
+        memberTarget,
         options: remote.options,
         fallback: projectSelection.compute,
         backend: defaultSandboxBackend,
@@ -1064,23 +1070,18 @@ function SessionsIndexRouteContent({
     selectedPolicyRow?.selectable
       ? "Choose a supported model, reasoning level, and speed."
       : null;
-  useEffect(() => {
-    if (modelCatalog.loading || newSessionDraft.loading) return;
-    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
-    // The server-resolved default comes first (saved workspace default, then a
-    // connected subscription, then credits, then the deployment default); the
-    // client ranking only covers a default that is itself unavailable.
-    const resolvedDefault = modelCatalog.defaultSelection;
+  // The server-resolved default comes first (saved workspace default, then a
+  // connected subscription, then credits, then the deployment default); the
+  // client ranking only covers a default that is itself unavailable.
+  const pendingFallbackModel = useMemo(() => {
+    if (modelCatalog.loading || newSessionDraft.loading) return null;
+    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return null;
     const next = composerFallbackModel({
       models: modelCatalog.models,
       rows: modelCatalog.rows,
-      defaultSelection: resolvedDefault,
+      defaultSelection: modelCatalog.defaultSelection,
     });
-    if (!next || next.id === context.model) return;
-    setModel(next.id);
-    setReasoningEffort(next.effort);
-    // An automatic replacement is not the person's choice.
-    setModelProvided((current) => (current === undefined ? current : false));
+    return next && next.id !== context.model ? next : null;
   }, [
     context.model,
     modelCatalog.defaultSelection,
@@ -1088,9 +1089,15 @@ function SessionsIndexRouteContent({
     modelCatalog.models,
     modelCatalog.rows,
     newSessionDraft.loading,
-    setModel,
-    setReasoningEffort,
   ]);
+  useEffect(() => {
+    const next = pendingFallbackModel;
+    if (!next) return;
+    setModel(next.id);
+    setReasoningEffort(next.effort);
+    // An automatic replacement is not the person's choice.
+    setModelProvided((current) => (current === undefined ? current : false));
+  }, [pendingFallbackModel, setModel, setReasoningEffort]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -1659,6 +1666,17 @@ function SessionsIndexRouteContent({
           !connectionAccounts.requiresAccountChoice)) &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
+    // What Send needs right after the page opens is still loading: an early
+    // Send waits for it instead of doing nothing.
+    preparing:
+      modelCatalog.loading ||
+      newSessionDraft.loading ||
+      pendingFallbackModel !== null ||
+      personalResourceCatalogRefreshPending ||
+      (createdSessionAuthority === null &&
+        (connectionAccounts.loading ||
+          (fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled)) ||
+          (draft.compute.kind === "machine" && fleet.loading))),
     pause: async () => {},
     pausing: false,
     resume: async () => {},

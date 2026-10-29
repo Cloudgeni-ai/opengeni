@@ -17,6 +17,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requirePermission,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -85,9 +86,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") !== true
     ) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     return { authorization, grant: authorization.grant, rig };
   }
@@ -196,9 +195,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
     if (payload.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const rig = await createRigForApi({ db }, grant, payload, {
       allowOrganization,
@@ -226,9 +223,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
     if (rig.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const payload = await parseRigRequest(
       c,
@@ -248,9 +243,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
     if (rig.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     await deleteRigForApi({ db }, grant, rig, { allowOrganization });
     return c.json({ ok: true });

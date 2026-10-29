@@ -5,7 +5,11 @@ import {
   type AccessPrincipalKind,
   type Permission,
 } from "@opengeni/contracts";
-import { accessGrantAuthorizationFromContext } from "@opengeni/core";
+import {
+  accessGrantAuthorizationFromContext,
+  missingPermissionMessage,
+  missingPermissionOf,
+} from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 import { authorizePreferenceRegistryScopeMutation } from "../src/routes/preference-registry";
 import { authorizeSkillScopeMutation } from "../src/routes/skill-content";
@@ -60,14 +64,17 @@ function authorization(input: {
   return accessGrantAuthorizationFromContext(context, grant);
 }
 
-function expectForbidden(operation: () => void, message?: string): void {
+function expectForbidden(operation: () => void, permission?: Permission): void {
   try {
     operation();
     throw new Error("expected preference authorization to fail");
   } catch (error) {
     expect(error).toBeInstanceOf(HTTPException);
     expect((error as HTTPException).status).toBe(403);
-    if (message) expect((error as Error).message).toContain(message);
+    if (permission) {
+      expect(missingPermissionOf(error)).toBe(permission);
+      expect((error as Error).message).toBe(missingPermissionMessage(permission));
+    }
   }
 }
 
@@ -273,7 +280,7 @@ describe("workspace integration administration", () => {
       requireWorkspaceIntegrationAdministration({
         permissions: ["workspace:read", "connections:write"],
       }),
-    ).toThrow("capabilities:manage");
+    ).toThrow(missingPermissionMessage("capabilities:manage"));
     expect(() =>
       requireWorkspaceIntegrationAdministration({
         permissions: ["workspace:read", "connections:write", "capabilities:manage"],

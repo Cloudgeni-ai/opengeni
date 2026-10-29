@@ -22,6 +22,7 @@ import {
 import {
   requireAccessGrant,
   integrationSourceForOrganizationPolicy,
+  listApiIntegrationsWithPersonalExtension,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
@@ -37,7 +38,6 @@ import {
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
   apiIntegrationConnected,
-  listInstalledApiIntegrations,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
 } from "@opengeni/db";
@@ -231,7 +231,14 @@ export function registerApiIntegrationRoutes(
   app.get("/v1/workspaces/:workspaceId/integrations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const integrations = await listInstalledApiIntegrations(deps.db, workspaceId, grant.subjectId);
+    // A Personal workspace also lists the instances its owner's "Only me"
+    // connections carry in from the organization's other workspaces.
+    const integrations = await listApiIntegrationsWithPersonalExtension(deps.db, {
+      workspaceId,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+      deploymentMcpServerIds: deps.settings.mcpServers.map((server) => server.id),
+    });
     return c.json(
       ListApiIntegrationsResponse.parse({
         integrations: integrations.map((integration) => {
@@ -272,6 +279,14 @@ export function registerApiIntegrationRoutes(
                 : integration.requireApproval.length,
             revisionId: integration.revision.id,
             contentSha256: integration.revision.contentSha256,
+            ...(integration.personalExtension
+              ? {
+                  personalExtension: {
+                    originWorkspaceId: integration.personalExtension.originWorkspaceId,
+                    originWorkspaceName: integration.personalExtension.originWorkspaceName,
+                  },
+                }
+              : {}),
           };
         }),
       }),

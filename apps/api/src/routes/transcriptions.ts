@@ -10,9 +10,11 @@ import {
   TranscriptionServiceError,
 } from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
+import { voiceInputRegionRestricted } from "../transcription/region";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/transcriptions", async (c) => {
@@ -24,6 +26,9 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       return c.json({ code: "policy_blocked" }, 403);
     }
     const preferences = WorkspaceVoiceInputSettings.safeParse(workspace.settings.voiceInput).data;
+    if (await voiceInputRegionRestricted(deps, { accountId: grant.accountId, workspaceId })) {
+      return c.json({ code: "region_restricted" }, 422);
+    }
     const service = deps.transcription;
     if (
       !service ||
@@ -68,6 +73,9 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       }
       if (error instanceof TranscriptionBillingRefusedError) {
         return transcriptionBillingRefusal(c, error);
+      }
+      if (error instanceof InferenceRegionRestrictedError) {
+        return c.json({ code: "region_restricted" }, 422);
       }
       if (isAbort(error)) return c.json({ code: "cancelled" }, 499 as never);
       return c.json({ code: "unknown" }, 500);

@@ -5008,12 +5008,14 @@ async function publishSlackSharedResult(
   const publicationOperationId = deterministicUuid(
     `slack-shared-result:${origin.interactionId}:${event.id}:${origin.policyActivationVersion}`,
   );
+  const identity = await client.sessionIdentity(interaction.workspaceId, interaction.sessionId);
   await deliverSlackModelText(async (format) => {
     await client.postMessage({
       operationId: publicationOperationId,
       channelId: origin.sourceChannelId,
       threadTimestamp: origin.sourceThreadTs,
       text: `<@${origin.initiatingSlackUserId}> ${boundedOutput(format(output))}`,
+      ...(identity ? { identity } : {}),
     });
   });
   return {
@@ -6178,6 +6180,12 @@ function slackTerminalProgressSameTurn(
   );
 }
 
+const SLACK_AGENT_AUTHORED_DELIVERY_KINDS: ReadonlySet<string> = new Set([
+  "progress",
+  "reply",
+  "final",
+]);
+
 async function postDelivery(
   client: Awaited<ReturnType<typeof createOpenGeniSlackBotInteractionClient>>,
   interaction: SlackInteraction,
@@ -6189,6 +6197,11 @@ async function postDelivery(
   ),
   blocks?: SlackMessageBlock[],
 ) {
+  // The agent's own words post under a bot chat's name and avatar; system
+  // notices (approvals, limits, failures) stay the app's.
+  const identity = SLACK_AGENT_AUTHORED_DELIVERY_KINDS.has(kind)
+    ? await client.sessionIdentity(interaction.workspaceId, interaction.sessionId)
+    : undefined;
   const post = async (label: string | null) => {
     const rendered = withWorkspaceLine(label, boundedOutput(text), blocks);
     await client.postMessage({
@@ -6197,6 +6210,7 @@ async function postDelivery(
       threadTimestamp: interaction.slackThreadTs,
       text: rendered.text,
       ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
+      ...(identity ? { identity } : {}),
     });
   };
   const label = slackMessageWorkspaceLabel(interaction);

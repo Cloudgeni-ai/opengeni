@@ -23,7 +23,7 @@ export function meetingSummaryPrompt(input: { recordingId: string; title: string
     '3. `## Decisions`: one bullet per decision, or "- None" when nothing was decided.',
     '4. `## Action items`: a checklist with one `- [ ]` line per task, naming its owner and its due date when one was said, or "- None" when there were none.',
     "",
-    "Use the names and terms people used, write in the language the meeting was held in, and leave out small talk.",
+    'Write all of it in the language the meeting was held in, the headings and "None" too. Use the names and terms people used, and leave out small talk.',
     "",
     "Link people when you name them: a person from the workspace (a speaker with a personId) as [Display name](person:<personId>), and any other speaker as [Display name](speaker:<label>), using exactly the labels and ids meeting_read gave. Name anyone else in plain text.",
     "",

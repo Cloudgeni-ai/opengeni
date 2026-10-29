@@ -1185,6 +1185,106 @@ describe("recording routes", () => {
     ).toBe(400);
   });
 
+  test("EU-only: a live secret is minted only for a Realtime endpoint declared EU", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const residency = {
+      geography: "eu",
+      deploymentType: "azure_data_zone",
+      regions: ["swedencentral"],
+      evidence: {
+        source: "operator_declaration",
+        reference: "Operator-declared EU deployment",
+        verifiedAt: "2026-10-26",
+      },
+    };
+    const live = async (declarations: Record<string, unknown>) => {
+      const minted: string[] = [];
+      const scope = await fixture({
+        settings: {
+          requiredModelGeography: "eu",
+          sideFeatureResidencyJson: JSON.stringify(declarations),
+          recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+          recordingAzureSpeechApiKey: "deployment-key",
+          speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+          recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+          voiceInputProviderOrder: "azure-openai",
+          voiceInputAzureEndpoint: AI,
+          voiceInputAzureDeployment: "gpt-4o-transcribe",
+          voiceInputAzureApiKey: "az-key",
+        },
+        speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          minted.push(new Request(input, init).url);
+          return Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 });
+        }) as typeof fetch,
+      });
+      // The workspace asks recorders to start with the live transcript on.
+      await shared.admin`
+        update workspaces set settings = settings || '{"recordings":{"liveTranscript":true}}'::jsonb
+        where id = ${scope.workspaceId}`;
+      const recordingId = crypto.randomUUID();
+      await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+      });
+      const models = await scope.owner.call("GET", "/recording-models");
+      const granted = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+      const entry = models.body.models.find(
+        (model: { providerId: string }) => model.providerId === "azure-openai",
+      );
+      return { minted, granted, entry, liveTranscript: models.body.liveTranscript };
+    };
+    // Meetings are declared EU; the live transcript's own route is not.
+    const speech = {
+      "transcription.azure-speech": {
+        endpoint: "https://speech.example.cognitiveservices.azure.com",
+        residency,
+      },
+      "transcription.azure-openai": { endpoint: AI, deployment: "gpt-4o-transcribe", residency },
+    };
+    const refused = await live(speech);
+    expect(refused.granted).toMatchObject({
+      status: 422,
+      body: { error: { details: { code: "region_restricted" } } },
+    });
+    expect(refused.minted).toEqual([]);
+    expect(refused.entry).toMatchObject({
+      available: false,
+      unavailableReason: "region_restricted",
+    });
+    // Recorders don't start a live transcript that can't run here.
+    expect(refused.liveTranscript).toBe(false);
+    // A Realtime declaration for another deployment on the same resource
+    // (an EU one beside the configured global one) mints nothing either.
+    const otherDeployment = await live({
+      ...speech,
+      "transcription.azure-openai-realtime": {
+        endpoint: AI,
+        deployment: "gpt-4o-transcribe-eu",
+        residency,
+      },
+    });
+    expect(otherDeployment.granted).toMatchObject({
+      status: 422,
+      body: { error: { details: { code: "region_restricted" } } },
+    });
+    expect(otherDeployment.minted).toEqual([]);
+    const admitted = await live({
+      ...speech,
+      "transcription.azure-openai-realtime": {
+        endpoint: AI,
+        deployment: "gpt-4o-transcribe",
+        residency,
+      },
+    });
+    expect(admitted.granted).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    expect(admitted.minted).toEqual([`${AI}/openai/v1/realtime/client_secrets`]);
+    expect(admitted.entry).toMatchObject({ available: true, capabilities: { live: true } });
+    expect(admitted.entry.unavailableReason).toBeUndefined();
+    expect(admitted.liveTranscript).toBe(true);
+  });
+
   test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {
     const tokenRequests: { url: string; key: string | null }[] = [];
     const realFetch = globalThis.fetch;

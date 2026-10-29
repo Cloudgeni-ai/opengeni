@@ -39,6 +39,7 @@ export * from "./credential-profiles";
 export * from "./secret-value-masking";
 export * from "./secret-use-history";
 export * from "./connected-machine-audience";
+export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
@@ -80,6 +81,11 @@ import {
   withConnectionSubjectRls,
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
+import {
+  CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  insertDisconnectAuditEventInScope,
+  type DisconnectAuditActor,
+} from "./disconnect-audit";
 export {
   getConnectionMetadata,
   getProviderConnectionHomeWorkspace,
@@ -181,7 +187,12 @@ import {
   WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT,
   waitsForMachineOwnerSql,
 } from "./machine-owner-wait";
-import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import {
+  childRequiresActionRouteTx,
+  parentOutboxAuthorityTx,
+  recordedChildNoticeTargetTx,
+  type ChildRequiresActionRoute,
+} from "./child-outbox-authority";
 import {
   compactionFailureHoldSequenceTx,
   systemUpdatePendingAfterSequenceSql,
@@ -400,6 +411,7 @@ import {
   historicalChildReadMatches,
 } from "./child-read-reconciliation";
 import { createRetryFailedSessionInTransaction } from "./session-retry";
+import { WorkspaceArtifactNotFoundError } from "./workspace-artifacts";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
 export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
@@ -494,6 +506,7 @@ export {
   disconnectSubscriptionCoreConnection,
   resolveSubscriptionCoreRouteConnectionId,
   type SubscriptionCoreConnectRefusal,
+  type SubscriptionCoreDisconnectAudit,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
 export * from "./subscription-core-xai-compat";
@@ -887,6 +900,8 @@ import {
 import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
+  type InteractionRequestCurrentTarget,
+  InteractionRequestRefusedError,
   InteractionResourceStateError,
   persistAttemptInteractionInterventionInTransaction,
   resolveInteractionInterventionInTransaction,
@@ -917,6 +932,8 @@ import {
   MESSAGE_TIME_ZONE_METADATA_KEY,
   messageTimeZoneFromTurnMetadata,
   normalizeMessageTimeZone,
+  OPENING_TOOLS_METADATA_KEY,
+  openingToolsFromTurnMetadata,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -1119,6 +1136,7 @@ import {
   registerSessionTurnAttemptClaim,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
+  sessionWorkstreamHasActiveWork,
   type SessionDiscoveryControl,
   type SessionCommandActor,
   SessionControlConflictError,
@@ -5944,6 +5962,8 @@ export async function deleteGitHubInstallationBinding(
     installationId: number;
     /** The deployment's event route secret: GitHub event routes are recomputed with it. */
     eventRouteSecret: Uint8Array | null;
+    /** Who removed the installation from the workspace: audited in the same transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -5960,10 +5980,31 @@ export async function deleteGitHubInstallationBinding(
         )
         .returning({ id: schema.githubInstallations.id });
       await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
+      if (input.audit && rows.length > 0) {
+        await insertDisconnectAuditEventInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+          actor: input.audit,
+          target: {
+            type: "github_installation",
+            id: String(input.installationId),
+            provider: "github",
+            providerDomain: "github.com",
+          },
+        });
+      }
       return rows.length > 0;
     },
   );
 }
+
+/** The residency claim a side-feature usage event records (never evidence). */
+export type UsageEventProcessingResidency = {
+  geography: string;
+  deploymentType: string;
+  regions: readonly string[];
+};
 
 export async function recordUsageEvent(
   db: Database,
@@ -5984,6 +6025,11 @@ export async function recordUsageEvent(
     origin?: SessionTurnSource | null;
     idempotencyKey: string;
     occurredAt?: Date;
+    /**
+     * Where a model-backed side feature processed the call: its route's
+     * residency claim (never evidence). See docs/eu-only-inference.md.
+     */
+    processingResidency?: UsageEventProcessingResidency | null;
   },
 ): Promise<UsageEvent> {
   if (input.turnId && !input.sessionId) {
@@ -6027,6 +6073,15 @@ export async function recordUsageEvent(
           origin: input.origin ?? null,
           idempotencyKey: input.idempotencyKey,
           occurredAt: input.occurredAt ?? new Date(),
+          ...(input.processingResidency
+            ? {
+                processingResidency: {
+                  geography: input.processingResidency.geography,
+                  deploymentType: input.processingResidency.deploymentType,
+                  regions: [...input.processingResidency.regions],
+                },
+              }
+            : {}),
         })
         .onConflictDoUpdate({
           target: schema.usageEvents.idempotencyKey,
@@ -7180,6 +7235,11 @@ export type UpdateSocialConnectionCredentialInput = {
   credentialEncrypted?: string | null;
   status?: SocialConnectionStatus;
   tokenMetadata?: Record<string, unknown>;
+  /**
+   * A disconnect (status `disabled`) by this actor: audited in the same
+   * transaction when the connection was not already disabled.
+   */
+  audit?: DisconnectAuditActor | null;
 };
 
 export type CreateSocialPostInput = {
@@ -7245,6 +7305,8 @@ type RevokeWorkspaceProviderApiKeyConnectionsInput = {
   connectionId: string;
   expectedVersion: number;
   updatedBySubjectId: string;
+  /** Audit the disconnect, in its transaction, as this actor. */
+  audit?: DisconnectAuditActor | null;
 };
 
 export type UpsertWorkspaceVercelAiGatewayConnectionInput =
@@ -7337,6 +7399,8 @@ export type DisconnectConnectionIdempotentlyInput = {
   metadata: Record<string, unknown>;
   lastError?: string | null;
   updatedBySubjectId?: string | null;
+  /** Audit the disconnect, in its transaction, as this actor (never on a replay). */
+  audit?: DisconnectAuditActor | null;
 };
 
 export class ConnectionDisconnectIdempotencyError extends Error {
@@ -11533,6 +11597,63 @@ export async function listEnabledMcpCapabilityServers(
    */
   only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
 ): Promise<EnabledMcpCapabilityServer[]> {
+  return (await listEnabledMcpCapabilityRows(db, workspaceId, only)).flatMap(
+    ({ item, installation }) => {
+      const server = enabledMcpCapabilityServerFromRow(item, installation, "installation");
+      return server ? [server] : [];
+    },
+  );
+}
+
+/**
+ * A connector enabled in an origin workspace, as the definition its members'
+ * own (subject-scoped) connections can carry into their Personal workspace.
+ *
+ * Never carries workspace-held credential headers: only the connection
+ * reference, which the caller narrows to the person's own accounts. A curated
+ * (global catalog) connector is projected from its catalog definition alone,
+ * so the origin workspace's per-installation configuration is not copied; a
+ * custom connector defined by the origin workspace keeps its enabled
+ * definition. This is a read of `originWorkspaceId`'s enabled set, NOT an
+ * authorization: the caller must already have established that the person
+ * still holds authority in the origin workspace.
+ */
+export type OriginMcpCapabilityServer = Omit<EnabledMcpCapabilityServer, "headersEncrypted"> & {
+  connectionRef: McpServerConnectionRef;
+  /** `global`: a curated/registry catalog row; `workspace`: the origin's own definition. */
+  catalogScope: "global" | "workspace";
+};
+
+export async function listOriginMcpCapabilityServersForPersonalExtension(
+  db: Database,
+  originWorkspaceId: string,
+): Promise<OriginMcpCapabilityServer[]> {
+  return (await listEnabledMcpCapabilityRows(db, originWorkspaceId)).flatMap(
+    ({ item, installation }) => {
+      const catalogScope = item.workspaceId === null ? "global" : "workspace";
+      const server = enabledMcpCapabilityServerFromRow(
+        item,
+        installation,
+        catalogScope === "global" ? "catalog" : "installation",
+      );
+      const connectionRef = server?.connectionRef;
+      if (!server || !connectionRef || connectionRef.authoritySource === "host") return [];
+      const { headersEncrypted: _workspaceHeaders, ...definition } = server;
+      return [{ ...definition, connectionRef, catalogScope }];
+    },
+  );
+}
+
+type EnabledMcpCapabilityRow = {
+  item: typeof schema.capabilityCatalogItems.$inferSelect;
+  installation: typeof schema.capabilityInstallations.$inferSelect;
+};
+
+async function listEnabledMcpCapabilityRows(
+  db: Database,
+  workspaceId: string,
+  only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
+): Promise<EnabledMcpCapabilityRow[]> {
   if (only && only.capabilityIds.length === 0 && only.serverIds.length === 0) return [];
   const rows = await withWorkspaceRls(
     db,
@@ -11595,51 +11716,64 @@ export async function listEnabledMcpCapabilityServers(
       preferredByInstallation.set(row.installation.id, row);
     }
   }
+  return [...preferredByInstallation.values()];
+}
 
-  return [...preferredByInstallation.values()].flatMap(({ item, installation }) => {
-    if (
-      catalogExposureState(item, installation) === "blocked" ||
-      !item.endpointUrl ||
-      !mcpConnectivityOk(installation.metadata)
-    ) {
-      return [];
-    }
-    const headersEncrypted = encryptedHeadersConfig(installation.config.headersEncrypted);
-    const connectionRef = connectionRefConfig(installation.config.connectionRef);
-    if (item.authModel && !headersEncrypted && !connectionRef) {
-      // Credential-gated MCPs are runnable only when either legacy static
-      // credential headers or the connections broker ref were stored at enable
-      // time.
-      return [];
-    }
-    const metadata = item.metadata;
-    const config = installation.config;
-    const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
-    const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
-    const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    const requireApproval = resolveMcpApprovalRecommendation(
-      config.requireApproval,
-      metadata.requireApproval,
-    );
-    return [
-      {
-        capabilityId: item.id,
-        id: mcpServerIdForCapability(item.id, metadata),
-        name: item.name,
-        ...(item.category ? { category: item.category } : {}),
-        url: item.endpointUrl,
-        ...(allowedTools ? { allowedTools } : {}),
-        ...(timeoutMs ? { timeoutMs } : {}),
-        ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
-        ...(requireApproval !== undefined ? { requireApproval } : {}),
-        ...(item.workspaceId === null
-          ? { approvalFloor: sessionMcpApprovalPolicyConfig(metadata.requireApproval) ?? false }
-          : {}),
-        ...(headersEncrypted ? { headersEncrypted } : {}),
-        ...(connectionRef ? { connectionRef } : {}),
-      },
-    ];
-  });
+/**
+ * `definition: "installation"` is the workspace's own enabled server: catalog
+ * defaults overlaid with the installation's configuration and stored
+ * credentials. `"catalog"` projects the catalog definition alone (no
+ * installation configuration, no stored headers) and keeps only the
+ * installation's connection reference.
+ */
+function enabledMcpCapabilityServerFromRow(
+  item: EnabledMcpCapabilityRow["item"],
+  installation: EnabledMcpCapabilityRow["installation"],
+  definition: "installation" | "catalog",
+): EnabledMcpCapabilityServer | null {
+  if (
+    catalogExposureState(item, installation) === "blocked" ||
+    !item.endpointUrl ||
+    !mcpConnectivityOk(installation.metadata)
+  ) {
+    return null;
+  }
+  const headersEncrypted =
+    definition === "installation"
+      ? encryptedHeadersConfig(installation.config.headersEncrypted)
+      : undefined;
+  const connectionRef = connectionRefConfig(installation.config.connectionRef);
+  if (item.authModel && !headersEncrypted && !connectionRef) {
+    // Credential-gated MCPs are runnable only when either legacy static
+    // credential headers or the connections broker ref were stored at enable
+    // time.
+    return null;
+  }
+  const metadata = item.metadata;
+  const config: Record<string, unknown> = definition === "installation" ? installation.config : {};
+  const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
+  const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
+  const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
+  const requireApproval = resolveMcpApprovalRecommendation(
+    config.requireApproval,
+    metadata.requireApproval,
+  );
+  return {
+    capabilityId: item.id,
+    id: mcpServerIdForCapability(item.id, metadata),
+    name: item.name,
+    ...(item.category ? { category: item.category } : {}),
+    url: item.endpointUrl,
+    ...(allowedTools ? { allowedTools } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
+    ...(requireApproval !== undefined ? { requireApproval } : {}),
+    ...(item.workspaceId === null
+      ? { approvalFloor: sessionMcpApprovalPolicyConfig(metadata.requireApproval) ?? false }
+      : {}),
+    ...(headersEncrypted ? { headersEncrypted } : {}),
+    ...(connectionRef ? { connectionRef } : {}),
+  };
 }
 
 const ecmaScriptTrimCharacters =
@@ -12343,6 +12477,7 @@ export async function revokeWorkspaceProviderApiKeyConnections(
           .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
           .for("update");
         let result = mapConnectionMetadata(targetRow);
+        const alsoRevokedConnectionIds: string[] = [];
         for (const row of providerRows) {
           const revoked = await revokeConnectionInScope(
             tx,
@@ -12355,6 +12490,14 @@ export async function revokeWorkspaceProviderApiKeyConnections(
             throw new Error(`${spec.label} connection changed during disconnect`);
           }
           if (row.id === input.connectionId) result = revoked;
+          else alsoRevokedConnectionIds.push(row.id);
+        }
+        // The target was live (an already revoked one returned above): one
+        // record for the disconnect, naming the older rows it also retired.
+        if (input.audit) {
+          await auditConnectionDisconnectInScope(tx, result, input.audit, {
+            ...(alsoRevokedConnectionIds.length > 0 ? { alsoRevokedConnectionIds } : {}),
+          });
         }
         return result;
       }),
@@ -13026,9 +13169,86 @@ export async function disconnectConnectionIdempotently(
       if (!updated) {
         throw new ConnectionDisconnectGenerationError();
       }
-      return mapConnectionMetadata(updated);
+      const disconnected = mapConnectionMetadata(updated);
+      if (input.audit && connection.status !== "revoked") {
+        await auditConnectionDisconnectInScope(scopedDb, disconnected, input.audit);
+      }
+      return disconnected;
     },
   );
+}
+
+/**
+ * Record one connection's disconnect (`connection.disconnected`) inside the
+ * transaction that revoked it. Only non-secret facts: the provider domain,
+ * the connection kind, its ownership and its credential role.
+ */
+async function auditConnectionDisconnectInScope(
+  tx: Database,
+  connection: ConnectionMetadataWithVerification,
+  actor: DisconnectAuditActor,
+  details: Record<string, string | readonly string[] | undefined> = {},
+): Promise<void> {
+  const credentialRole = connection.metadata.credentialRole;
+  await insertDisconnectAuditEventInScope(tx, {
+    accountId: connection.accountId,
+    workspaceId: connection.workspaceId,
+    action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+    actor,
+    target: { type: "connection", id: connection.id, providerDomain: connection.providerDomain },
+    details: {
+      connectionKind: connection.kind,
+      ownership: connection.subjectId === null ? "workspace" : "personal",
+      ...(typeof credentialRole === "string" ? { credentialRole } : {}),
+      ...details,
+    },
+  });
+}
+
+/**
+ * Revoke one connection and, when `audit` names the actor, record the
+ * disconnect in the same transaction. Only a transition from a live status is
+ * audited: re-revoking an already revoked row records nothing.
+ */
+async function revokeConnectionAuditedInScope(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  updatedBySubjectId: string | null | undefined,
+  expectedVersion: number | undefined,
+  audit: DisconnectAuditActor | null | undefined,
+): Promise<ConnectionMetadataWithVerification | null> {
+  if (!audit) {
+    return await revokeConnectionInScope(
+      db,
+      workspaceId,
+      connectionId,
+      updatedBySubjectId,
+      expectedVersion,
+    );
+  }
+  const [prior] = await db
+    .select({ status: schema.connections.status })
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        connectionSubjectVisibility(updatedBySubjectId),
+      ),
+    )
+    .for("update");
+  const revoked = await revokeConnectionInScope(
+    db,
+    workspaceId,
+    connectionId,
+    updatedBySubjectId,
+    expectedVersion,
+  );
+  if (revoked && prior && prior.status !== "revoked") {
+    await auditConnectionDisconnectInScope(db, revoked, audit);
+  }
+  return revoked;
 }
 
 async function revokeConnectionInScope(
@@ -13076,18 +13296,23 @@ export async function revokeConnection(
   connectionId: string,
   updatedBySubjectId?: string | null,
   expectedVersion?: number,
+  options: {
+    /** A person's, key's or agent's disconnect: audited in the same transaction. */
+    audit?: DisconnectAuditActor | null;
+  } = {},
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withConnectionSubjectRls(
     db,
     workspaceId,
     updatedBySubjectId,
     async (scopedDb) =>
-      await revokeConnectionInScope(
+      await revokeConnectionAuditedInScope(
         scopedDb,
         workspaceId,
         connectionId,
         updatedBySubjectId,
         expectedVersion,
+        options.audit,
       ),
   );
 }
@@ -15480,15 +15705,18 @@ export async function revokeConnectionWithSlackBotSuccessAudit(
   input: SlackBotLifecycleSuccessAuditInput & {
     connectionId: string;
     expectedVersion: number;
+    /** Also record the generic `connection.disconnected` row as this actor. */
+    audit?: DisconnectAuditActor | null;
   },
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
-    const connection = await revokeConnectionInScope(
+    const connection = await revokeConnectionAuditedInScope(
       scopedDb,
       input.workspaceId,
       input.connectionId,
       input.subjectId,
       input.expectedVersion,
+      input.audit,
     );
     if (!connection) return null;
     if (connection.accountId !== input.accountId) {
@@ -18701,6 +18929,20 @@ export async function updateSocialConnectionCredential(
     input.workspaceId,
     input.subjectId,
     async (scopedDb) => {
+      const audited = input.audit && input.status === "disabled" ? input.audit : null;
+      const [prior] = audited
+        ? await scopedDb
+            .select({ status: schema.socialConnections.status })
+            .from(schema.socialConnections)
+            .where(
+              and(
+                eq(schema.socialConnections.workspaceId, input.workspaceId),
+                eq(schema.socialConnections.id, input.connectionId),
+                socialConnectionSubjectVisibility(input.subjectId),
+              ),
+            )
+            .for("update")
+        : [];
       const [row] = await scopedDb
         .update(schema.socialConnections)
         .set({
@@ -18719,7 +18961,21 @@ export async function updateSocialConnectionCredential(
           ),
         )
         .returning();
-      return row ? mapSocialConnection(row) : null;
+      if (!row) return null;
+      if (audited && prior && prior.status !== "disabled") {
+        await insertDisconnectAuditEventInScope(scopedDb, {
+          accountId: row.accountId,
+          workspaceId: row.workspaceId,
+          action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+          actor: audited,
+          target: { type: "social_connection", id: row.id, provider: row.provider },
+          details: {
+            ownership: row.subjectId ? "personal" : "workspace",
+            accountHandle: row.accountHandle,
+          },
+        });
+      }
+      return mapSocialConnection(row);
     },
   );
 }
@@ -22626,6 +22882,176 @@ export async function setSessionChannel(
       throw error;
     }
   });
+}
+
+/** Bound on the conversations one Site row move re-files. */
+export const SITE_PROJECT_MOVE_LIMIT = 500;
+
+/**
+ * The conversations a Site row in one project stands for, as this person sees
+ * them: the Site's top-level conversations filed in that project (null is
+ * Default), archived or pinned ones included, so none stays behind. Up to
+ * SITE_PROJECT_MOVE_LIMIT + 1 ids, so a caller can refuse an oversized move.
+ */
+export async function listSiteProjectConversationIds(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; siteId: string; channelId: string | null },
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const rows = await scoped
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.siteId, input.siteId),
+          isNotNull(schema.sessions.siteAccessRootId),
+          isNull(schema.sessions.parentSessionId),
+          input.channelId === null
+            ? isNull(schema.sessions.channelId)
+            : eq(schema.sessions.channelId, input.channelId),
+        ),
+      )
+      .orderBy(schema.sessions.id)
+      .limit(SITE_PROJECT_MOVE_LIMIT + 1);
+    return rows.map((row) => row.id);
+  });
+}
+
+/**
+ * Moves a Site's sidebar row from one project to another (null is Default),
+ * like moving a chat. The row is the Site itself when that project is its
+ * home as this person sees it (the project someone moved it to, else the
+ * creating chat's): then the Site moves for everyone, and its new
+ * conversations are filed there. The row's conversations move with it; the
+ * caller passes the ids it authorized, and only those still filed in the
+ * source project move. Only a Site in this person's audience can move; a row
+ * left behind by a Site that is no longer theirs to see still moves its
+ * conversations, as a chat owner can always move their own chat. Nothing
+ * about the Site, its publication or audience changes.
+ */
+export async function moveSiteToProject(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    siteId: string;
+    fromChannelId: string | null;
+    channelId: string | null;
+    sessionIds: readonly string[];
+  },
+): Promise<{ siteMoved: boolean; movedSessionIds: string[] }> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scoped) => {
+      // One move of a Site at a time, so concurrent moves cannot leave the Site
+      // in one project and its conversations in another.
+      await scoped.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`site-project:${input.workspaceId}:${input.siteId}`}, 0))`,
+      );
+      const [site] = await rawRows<{
+        accountId: string;
+        homeChannelId: string | null;
+        inAudience: boolean;
+      }>(
+        scoped,
+        sql`
+          select artifact.account_id as "accountId",
+            (case when placement.site_id is not null then placement.channel_id
+              else creator.channel_id end)::text as "homeChannelId",
+            (artifact.visibility = 'workspace_shared'
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
+          from ${schema.workspaceArtifacts} artifact
+          left join ${schema.siteProjectPlacements} placement
+            on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
+          left join ${schema.workspaceArtifactVersions} version
+            on version.workspace_id = artifact.workspace_id and version.artifact_id = artifact.id
+            and version.revision = 1
+          left join ${schema.sessions} source
+            on source.workspace_id = artifact.workspace_id
+            and source.id = version.source_session_id
+          left join ${schema.sessions} creator
+            on creator.workspace_id = artifact.workspace_id
+            and creator.id = source.root_session_id and creator.site_access_root_id is null
+          where artifact.workspace_id = ${input.workspaceId} and artifact.id = ${input.siteId}
+          limit 1`,
+      );
+      if (!site || (!site.inAudience && input.sessionIds.length === 0))
+        throw new WorkspaceArtifactNotFoundError("Site not found");
+      if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
+      if (input.channelId !== null) {
+        const [channel] = await scoped
+          .select({ id: schema.channels.id })
+          .from(schema.channels)
+          .where(
+            and(
+              eq(schema.channels.workspaceId, input.workspaceId),
+              eq(schema.channels.id, input.channelId),
+            ),
+          )
+          .limit(1);
+        if (!channel) throw new ChannelNotFoundError(input.channelId);
+      }
+      const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
+      try {
+        if (siteMoved) {
+          await scoped
+            .insert(schema.siteProjectPlacements)
+            .values({
+              accountId: site.accountId,
+              workspaceId: input.workspaceId,
+              siteId: input.siteId,
+              channelId: input.channelId,
+              placedBySubjectId: input.subjectId,
+            })
+            .onConflictDoUpdate({
+              target: [
+                schema.siteProjectPlacements.workspaceId,
+                schema.siteProjectPlacements.siteId,
+              ],
+              set: {
+                channelId: input.channelId,
+                placedBySubjectId: input.subjectId,
+                updatedAt: sql`now()`,
+              },
+            });
+        }
+        const moved =
+          input.sessionIds.length === 0
+            ? []
+            : await scoped
+                .update(schema.sessions)
+                // As for a chat move: the self-assignment keeps the activity time.
+                .set({ channelId: input.channelId, updatedAt: sql`${schema.sessions.updatedAt}` })
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    inArray(schema.sessions.id, [...input.sessionIds]),
+                    eq(schema.sessions.siteId, input.siteId),
+                    isNotNull(schema.sessions.siteAccessRootId),
+                    isNull(schema.sessions.parentSessionId),
+                    input.fromChannelId === null
+                      ? isNull(schema.sessions.channelId)
+                      : eq(schema.sessions.channelId, input.fromChannelId),
+                  ),
+                )
+                .returning({ id: schema.sessions.id });
+        return { siteMoved, movedSessionIds: moved.map((row) => row.id).sort() };
+      } catch (error) {
+        // The project passed the check above but was deleted before the write.
+        if (
+          input.channelId !== null &&
+          nestedPostgresSqlState(error) === "23503" &&
+          /channel/u.test(safeDatabaseErrorFacts(error).constraint ?? "")
+        ) {
+          throw new ChannelNotFoundError(input.channelId);
+        }
+        throw error;
+      }
+    },
+  );
 }
 
 export async function countRigs(
@@ -30404,11 +30830,12 @@ function wellFormedDriverText(value: unknown): unknown {
 }
 
 /**
- * A new Site conversation is filed in the project of the chat that created the
- * Site (the tree of its first version's session), so the Site's sidebar row and
- * its conversations sit together. Without a Site origin, or a creating chat,
- * the session stays unfiled. Callers pass "no project" as null or omit it, so
- * both mean "file it with its Site"; only a named project overrides that.
+ * A new Site conversation is filed in the Site's project: the one someone moved
+ * the Site to, else the project of the chat that created it (the tree of its
+ * first version's session), so the Site's sidebar row and its conversations
+ * sit together. Without a Site origin, or a creating chat, the session stays
+ * unfiled. Callers pass "no project" as null or omit it, so both mean "file it
+ * with its Site"; only a named project overrides that.
  */
 async function siteHomeChannelId(
   tx: Database,
@@ -30422,14 +30849,21 @@ async function siteHomeChannelId(
   const [home] = await rawRows<{ channelId: string | null }>(
     tx,
     sql`
-      select root.channel_id::text as "channelId"
-      from ${schema.workspaceArtifactVersions} version
-      join ${schema.sessions} source
-        on source.workspace_id = version.workspace_id and source.id = version.source_session_id
-      join ${schema.sessions} root
-        on root.workspace_id = source.workspace_id and root.id = source.root_session_id
-      where version.workspace_id = ${workspaceId} and version.artifact_id = ${siteId}::uuid
-        and version.revision = 1 and root.site_access_root_id is null
+      select "channelId" from (
+        select 0 as rank, placement.channel_id::text as "channelId"
+        from ${schema.siteProjectPlacements} placement
+        where placement.workspace_id = ${workspaceId} and placement.site_id = ${siteId}::uuid
+        union all
+        select 1, root.channel_id::text
+        from ${schema.workspaceArtifactVersions} version
+        join ${schema.sessions} source
+          on source.workspace_id = version.workspace_id and source.id = version.source_session_id
+        join ${schema.sessions} root
+          on root.workspace_id = source.workspace_id and root.id = source.root_session_id
+        where version.workspace_id = ${workspaceId} and version.artifact_id = ${siteId}::uuid
+          and version.revision = 1 and root.site_access_root_id is null
+      ) homes
+      order by rank
       limit 1`,
   );
   return home?.channelId ?? null;
@@ -33839,12 +34273,15 @@ async function sessionListTotalsInScope(
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
       -- its first version's session), as far as this viewer can see that
-      -- chat; new Site conversations are filed there too. Conversations in
-      -- other projects never take the Site out of its own: a Site without
+      -- chat, unless someone moved it to a project (or Default) since; new
+      -- Site conversations are filed there too. Conversations in other
+      -- projects never take the Site out of its own: a Site without
       -- conversations here is still listed here when this viewer lists its
       -- creating chat, or opened it. Candidates are the live Sites in this
       -- viewer's audience (one row each); revision 1 is a unique-index lookup.
-      select artifact.id as site_id, creator.channel_id
+      select artifact.id as site_id,
+        case when placement.site_id is not null then placement.channel_id
+          else creator.channel_id end as channel_id
       from ${schema.workspaceArtifacts} artifact
       join lateral (
         select version.source_session_id from ${schema.workspaceArtifactVersions} version
@@ -33856,6 +34293,8 @@ async function sessionListTotalsInScope(
       left join ${schema.sessions} creator
         on creator.workspace_id = ${workspaceId} and creator.id = source.root_session_id
         and creator.site_access_root_id is null
+      left join ${schema.siteProjectPlacements} placement
+        on placement.workspace_id = ${workspaceId} and placement.site_id = artifact.id
       where ${withSiteRows && !options.needsYouOnly ? sql`true` : sql`false`}
         and artifact.workspace_id = ${workspaceId} and artifact.status = 'active'
         and (artifact.visibility = 'workspace_shared'
@@ -33863,7 +34302,8 @@ async function sessionListTotalsInScope(
         and not exists (
           select 1 from site_conv_totals filed
           where filed.site_id = artifact.id
-            and filed.channel_id is not distinct from creator.channel_id)
+            and filed.channel_id is not distinct from (case when placement.site_id is not null
+              then placement.channel_id else creator.channel_id end))
         and (exists (select 1 from roots listed where listed.id = creator.id)
           ${
             // Opens and pins are this person's own plain-view state: a root
@@ -35873,6 +36313,69 @@ export async function setSessionAttention(
           mapSessionArchive(state),
         );
       }),
+  );
+}
+
+/**
+ * Whether archiving this chat must first ask to pause its work, answered from
+ * a plain read before any lock. Archive takes the person's archive lock and the
+ * workspace's control lock before it pauses; on a busy workspace those waits
+ * last many seconds, and the question must not wait behind them. The locked
+ * check in the pause stays the authority for work that starts in between.
+ * False when the chat is not one this person can archive here, is already
+ * archived for them, or changed since the version they saw, so those requests
+ * take the ordinary path and get its answer.
+ */
+export async function sessionArchiveNeedsPauseConfirmation(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    expectedVersion?: number | undefined;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (tx) => {
+      await requireSessionPersonalStateWriteAuthority(tx, input);
+      const [chat] = await tx
+        .select({
+          id: schema.sessions.id,
+          archived: schema.sessionPins.archived,
+          archiveVersion: schema.sessionPins.archiveVersion,
+        })
+        .from(schema.sessions)
+        .leftJoin(
+          schema.sessionPins,
+          and(
+            eq(schema.sessionPins.workspaceId, schema.sessions.workspaceId),
+            eq(schema.sessionPins.sessionId, schema.sessions.id),
+            eq(schema.sessionPins.subjectId, input.subjectId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            isNull(schema.sessions.parentSessionId),
+          ),
+        )
+        .limit(1);
+      if (!chat || chat.archived === true) return false;
+      if (
+        input.expectedVersion !== undefined &&
+        input.expectedVersion !== (chat.archiveVersion ?? 0)
+      ) {
+        return false;
+      }
+      return await sessionWorkstreamHasActiveWork(tx, input.workspaceId, input.sessionId);
+    },
+    undefined,
+    "none",
   );
 }
 
@@ -39866,8 +40369,28 @@ function validateSecretHumanInputAnswer(
   }
 }
 
+/**
+ * "Let the agent decide" may settle an agent's own question, but never a
+ * secret question, a Skill review or a secret-use approval card: those stay
+ * with the person.
+ */
+export function humanInputAgentMayDecide(
+  request: Pick<SessionHumanInputRequest, "questions"> &
+    Partial<Pick<SessionHumanInputRequest, "origin">>,
+): boolean {
+  if ((request.origin ?? "tool_call") !== "tool_call") return false;
+  return request.questions.every(
+    (question) =>
+      question.kind !== "secret" &&
+      question.secret == null &&
+      question.skillReview == null &&
+      secretUseApprovalIdFromQuestionId(question.id) === null,
+  );
+}
+
 export function validateHumanInputResponse(
-  request: Pick<SessionHumanInputRequest, "questions" | "allowSkip">,
+  request: Pick<SessionHumanInputRequest, "questions" | "allowSkip"> &
+    Partial<Pick<SessionHumanInputRequest, "origin">>,
   rawResponse: unknown,
   secretAnswerQuestionIds: ReadonlySet<string> = new Set(),
 ): HumanInputResponse {
@@ -39880,6 +40403,15 @@ export function validateHumanInputResponse(
     );
   }
   if (response.outcome === "skipped") {
+    if (response.agentDecides) {
+      if (!humanInputAgentMayDecide(request)) {
+        throw new HumanInputResponseValidationError(
+          "SKIP_NOT_ALLOWED",
+          "Only the person can answer this request",
+        );
+      }
+      return { outcome: "skipped", agentDecides: true };
+    }
     if (!request.allowSkip) {
       throw new HumanInputResponseValidationError(
         "SKIP_NOT_ALLOWED",
@@ -40734,6 +41266,22 @@ export async function acceptSessionHumanInputResponse(
               input.response,
               secretAnswerQuestionIds,
             );
+        // "Let the agent decide" is the person's choice: an agent or the
+        // system cannot hand the decision back to the asking agent this way
+        // (it would skip a request that cannot be skipped and tell the agent
+        // a person chose it).
+        if (
+          response.outcome === "skipped" &&
+          response.agentDecides &&
+          !["human", "api"].includes(
+            childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+          )
+        ) {
+          throw new HumanInputResponseValidationError(
+            "SKIP_NOT_ALLOWED",
+            "Only a person can let the agent decide. Answer the question, or skip it if skipping is allowed.",
+          );
+        }
         if (
           hasSkillReview &&
           !expired &&
@@ -42419,6 +42967,32 @@ export async function listTurnOpenSuffixToolCalls(
 }
 
 /**
+ * The interaction_request_human calls of a turn that hold an intervention: a
+ * request recorded at a pause, or a wait attached to one. Any status counts;
+ * a call not listed was refused (or never reached a pause).
+ */
+export async function listRecordedInteractionToolCallIds(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; toolCallIds: string[] },
+): Promise<Set<string>> {
+  if (input.toolCallIds.length === 0) return new Set();
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ toolCallId: schema.interactionInterventions.originatingToolCallId })
+      .from(schema.interactionInterventions)
+      .where(
+        and(
+          eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+          eq(schema.interactionInterventions.originatingSessionId, input.sessionId),
+          eq(schema.interactionInterventions.originatingTurnId, input.turnId),
+          inArray(schema.interactionInterventions.originatingToolCallId, input.toolCallIds),
+        ),
+      );
+    return new Set(rows.flatMap((row) => (row.toolCallId ? [row.toolCallId] : [])));
+  });
+}
+
+/**
  * Remove completed receipts only after the full SDK call/result batch is
  * durable. Until then every raw result remains available to an attempt-ending
  * transaction, including reverse-completing parallel calls.
@@ -42793,6 +43367,11 @@ export async function applyContextCompaction(
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
+    /**
+     * The replacement is a portable rebuild of a Codex remote_v2 session for
+     * another model: switch the session to portable compaction with it.
+     */
+    switchToPortableCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
@@ -42967,6 +43546,7 @@ export async function applyContextCompaction(
             // post-compaction response install the next authoritative count.
             lastInputTokens: null,
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(input.switchToPortableCompaction ? { codexCompactionMode: "portable" } : {}),
             ...(insertedEvents.length > 0
               ? {
                   lastSequence: fence.session.lastSequence + insertedEvents.length,
@@ -43763,6 +44343,70 @@ export async function requestSessionCompaction(
       reason: "compaction_requested",
     });
     return { wakeRevision, temporalWorkflowId };
+  });
+}
+
+/**
+ * Prepare a Codex remote_v2 session for a turn on another provider's model.
+ * Without a Codex checkpoint in its active history the session switches to
+ * portable compaction at once. With one, which only Codex can read, this
+ * requests a forced compaction instead: the turn's pre-turn compaction
+ * rebuilds a portable summary from the stored transcript and switches the
+ * session in the same transaction that installs it, so a failed rebuild is
+ * simply requested again by the next such turn. A portable session is left
+ * untouched (null). With `attempt`, the write happens only while that exact
+ * turn attempt still owns the session ("fenced" otherwise), so a stale or
+ * superseded claim never converts the chat.
+ */
+export async function convertSessionToPortableCompactionForModelSwitch(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  attempt?: { turnId: string; executionGeneration: number; attemptId: string },
+): Promise<
+  { codexCompactionMode: "remote_v2" | "portable"; compactRequested: boolean } | null | "fenced"
+> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    if (attempt) {
+      const fence = await lockTurnAttemptWriteFenceTx(scopedDb as unknown as Database, {
+        workspaceId,
+        sessionId,
+        ...attempt,
+      });
+      if (!fence.allowed) return "fenced";
+    }
+    const checkpoint = sql`exists (
+      select 1 from session_history_items history
+      where history.workspace_id = ${workspaceId}
+        and history.session_id = ${sessionId}
+        and history.active = true
+        and history.item ->> 'type' = 'compaction'
+        and jsonb_typeof(history.item -> 'encrypted_content') = 'string'
+        and history.item ->> 'encrypted_content' <> ''
+    )`;
+    const [converted] = await scopedDb
+      .update(schema.sessions)
+      .set({
+        codexCompactionMode: sql`case when ${checkpoint} then 'remote_v2' else 'portable' end`,
+        compactRequested: sql`${schema.sessions.compactRequested} or ${checkpoint}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessions.codexCompactionMode, "remote_v2"),
+        ),
+      )
+      .returning({
+        codexCompactionMode: schema.sessions.codexCompactionMode,
+        compactRequested: schema.sessions.compactRequested,
+      });
+    if (!converted) return null;
+    return {
+      codexCompactionMode: converted.codexCompactionMode === "portable" ? "portable" : "remote_v2",
+      compactRequested: converted.compactRequested,
+    };
   });
 }
 
@@ -51903,6 +52547,9 @@ export type MarkWarmLeaseInstanceLostResult =
       /** Terminal events of linked background commands, already durable in
        * this commit; present only when a command settled. */
       backgroundCommandEvents?: SessionEvent[];
+      /** Committed wakes of sessions waiting on those commands; signal them
+       * after commit (see `signalBackgroundCommandWakes`). */
+      backgroundCommandWakes?: SessionWorkflowWake[];
     }
   | { status: "stale"; lease: LeaseSnapshot | null };
 
@@ -52097,6 +52744,8 @@ async function settleExactLostProviderWorkspaceBlockersTx(
       activityTx: SessionActivityDatabase;
       idleContainmentMinutes: number | null;
       events: SessionEvent[];
+      /** Receives the committed wake of each session waiting on a command. */
+      wakes?: SessionWorkflowWake[];
     };
   } = {},
 ): Promise<LostProviderWorkspaceSettlement> {
@@ -52250,6 +52899,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+      delivery.wakes?.push(...mutation.wakes);
     }
   }
 
@@ -52359,10 +53009,12 @@ export async function markWarmLeaseInstanceLost(
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   const backgroundCommandEvents: SessionEvent[] = [];
+  const backgroundCommandWakes: SessionWorkflowWake[] = [];
   // Settling a linked command appends its terminal event and agent input, so
   // the loss commit runs inside the session activity gate.
   const result = await withLostProviderCommandSessionRetry(async () => {
     backgroundCommandEvents.length = 0;
+    backgroundCommandWakes.length = 0;
     return await withSessionActivityRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -52424,6 +53076,7 @@ export async function markWarmLeaseInstanceLost(
             activityTx: tx,
             idleContainmentMinutes: null,
             events: backgroundCommandEvents,
+            wakes: backgroundCommandWakes,
           },
         });
 
@@ -52538,7 +53191,11 @@ export async function markWarmLeaseInstanceLost(
     );
   });
   return result.status === "marked" && backgroundCommandEvents.length
-    ? { ...result, backgroundCommandEvents }
+    ? {
+        ...result,
+        backgroundCommandEvents,
+        ...(backgroundCommandWakes.length ? { backgroundCommandWakes } : {}),
+      }
     : result;
 }
 
@@ -55951,12 +56608,16 @@ export async function confirmDrainCold(
    *  recorded no lost workspace (see `unpublishedWarmingLoss`). */
   unpublishedProviderLost?: boolean;
   backgroundCommandEvents?: SessionEvent[];
+  /** Committed wakes of sessions waiting on those commands. */
+  backgroundCommandWakes?: SessionWorkflowWake[];
 }> {
   const backgroundCommandEvents: SessionEvent[] = [];
+  const backgroundCommandWakes: SessionWorkflowWake[] = [];
   // Settling a command appends its terminal session event and agent input, so
   // the cold commit runs inside the session activity gate.
   const result = await withLostProviderCommandSessionRetry(async () => {
     backgroundCommandEvents.length = 0;
+    backgroundCommandWakes.length = 0;
     return await withSessionActivityRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -56126,6 +56787,7 @@ export async function confirmDrainCold(
                   ? null
                   : Math.max(1, Math.round(input.idleCommandContainmentMs / 60_000)),
               events: backgroundCommandEvents,
+              wakes: backgroundCommandWakes,
             },
           });
         }
@@ -56340,7 +57002,13 @@ export async function confirmDrainCold(
       },
     );
   });
-  return backgroundCommandEvents.length ? { ...result, backgroundCommandEvents } : result;
+  return backgroundCommandEvents.length
+    ? {
+        ...result,
+        backgroundCommandEvents,
+        ...(backgroundCommandWakes.length ? { backgroundCommandWakes } : {}),
+      }
+    : result;
 }
 
 // §4.8b — persist the /workspace snapshot archive onto the lease BEFORE the
@@ -59168,6 +59836,8 @@ export async function settleRetainedProcess(
   settled: boolean;
   process: SandboxRetainedProcess;
   backgroundCommandEvents: SessionEvent[];
+  /** Committed wakes to signal after commit; see `signalBackgroundCommandWakes`. */
+  backgroundCommandWakes: SessionWorkflowWake[];
 }> {
   return settleRetainedProcessWithAuthority(db, input);
 }
@@ -59325,6 +59995,7 @@ async function settleRetainedProcessWithAuthority(
           settled: false,
           process: terminalProcess,
           backgroundCommandEvents: [...commandMutation.events],
+          backgroundCommandWakes: [...commandMutation.wakes],
         };
       }
       if (
@@ -59574,6 +60245,7 @@ async function settleRetainedProcessWithAuthority(
         settled: true,
         process: settledProcess,
         backgroundCommandEvents: [...commandMutation.events],
+        backgroundCommandWakes: [...commandMutation.wakes],
       };
     },
   );
@@ -70621,6 +71293,26 @@ export function storedSessionAvatar(value: unknown): SessionAvatar | null {
 }
 
 /**
+ * A chat's name and avatar, as a bot shows itself outside the console (its
+ * Slack posts). Null when the chat does not exist in this workspace.
+ */
+export async function getSessionBotIdentity(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ title: string | null; avatar: SessionAvatar | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ title: schema.sessions.title, avatar: schema.sessions.avatar })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return { title: row.title?.trim() || null, avatar: storedSessionAvatar(row.avatar) };
+  });
+}
+
+/**
  * Set a chat's description and/or avatar (display metadata) and append its
  * public `session.profile_set` event under the canonical session event-write
  * lock, like {@link updateSessionTitleWithEvent}. Only the named fields change;
@@ -72104,6 +72796,12 @@ export type InitializeSessionStartInput = {
    */
   initialTimeZone?: string;
   /**
+   * Tools the opening context is for, already narrowed to the session's own
+   * selection, frozen in the initial turn's metadata. That turn's first model
+   * step loads them as a search by name would.
+   */
+  initialOpeningTools?: readonly string[];
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -72162,10 +72860,16 @@ export type InitializeSessionStartResult = {
 
 /** Trusted per-message facts the create request froze for the initial turn. */
 function initialTurnMetadata(
-  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+  input: Pick<InitializeSessionStartInput, "initialTimeZone" | "initialOpeningTools">,
 ): Record<string, unknown> {
   const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
-  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+  const openingTools = openingToolsFromTurnMetadata({
+    [OPENING_TOOLS_METADATA_KEY]: input.initialOpeningTools,
+  });
+  return {
+    ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+    ...(openingTools.length ? { [OPENING_TOOLS_METADATA_KEY]: openingTools } : {}),
+  };
 }
 
 /**
@@ -82480,6 +83184,8 @@ export type ApplySessionTurnSettlementInput = {
       operationId: string;
       toolCallId: string;
       input: RequestHumanInteractionToolInput;
+      /** The target as read at this pause, or why it could not be read. */
+      currentTarget?: InteractionRequestCurrentTarget | string;
     }>;
   };
   recording?: SessionTurnRecordingSettlement;
@@ -82983,6 +83689,7 @@ export async function applySessionTurnSettlement(
         }),
       }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
+      let interactionRefusalEvent: AppendEventInput | null = null;
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -83125,25 +83832,57 @@ export async function applySessionTurnSettlement(
           }
         }
         for (const request of interactionInterventionRequests) {
-          await persistAttemptInteractionInterventionInTransaction(tx as unknown as Database, {
-            ...request,
-            accountId: session.accountId,
-            workspaceId,
-            originatingSessionId: input.sessionId,
-            originatingTurnId: input.turnId,
-            originatingAttemptId: input.attemptId,
-          });
+          try {
+            // A savepoint, so a refused request leaves nothing behind.
+            await tx.transaction(async (savepoint) => {
+              await persistAttemptInteractionInterventionInTransaction(
+                savepoint as unknown as Database,
+                {
+                  ...request,
+                  accountId: session.accountId,
+                  workspaceId,
+                  originatingSessionId: input.sessionId,
+                  originatingTurnId: input.turnId,
+                  originatingAttemptId: input.attemptId,
+                },
+              );
+            });
+          } catch (error) {
+            if (!(error instanceof InteractionRequestRefusedError)) throw error;
+            // The agent learns why as this call's result: the pause records
+            // a system rejection, so the turn resumes at once instead of
+            // failing. One decision resumes a pause, so a second refused call
+            // stays pending; the worker's re-freeze after the first is
+            // answered passes it here again and it is refused the same way.
+            interactionRefusalEvent ??= {
+              type: "user.approvalDecision",
+              payload: {
+                approvalId: request.toolCallId,
+                decision: "reject",
+                refusal: error.refusal,
+              },
+              clientEventId: `system:interaction-request-refused:${request.id}:${turn.executionGeneration}`,
+            };
+          }
         }
         // The child is now blocked on a human. Tell its parent through the
         // durable outbox (the worker delivers it): one row per exact
         // (child, turn, generation), so a same-generation re-freeze after an
         // activity retry dedupes and a later generation is a new notice.
-        await enqueueChildRequiresActionOutboxTx(tx as unknown as Database, workspaceId, session, {
-          turnId: input.turnId,
-          turnGeneration: turn.executionGeneration,
-          humanInputRequests,
-          pendingApprovals: input.runState.pendingApprovals,
-        });
+        // A refused request resumes the turn at once, so nobody is waited on.
+        if (!interactionRefusalEvent) {
+          await enqueueChildRequiresActionOutboxTx(
+            tx as unknown as Database,
+            workspaceId,
+            session,
+            {
+              turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              humanInputRequests,
+              pendingApprovals: input.runState.pendingApprovals,
+            },
+          );
+        }
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -83492,6 +84231,7 @@ export async function applySessionTurnSettlement(
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
         ...input.events,
+        ...(interactionRefusalEvent ? [interactionRefusalEvent] : []),
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
@@ -85527,6 +86267,8 @@ type ChildLifecycleNoticeInput = {
   classification: SystemUpdateClassification;
   summary: string;
   lineage?: Record<string, unknown>;
+  /** A child's question routed past a parent that cannot act (childRequiresActionRouteTx). */
+  route?: ChildRequiresActionRoute;
 };
 
 /**
@@ -85544,10 +86286,23 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   input: ChildLifecycleNoticeInput,
 ): Promise<boolean> {
   if (!session.parentSessionId) return false;
+  const route = input.route ?? null;
+  const targetSessionId = route?.targetSessionId ?? session.parentSessionId;
+  // An escalated notice carries the target's own causal turn: the one that
+  // started the branch the child is on.
   const authority = await parentOutboxAuthorityTx(tx, workspaceId, {
-    ...session,
-    parentSessionId: session.parentSessionId,
+    ...(route?.via ?? session),
+    parentSessionId: targetSessionId,
   });
+  const routeLineage =
+    route && route.targetSessionId !== session.parentSessionId
+      ? {
+          childSessionId: session.id,
+          ...(route.escalatedFromSessionId
+            ? { escalatedFromSessionId: route.escalatedFromSessionId }
+            : {}),
+        }
+      : {};
   // Freeze complete content at notice creation, never at parent claim time.
   // Oversized evidence is omitted, not truncated and then called consumed.
   // Bound index candidates before payload filters, and prefer the newest complete
@@ -85579,14 +86334,14 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             accountId: session.accountId,
             workspaceId,
             sourceSessionId: session.id,
-            targetSessionId: session.parentSessionId,
+            targetSessionId,
             dedupeKey: input.dedupeKey,
             kind: input.kind,
             classification: input.classification,
             sourceId: session.id,
             summary: input.summary,
             payload: noticePayload,
-            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
+            lineage: { ...authority.lineage, ...routeLineage, ...(input.lineage ?? {}) },
             personalConnectionDelegations: authority.personalConnectionDelegations,
             mcpAccountBindings: authority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
@@ -85667,6 +86422,13 @@ async function enqueueChildRequiresActionOutboxTx(
     pendingApprovals: input.pendingApprovals,
   });
   if (payload.requests.length === 0 && !payload.truncated) return false;
+  // A parent that cannot act (failed, or without session tools) does not
+  // hold its child's question: the nearest ancestor that can gets it.
+  const route = await childRequiresActionRouteTx(tx, workspaceId, {
+    ...session,
+    parentSessionId: session.parentSessionId,
+  });
+  const summary = childRequiresActionSummary(session.id, payload);
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childRequiresActionDedupeKey({
       childSessionId: session.id,
@@ -85675,9 +86437,12 @@ async function enqueueChildRequiresActionOutboxTx(
     }),
     kind: "child_requires_action",
     classification: "action_required",
-    summary: childRequiresActionSummary(session.id, payload),
+    summary: route.escalatedFromSessionId
+      ? `${summary}\nIts parent session ${route.escalatedFromSessionId} can't act on it, so it came to you; answer it the same way.`
+      : summary,
     payload,
     lineage: { turnId: input.turnId },
+    route,
   });
 }
 
@@ -85705,6 +86470,25 @@ async function enqueueChildRequiresActionResolvedOutboxTx(
     outcome: input.outcome,
     respondedByKind: input.respondedByKind,
   };
+  // The resolution follows its question, so it supersedes the notice where it landed.
+  const recordedTarget = await recordedChildNoticeTargetTx(
+    tx,
+    workspaceId,
+    childRequiresActionDedupeKey({
+      childSessionId: session.id,
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+    }),
+  );
+  const route =
+    recordedTarget && recordedTarget !== session.parentSessionId
+      ? await childRequiresActionRouteTx(
+          tx,
+          workspaceId,
+          { ...session, parentSessionId: session.parentSessionId },
+          recordedTarget,
+        )
+      : undefined;
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childRequiresActionResolvedDedupeKey({
       childSessionId: session.id,
@@ -85718,6 +86502,7 @@ async function enqueueChildRequiresActionResolvedOutboxTx(
     summary: childRequiresActionResolvedSummary(session.id, payload),
     payload,
     lineage: { turnId: input.turnId },
+    ...(route ? { route } : {}),
   });
 }
 
@@ -87013,6 +87798,7 @@ export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = bo
   | (RequireIdleSession extends true
       ?
           | { added: false; reason: "session_not_idle" }
+          | { added: false; reason: "session_waiting_capacity" }
           | { added: false; reason: "session_paused" }
           | { added: false; reason: "workspace_paused" }
       : never)
@@ -87313,6 +88099,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
     rejectionReason:
       | "session_cancelled"
       | "session_not_idle"
+      | "session_waiting_capacity"
       | "session_paused"
       | "workspace_paused"
       | null,
@@ -87441,7 +88228,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
           }
           const reason =
             effectiveControl.state === "active"
-              ? "session_not_idle"
+              ? // A chat parked on a model account (for example a Codex plan
+                // out of usage or no longer connected) is told apart, so the
+                // schedule can name the fix: pick another model in the chat.
+                session.status === "waiting_capacity"
+                ? "session_waiting_capacity"
+                : "session_not_idle"
               : sessionPaused
                 ? "session_paused"
                 : "workspace_paused";
@@ -87727,9 +88519,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // explicit durable obligation, independent of whether the session has
         // a goal, so an immediate child result may wake it. A parent with no
         // goal at all (an ordinary chat that started a worker and promised its
-        // result) is woken by the child's terminal result, and by the child's
-        // blocking question so it can answer it or tell the person; the person
-        // sees the question too, and the first answer wins.
+        // result) is woken by the child's terminal result. A child's blocking
+        // question also wakes a parent whose goal is completed: the worker is
+        // still the parent's work, and the parent should answer what it can
+        // before the person has to. It does not reopen the goal. The person
+        // sees the question too, and the first answer wins. A goal paused by
+        // intent still holds every child notice for its next turn.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -87741,7 +88536,8 @@ export async function addSessionSystemUpdateWithSourceMutation<
             (goalStatus === "active" ||
               waitingForInput ||
               ((input.kind === "child_terminal_result" || input.kind === "child_requires_action") &&
-                goalStatus === null)));
+                goalStatus === null) ||
+              (input.kind === "child_requires_action" && goalStatus === "completed")));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&
@@ -87939,13 +88735,16 @@ function backgroundCommandTerminalMutation(input: {
   idleContainmentMinutes?: number | null;
 }): {
   events: SessionEvent[];
+  wakes: SessionWorkflowWake[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
   commit: (tx: SessionActivityDatabase, command: SessionBackgroundCommand) => Promise<void>;
 } {
   let controlActive = false;
   const events: SessionEvent[] = [];
+  const wakes: SessionWorkflowWake[] = [];
   return {
     events,
+    wakes,
     prepare: async (tx: SessionActivityDatabase): Promise<void> => {
       const locks = await lockSessionEventWriteRows(tx, {
         workspaceId: input.workspaceId,
@@ -88249,11 +89048,23 @@ function backgroundCommandTerminalMutation(input: {
         controlActive &&
         !realtimeActive;
       if (shouldWake) {
-        await registerInternalUpdateWakeInTransaction(tx, {
+        const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+        const wake = await registerInternalUpdateWakeInTransaction(tx, {
           accountId: session.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+          temporalWorkflowId,
+        });
+        // The caller signals this after commit; the dispatcher remains the
+        // repair path when it cannot. The wake is a passive queue change: this
+        // branch requires an idle session, so there is no turn to interrupt.
+        wakes.push({
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId,
+          wakeRevision: wake.wakeRevision,
+          interruptionRequested: false,
         });
       }
       await tx
@@ -88276,6 +89087,9 @@ function backgroundCommandTerminalMutation(input: {
 export type SessionBackgroundCommandTerminalSettlement = {
   command: SessionBackgroundCommand;
   events: SessionEvent[];
+  /** Committed wakes of a session waiting on this result. Signal them after
+   * commit so the wait resumes now instead of on the dispatcher's next tick. */
+  wakes: SessionWorkflowWake[];
 };
 
 export async function settleConnectedMachineSessionBackgroundCommand(
@@ -88302,13 +89116,13 @@ export async function settleConnectedMachineSessionBackgroundCommand(
     input,
     mutation,
   );
-  return command ? { command, events: [...mutation.events] } : null;
+  return command ? { command, events: [...mutation.events], wakes: [...mutation.wakes] } : null;
 }
 
 export async function settleClaimedConnectedMachineBackgroundCommand(
   db: Database,
   input: { claim: ConnectedMachineBackgroundCommandClaim },
-): Promise<{ settled: boolean; events: SessionEvent[] }> {
+): Promise<{ settled: boolean; events: SessionEvent[]; wakes: SessionWorkflowWake[] }> {
   const mutation = backgroundCommandTerminalMutation({
     accountId: input.claim.accountId,
     workspaceId: input.claim.workspaceId,
@@ -88319,7 +89133,11 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     input,
     mutation,
   );
-  return { settled, events: settled ? [...mutation.events] : [] };
+  return {
+    settled,
+    events: settled ? [...mutation.events] : [],
+    wakes: settled ? [...mutation.wakes] : [],
+  };
 }
 
 /** Shared push/reaper terminal commit after output capture. A concurrent attached
@@ -88331,6 +89149,8 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     proof: ConnectedMachineBackgroundCommandProof;
     receipt?: ConnectedCommandOutputReceipt | undefined;
     publish?: ((events: SessionEvent[]) => Promise<void>) | undefined;
+    /** Signals a committed wake of a session waiting on this result. */
+    wake?: ((wake: SessionWorkflowWake) => Promise<unknown>) | undefined;
   },
 ): Promise<boolean> {
   const terminal = async () => {
@@ -88347,7 +89167,7 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     }
   }
   const settlement = alreadyTerminal
-    ? { settled: false, events: [] }
+    ? { settled: false, events: [], wakes: [] }
     : await settleClaimedConnectedMachineBackgroundCommand(db, input);
   const command = settlement.settled ? null : await terminal();
   if (!settlement.settled && !command)
@@ -88368,9 +89188,73 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     }
   } finally {
     // A custody-checkpoint error must never suppress already committed fanout.
-    if (settlement.events.length) await input.publish?.(settlement.events);
+    try {
+      if (settlement.events.length) await input.publish?.(settlement.events);
+    } finally {
+      await signalBackgroundCommandWakes(settlement.wakes, input.wake);
+    }
   }
   return settlement.settled;
+}
+
+/** How long a settlement caller waits for its wake signals before it moves on. */
+export const BACKGROUND_COMMAND_WAKE_SIGNAL_TIMEOUT_MS = 5_000;
+
+/**
+ * Signal the committed wakes of a terminal background-command settlement, one
+ * per session and revision, concurrently and for at most `timeoutMs`. A failed,
+ * slow or missing signal is not an error: the outbox row stays undelivered and
+ * the periodic wake dispatcher delivers it. `onError` sees each failure.
+ */
+export async function signalBackgroundCommandWakes(
+  wakes: readonly SessionWorkflowWake[] | undefined,
+  wake: ((wake: SessionWorkflowWake) => Promise<unknown>) | null | undefined,
+  options: {
+    timeoutMs?: number;
+    onError?: (error: unknown, wake: SessionWorkflowWake) => void;
+  } = {},
+): Promise<void> {
+  if (!wake || !wakes?.length) return;
+  const unique = new Map<string, SessionWorkflowWake>();
+  for (const pending of wakes) {
+    const key = `${pending.workspaceId}:${pending.sessionId}`;
+    const seen = unique.get(key);
+    if (!seen || seen.wakeRevision < pending.wakeRevision) unique.set(key, pending);
+  }
+  const timeoutMs = options.timeoutMs ?? BACKGROUND_COMMAND_WAKE_SIGNAL_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  const report = (error: unknown, pending: SessionWorkflowWake) => {
+    try {
+      options.onError?.(error, pending);
+    } catch {
+      // Reporting is best effort too.
+    }
+  };
+  const unsettled = new Set(unique.values());
+  try {
+    await Promise.race([
+      Promise.all(
+        [...unique.values()].map((pending) =>
+          Promise.resolve()
+            .then(() => wake(pending))
+            .then(
+              () => undefined,
+              (error: unknown) => report(error, pending),
+            )
+            .finally(() => unsettled.delete(pending)),
+        ),
+      ),
+      timedOut,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  for (const pending of unsettled) {
+    report(new Error(`wake signal still pending after ${timeoutMs} ms`), pending);
+  }
 }
 
 /**
@@ -91966,6 +92850,7 @@ export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
+export * from "./workspace-member-execution-defaults";
 export * from "./recordings";
 export * from "./recording-live";
 export {
@@ -91982,6 +92867,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-secret-redaction";
 export * from "./session-archive";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";

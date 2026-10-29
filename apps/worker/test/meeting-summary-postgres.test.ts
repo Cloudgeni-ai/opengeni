@@ -429,6 +429,22 @@ describe("built-in meeting summary", () => {
     expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
   }, 180_000);
 
+  test("in an EU-only workspace nothing starts on a subscription model outside the EU", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const input = await scope.meeting();
+    await shared!.admin`insert into organization_inference_residency
+        (account_id, eu_only, version, updated_by_subject_id)
+      values (${scope.accountId}, true, 1, ${scope.owner})
+      on conflict (account_id) do update set eu_only = true`;
+    expect(await startMeetingSummary(services(), input)).toEqual({
+      started: false,
+      reason: "region_restricted",
+    });
+    expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
+  }, 180_000);
+
   test("no other session can pass as a meeting summary or widen one", async () => {
     if (!realDb) return;
     const scope = await workspace({ subscription: false });
@@ -714,5 +730,33 @@ describe("meetingSummaryModel", () => {
         chatDefault: chat(served),
       }),
     ).toBeNull();
+  });
+
+  test("under EU-only inference only a model whose route is EU counts", () => {
+    const eu = { ...settings, requiredModelGeography: "eu" as const };
+    expect(
+      meetingSummaryModel({
+        settings: eu,
+        selections: [selection(served), selection(other)],
+        chatDefault: chat(served),
+      }),
+    ).toBeNull();
+    const euResidency = {
+      geography: "eu" as const,
+      deploymentType: "self_hosted" as const,
+      regions: [],
+      evidence: {
+        source: "operator_declaration" as const,
+        reference: "test",
+        verifiedAt: "2026-10-27",
+      },
+    };
+    expect(
+      meetingSummaryModel({
+        settings: eu,
+        selections: [selection({ ...served, residency: euResidency })],
+        chatDefault: chat(served),
+      }),
+    ).toEqual(chat(served));
   });
 });

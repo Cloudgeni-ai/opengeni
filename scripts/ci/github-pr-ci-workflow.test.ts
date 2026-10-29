@@ -19,7 +19,7 @@ test("PR-only capped selection precedes unit count; selected failures still fail
   expect(units["continue-on-error"]).toBeUndefined();
   expect(units.run).toContain("set -euo pipefail");
   expect(jobs.ready.steps[0].run).toContain('test "$FAST" = success');
-  expect(JSON.stringify(workflow("batch-ci"))).not.toContain("pr-fast-plan.ts");
+  expect(JSON.stringify(workflow("ci"))).not.toContain("pr-fast-plan.ts");
 });
 
 test("PR CI reserves a bounded PR lane without cancelling main or batch", () => {
@@ -34,12 +34,6 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(
     pr.jobs.plan.steps.some((s: any) => /github-pr-ci.ts (priority|admit-fast)/.test(s.run ?? "")),
   ).toBe(false);
-  expect(
-    workflow("batch-ci").jobs.plan.steps.some(
-      (s: any) => s.run === "bun scripts/ci/github-pr-ci.ts priority batch",
-    ),
-  ).toBe(false);
-  expect(workflow("batch-ci").concurrency["cancel-in-progress"]).toBe(false);
   expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
   expect(pr.jobs.fast.needs).toBe("plan");
   expect(pr.jobs.fast["timeout-minutes"]).toBe(15);
@@ -68,17 +62,6 @@ test("actual concurrency expression isolates PRs and matches dispatch", () => {
   }
   expect(buckets.size).toBe(1000);
   expect(workflow("pr-ci").jobs.fast.strategy).toBeUndefined();
-});
-
-test("Queue ready entry and labeling do not wait for PR CI", () => {
-  const queue = workflow("merge-queue");
-  expect(queue.on.pull_request.types).toContain("labeled");
-  const entry = Object.values(queue.jobs).find((j: any) =>
-    String(j.name).includes("Queue ready"),
-  ) as any;
-  expect(entry).toBeDefined();
-  expect(entry.needs).toBeUndefined();
-  expect(entry.steps.map((s: any) => s.run ?? "").join("\n")).toContain("exact-head PR CI");
 });
 
 test("required aggregate covers docs and every selected job at exact head", () => {
@@ -150,7 +133,7 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   expect(excluded(guards.run).sort()).toEqual([...batchExcluded, "lint"].sort());
 });
 
-test("PR fast checks build Batch's production web bundle whenever the plan selects it", () => {
+test("PR fast checks build the production web bundle whenever the plan selects it", () => {
   const { jobs } = workflow("pr-ci");
   const plan = jobs.plan.steps.find((step: any) => step.id === "plan").run as string;
   expect(plan.indexOf("pr-fast-plan.ts")).toBeLessThan(plan.indexOf("web_bundle="));
@@ -159,16 +142,12 @@ test("PR fast checks build Batch's production web bundle whenever the plan selec
   const steps = jobs.fast.steps as any[];
   const pr = steps.find((step) => step.name === "Production web bundle");
   expect(pr.if).toBe("${{ needs.plan.outputs.web_bundle == 'true' }}");
+  expect(pr.env).toEqual({ NODE_ENV: "production" });
+  expect(pr.run).toContain("bun run --cwd apps/web build");
   expect(pr["continue-on-error"]).toBeUndefined();
   expect(steps.indexOf(pr)).toBeLessThan(
     steps.findIndex((step) => step.name === "Test every selected unit file"),
   );
-  const batch = Object.values(workflow("batch-ci").jobs as Record<string, any>)
-    .flatMap((job) => job.steps ?? [])
-    .find((step: any) => step.name === "Production web bundle");
-  // Same command and environment as Batch, minus its receipt wrapper.
-  expect(batch.env).toEqual(pr.env);
-  expect(batch.run.endsWith(` -- ${pr.run}`)).toBe(true);
 });
 
 test("write-capable supersession handler executes trusted base only on a new PR push", () => {

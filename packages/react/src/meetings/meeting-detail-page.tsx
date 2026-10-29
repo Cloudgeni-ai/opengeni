@@ -14,6 +14,7 @@
  * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { regionRestrictedText } from "../inference-region";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AudioLinesIcon,
@@ -225,6 +226,38 @@ function RenameDialog({
   );
 }
 
+/**
+ * The models "Transcribe again" offers. One that can't be used says why:
+ * "Not supported in EU" when EU-only switched it off, otherwise what to connect.
+ */
+export function transcribeAgainModelOptions(
+  models: readonly Pick<
+    RecordingTranscriptionModel,
+    | "providerId"
+    | "providerName"
+    | "model"
+    | "name"
+    | "available"
+    | "unavailableReason"
+    | "usdPerHour"
+  >[],
+  msg: OpenGeniText = defaultText,
+): SelectOption[] {
+  return models.map((entry) => ({
+    value: `${entry.providerId}/${entry.model}`,
+    label: entry.name,
+    meta:
+      entry.usdPerHour !== null
+        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
+        : entry.providerName,
+    disabled: !entry.available,
+    disabledReason: entry.available
+      ? undefined
+      : (regionRestrictedText(msg, entry.unavailableReason) ??
+        msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName })),
+  }));
+}
+
 function TranscribeAgainDialog({
   open,
   recording,
@@ -267,18 +300,7 @@ function TranscribeAgainDialog({
       setError(null);
     }
   }, [open, initialModel]);
-  const modelOptions: SelectOption[] = models.map((entry) => ({
-    value: `${entry.providerId}/${entry.model}`,
-    label: entry.name,
-    meta:
-      entry.usdPerHour !== null
-        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
-        : entry.providerName,
-    disabled: !entry.available,
-    disabledReason: entry.available
-      ? undefined
-      : msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName }),
-  }));
+  const modelOptions = transcribeAgainModelOptions(models, msg);
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
   const estimate =
     selected?.usdPerHour != null && recording.durationMilliseconds > 0

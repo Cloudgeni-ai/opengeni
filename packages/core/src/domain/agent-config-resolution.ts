@@ -60,6 +60,33 @@ export function newSessionKnowledgeSearchTools(
 }
 
 /**
+ * Creation only: the first-party tools a new session's opening context is for
+ * (`modelContextTools`, such as the tool that reaches a workbook the person is
+ * writing from), frozen in the initial turn so its first model step loads them
+ * as a search by name would. Only tools in the session's own first-party
+ * selection count, so this never adds a tool or permission, and the session's
+ * tools stay exactly as selected: the first request's tool block is the same
+ * as any other chat's.
+ */
+export function newSessionOpeningTools(
+  tools: ToolRef[],
+  firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+  modelContextTools: readonly string[] | undefined,
+): FirstPartyMcpToolName[] {
+  const opengeni = tools.find((tool) => tool.kind === "mcp" && tool.id === "opengeni");
+  if (!opengeni || opengeni.kind !== "mcp") return [];
+  return [
+    ...new Set(
+      (modelContextTools ?? []).filter(
+        (name): name is FirstPartyMcpToolName =>
+          firstPartyMcpTools.includes(name as FirstPartyMcpToolName) &&
+          (opengeni.allowedTools === undefined || opengeni.allowedTools.includes(name)),
+      ),
+    ),
+  ];
+}
+
+/**
  * Run an agent-config resolution step and surface its typed failure as a 422
  * whose `cause` keeps the `AgentConfigError` (the API renders its code as
  * `details.code`; MCP and Slack keep the plain message).

@@ -73,6 +73,30 @@ describe("authNeededPresentation", () => {
     expect(view.footnote).toBeNull();
   });
 
+  test("a plugin is installed, not connected, and says who can install it", () => {
+    const view = authNeededPresentation(
+      t,
+      item({
+        reason: "missing_connection",
+        providerDomain: "sentry.io",
+        capability: {
+          id: "plugin:marketplace/anthropic/sentry",
+          name: "Sentry",
+          kind: "plugin",
+          action: "enable",
+          rationale: "To triage this morning's errors.",
+          requiredVariables: [],
+        } as unknown as NonNullable<AuthNeededItem["capability"]>,
+      }),
+      { setupUnavailable: true },
+    );
+    expect(view.title).toBe("Install Sentry");
+    expect(view.footnote).toBe(
+      "Installing Sentry needs permission to manage this workspace's plugins. Ask a workspace admin to install it.",
+    );
+    expect(`${view.title} ${view.footnote}`).not.toMatch(/connect/i);
+  });
+
   test("provider labels are calm names, not raw domains", () => {
     expect(providerLabel(t, "https://www.notion.so/path")).toBe("Notion");
     expect(providerLabel(t, "")).toBe(t("messageTimeline.thisService"));

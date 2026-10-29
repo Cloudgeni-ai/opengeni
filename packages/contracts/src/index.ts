@@ -50,6 +50,8 @@ import {
   messageTimeZoneWallClock,
 } from "./message-time-zone";
 export * from "./message-time-zone";
+import { OPENING_TOOLS_MAX } from "./opening-tools";
+export * from "./opening-tools";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
@@ -61,6 +63,7 @@ export * from "./first-party-tool-authorization";
 export * from "./model-availability";
 export * from "./model-residency";
 import { ClientModelResidencyV1 } from "./model-residency";
+import { InferenceFeatureAvailability } from "./inference-residency";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
   AgentConfigRequest,
@@ -197,7 +200,9 @@ export {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
@@ -902,7 +907,7 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
-    /** Content from an EU-only workspace may only reach other EU-only workspaces (HTTP 422). */
+    /** EU-only refusal (HTTP 422): content from an EU-only workspace may only reach other EU-only workspaces, and EU-only inference refuses a model-backed feature with no EU route (details.code "region_restricted"). */
     "region_restricted",
     /** The resource or route no longer exists (HTTP 410). */
     "gone",
@@ -2225,6 +2230,8 @@ export const TranscriptionErrorCode = /* @__PURE__ */ defineSchema(() =>
     "insufficient_credits",
     "allowance_exhausted",
     "monthly_model_cost_limit",
+    /** The workspace is EU-only and no speech-to-text route here is EU. */
+    "region_restricted",
   ]),
 );
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
@@ -3186,6 +3193,43 @@ export function resolveWorkspaceDefaultExecutionTarget(
     ? null
     : WorkspaceDefaultExecutionTarget.parse(value);
 }
+
+/**
+ * Whether a machine may be a workspace's default for new chats. A personal
+ * (Only me) machine qualifies only in a Personal workspace: nobody else starts
+ * chats there, and the scoped machine lookup returns it to its owner alone.
+ * Chats that start on it still ask for the owner's personal-machine consent.
+ */
+export function machineCanBeWorkspaceDefault(
+  machine: { scope?: string | null | undefined },
+  workspace: { kind?: string | null | undefined } | null | undefined,
+): boolean {
+  return machine.scope !== "user" || workspace?.kind === "personal";
+}
+
+/**
+ * `GET /v1/workspaces/:workspaceId/my-default-execution-target`: the caller's
+ * own placement for the new chats they start in this workspace ("Your default
+ * machine"). Null follows the workspace default. Any active machine the caller
+ * can use qualifies, including their own Only me machine. `usable` is false
+ * when the saved machine was removed or is no longer available to them; their
+ * new chats then follow the workspace default until they choose again.
+ */
+export const MemberDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    target: WorkspaceDefaultExecutionTarget.nullable(),
+    usable: primitives.boolean,
+  }),
+);
+export type MemberDefaultExecutionTarget = z.infer<typeof MemberDefaultExecutionTarget>;
+
+/** `PUT /v1/workspaces/:workspaceId/my-default-execution-target`; null clears it. */
+export const UpdateMemberDefaultExecutionTargetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ target: WorkspaceDefaultExecutionTarget.nullable() }).strict(),
+);
+export type UpdateMemberDefaultExecutionTargetRequest = z.infer<
+  typeof UpdateMemberDefaultExecutionTargetRequest
+>;
 
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
@@ -10293,6 +10337,12 @@ export const NewSessionDraft = /* @__PURE__ */ defineSchema(() =>
     selectedProjectChannelId: z.string().uuid().nullable().optional(),
     options: NewSessionDraftOptions,
     selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
+    /**
+     * Read-only: the caller's own default placement for new chats here ("Your
+     * default machine") when it is usable now. A fresh form starts on it ahead
+     * of the workspace default. Never saved with the draft.
+     */
+    memberDefaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
     updatedAt: primitives.nullableString,
   }),
 );
@@ -10535,8 +10585,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * consumer could see that the rendering does not capture: what a field means,
  * the `sourceId`, dedupe keys, classification, summary or lineage the
  * producers write, or how a consumer supersedes, wakes on or renders a notice.
+ *
+ * 2: a child's `child_requires_action` may target the nearest ancestor that
+ * can act instead of a parent that cannot (new lineage `escalatedFromSessionId`),
+ * its resolution follows it there, and it also wakes a parent whose goal is
+ * completed.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 1;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 2;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -11709,7 +11764,8 @@ export const RigVersion = /* @__PURE__ */ defineSchema(() =>
     // Operational build metadata is version-bound but not part of the immutable
     // rig definition. Each backend records its own truthful build state.
     providerImages: RigProviderImages.default({}),
-    // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
+    // Attribution: the person's subject ('user:<id>'; older versions say
+    // 'user:user:<id>') | 'session:<id>' | 'system'.
     createdBy: primitives.nullableString,
     active: primitives.boolean,
     createdAt: primitives.string,
@@ -15214,6 +15270,18 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       approvalRequiredToolCount: primitives.nonnegativeInteger,
       revisionId: primitives.nonEmptyString,
       contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+      /**
+       * Set on an instance a Personal workspace carries for its owner from
+       * another workspace where they connected it "Only me". It is managed in
+       * that workspace, not here.
+       */
+      personalExtension: z
+        .object({
+          originWorkspaceId: primitives.uuid,
+          originWorkspaceName: primitives.nonEmptyString,
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );
@@ -15918,9 +15986,10 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
       })
       .nullable()
       .optional(),
-    // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
-    // model admission for the life of the session; portable ⇒ plaintext compaction
-    // and free mid-session provider switching (today's behavior).
+    // Set at session create. remote_v2 ⇒ Codex remote compaction while the chat
+    // stays on Codex; switching to another provider's model rebuilds the context
+    // as a portable summary and turns the chat portable. portable ⇒ plaintext
+    // compaction and free mid-session provider switching.
     codexCompactionMode: CodexCompactionMode,
     /**
      * The `code_search` decision frozen at create. A turn gets the tool only when
@@ -16912,7 +16981,11 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     title: primitives.string,
     /** A notification's subtitle; empty otherwise. */
     subtitle: primitives.string.default(""),
-    /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
+    /**
+     * Plain text: for an approval, where it runs (the integration, and the
+     * account when there are several); for a notification, its message
+     * (paragraphs, "- " bullets, **bold**, `code`, links).
+     */
     body: primitives.string,
     /** A notification's label/value facts; empty otherwise. */
     facts: z
@@ -19274,6 +19347,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // Standard timeline rendering omits it, while full event/audit reads retain
         // it. This is ordinary user-role content, not secret or privileged input.
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
+        // First-party tools the opening context is for, such as the tool that
+        // reaches the open document or record it names. The first turn loads
+        // them before its first model request, as a search by name would, so it
+        // can use them without searching; the session's tool block is unchanged.
+        // Decided once at creation. Names outside the session's tool selection
+        // are ignored; this grants no tool or permission.
+        modelContextTools: z.array(z.string().min(1).max(200)).max(OPENING_TOOLS_MAX).optional(),
         // The IANA time zone of the person sending the initial message, so the
         // model sees its local time. Ignored without an initial message.
         timeZone: MessageTimeZone.optional(),
@@ -19775,13 +19855,25 @@ export const HumanInputAnswer = /* @__PURE__ */ defineSchema(() =>
 );
 export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
 
+/**
+ * `agentDecides` on a skipped response records "Let the agent decide": the
+ * asking agent proceeds with its own best choice and says what it chose. It is
+ * accepted even when the request does not allow an ordinary skip, but never
+ * for secret questions, Skill reviews or secret-use approvals.
+ */
+const SkippedHumanInputResponse = () =>
+  z.object({
+    outcome: z.literal("skipped"),
+    agentDecides: z.literal(true).optional(),
+  });
+
 export const HumanInputResponse = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("outcome", [
     z.object({
       outcome: z.literal("answered"),
       answers: z.array(HumanInputAnswer).max(20),
     }),
-    z.object({ outcome: z.literal("skipped") }),
+    SkippedHumanInputResponse(),
     z.object({ outcome: z.literal("expired") }),
     z.object({ outcome: z.literal("cancelled") }),
   ]),
@@ -19796,7 +19888,7 @@ export const SubmitHumanInputResponseRequest = /* @__PURE__ */ defineSchema(() =
       /** Write-only secret values; the API strips them before building any event. */
       secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
     }),
-    z.object({ outcome: z.literal("skipped") }),
+    SkippedHumanInputResponse(),
   ]),
 );
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
@@ -21307,6 +21399,20 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
         }),
       )
       .optional(),
+    /**
+     * The next saved message is the machine owner's own and was approved for
+     * other machines, not this one, so it can't start here and no recheck
+     * helps: it runs after the chat moves to a machine it was approved for,
+     * or it is removed and sent again here. Older servers omit it.
+     */
+    queuedTurnNotApprovedHere: z.boolean().optional(),
+    /**
+     * Where that message may run: the owner's personal machines it was
+     * approved for. Listed only for its sender; empty for everyone else.
+     */
+    queuedTurnApprovedMachines: z
+      .array(z.object({ sandboxId: primitives.uuid, machineName: primitives.string }))
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
@@ -21901,6 +22007,8 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
         "unsupported",
         // The workspace turned Opengeni credits off and this model spends them.
         "credits_disabled",
+        // The workspace is EU-only and this model's route is not EU.
+        "region_restricted",
       ])
       .nullable(),
     checkedAt: z.string().datetime().nullable(),
@@ -22105,6 +22213,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     codeSearch: z
       .object({ available: primitives.boolean, workspaceDefault: z.enum(["off", "on", "split"]) })
       .default({ available: false, workspaceDefault: "off" }),
+    // EU-only inference: each model-backed side feature's region availability
+    // for the caller's workspace. `unavailableReason: "region_restricted"`
+    // means the workspace is EU-only and the feature has no EU route here;
+    // show "Not supported in EU". Absent on older servers.
+    inferenceFeatures: z.array(InferenceFeatureAvailability).optional(),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
@@ -22283,6 +22396,7 @@ export * from "./governed-learning-evaluator";
 export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
+export * from "./session-secret-redaction";
 export * from "./canonical-human-identities";
 export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";

@@ -2366,7 +2366,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
     "/takedown",
   );
   expect(readOnlyTakedown.status).toBe(403);
-  expect(code(readOnlyTakedown)).toBeUndefined();
+  expect(code(readOnlyTakedown)).toBe("missing_permission");
   expect(JSON.stringify(readOnlyTakedown.json)).toContain("artifacts:publish");
   // A signed-in member is talking to the Site's assistant when it is taken down.
   const memberToken = await f.signIn(f.member, site.host);
@@ -2420,7 +2420,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
 
   const readOnlyRestore = await f.publication(readOnly, site.id, "POST", {}, "/restore");
   expect(readOnlyRestore.status).toBe(403);
-  expect(code(readOnlyRestore)).toBeUndefined();
+  expect(code(readOnlyRestore)).toBe("missing_permission");
   // The takedown revoked every viewer session and cancelled the running conversation.
   const [revoked] = await shared.admin`select count(*)::int as n from site_viewer_sessions
     where site_id = ${site.id} and revoked_at is null`;

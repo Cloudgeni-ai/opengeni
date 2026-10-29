@@ -6,6 +6,7 @@ import {
   type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  ErrorEnvelope,
   isReadOnlyPermissionSet,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -25,6 +26,10 @@ import {
 } from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
 import { actionDescription } from "./mcp/action-descriptions";
+import {
+  stampActionAuditProvenance,
+  type ActionAuditProvenance,
+} from "./http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -79,8 +84,15 @@ export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
   );
 }
 
-/** The billing routes' 403 when the caller lacks billing:manage (requireSelectedAccount). */
-const BILLING_MANAGE_MISSING = "missing permission: billing:manage";
+/** Whether a 403 body is the billing routes' refusal for a missing billing:manage. */
+async function refusedForBillingManage(response: Response): Promise<boolean> {
+  try {
+    const envelope = ErrorEnvelope.safeParse(await response.clone().json());
+    return envelope.success && envelope.data.error.details?.permission === "billing:manage";
+  } catch {
+    return false;
+  }
+}
 
 /** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
 const EXTERNAL_PERSON_REFUSED_HINT =
@@ -181,6 +193,11 @@ export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
 
 export type OrganizationActionContext = {
   caller: OrganizationMcpCaller;
+  /**
+   * Who acts for the person (an agent session with admin access, a connected
+   * agent, a personal key), for audit records. Trusted server state only.
+   */
+  auditProvenance?: ActionAuditProvenance;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
   /** The web app's public origin, when configured; serves the PNG icon. */
@@ -380,7 +397,7 @@ export async function callOrganizationAction(
     options.billingForbidden &&
     outcome.externalPerson !== true &&
     outcome.response.status === 403 &&
-    (await outcome.response.clone().text()).includes(BILLING_MANAGE_MISSING)
+    (await refusedForBillingManage(outcome.response))
   ) {
     await outcome.response.body?.cancel();
     return failure(options.billingForbidden);
@@ -483,6 +500,7 @@ export async function runOrganizationAction(
         workspaceScope: context.caller.access.workspaceScope,
       });
     }
+    if (context.auditProvenance) stampActionAuditProvenance(request, context.auditProvenance);
   }
   return {
     response: await context.dispatch(request),

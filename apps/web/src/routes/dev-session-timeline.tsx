@@ -2,7 +2,7 @@
 // session scenarios, so native renderers can be compared against web at phone width.
 // Open: http://127.0.0.1:3000/dev/session-timeline?scenario=working (add &bare=1 for a
 // frameless 390px stage, used by automated screenshots).
-import { MessageTimeline } from "@opengeni/react";
+import { InteractiveAnswerProvider, MessageTimeline } from "@opengeni/react";
 import { ChatInteractiveBlock, type SiteSnapshotClient } from "@opengeni/react/artifacts";
 import { labScenarios, type LabScenarioId } from "@opengeni/react/testing";
 import { useCallback, useMemo } from "react";
@@ -20,6 +20,8 @@ const noSites: SiteSnapshotClient = {
   getWorkspaceArtifactHtml: () => Promise.reject(new Error("The lab has no Sites")),
 };
 
+const labSend = async () => true;
+
 export function DevSessionTimelineRoute() {
   const scenarios = useMemo(() => labScenarios(), []);
   const id = (param("scenario") ?? "working") as LabScenarioId;
@@ -32,14 +34,17 @@ export function DevSessionTimelineRoute() {
     [],
   );
   const timeline = (
-    <MessageTimeline
-      className="h-full"
-      events={scenario.events}
-      key={scenario.id}
-      renderInteractiveBlock={renderInteractiveBlock}
-      status={scenario.running ? "running" : "idle"}
-      turnSummary={{ rolling: true }}
-    />
+    // Picks in interactive answers "send" without leaving the lab.
+    <InteractiveAnswerProvider send={labSend} scope={`lab-${scenario.id}`}>
+      <MessageTimeline
+        className="h-full"
+        events={scenario.events}
+        key={scenario.id}
+        renderInteractiveBlock={renderInteractiveBlock}
+        status={scenario.running ? "running" : "idle"}
+        turnSummary={{ rolling: true }}
+      />
+    </InteractiveAnswerProvider>
   );
   if (param("bare") === "1") {
     return <main className="h-dvh w-full overflow-hidden bg-bg text-fg">{timeline}</main>;

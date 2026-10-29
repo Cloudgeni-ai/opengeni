@@ -387,6 +387,37 @@ export const siteSidebarStates = pgTable(
 );
 
 /**
+ * A Site's project in the sidebar, chosen by a person (migration 1071). Without
+ * a row a Site sits in the project of the chat that created it. Shared like a
+ * chat's project; a null channel is Default (no project). Grants nothing.
+ */
+export const siteProjectPlacements = pgTable(
+  "site_project_placements",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    // Composite FK to channels(workspace_id, id) ON DELETE SET NULL (channel_id),
+    // owned by the migration.
+    channelId: uuid("channel_id"),
+    placedBySubjectId: text("placed_by_subject_id").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_project_placements_channel_idx").on(table.workspaceId, table.channelId),
+  ],
+);
+
+/**
  * "Always allow for this Site" (migration 1031): one person's standing consent
  * for one Site to run one tool on one of their own connections. Personal;
  * consulted only for that Site's calls; never overrides Block and never
@@ -424,6 +455,32 @@ export const siteToolAllowances = pgTable(
       foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
     }).onDelete("cascade"),
     index("site_tool_allowances_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
+/**
+ * "Your default machine" (migration 1090): one person's own placement for the
+ * new chats they start in one workspace, ahead of the workspace default.
+ * Personal (RLS: own subject only). Session creation revalidates it on every
+ * use and falls back to the workspace default when it is no longer usable.
+ */
+export const workspaceMemberExecutionDefaults = pgTable(
+  "workspace_member_execution_defaults",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    target: jsonb("target").$type<Record<string, unknown>>().notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   ],
 );
 
@@ -13000,6 +13057,14 @@ export const usageEvents = pgTable(
       withTimezone: true,
     }),
     billingProviderEventId: text("billing_provider_event_id"),
+    // Where a model-backed side feature processed this call (geography,
+    // deployment type, regions of its route's residency record; never
+    // evidence). Null before 1072 and for events that are not such calls.
+    processingResidency: jsonb("processing_residency").$type<{
+      geography: string;
+      deploymentType: string;
+      regions: string[];
+    }>(),
   },
   (table) => ({
     idempotency: uniqueIndex("usage_events_idempotency_idx").on(table.idempotencyKey),

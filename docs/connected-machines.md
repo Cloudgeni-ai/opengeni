@@ -323,6 +323,15 @@ exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
 `/workspace` has no special meaning on a machine.
 
+The machine's own Git identity applies to commits. Only on a machine where Git
+cannot derive an address from the hostname (typically a fresh container, whose
+hostname has no domain) and whose agent environment has no `EMAIL` do commands
+receive `EMAIL=agent@opengeni.invalid`, Git's last-resort commit email;
+`GIT_*_EMAIL` and any `user.email` setting still win. The agent asks Git once
+per process. The author name still comes from the account, so a container
+running as a uid with no passwd entry has no name and its commits still need
+`user.name`.
+
 The Files surface advertises that effective path as `FileSystem.root`, including
 Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
 in the same namespace and sends the negotiated `{ epoch, root }` identity with
@@ -1675,7 +1684,9 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   Mobile browsers direct the person to the computer they want to connect;
 - inside the desktop app, the same dialog is **Connect a machine**: for the
   computer the app runs on it shows the **Computer use** switch (off, turning
-  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  on, on, waiting on a macOS permission, or a problem with one fix; turning on
+  that hasn't connected after a minute becomes a problem saying why, with
+  **Try again**), and never
   offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
   command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.

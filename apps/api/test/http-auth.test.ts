@@ -196,4 +196,20 @@ describe("configured deployment perimeter authentication", () => {
       ).status,
     ).toBe(401);
   });
+
+  test("opens a bot's signed avatar picture to Slack, for reading only", async () => {
+    const app = new Hono();
+    app.use(
+      "*",
+      requireAccessKey(
+        testSettings({ productAccessMode: "configured", authRequired: true, accessKey }),
+      ),
+    );
+    app.all("*", (context) => context.json({ ok: true }));
+    expect((await app.request("/v1/public/session-avatars/abc.def.png")).status).toBe(200);
+    expect(
+      (await app.request("/v1/public/session-avatars/abc.def.png", { method: "POST" })).status,
+    ).toBe(401);
+    expect((await app.request("/v1/public/other")).status).toBe(401);
+  });
 });

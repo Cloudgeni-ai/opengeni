@@ -1361,7 +1361,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     if (!written) {
       throw provider.errors.sourceRefused(
         "forbidden",
-        `missing permission to change this workspace's ${provider.adapter.displayName} source`,
+        `You don't have permission to change this workspace's ${provider.adapter.displayName} source.`,
       );
     }
     return {

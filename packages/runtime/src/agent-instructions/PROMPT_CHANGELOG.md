@@ -1,5 +1,30 @@
 # Modular prompt changelog
 
+A blocked routine, reversible step no longer ends the turn with a question.
+Autonomy and persistence adds one general principle: take the conventional
+default without changing user or machine configuration, say which default was
+taken in the final answer, and continue; end the turn with a question only when
+the step is destructive, acts outside the workspace, needs authority the user
+has not given, or has no conventional default and the choice would materially
+change the result. Sessions run through the API, schedules and other headless
+paths often have no one to answer, so a question there ends the work unfinished.
+Both compositions change identically; legacy prompt digests are refreshed.
+
+Child questions the agent can answer. The Session coordination sentence on a
+`child_requires_action` update (263 bytes longer) now asks the agent to answer
+as soon as it can, before the person has to; to do agent work the question
+asks for, such as starting a reviewer or worker, and then answer; and, when the
+person lets it decide a child's question, to answer with its best judgement
+and say in one sentence what it chose. The goal-continuation notice guidance
+says the same. The `request_human_input` description adds that the person may
+let the agent decide (the result has `agentDecides`: choose, continue, and say
+what was chosen) and that a sub-session whose need is agent work messages its
+parent agent instead, or says in the question that it is for the parent agent.
+Before, a sub-session that could not start a reviewer asked the person for one
+(session ea347a98, 2026-10-28 07:32 UTC), and the orchestrator handled
+it only after the person asked why they were shown it. Both compositions change
+identically; legacy prompt digests are refreshed for this reviewed change.
+
 Settings that block a tool are changed in the chat. When the app-action tools
 may exist (capability `workspaceAdmin` on and neither `admin_actions_search`
 nor `admin_action_call` proven absent), the Autonomy and persistence rule for

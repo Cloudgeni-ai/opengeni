@@ -19,7 +19,11 @@ import {
 } from "@opengeni/contracts";
 import { createHash, randomBytes } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import {
+  requireConnectOwnerAuthority,
+  MissingPermissionRefusal,
+  WORKSPACE_SETTINGS_REFUSAL,
+} from "@opengeni/core";
 import {
   configuredGoogleDriveSyncLimits,
   googleDriveOAuthCallbackUrl,
@@ -107,6 +111,7 @@ import {
   withWorkspaceSubjectRls,
   recordKnowledgeLifecycleEvent,
   type PermanentConnectionRefreshFailure,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import { googleDriveKnowledgeSourceIdentity } from "@opengeni/documents/google-drive";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -114,10 +119,10 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import { requestValidationError } from "../http/request-body";
 import {
+  connectOwnerStateFields,
   personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -236,7 +241,7 @@ export async function startGoogleDriveOAuth(
     ...(input.externalContinuation ? { externalContinuation: input.externalContinuation } : {}),
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
+    personalOwnerVerified: true,
     returnPath: GOOGLE_DRIVE_RETURN_PATH(input.workspaceId),
     capability: input.payload.capability,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
@@ -249,8 +254,16 @@ function googleDriveOAuthAuthorization(
 ): GoogleDriveOAuthStartResponse {
   const key = requireEnvironmentEncryption(settings);
   const verifier = randomBytes(48).toString("base64url");
-  const { externalContinuation, ...claims } = authority;
+  const {
+    externalContinuation,
+    accountId,
+    workspaceId,
+    subjectId,
+    personalOwnerVerified,
+    ...claims
+  } = authority;
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    ...connectOwnerStateFields({ accountId, workspaceId, subjectId }, personalOwnerVerified),
     ...claims,
     kind: GOOGLE_DRIVE_OAUTH_STATE_KIND,
     ...(externalContinuation
@@ -836,6 +849,8 @@ export async function disconnectGoogleDrive(
     subjectId: string;
     connection: GoogleDriveConnectionRecord;
     payload: GoogleDriveDisconnectRequest;
+    /** Who disconnects: audited in the disconnect's transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ) {
   const metadata = requireGoogleDriveConnection(input.connection, input.subjectId);
@@ -860,6 +875,7 @@ export async function disconnectGoogleDrive(
       }),
       lastError: null,
       updatedBySubjectId: input.subjectId,
+      audit: input.audit ?? null,
     });
     await setGoogleDriveScheduleStatus(deps, input.workspaceId, input.connection.id, "paused");
     return disconnected;
@@ -1478,10 +1494,12 @@ function googleDriveDocumentDestination(
     destinationSelection.authorityKind === "organization" &&
     !input.canManageOrganizationDestination
   ) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   if (destinationSelection.authorityKind === "workspace" && !input.canManageWorkspaceDestination) {
-    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+    throw new MissingPermissionRefusal("workspace:admin", {
+      message: WORKSPACE_SETTINGS_REFUSAL,
+    });
   }
   if (destinationSelection.authorityKind === "personal" && !input.canManagePersonalDestination) {
     throw new HTTPException(403, { message: "personal destination requires the exact actor" });
