@@ -48,6 +48,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CornerDownRightIcon,
+  Loader2Icon,
   PauseCircleIcon,
   PauseIcon,
   MessageCircleQuestionIcon,
@@ -417,14 +418,10 @@ const PIN_THRESHOLD_PX = 48;
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 /**
- * Floating timeline navigation: two identical small round arrow buttons at fixed
- * spots, centered on the conversation. Back to your message floats 12px below
- * the top edge, or just below an expanded work-header strip while that strip is
- * pinned (32px, 44px on coarse pointers) so the strip stays a full-width
- * target. Jump to latest floats 12px above the bottom edge. They never dodge
- * the content beneath them (floating over a sliver of text is fine), so they
- * cannot wander as rows stream in or the host resizes. Coarse pointers get a
- * larger invisible hit area instead of a larger button.
+ * Navigation stays in a reserved 48px end gutter, outside the scrollport.
+ * Its position and the reading width stay stable when arrows appear, without
+ * covering prose, setup cards or pinned work headers. Coarse pointers get a
+ * 44px hit area within that gutter instead of a larger visible button.
  */
 const NAV_BUTTON_CLASS =
   "pointer-events-auto relative inline-flex size-8 items-center justify-center rounded-full border border-og-border bg-og-surface-3/90 text-og-fg-muted shadow-og-md backdrop-blur hover:border-og-border-strong hover:text-og-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:before:absolute pointer-coarse:before:-inset-1.5 pointer-coarse:before:content-['']";
@@ -2611,7 +2608,7 @@ export function MessageTimeline({
                   <TooltipProvider delayDuration={400}>
                     <TimelineAnnotationSourceRootContext.Provider value={scrollRef}>
                       <div
-                        className={cn("og-root relative flex min-h-0 flex-col", className)}
+                        className={cn("og-root relative flex min-h-0 flex-col pr-12", className)}
                         // Sticky insets start at the scroller's padded content edge
                         // (pt-16). Subtract exactly that padding so an expanded work
                         // header pins flush to the scrollport. Pinning it lower left a
@@ -2935,10 +2932,7 @@ export function MessageTimeline({
 
                         <div
                           data-og-timeline-nav="top"
-                          className={cn(
-                            "pointer-events-none absolute inset-x-0 z-10 flex justify-center",
-                            questionNav?.belowHeader ? "top-10 pointer-coarse:top-13" : "top-3",
-                          )}
+                          className="pointer-events-none absolute right-1 top-3 z-10 flex w-11 justify-center"
                         >
                           <AnimatePresence>
                             {questionNav ? (
@@ -2962,7 +2956,7 @@ export function MessageTimeline({
                         </div>
                         <div
                           data-og-timeline-nav="bottom"
-                          className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex flex-col items-center gap-2"
+                          className="pointer-events-none absolute right-1 bottom-3 z-10 flex w-11 flex-col items-center gap-2"
                         >
                           <AnimatePresence>
                             {loadingNewer ? (
@@ -2971,12 +2965,14 @@ export function MessageTimeline({
                                 {...NAV_FADE}
                                 data-og-loading-newer=""
                                 aria-live="polite"
-                                className="flex max-w-full justify-center"
+                                className="flex size-8 items-center justify-center text-og-fg-muted"
                               >
-                                <span className={LOADING_CHIP_CLASS}>
-                                  <ShimmerText>
-                                    {t("messageTimeline.loadingLaterActivity")}
-                                  </ShimmerText>
+                                <Loader2Icon
+                                  aria-hidden
+                                  className="size-4 animate-spin motion-reduce:animate-none"
+                                />
+                                <span className="sr-only">
+                                  {t("messageTimeline.loadingLaterActivity")}
                                 </span>
                               </motion.div>
                             ) : null}
