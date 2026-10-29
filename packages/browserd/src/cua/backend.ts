@@ -2725,7 +2725,7 @@ export class CuaComputerBackend implements ComputerBackend {
       case "not_applied":
         throw new ComputerBackendError(
           "driver_failed",
-          "The field's text was replaced, but the field reads something other than the value afterwards (it may limit or change what is typed); observe it before setting it again",
+          "The text was sent to the field, but the field does not hold the value afterwards (it may ignore, limit or change what is typed); observe it before setting it again",
           false,
           true,
         );

@@ -1443,7 +1443,15 @@ describe("CUA desktop boundary", () => {
               "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
           },
         ],
-        ["not_applied", { code: "driver_failed", dispatched: true }],
+        [
+          "not_applied",
+          {
+            code: "driver_failed",
+            dispatched: true,
+            message:
+              "The text was sent to the field, but the field does not hold the value afterwards (it may ignore, limit or change what is typed); observe it before setting it again",
+          },
+        ],
         ["no_answer", { code: "outcome_unknown", dispatched: true }],
       ] as const) {
         outcome = kind;

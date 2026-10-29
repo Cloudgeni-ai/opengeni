@@ -14,18 +14,23 @@
  * when its whole text is selected (EM_SETSEL) and replaced (EM_REPLACESEL):
  * the app is told its text changed, the change can be undone, and the window
  * does not come to the front. Windows carries both messages and their text
- * between processes for these controls. The field is the control under the
- * centre of the element CUA read, and only when the control covers the same
- * area, so no other control is ever written. A read-only or disabled control
- * is refused before anything is sent.
+ * between processes for these controls.
+ *
+ * The field written is the one visible Edit or RichEdit control of the window
+ * whose window rectangle is exactly the element's bounds: UI Automation gives
+ * such a control's element the rectangle of the control's own window. When no
+ * control or more than one has that rectangle, nothing is written, so a
+ * control nested in the element or around it never is. A read-only or
+ * disabled control is refused before anything is sent.
  */
 
 /** What setting a field's text needs from Windows. Window handles are plain
  * numbers; points and rectangles are in screen coordinates, as CUA gives
  * element bounds. */
 export type Win32TextControls = {
-  /** The deepest visible child window of `window` at the point, or 0. */
-  childAt(window: number, point: { x: number; y: number }): number;
+  /** Every child window of `window`, and theirs, at any depth. */
+  descendants(window: number): number[];
+  isVisible(control: number): boolean;
   /** The control's class name and the system class it is built on ("Edit"
    * for a superclassed edit control such as a WinForms TextBox). */
   className(control: number): string;
@@ -40,6 +45,12 @@ export type Win32TextControls = {
   text(control: number): string | null;
   /** The length of the control's text, or null when it did not answer. */
   textLength(control: number): number | null;
+  /** Whether the control's text was edited since it was last set or marked
+   * unedited (EM_GETMODIFY), or null when it did not answer. */
+  modified(control: number): boolean | null;
+  /** Mark the control's text edited or unedited (EM_SETMODIFY). False when
+   * the control did not answer. */
+  setModified(control: number, modified: boolean): boolean;
 };
 
 export type TextFieldWrite =
@@ -50,7 +61,7 @@ export type TextFieldWrite =
   | { kind: "read_only" }
   | { kind: "disabled" }
   | { kind: "single_line" }
-  /** The text was sent; the field reads something else afterwards. */
+  /** The text was sent; the field does not hold the value afterwards. */
   | { kind: "not_applied" }
   /** The app did not answer: the text may or may not have been replaced. */
   | { kind: "no_answer" };
@@ -82,13 +93,32 @@ const ES_READONLY = 0x0800;
  * WinForms wrappers of both ("WindowsForms10.EDIT.app.0.…"). */
 const TEXT_CONTROL_CLASS = /(?:^|\.)(?:edit|richedit(?:20[aw]|50w|d2dpt)?)(?:\.|$)/iu;
 
-/** How far a control's edges may lie from the element's bounds: UI
- * Automation can give an element without its control's border. */
-const EDGE_TOLERANCE = 8;
-
 /** Line breaks as the control and the value compare. */
 function lines(text: string): string {
   return text.replace(/\r\n?/gu, "\n");
+}
+
+/** The one visible text control of `window` whose window is exactly the
+ * element's area, or 0 when there is none or more than one. */
+function controlOf(
+  win: Win32TextControls,
+  window: number,
+  bounds: { x: number; y: number; width: number; height: number },
+): number {
+  const matches = win.descendants(window).filter((control) => {
+    const rect = win.rect(control);
+    return (
+      rect !== null &&
+      rect.left === bounds.x &&
+      rect.top === bounds.y &&
+      rect.right === bounds.x + bounds.width &&
+      rect.bottom === bounds.y + bounds.height &&
+      win.isVisible(control) &&
+      (TEXT_CONTROL_CLASS.test(win.className(control)) ||
+        TEXT_CONTROL_CLASS.test(win.baseClassName(control)))
+    );
+  });
+  return matches.length === 1 ? matches[0]! : 0;
 }
 
 export function replaceFieldText(
@@ -98,53 +128,52 @@ export function replaceFieldText(
   value: string,
 ): TextFieldWrite {
   if (bounds.width <= 0 || bounds.height <= 0) return { kind: "no_control" };
-  const centre = {
-    x: Math.round(bounds.x + bounds.width / 2),
-    y: Math.round(bounds.y + bounds.height / 2),
-  };
-  const control = win.childAt(window, centre);
-  if (!control || control === window) return { kind: "no_control" };
-  if (
-    !TEXT_CONTROL_CLASS.test(win.className(control)) &&
-    !TEXT_CONTROL_CLASS.test(win.baseClassName(control))
-  )
-    return { kind: "no_control" };
-  const rect = win.rect(control);
-  if (
-    !rect ||
-    Math.abs(rect.left - bounds.x) > EDGE_TOLERANCE ||
-    Math.abs(rect.top - bounds.y) > EDGE_TOLERANCE ||
-    Math.abs(rect.right - (bounds.x + bounds.width)) > EDGE_TOLERANCE ||
-    Math.abs(rect.bottom - (bounds.y + bounds.height)) > EDGE_TOLERANCE
-  )
-    return { kind: "no_control" };
+  const control = controlOf(win, window, bounds);
+  if (!control) return { kind: "no_control" };
   const style = win.style(control);
   if (style & ES_READONLY) return { kind: "read_only" };
   if (!win.isEnabled(control)) return { kind: "disabled" };
   const multiline = (style & ES_MULTILINE) !== 0;
   if (!multiline && /[\r\n]/u.test(value)) return { kind: "single_line" };
+  if (style & ES_PASSWORD) return replacePassword(win, control, value);
   if (!win.replaceAll(control, multiline ? lines(value).replace(/\n/gu, "\r\n") : value))
     return { kind: "no_answer" };
-  // Another process cannot read a password field's text, only its length.
-  if (style & ES_PASSWORD) {
-    const length = win.textLength(control);
-    if (length === null) return { kind: "no_answer" };
-    return length === value.length ? { kind: "replaced" } : { kind: "not_applied" };
-  }
   const reads = win.text(control);
   if (reads === null) return { kind: "no_answer" };
   return lines(reads) === lines(value) ? { kind: "replaced" } : { kind: "not_applied" };
 }
 
+/** Another process cannot read a password field's text, only its length, and
+ * a field that ignored the replacement can have the value's length already.
+ * The control marks its text edited when it takes a replacement, so it is
+ * marked unedited first: a field that is still unedited afterwards did not
+ * take it, and gets back the mark it had. */
+function replacePassword(win: Win32TextControls, control: number, value: string): TextFieldWrite {
+  const edited = win.modified(control);
+  if (edited === null || (edited && !win.setModified(control, false))) return { kind: "no_answer" };
+  if (!win.replaceAll(control, value)) return { kind: "no_answer" };
+  const taken = win.modified(control);
+  if (taken === null) return { kind: "no_answer" };
+  if (!taken) {
+    if (edited) win.setModified(control, true);
+    return { kind: "not_applied" };
+  }
+  const length = win.textLength(control);
+  if (length === null) return { kind: "no_answer" };
+  return length === value.length ? { kind: "replaced" } : { kind: "not_applied" };
+}
+
 const GWL_STYLE = -16;
-const CWP_SKIPINVISIBLE = 0x0001;
-const CWP_SKIPTRANSPARENT = 0x0004;
 const WM_GETTEXT = 0x000d;
 const WM_GETTEXTLENGTH = 0x000e;
 const EM_SETSEL = 0x00b1;
+const EM_GETMODIFY = 0x00b8;
+const EM_SETMODIFY = 0x00b9;
 const EM_REPLACESEL = 0x00c2;
 const SMTO_ABORTIFHUNG = 0x0002;
 const SEND_TIMEOUT_MS = 2_000;
+/** More child windows than any app's window has; a bound on the walk. */
+const MAX_DESCENDANTS = 4_096;
 
 let native: Promise<Win32TextControls> | null = null;
 
@@ -158,8 +187,8 @@ async function loadWin32TextControls(): Promise<Win32TextControls> {
   const { dlopen, FFIType, ptr } = await import("bun:ffi");
   const handle = FFIType.u64;
   const user32 = dlopen("user32.dll", {
-    ChildWindowFromPointEx: { args: [handle, FFIType.u64, FFIType.u32], returns: handle },
-    ScreenToClient: { args: [handle, FFIType.ptr], returns: FFIType.i32 },
+    FindWindowExW: { args: [handle, handle, FFIType.ptr, FFIType.ptr], returns: handle },
+    IsWindowVisible: { args: [handle], returns: FFIType.i32 },
     GetClassNameW: { args: [handle, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
     RealGetWindowClassW: { args: [handle, FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
     GetWindowRect: { args: [handle, FFIType.ptr], returns: FFIType.i32 },
@@ -191,21 +220,22 @@ async function loadWin32TextControls(): Promise<Win32TextControls> {
     return length === null ? null : Number(length);
   };
   return {
-    childAt: (window, { x, y }) => {
-      let at = window;
-      for (let depth = 0; depth < 16; depth++) {
-        const point = new Int32Array([x, y]);
-        if (!user32.ScreenToClient(hwnd(at), point)) return 0;
-        const packed = (BigInt(point[1]! >>> 0) << 32n) | BigInt(point[0]! >>> 0);
-        const child = Number(
-          user32.ChildWindowFromPointEx(hwnd(at), packed, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT),
-        );
-        if (!child) return depth === 0 ? 0 : at;
-        if (child === at) return at;
-        at = child;
+    descendants: (window) => {
+      const found: number[] = [];
+      const pending = [window];
+      while (pending.length && found.length < MAX_DESCENDANTS) {
+        const parent = pending.pop()!;
+        let child = 0;
+        while (found.length < MAX_DESCENDANTS) {
+          child = Number(user32.FindWindowExW(hwnd(parent), hwnd(child), null, null));
+          if (!child) break;
+          found.push(child);
+          pending.push(child);
+        }
       }
-      return at;
+      return found;
     },
+    isVisible: (control) => user32.IsWindowVisible(hwnd(control)) !== 0,
     className: (control) => {
       const buffer = new Uint16Array(256);
       return decode(buffer, user32.GetClassNameW(hwnd(control), buffer, buffer.length));
@@ -234,5 +264,11 @@ async function loadWin32TextControls(): Promise<Win32TextControls> {
       return read === null ? null : decode(buffer, Number(read));
     },
     textLength,
+    modified: (control) => {
+      const edited = send(control, EM_GETMODIFY, 0n, 0n);
+      return edited === null ? null : edited !== 0n;
+    },
+    setModified: (control, modified) =>
+      send(control, EM_SETMODIFY, modified ? 1n : 0n, 0n) !== null,
   };
 }
