@@ -16,6 +16,12 @@ export const WINDOW_BAR_HEIGHT = 44;
 export const MACOS_BAR_CONTROLS_LEFT = 84;
 
 /**
+ * Where a chat's header may start when it is the macOS window bar's row: past
+ * the sidebar toggle (84px + 32px) with a small gap.
+ */
+export const MACOS_BAR_ROW_LEFT = 120;
+
+/**
  * A plain browser has no Windows window controls overlay, so stand in for the
  * 44px title bar area the desktop shell asks for. Call before the page loads.
  */
@@ -39,41 +45,87 @@ export async function simulateWindowsTitleBar(target: Page | BrowserContext) {
  * the window controls, with the bar itself hidden: hit-tests a grid across the
  * strip and lists every element found there other than the page's own
  * background (html, body) and the controls placed in the bar on purpose
- * (`[data-window-bar-controls]`, checked by `windowBarControls`). Empty when
- * the page starts below the bar.
+ * (`[data-window-bar-controls]`, checked by `windowBarControls`, and with
+ * `barRow` a chat's header that is the bar's row, checked by `windowBarRow`).
+ * Empty when the page starts below the bar.
  */
-export async function contentUnderWindowBar(page: Page): Promise<string[]> {
-  return page.evaluate((height) => {
-    const hide = document.createElement("style");
-    hide.textContent = "html::before { display: none !important; }";
-    document.head.append(hide);
-    try {
-      const found = new Set<string>();
-      for (let x = 1; x < innerWidth; x += 4) {
-        for (const y of [1, height / 2, height - 1]) {
-          const element = document.elementFromPoint(x, y);
-          if (!element || element === document.documentElement || element === document.body) {
-            continue;
+export async function contentUnderWindowBar(
+  page: Page,
+  { barRow = false }: { barRow?: boolean } = {},
+): Promise<string[]> {
+  return page.evaluate(
+    ({ height, skipRow }) => {
+      const hide = document.createElement("style");
+      hide.textContent = "html::before { display: none !important; }";
+      document.head.append(hide);
+      try {
+        const found = new Set<string>();
+        for (let x = 1; x < innerWidth; x += 4) {
+          for (const y of [1, height / 2, height - 1]) {
+            const element = document.elementFromPoint(x, y);
+            if (!element || element === document.documentElement || element === document.body) {
+              continue;
+            }
+            if (element.closest("[data-window-bar-controls]")) continue;
+            if (skipRow && element.closest("[data-window-bar-row] > [data-titlebar]")) continue;
+            // A modal dialog's ::backdrop hit-tests as the dialog itself: only
+            // count what is drawn at the point by the element's own box.
+            const box = element.getBoundingClientRect();
+            if (x < box.left || x >= box.right || y < box.top || y >= box.bottom) continue;
+            const label = (element.getAttribute("aria-label") ?? element.textContent ?? "")
+              .trim()
+              .slice(0, 40);
+            found.add(
+              `${element.tagName.toLowerCase()} "${label}" at ${Math.round(x)},${Math.round(y)}`,
+            );
+            if (found.size >= 12) return [...found];
           }
-          if (element.closest("[data-window-bar-controls]")) continue;
-          // A modal dialog's ::backdrop hit-tests as the dialog itself: only
-          // count what is drawn at the point by the element's own box.
-          const box = element.getBoundingClientRect();
-          if (x < box.left || x >= box.right || y < box.top || y >= box.bottom) continue;
-          const label = (element.getAttribute("aria-label") ?? element.textContent ?? "")
-            .trim()
-            .slice(0, 40);
-          found.add(
-            `${element.tagName.toLowerCase()} "${label}" at ${Math.round(x)},${Math.round(y)}`,
-          );
-          if (found.size >= 12) return [...found];
         }
+        return [...found];
+      } finally {
+        hide.remove();
       }
-      return [...found];
-    } finally {
-      hide.remove();
-    }
-  }, WINDOW_BAR_HEIGHT);
+    },
+    { height: WINDOW_BAR_HEIGHT, skipRow: barRow },
+  );
+}
+
+/**
+ * A chat's header when it is the macOS window bar's row, or null: its box,
+ * drag behaviour, and each shown button with its drag behaviour and whether
+ * a click at its centre reaches it (nothing, the bar included, is on top).
+ */
+export async function windowBarRow(page: Page) {
+  return page.evaluate(() => {
+    const header = document.querySelector<HTMLElement>("[data-window-bar-row] > [data-titlebar]");
+    if (!header) return null;
+    const box = header.getBoundingClientRect();
+    return {
+      left: box.left,
+      top: box.top,
+      bottom: box.bottom,
+      drag: getComputedStyle(header).getPropertyValue("-webkit-app-region"),
+      // A full-window layer (and its backdrop) may cover the row.
+      layerOpen: document.documentElement.hasAttribute("data-window-layer-open"),
+      buttons: [...header.querySelectorAll<HTMLElement>("button")]
+        .filter((button) => button.getClientRects().length > 0)
+        .map((button) => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          );
+          return {
+            label: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "",
+            left: rect.left,
+            top: rect.top,
+            bottom: rect.bottom,
+            clickable: hit != null && button.contains(hit),
+            drag: getComputedStyle(button).getPropertyValue("-webkit-app-region"),
+          };
+        }),
+    };
+  });
 }
 
 /**
@@ -124,12 +176,14 @@ export async function windowBar(page: Page) {
  * Asserts the platform's top edge: on macOS and Windows a draggable bar holds
  * the window controls and nothing of the page sits under it; elsewhere there
  * is no bar and the page starts at the top of the window. Only the macOS app
- * puts controls of its own in the bar, right of the traffic lights and not
- * draggable, so they stay clickable.
+ * puts controls of its own in the bar (the sidebar toggle, and on a chat the
+ * chat's header as the bar's row), right of the traffic lights; its buttons
+ * are not draggable and take clicks, and the header's empty space drags.
  */
 export async function expectWindowTop(page: Page, platform: string) {
   const bar = await windowBar(page);
   const controls = await windowBarControls(page);
+  const row = platform === "macos" ? await windowBarRow(page) : null;
   if (platform === "macos" || platform === "windows") {
     expect(bar).toMatchObject({
       top: 0,
@@ -137,7 +191,7 @@ export async function expectWindowTop(page: Page, platform: string) {
       position: "fixed",
       drag: "drag",
     });
-    expect(await contentUnderWindowBar(page)).toEqual([]);
+    expect(await contentUnderWindowBar(page, { barRow: row != null })).toEqual([]);
   } else {
     expect(bar).toBeNull();
   }
@@ -147,6 +201,20 @@ export async function expectWindowTop(page: Page, platform: string) {
       expect(control.top).toBeGreaterThanOrEqual(0);
       expect(control.bottom).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
       expect(control.drag).toBe("no-drag");
+    }
+    if (row) {
+      expect(row.left).toBeGreaterThanOrEqual(
+        controls.some((control) => control.visible) ? MACOS_BAR_ROW_LEFT : MACOS_BAR_CONTROLS_LEFT,
+      );
+      expect(row.top).toBe(0);
+      expect(row.drag).toBe("drag");
+      expect(row.buttons.length).toBeGreaterThan(0);
+      for (const button of row.buttons) {
+        expect(button.drag).toBe("no-drag");
+        if (!row.layerOpen) expect(button.clickable).toBe(true);
+        expect(button.top).toBeGreaterThanOrEqual(0);
+        expect(button.bottom).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
+      }
     }
   } else {
     expect(controls).toEqual([]);
