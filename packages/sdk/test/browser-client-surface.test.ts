@@ -60,7 +60,6 @@ const legacyBrowserUnusedMethods = [
   "listFiles",
   "listGoalRevisionPage",
   "listGoalRevisions",
-  "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
   // The organization account page reads usage from the account overview, so
@@ -184,17 +183,6 @@ const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 // person's links is offered to the agent and SDK callers, not a web screen yet.
 const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
 
-// Dictation is recorded as a recording since #6022; the resumable transcription
-// recording methods are deprecated and stay only for existing SDK callers.
-const deprecatedTranscriptionRecordingMethods = [
-  "createTranscriptionRecording",
-  "discardTranscriptionRecording",
-  "finalizeTranscriptionRecording",
-  "getTranscriptionRecording",
-  "processNextTranscriptionRecordingSegment",
-  "uploadTranscriptionRecordingChunk",
-];
-
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
 // public SDK methods stay for existing callers.
@@ -272,7 +260,6 @@ describe("browser client runtime surface", () => {
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
         ...chatShareLinkMethods,
-        ...deprecatedTranscriptionRecordingMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );

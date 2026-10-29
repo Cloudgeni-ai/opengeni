@@ -103,6 +103,7 @@ export function personalIntegrationSetupAccess(
  *   connect with their own account.
  * - `"unavailable"`: they cannot finish this setup from the chat.
  * - `"default"`: not decided here (other kinds of setup keep their own row).
+ *   A plugin they can install is `"default"` too: its card installs it.
  *
  * The chat card and the agent's setup tool both use this rule, so what the
  * agent says matches what the card offers.
@@ -132,6 +133,12 @@ export function inChatCapabilitySetup(
     return can("sessions:control") &&
       (can(PERSONAL_INTEGRATION_SETUP_PERMISSION) || can("connections:write"))
       ? { kind: "integration" }
+      : { kind: "unavailable" };
+  }
+  if (capabilityId.startsWith("plugin:")) {
+    // Installing a plugin adds Skills and MCP servers for the whole workspace.
+    return can("sessions:control") && can("capabilities:manage")
+      ? { kind: "default" }
       : { kind: "unavailable" };
   }
   if (!item || item.kind !== "mcp" || item.authKind !== "oauth2") return { kind: "default" };

@@ -213,6 +213,12 @@ describe("managed-auth pool credentials", () => {
       Client: rotatingPasswordClient(source) as unknown as PoolConfig["Client"],
     });
     retryConnectAfterAuthenticationFailure(pool, source);
+    // Like the production pool, handle an idle client's error. `pool.end()`
+    // resolves before its clients finish closing, so releasing the shared
+    // database right after this test can terminate one of them; without a
+    // listener that becomes an unhandled error. None may happen before then.
+    const idleErrors: unknown[] = [];
+    pool.on("error", (error) => idleErrors.push(error));
     const waitFor = async (done: () => boolean) => {
       const deadline = Date.now() + 15_000;
       while (!done() && Date.now() < deadline) await Bun.sleep(5);
@@ -234,6 +240,7 @@ describe("managed-auth pool credentials", () => {
       releaseAnswer();
       const outcomes = await Promise.allSettled(operations);
       expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
+      expect(idleErrors).toEqual([]);
       const after = events.slice(mark);
       const refusals = typesOf(after, "candidate_refused");
       expect(refusals).toHaveLength(max);

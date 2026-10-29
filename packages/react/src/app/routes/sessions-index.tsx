@@ -46,6 +46,7 @@ import {
 } from "../../realtime";
 import {
   OpenGeniApiError,
+  type NewSessionDraft,
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
@@ -157,7 +158,7 @@ import {
   relativeTimeLabel,
   sessionRepoLabel,
 } from "../../session-list-model";
-import { signupStarterSet } from "../lib/signup-starter-set";
+import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -217,6 +218,9 @@ import {
 } from "./sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
+import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
+import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
+import { useBotTemplates } from "../lib/bot-templates";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -328,6 +332,50 @@ function SessionsIndexRouteContent({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  // ?botTemplateId= starts this chat as a bot: the template's setup
+  // instructions fill the composer (to read and change before sending), and
+  // the chat is created with its name, description and avatar, kept live.
+  const launchBotTemplateId = launch.botTemplateId;
+  const workspaceBotTemplates = useBotTemplates(workspaceId);
+  const [botLaunch, setBotLaunch] = useState<{
+    id: string;
+    state: BotLaunchState;
+  } | null>(null);
+  useEffect(() => {
+    if (!launchBotTemplateId) {
+      setBotLaunch(null);
+      return;
+    }
+    let live = true;
+    setBotLaunch({ id: launchBotTemplateId, state: { kind: "loading" } });
+    context.client.getBotTemplate(workspaceId, launchBotTemplateId).then(
+      (template) => {
+        if (live)
+          setBotLaunch({
+            id: launchBotTemplateId,
+            state: { kind: "ready", template },
+          });
+      },
+      (error: unknown) => {
+        if (live)
+          setBotLaunch({
+            id: launchBotTemplateId,
+            state: { kind: "error", message: userErrorText(error) },
+          });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [context.client, launchBotTemplateId, workspaceId]);
+  const botTemplate = botLaunch?.state.kind === "ready" ? botLaunch.state.template : null;
+  const newSessionBot = botTemplate
+    ? {
+        name: botTemplate.name,
+        description: botTemplate.description,
+        avatar: botTemplate.avatar,
+      }
+    : undefined;
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
@@ -378,9 +426,7 @@ function SessionsIndexRouteContent({
   const draftSecretsOn =
     agentAvailability.isAvailable("secrets") &&
     capabilityOn(composerAgentCapabilities.draft.values, "secrets");
-  const canListSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const canListSecrets = hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
   const draftVaults = useVaults({
     client: context.client,
     workspaceId,
@@ -843,7 +889,11 @@ function SessionsIndexRouteContent({
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
-    (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
+    (
+      remote: NewSessionDraftEditable,
+      history: NewSessionSelectionHistory,
+      memberTarget: NewSessionDraft["memberDefaultExecutionTarget"] | null,
+    ) => {
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -868,6 +918,7 @@ function SessionsIndexRouteContent({
       setSelectedProjectChannelId(projectSelection.channelId);
       const compute = initialWorkspaceMachineCompute({
         settings: workspace?.settings,
+        memberTarget,
         options: remote.options,
         fallback: projectSelection.compute,
         backend: defaultSandboxBackend,
@@ -960,6 +1011,15 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  // The signup answer picks the starters, and with them the heading and placeholder.
+  const starterSet = signupStarterSet(
+    context.authSession?.user.email,
+    workspace?.accountId,
+    context.managedSelfContext?.memberships.find(
+      (membership) => membership.organizationId === workspace?.accountId,
+    )?.signupUseCase,
+  );
+  const wording = newChatWording(starterSet);
   // A refused start names its model until the next start or a dismissal; before
   // any Send, an uncovered model with free credit left for others does the same.
   const refusedCreate =
@@ -1010,23 +1070,18 @@ function SessionsIndexRouteContent({
     selectedPolicyRow?.selectable
       ? "Choose a supported model, reasoning level, and speed."
       : null;
-  useEffect(() => {
-    if (modelCatalog.loading || newSessionDraft.loading) return;
-    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
-    // The server-resolved default comes first (saved workspace default, then a
-    // connected subscription, then credits, then the deployment default); the
-    // client ranking only covers a default that is itself unavailable.
-    const resolvedDefault = modelCatalog.defaultSelection;
+  // The server-resolved default comes first (saved workspace default, then a
+  // connected subscription, then credits, then the deployment default); the
+  // client ranking only covers a default that is itself unavailable.
+  const pendingFallbackModel = useMemo(() => {
+    if (modelCatalog.loading || newSessionDraft.loading) return null;
+    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return null;
     const next = composerFallbackModel({
       models: modelCatalog.models,
       rows: modelCatalog.rows,
-      defaultSelection: resolvedDefault,
+      defaultSelection: modelCatalog.defaultSelection,
     });
-    if (!next || next.id === context.model) return;
-    setModel(next.id);
-    setReasoningEffort(next.effort);
-    // An automatic replacement is not the person's choice.
-    setModelProvided((current) => (current === undefined ? current : false));
+    return next && next.id !== context.model ? next : null;
   }, [
     context.model,
     modelCatalog.defaultSelection,
@@ -1034,9 +1089,15 @@ function SessionsIndexRouteContent({
     modelCatalog.models,
     modelCatalog.rows,
     newSessionDraft.loading,
-    setModel,
-    setReasoningEffort,
   ]);
+  useEffect(() => {
+    const next = pendingFallbackModel;
+    if (!next) return;
+    setModel(next.id);
+    setReasoningEffort(next.effort);
+    // An automatic replacement is not the person's choice.
+    setModelProvided((current) => (current === undefined ? current : false));
+  }, [pendingFallbackModel, setModel, setReasoningEffort]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -1229,6 +1290,7 @@ function SessionsIndexRouteContent({
                     installedSkillIds: launch.skillCapabilityId
                       ? [launch.skillCapabilityId]
                       : undefined,
+                    bot: newSessionBot,
                     startMode: "realtime",
                     expectedNewSessionDraftRevision: flushed.revision,
                     newSessionDraftToolPolicy: persistedToolPolicy,
@@ -1308,6 +1370,7 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
+                  bot: newSessionBot,
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1430,6 +1493,66 @@ function SessionsIndexRouteContent({
     },
   );
 
+  // A bot template's setup instructions fill an empty composer once its saved
+  // draft has loaded, so the remote draft cannot overwrite them. Text the
+  // person already typed stays; they can still start the bot with it.
+  const prefilledBotTemplateRef = useRef<string | null>(null);
+  // The instructions this page put in the composer, so leaving the bot launch
+  // (dismissing it, or a link without the template) takes them out again
+  // instead of leaving them behind as an ordinary chat's first message.
+  const prefilledBotInstructionsRef = useRef<string | null>(null);
+  const fillBotInstructions = useCallback((instructions: string) => {
+    prefilledBotInstructionsRef.current = instructions;
+    setMessage(instructions);
+  }, []);
+  useEffect(() => {
+    if (!botTemplate || newSessionDraft.loading) return;
+    if (prefilledBotTemplateRef.current === botTemplate.id) return;
+    prefilledBotTemplateRef.current = botTemplate.id;
+    if (message.trim().length === 0 || message === botTemplate.setupInstructions) {
+      fillBotInstructions(botTemplate.setupInstructions);
+    } else {
+      toast.info("Kept your unsent message", {
+        description: "Clear it to use the template's setup instructions instead.",
+        action: {
+          label: "Use setup instructions",
+          onClick: () => fillBotInstructions(botTemplate.setupInstructions),
+        },
+      });
+    }
+  }, [botTemplate, fillBotInstructions, message, newSessionDraft.loading]);
+  useEffect(() => {
+    if (launchBotTemplateId) return;
+    prefilledBotTemplateRef.current = null;
+    const prefilled = prefilledBotInstructionsRef.current;
+    prefilledBotInstructionsRef.current = null;
+    if (prefilled !== null) setMessage((current) => (current === prefilled ? "" : current));
+  }, [launchBotTemplateId]);
+  // After a reload the page no longer knows it filled the composer, but the
+  // saved draft still holds the instructions. Untouched instructions of a
+  // template, without that template's launch, are taken out the same way.
+  const leftoverBotInstructionsCheckedRef = useRef(false);
+  useEffect(() => {
+    if (leftoverBotInstructionsCheckedRef.current) return;
+    if (newSessionDraft.loading || workspaceBotTemplates.templates === undefined) return;
+    leftoverBotInstructionsCheckedRef.current = true;
+    if (launchBotTemplateId || message.length === 0) return;
+    if (workspaceBotTemplates.templates.some((entry) => entry.setupInstructions === message)) {
+      setMessage("");
+    }
+  }, [launchBotTemplateId, message, newSessionDraft.loading, workspaceBotTemplates.templates]);
+  const dismissBotLaunch = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      search: (previous: Record<string, unknown>) => {
+        const { botTemplateId: _dropped, ...rest } = previous;
+        return rest;
+      },
+      replace: true,
+    });
+  }, [navigate, workspaceId]);
+
   // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
   // creates a realtime-first session and autostarts voice on the session page.
   // Wait for the durable new-session draft so remote hydrate cannot stomp the
@@ -1469,6 +1592,7 @@ function SessionsIndexRouteContent({
         search: {
           ...(launch.channelId ? { channelId: launch.channelId } : {}),
           ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+          ...(launch.botTemplateId ? { botTemplateId: launch.botTemplateId } : {}),
         },
         replace: true,
       });
@@ -1503,6 +1627,7 @@ function SessionsIndexRouteContent({
     launchRealtime,
     launchSkillCapabilityId,
     launchKey,
+    launch.botTemplateId,
     launch.channelId,
     navigate,
     newSessionDraft.loading,
@@ -1541,6 +1666,17 @@ function SessionsIndexRouteContent({
           !connectionAccounts.requiresAccountChoice)) &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
+    // What Send needs right after the page opens is still loading: an early
+    // Send waits for it instead of doing nothing.
+    preparing:
+      modelCatalog.loading ||
+      newSessionDraft.loading ||
+      pendingFallbackModel !== null ||
+      personalResourceCatalogRefreshPending ||
+      (createdSessionAuthority === null &&
+        (connectionAccounts.loading ||
+          (fixedResourceCatalogEnabled && (rigs.loading || !personalResourceEligibilitySettled)) ||
+          (draft.compute.kind === "machine" && fleet.loading))),
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -1615,6 +1751,20 @@ function SessionsIndexRouteContent({
 
   // A transient outage is covered by the updating notice instead.
   const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
+  // With no usable credit, the notice above the composer carries the one
+  // Add credits action, so the heading's top-up button steps aside. Hosts that
+  // turn off addCredits (side panes) get the notice's billing link instead of
+  // the dialog.
+  const canTopUpCredits =
+    addCredits &&
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspace?.accountId) &&
+    hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:manage");
+  const noUsableCredit =
+    creditGap !== null ||
+    (modelUsesCredits(selectedPolicyRow?.catalog) &&
+      selectedPolicyRow?.catalog.creditFunding === "unavailable");
+  const openCreditTopup = () => setCreditTopupOpen(true);
 
   return createElement(
     LightboxProvider,
@@ -1630,23 +1780,22 @@ function SessionsIndexRouteContent({
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
-            What should the agent do?
+            {wording.heading}
           </h1>
-          {addCredits &&
-          context.clientConfig.billingMode === "stripe" &&
-          workspace?.accountId &&
-          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+          {canTopUpCredits && workspace?.accountId ? (
             <>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="mt-2"
-                onClick={() => setCreditTopupOpen(true)}
-              >
-                <CreditCardIcon className="size-4" />
-                Add credits
-              </Button>
+              {noUsableCredit ? null : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={openCreditTopup}
+                >
+                  <CreditCardIcon className="size-4" />
+                  Add credits
+                </Button>
+              )}
               <Suspense fallback={null}>
                 <CreditTopupPrompt
                   purpose="topup"
@@ -1655,6 +1804,7 @@ function SessionsIndexRouteContent({
                   accountId={workspace.accountId}
                   canBuyCredits
                   onOpenChange={setCreditTopupOpen}
+                  beforeLeave={newSessionDraft.flush}
                 />
               </Suspense>
             </>
@@ -1676,6 +1826,12 @@ function SessionsIndexRouteContent({
               gap={creditGap}
               message={refusedCreate?.message}
               workspaceId={workspaceId}
+              accountId={workspace?.accountId ?? null}
+              canReadBilling={hasAccountPermission(
+                context.accessContext,
+                workspace?.accountId ?? "",
+                "billing:read",
+              )}
               canBuyCredits={
                 context.clientConfig.billingMode === "stripe" &&
                 hasAccountPermission(
@@ -1690,6 +1846,7 @@ function SessionsIndexRouteContent({
                 "connections:write",
               )}
               onChooseModel={busy ? undefined : chooseCoveredModel}
+              {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
             />
           </div>
@@ -1711,6 +1868,7 @@ function SessionsIndexRouteContent({
                   "billing:manage",
                 )}
                 canReadBilling
+                {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               />
             </Suspense>
           </div>
@@ -1724,7 +1882,8 @@ function SessionsIndexRouteContent({
             autoFocus
             disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            placeholder="Describe a task for the agent…"
+            placeholder={wording.placeholder}
+            messages={wording.composerMessages}
             controlsLeading={
               <>
                 <ComposerMobilePlus
@@ -1960,14 +2119,25 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              chatList ? (
-                <SessionSetupStrip
-                  disabled={busy || newSessionDraft.loading}
-                  channels={channelsQuery.channels}
-                  selectedChannelId={selectedChannelId}
-                  onChannelChange={selectProject}
-                  onCreateProject={() => setProjectDialogOpen(true)}
-                />
+              chatList || botLaunch ? (
+                <>
+                  {botLaunch ? (
+                    <BotLaunchStrip
+                      state={botLaunch.state}
+                      workspaceId={workspaceId}
+                      onDismiss={dismissBotLaunch}
+                    />
+                  ) : null}
+                  {chatList ? (
+                    <SessionSetupStrip
+                      disabled={busy || newSessionDraft.loading}
+                      channels={channelsQuery.channels}
+                      selectedChannelId={selectedChannelId}
+                      onChannelChange={selectProject}
+                      onCreateProject={() => setProjectDialogOpen(true)}
+                    />
+                  ) : null}
+                </>
               ) : undefined
             }
           />
@@ -2037,11 +2207,19 @@ function SessionsIndexRouteContent({
           />
         </div>
 
+        {!botLaunch ? (
+          <BotTemplateShortcuts
+            workspaceId={workspaceId}
+            templates={workspaceBotTemplates.templates}
+            disabled={busy}
+          />
+        ) : null}
         {chatList ? <RecentSessions workspaceId={workspaceId} /> : null}
         {starters ? (
           <NewSessionStarters
             workspaceId={workspaceId}
-            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            set={starterSet}
+            fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
               setMessage(prompt);

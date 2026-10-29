@@ -48,6 +48,7 @@ import {
   jsonSerializedLength,
   jsonSerializedUtf8ByteLength,
   omitOpaqueArtifactsFromPortableCompactionHistory,
+  portableSwitchTranscriptStart,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
   renderCompactionPromptInputForChat,
@@ -1907,4 +1908,36 @@ test("remote compaction preserves explicitly selected reasoning instructions on 
     });
     expect(body.reasoning).toEqual({ effort, summary: "detailed" });
   }
+});
+
+describe("portableSwitchTranscriptStart", () => {
+  const reply = (text: string): CompactionItem => ({
+    type: "message",
+    role: "assistant",
+    content: text,
+  });
+  // Three work units; the oldest reply is large.
+  const items = [
+    user("first"),
+    reply("x".repeat(40_000)),
+    user("second"),
+    reply("short"),
+    user("third"),
+    reply("short"),
+  ];
+  const tokens = (from: number) => estimateTokens(items.slice(from));
+
+  test("keeps the whole transcript when it fits", () => {
+    expect(portableSwitchTranscriptStart(items, tokens(0))).toBe(0);
+  });
+
+  test("drops the oldest work units that do not fit, at a user message", () => {
+    expect(portableSwitchTranscriptStart(items, tokens(2))).toBe(2);
+    expect(portableSwitchTranscriptStart(items, tokens(4))).toBe(4);
+  });
+
+  test("keeps at least the newest work unit", () => {
+    expect(portableSwitchTranscriptStart(items, 0)).toBe(4);
+    expect(portableSwitchTranscriptStart([reply("only a reply")], 0)).toBe(0);
+  });
 });

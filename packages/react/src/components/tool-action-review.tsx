@@ -70,6 +70,10 @@ const statusTone: Record<ToolReviewStatus, Tone> = {
   failed: "failed",
   unavailable: "muted",
 };
+/** One part of the header's status line, led by a separator dot that screen readers skip. */
+const headerPart =
+  "before:inline-block before:w-3 before:text-center before:text-og-fg-muted before:content-['·'_/_'']";
+
 const toneText: Record<Tone, string> = {
   waiting: "text-og-fg-muted",
   ok: "text-og-fg-muted",
@@ -144,26 +148,32 @@ export function ToolReviewFrame({
           >
             {title}
           </h3>
-          <p className="m-0 mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-og-xs leading-5 text-og-fg-muted">
-            <span
-              className={cn("inline-flex items-center gap-1.5", toneText[tone])}
-              role="status"
-              aria-live="polite"
-            >
-              {waiting ? (
+          {/* Each part leads with its separator, and the row is shifted left
+              by one separator and clipped, so a part that starts a line never
+              shows a dot and none is left dangling at a line's end. */}
+          <p className="m-0 mt-0.5 min-w-0 overflow-hidden text-og-xs leading-5 text-og-fg-muted">
+            <span className="-ml-3 flex min-w-0 flex-wrap items-center">
+              <span className={headerPart}>
                 <span
-                  aria-hidden="true"
-                  className="size-1.5 shrink-0 rounded-full bg-og-status-waiting"
-                />
+                  className={cn("inline-flex items-center gap-1.5", toneText[tone])}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {waiting ? (
+                    <span
+                      aria-hidden="true"
+                      className="size-1.5 shrink-0 rounded-full bg-og-status-waiting"
+                    />
+                  ) : null}
+                  {eyebrow}
+                </span>
+              </span>
+              {subtitle ? (
+                <span className={cn(headerPart, "min-w-0 break-words [overflow-wrap:anywhere]")}>
+                  {subtitle}
+                </span>
               ) : null}
-              {eyebrow}
             </span>
-            {subtitle ? (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="min-w-0 break-words [overflow-wrap:anywhere]">{subtitle}</span>
-              </>
-            ) : null}
           </p>
         </div>
       </header>

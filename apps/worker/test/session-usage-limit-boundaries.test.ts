@@ -207,6 +207,7 @@ test("a reached limit refuses the first request and the parallel title request b
         generateSessionTitleInParallel: true,
         groupBoxBackend: "none",
         agent: {},
+        compactionModeOptions: {},
       } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
     } catch (caught) {
       error = caught;

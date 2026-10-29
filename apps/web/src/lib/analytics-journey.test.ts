@@ -31,12 +31,11 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/reset-password/private", "?token=private")).toEqual({ page: "other" });
   });
-  test("labels every workspace page, including agents, variable sets, and environments", () => {
+  test("labels every workspace page, including agents and secrets", () => {
     for (const page of [
       "read-only-chats",
       "agents",
-      "variable-sets",
-      "environments",
+      "secrets",
       "rigs",
       "capabilities",
       "plugins",
@@ -263,20 +262,5 @@ describe("content-free customer journey", () => {
       operation: "dictation",
       properties: { workspace_id: workspace, method: "POST", mode: "direct" },
     });
-    expect(
-      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "POST"),
-    ).toEqual({
-      operation: "dictation",
-      properties: { workspace_id: workspace, method: "POST", mode: "recording" },
-    });
-    expect(
-      journeyOperation(
-        `/v1/workspaces/${workspace}/transcription-recordings/${session}/finalize`,
-        "POST",
-      ),
-    ).toBeNull();
-    expect(
-      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "GET"),
-    ).toBeNull();
   });
 });

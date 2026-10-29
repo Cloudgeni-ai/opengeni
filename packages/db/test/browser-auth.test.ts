@@ -1120,6 +1120,471 @@ describe("browser auth and network resources", () => {
     ).toEqual({ action: "stale", events: [] });
   });
 
+  async function freezeInteractionRequest(
+    scope: Awaited<ReturnType<typeof fixture>>,
+    claimed: Awaited<ReturnType<typeof claimTurn>>,
+    toolCallId: string,
+    input: Record<string, unknown>,
+    currentTarget?:
+      | {
+          controllerGeneration: string;
+          targetGeneration: string;
+          documentGeneration: string | null;
+        }
+      | string,
+  ) {
+    const interventionId = crypto.randomUUID();
+    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: toolCallId }],
+        interactionInterventionRequests: [
+          {
+            id: interventionId,
+            operationId: crypto.randomUUID(),
+            toolCallId,
+            input: input as never,
+            ...(currentTarget !== undefined ? { currentTarget } : {}),
+          },
+        ],
+      },
+      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+    });
+    return { settled, interventionId };
+  }
+
+  test("answers an interaction request it cannot record as the call's result", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const toolCallId = "interaction-human-unknown-generations";
+    // An agent that never saw the generations passed placeholders. The pause
+    // used to fail the whole turn here; the person was never asked.
+    const { settled, interventionId } = await freezeInteractionRequest(scope, claimed, toolCallId, {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-unknown",
+      expectedControllerGeneration: "unknown",
+      expectedTargetGeneration: "unknown",
+      expectedDocumentGeneration: "unknown",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+    });
+    expect(settled.action).toBe("settled");
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    const refusal = settled.events.find((event) => event.type === "user.approvalDecision");
+    expect(refusal?.payload).toEqual({
+      approvalId: toolCallId,
+      decision: "reject",
+      refusal:
+        "Nothing was requested: the expected generation values given do not match the tab or window as it is now. Call interaction_request_human again and leave out expectedControllerGeneration, expectedTargetGeneration and expectedDocumentGeneration; they are read from the tab or window when the turn pauses.",
+    });
+    // Nothing was recorded, so no person sees a request.
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+    // The workflow resumes the turn with the refusal at once.
+    expect(await peekSessionWork(client.db, scope.workspaceId, scope.sessionId)).toMatchObject({
+      kind: "approval-pending",
+      triggerEventId: refusal!.id,
+    });
+    expect(
+      await getInteractionInterventionResumeForEvent(
+        client.db,
+        scope.workspaceId,
+        scope.sessionId,
+        refusal!,
+      ),
+    ).toBeNull();
+    const resumed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      workflowId: `session-${scope.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "approval", triggerEventId: refusal!.id },
+    });
+    expect(resumed.action).toBe("claimed");
+  });
+
+  test("records a request without generations from the target as it is now", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const toolCallId = "interaction-human-current-target";
+    const request = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-current",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+    };
+    const currentTarget = {
+      controllerGeneration: browser.controllerGeneration,
+      targetGeneration: "target-generation-current",
+      documentGeneration: "document-generation-current",
+    };
+    const { settled, interventionId } = await freezeInteractionRequest(
+      scope,
+      claimed,
+      toolCallId,
+      request,
+      currentTarget,
+    );
+    expect(settled.action).toBe("settled");
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    expect(settled.events.map((event) => event.type)).not.toContain("user.approvalDecision");
+    expect(await getInteractionIntervention(client.db, { ...scope, interventionId })).toMatchObject(
+      {
+        status: "open",
+        targetId: "target-current",
+        ...currentTarget,
+        originatingToolOperationId: expect.any(String),
+      },
+    );
+    expect(await peekSessionWork(client.db, scope.workspaceId, scope.sessionId)).toMatchObject({
+      kind: "approval-wait",
+      interactionInterventionId: interventionId,
+    });
+  });
+
+  test("refuses requests whose target is gone or already has an open request", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const request = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-busy",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+    };
+
+    const gone = await freezeInteractionRequest(
+      scope,
+      await claimTurn(scope),
+      "interaction-human-gone",
+      request,
+      "browser tab target-busy was not found",
+    );
+    if (gone.settled.action !== "settled") throw new Error("pause was not recorded");
+    expect(
+      gone.settled.events.find((event) => event.type === "user.approvalDecision")?.payload,
+    ).toMatchObject({
+      refusal:
+        "Nothing was requested: browser tab target-busy was not found. Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.",
+    });
+
+    // Another request already asks a person to act on this tab, for example
+    // the one browser_auth opened. Its unique index used to fail the pause.
+    const open = await createInteractionIntervention(client.db, {
+      ...scope,
+      operationId: crypto.randomUUID(),
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-busy",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-busy",
+      expectedDocumentGeneration: null,
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 900,
+      originatingSessionId: scope.sessionId,
+    });
+    const busy = await freezeInteractionRequest(
+      scope,
+      await resumeRefusedTurn(scope, gone.settled),
+      "interaction-human-busy",
+      request,
+      {
+        controllerGeneration: browser.controllerGeneration,
+        targetGeneration: "target-generation-busy",
+        documentGeneration: null,
+      },
+    );
+    if (busy.settled.action !== "settled") throw new Error("pause was not recorded");
+    expect(
+      busy.settled.events.find((event) => event.type === "user.approvalDecision")?.payload,
+    ).toMatchObject({
+      refusal: `Nothing was requested: another open request (intervention ${open.intervention.id}) already asks a person to act on this tab or window. If browser_auth returned that interventionId, wait for it with operation=wait; otherwise ask again only after that request is finished.`,
+    });
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId: busy.interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+  });
+
+  async function resumeRefusedTurn(
+    scope: Awaited<ReturnType<typeof fixture>>,
+    settled: Awaited<ReturnType<typeof applySessionTurnSettlement>>,
+  ) {
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    const refusal = settled.events.find((event) => event.type === "user.approvalDecision")!;
+    const attemptId = crypto.randomUUID();
+    const resumed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      workflowId: `session-${scope.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "approval", triggerEventId: refusal.id },
+    });
+    if (resumed.action !== "claimed") throw new Error(`Could not resume: ${resumed.reason}`);
+    return { attemptId, turn: resumed.turn };
+  }
+
+  function refusalOf(settled: Awaited<ReturnType<typeof applySessionTurnSettlement>>) {
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    const decision = settled.events.find((event) => event.type === "user.approvalDecision");
+    return (decision?.payload as { refusal?: string } | undefined)?.refusal ?? null;
+  }
+
+  const LEAVE_OUT_GENERATIONS =
+    "Call interaction_request_human again and leave out expectedControllerGeneration, expectedTargetGeneration and expectedDocumentGeneration; they are read from the tab or window when the turn pauses.";
+
+  test("checks supplied generations against the target as read at the pause", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const current = {
+      controllerGeneration: browser.controllerGeneration,
+      targetGeneration: "target-generation-now",
+      documentGeneration: "document-generation-now",
+    };
+    const request = (targetId: string, generations: Record<string, unknown>) => ({
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId,
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      ...generations,
+    });
+
+    // A supplied target generation that the tab no longer has is refused, and
+    // the agent is told to leave the fields out rather than observe again.
+    let claimed = await claimTurn(scope);
+    const stale = await freezeInteractionRequest(
+      scope,
+      claimed,
+      "call-stale-target",
+      request("tab-stale", { expectedTargetGeneration: "target-generation-before" }),
+      current,
+    );
+    expect(refusalOf(stale.settled)).toBe(
+      `Nothing was requested: the expected generation values given do not match the tab or window as it is now. ${LEAVE_OUT_GENERATIONS}`,
+    );
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId: stale.interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+
+    // Supplied values that match the reading are recorded with it.
+    claimed = await resumeRefusedTurn(scope, stale.settled);
+    const matching = await freezeInteractionRequest(
+      scope,
+      claimed,
+      "call-matching",
+      request("tab-matching", { expectedDocumentGeneration: current.documentGeneration }),
+      current,
+    );
+    expect(refusalOf(matching.settled)).toBeNull();
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId: matching.interventionId,
+      }),
+    ).toMatchObject({ status: "open", targetId: "tab-matching", ...current });
+  });
+
+  test("records fully supplied generations as given when the target cannot be read", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const unreadable = "the current state of browser tab tab-unread could not be read";
+    const base = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "tab-unread",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-given",
+    };
+    // Without a reading, a request missing a generation cannot be recorded.
+    const partial = await freezeInteractionRequest(
+      scope,
+      await claimTurn(scope),
+      "call-partial",
+      base,
+      unreadable,
+    );
+    expect(refusalOf(partial.settled)).toBe(
+      `Nothing was requested: ${unreadable}. Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.`,
+    );
+    // All three supplied: recorded as given (the controller is still checked).
+    const given = await freezeInteractionRequest(
+      scope,
+      await resumeRefusedTurn(scope, partial.settled),
+      "call-given",
+      { ...base, expectedDocumentGeneration: null },
+      unreadable,
+    );
+    expect(refusalOf(given.settled)).toBeNull();
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId: given.interventionId,
+      }),
+    ).toMatchObject({
+      status: "open",
+      controllerGeneration: browser.controllerGeneration,
+      targetGeneration: "target-generation-given",
+      documentGeneration: null,
+    });
+  });
+
+  test("refuses waits it cannot attach in plain words", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const missing = crypto.randomUUID();
+    const notFound = await freezeInteractionRequest(
+      scope,
+      await claimTurn(scope),
+      "call-wait-missing",
+      { operation: "wait", interventionId: missing },
+    );
+    expect(refusalOf(notFound.settled)).toBe(
+      `Not waiting: intervention ${missing} was not found. Use operation=wait only with an interventionId browser_auth returned in this turn; otherwise ask with operation=request.`,
+    );
+
+    // Opened outside this turn (no originating turn): not this call's to wait for.
+    const foreign = await createInteractionIntervention(client.db, {
+      ...scope,
+      operationId: crypto.randomUUID(),
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "tab-foreign",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-foreign",
+      expectedDocumentGeneration: null,
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 900,
+      originatingSessionId: scope.sessionId,
+    });
+    const claimed = await resumeRefusedTurn(scope, notFound.settled);
+    const other = await freezeInteractionRequest(scope, claimed, "call-wait-foreign", {
+      operation: "wait",
+      interventionId: foreign.intervention.id,
+    });
+    expect(refusalOf(other.settled)).toBe(
+      `Not waiting: intervention ${foreign.intervention.id} was opened by another agent turn. Use operation=wait only with an interventionId browser_auth returned in this turn; otherwise ask with operation=request.`,
+    );
+
+    await resolveInteractionIntervention(client.db, {
+      ...scope,
+      interventionId: foreign.intervention.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      outcome: "completed",
+    });
+    const finished = await freezeInteractionRequest(
+      scope,
+      await resumeRefusedTurn(scope, other.settled),
+      "call-wait-finished",
+      { operation: "wait", interventionId: foreign.intervention.id },
+    );
+    expect(refusalOf(finished.settled)).toBe(
+      `Not waiting: intervention ${foreign.intervention.id} is no longer open; it was finished, dismissed or expired. Observe the tab or window again, then call interaction_request_human with operation=request if a person still needs to act there.`,
+    );
+  });
+
+  test("refuses a request that loses the open-request race instead of failing the turn", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    // Another writer holds an uncommitted open request on the same tab, so
+    // the pause's check cannot see it and its insert waits on the unique
+    // index; once that writer commits, the insert fails with 23505.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inserted!: () => void;
+    const insertedRow = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    const competing = shared!.admin.begin(async (tx) => {
+      await tx`
+        insert into interaction_interventions (
+          id, account_id, workspace_id, resource_kind, resource_id, target_id,
+          controller_generation, target_generation, document_generation, kind, reason,
+          originating_session_id, operation_id, expires_at
+        ) values (
+          ${crypto.randomUUID()}, ${scope.accountId}, ${scope.workspaceId}, 'browser_session',
+          ${browser.browserSessionId}, 'tab-race', ${browser.controllerGeneration},
+          'target-generation-race', null, 'mfa', 'Approve the sign-in on your phone.',
+          ${scope.sessionId}, ${crypto.randomUUID()}, now() + interval '15 minutes'
+        )
+      `;
+      inserted();
+      await released;
+    });
+    await insertedRow;
+    const pausing = freezeInteractionRequest(
+      scope,
+      claimed,
+      "call-race",
+      {
+        operation: "request",
+        resourceKind: "browser_session",
+        resourceId: browser.browserSessionId,
+        targetId: "tab-race",
+        kind: "mfa",
+        reason: "Approve the sign-in on your phone.",
+      },
+      {
+        controllerGeneration: browser.controllerGeneration,
+        targetGeneration: "target-generation-race",
+        documentGeneration: null,
+      },
+    );
+    // Commit the competing request only once the pause's insert waits on it.
+    for (let waited = 0; ; waited += 25) {
+      const [waiting] = await shared!.admin<{ blocked: number }[]>`
+        select count(*)::int as blocked from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'
+          and query ilike '%insert into "interaction_interventions"%'
+      `;
+      if ((waiting?.blocked ?? 0) > 0) break;
+      if (waited > 10_000) throw new Error("the pause never reached its insert");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    release();
+    await competing;
+    const { settled, interventionId } = await pausing;
+    expect(refusalOf(settled)).toBe(
+      "Nothing was requested: another open request already asks a person to act on this tab or window. If browser_auth returned that interventionId, wait for it with operation=wait; otherwise ask again only after that request is finished.",
+    );
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+  });
+
   test("cancels leftover intervention resources with their terminal agent turn", async () => {
     if (!available) return;
     const scope = await fixture();

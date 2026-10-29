@@ -3,6 +3,7 @@ import {
   MICROSOFT_TEAMS_INTEGRATION_DEFINITION as definition,
   compileOpenApiRevision,
   filterOpenApiDocumentForDefinition,
+  integrationDefinitionReadOnlyOperations,
   invokeOpenApiOperation,
   isIntegrationDefinitionEnabled,
 } from "../src";
@@ -42,13 +43,22 @@ const document = {
       post: operation("replies.send"),
     },
     "/teams": { post: operation("team.create") },
-    "/search/query": { post: operation("search") },
+    "/search/query": {
+      post: {
+        ...operation("search"),
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } },
+        },
+      },
+    },
   },
 };
 const revision = () =>
   compileOpenApiRevision(filterOpenApiDocumentForDefinition(document, definition), {
     definitionId: definition.id,
     schemaMode: "provider_validated_json",
+    readOnlyOperations: integrationDefinitionReadOnlyOperations(definition),
   });
 
 test("Teams uses work/school delegated permissions without migration or tenant administration grants", () => {
@@ -62,6 +72,7 @@ test("Teams uses work/school delegated permissions without migration or tenant a
     "ChannelMessage.Send",
     "Chat.Read",
     "ChatMessage.Send",
+    "User.Read.All",
   ]);
   expect(definition.baseUrl).toBe("https://graph.microsoft.com/v1.0");
 });
@@ -87,7 +98,7 @@ test("Teams rollout defaults closed and allows only an exact workspace or explic
   expect(isIntegrationDefinitionEnabled("microsoft-outlook-mail")).toBe(true);
 });
 
-test("Teams projection excludes unreviewed methods and admin/export/search paths and preserves approval classification", () => {
+test("Teams projection excludes unreviewed methods and admin/export paths and preserves approval classification", () => {
   const compiled = revision();
   expect(compiled.tools.map((tool) => [tool.operationKey, tool.safety, tool.approvalMode])).toEqual(
     [
@@ -95,6 +106,7 @@ test("Teams projection excludes unreviewed methods and admin/export/search paths
       ["chat.send", "write", "ask"],
       ["replies.read", "read", "never"],
       ["replies.send", "write", "ask"],
+      ["search", "read", "never"],
     ],
   );
   expect(compiled.bindings.chat_send!.parameters[0]!.name).toBe("chat-id");
@@ -108,12 +120,64 @@ test("Teams projection excludes unreviewed methods and admin/export/search paths
   expect(
     Object.values(compiled.bindings).every((binding) => binding.serverUrl === definition.baseUrl),
   ).toBe(true);
-  expect(() =>
-    filterOpenApiDocumentForDefinition(
-      { paths: { "/search/query": document.paths["/search/query"] } },
-      definition,
-    ),
-  ).toThrow("did not match");
+  expect(compiled.bindings.search!.searchEntityTypes).toEqual(["chatMessage"]);
+  expect(compiled.bindings.search!.requiredScopeAlternatives).toEqual([
+    ["ChannelMessage.Read.All", "Chat.Read"],
+  ]);
+});
+
+const invokeSearch = async (body: unknown) => {
+  const fetched: string[] = [];
+  let resolved = 0;
+  const run = invokeOpenApiOperation(
+    {
+      revision: revision(),
+      authority: { accountId: "a", workspaceId: "pilot", connectionRef: "conn" },
+      credentialResolver: {
+        resolve: async () => {
+          resolved++;
+          return {
+            audience: { origin: "https://graph.microsoft.com", pathPrefix: "/v1.0" },
+            placements: [
+              { carrier: "header", name: "Authorization", prefix: "Bearer ", value: "t" },
+            ],
+          };
+        },
+      },
+      transport: {
+        fetch: async (url) => {
+          fetched.push(String(url));
+          return new Response(JSON.stringify({ value: [] }));
+        },
+      },
+    },
+    "search",
+    { body },
+  );
+  return { run, fetched: () => fetched, resolved: () => resolved };
+};
+
+test("Teams search reads only chat and channel messages", async () => {
+  const allowed = await invokeSearch({
+    requests: [{ entityTypes: ["chatMessage"], query: { queryString: "pricing" }, size: 25 }],
+  });
+  await allowed.run;
+  expect(allowed.fetched()).toEqual(["https://graph.microsoft.com/v1.0/search/query"]);
+
+  // Files, mail and calendar stay behind their own integrations' tools.
+  for (const body of [
+    { requests: [{ entityTypes: ["driveItem"], query: { queryString: "pricing" } }] },
+    { requests: [{ entityTypes: ["chatMessage", "message"] }] },
+    { requests: [{ entityTypes: ["chatMessage"] }, { entityTypes: ["event"] }] },
+  ]) {
+    const rejected = await invokeSearch(body);
+    await expect(rejected.run).rejects.toMatchObject({
+      code: "parameter_invalid",
+      outcome: "not_started",
+    });
+    expect(rejected.fetched()).toEqual([]);
+    expect(rejected.resolved()).toBe(0);
+  }
 });
 
 test("Teams sends preserve message bytes and use the exact connection and delegated scope at the provider boundary", async () => {

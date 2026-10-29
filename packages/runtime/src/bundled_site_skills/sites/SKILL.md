@@ -249,7 +249,7 @@ Read the references the app needs with `skill_read`, for example
 
 | The app | Read |
 | --- | --- |
-| Every app: packages, build, local preview with live tools, requested tools, the completion gate | `references/build-and-preview.md` |
+| Every app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
 | Saves records or files (Site Data) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (Site SQL) | `references/site-sql.md` |

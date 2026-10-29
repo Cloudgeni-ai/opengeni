@@ -83,7 +83,7 @@ async function connect(context: { accountId: string; workspaceId: string }) {
   }
 }
 
-test("supplied scope preserves fresh empty, active, revoked and maintenance results", async () => {
+test("supplied scope preserves fresh empty, active and revoked results", async () => {
   const f = await fixture();
   const check = async (expected: string[]) => {
     expect(await f.ids(f.context)).toEqual(expected);
@@ -98,9 +98,6 @@ test("supplied scope preserves fresh empty, active, revoked and maintenance resu
   await shared.admin`update subscription_connections set status = 'active'
     where account_id = ${f.context.accountId}::uuid`;
   await check(["codex-subscription", "supergrok-subscription"]);
-  await shared.admin`update subscription_provider_cutovers set enabled = false
-    where account_id = ${f.context.accountId}::uuid`;
-  await check([]);
 });
 
 test("supplied account cannot expose another account's pool or a deleted workspace", async () => {
@@ -132,13 +129,11 @@ test("account hint removes only workspace hydration, not fresh provider queries"
     const newIds = await f.ids(f.context);
     const scopedQueries = statements;
     expect(newIds).toEqual(oldIds);
-    // Codex, Grok and the workspace-key provider each hydrate the workspace once.
-    expect(fallbackQueries.length - scopedQueries.length).toBe(18);
+    // Codex, Grok and the workspace-key provider each hydrate the workspace
+    // once, and so does the EU-only check (one read shared by every provider).
+    expect(fallbackQueries.length - scopedQueries.length).toBe(24);
     expect(scopedQueries.some((q) => q.includes('"workspace_inference_controls"'))).toBe(false);
     for (const queries of [fallbackQueries, scopedQueries]) {
-      expect(
-        queries.filter((q) => q.includes("select enabled from subscription_provider_cutovers")),
-      ).toHaveLength(3);
       expect(queries.filter((q) => q.includes("select connection.id::text"))).toHaveLength(4);
       // Both find an organization's key, whether or not the caller named the account.
       expect(

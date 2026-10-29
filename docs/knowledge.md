@@ -296,6 +296,11 @@ Archiving keeps the published revision, so the Archived view orders by that
 too. A collection's is the newest of its own and that of any non-archived entry or
 sub-collection below it that the reader can see in the selected scope; the walk
 descends through sub-collections by membership. Collection rows show that date.
+Writes keep each collection's newest change, and the member it came through, up
+to date (migration 1032), so a list follows that chain and checks it for the
+reader instead of walking every member. The walk still answers any collection
+whose chain passes a member the reader cannot see or the scope filter excludes,
+the Review queue, and organizations not yet built by their first Knowledge write.
 Search keeps relevance order, with each row's own change breaking ties; an
 **Added** window orders by creation time, the date it filters on. Review groups
 and the Review queue also list the newest proposal first. Collections hides the
@@ -411,7 +416,11 @@ or the person's) for that category, as of acceptance: Off refuses it, and Review
 first leaves a pending proposal in that owner's review. Work with no verified
 initiating person cannot choose a personal destination, nobody else's personal
 Skill is reachable, permanent Skill deletion stays within the chat's own scope,
-and shared Knowledge still cannot point at private evidence.
+and shared Knowledge still cannot point at private evidence. The one deletion
+exception is work the verified owner started in their own Personal workspace
+(their chats and scheduled tasks): that workspace has no other member, so it
+may also permanently remove the workspace's Skills under its own Skills mode
+(migration 1070).
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,

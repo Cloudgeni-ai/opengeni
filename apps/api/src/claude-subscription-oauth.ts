@@ -91,6 +91,18 @@ const changed = () =>
  */
 export type ClaudeOAuthCore = { connectedBySubjectId: string | null };
 
+/**
+ * Where the attempt's account lives: the route's place (a private account's
+ * owner's Personal workspace), else the scope's own workspace. The attempt
+ * itself stays bound to the scope the person signs in from.
+ */
+function placed(
+  scope: ClaudeOAuthScope,
+  place: string | null | undefined | void,
+): ClaudeOAuthScope {
+  return place ? { ...scope, workspaceId: place } : scope;
+}
+
 async function coreTarget(deps: ApiRouteDeps, scope: ClaudeOAuthScope, credentialId: string) {
   const account = await claudeCoreAccount(
     deps,
@@ -105,12 +117,13 @@ export async function startClaudeSubscriptionOAuth(
   scope: ClaudeOAuthScope,
   input: { scope?: "workspace" | "user" | undefined; reconnectAccountId?: string | undefined } = {},
   core: ClaudeOAuthCore | null = { connectedBySubjectId: null },
+  place: string | null = null,
 ) {
   if (!core) throw changed();
   const key = requireEnvironmentEncryption(deps.settings);
   const poolScope = scope.workspaceId ? (input.scope ?? "workspace") : "organization";
   const current = input.reconnectAccountId
-    ? await coreTarget(deps, scope, input.reconnectAccountId)
+    ? await coreTarget(deps, placed(scope, place), input.reconnectAccountId)
     : null;
   if (input.reconnectAccountId && (!current || current.account.scope !== poolScope))
     throw changed();
@@ -151,7 +164,8 @@ export async function completeClaudeSubscriptionOAuth(
   deps: ApiRouteDeps,
   scope: ClaudeOAuthScope,
   input: { attemptId: string; code: string },
-  reauthorize: (poolScope?: "workspace" | "user" | "organization") => Promise<void>,
+  /** Re-checks the caller's authority; answers where the account lives (null: the scope's own). */
+  reauthorize: (poolScope?: "workspace" | "user" | "organization") => Promise<string | null | void>,
   fetchImpl: typeof fetch = globalThis.fetch,
   core: ClaudeOAuthCore | null = { connectedBySubjectId: null },
 ) {
@@ -183,8 +197,8 @@ export async function completeClaudeSubscriptionOAuth(
       message: "Complete Claude sign-in in the browser where you started it.",
     });
   if (attempt.runtime !== "core") throw changed();
-  await reauthorize(attempt.poolScope);
-  const current = attempt.credentialId ? await coreTarget(deps, scope, attempt.credentialId) : null;
+  const where = placed(scope, await reauthorize(attempt.poolScope));
+  const current = attempt.credentialId ? await coreTarget(deps, where, attempt.credentialId) : null;
   if (
     attempt.credentialId &&
     (!current ||
@@ -266,20 +280,21 @@ export async function completeClaudeSubscriptionOAuth(
       message:
         "Sign in to the same Claude account to reconnect. Use Add account for a different subscription.",
     });
-  await reauthorize(attempt.poolScope);
+  if (placed(scope, await reauthorize(attempt.poolScope)).workspaceId !== where.workspaceId)
+    throw changed();
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
   const bundle = ClaudeSubscriptionCredential.parse({
     ...JSON.parse(
       prepareClaudeSubscriptionCredential(
         deps.settings,
-        scope.workspaceId ? "workspace:" + scope.workspaceId : "organization:" + scope.accountId,
+        where.workspaceId ? "workspace:" + where.workspaceId : "organization:" + where.accountId,
         tokens.access_token,
       ),
     ),
     identity: {
       accountUuid,
       deviceId: createHmac("sha256", key)
-        .update("claude-device:" + (scope.workspaceId ?? scope.accountId))
+        .update("claude-device:" + (where.workspaceId ?? where.accountId))
         .digest("hex"),
     },
     oauth: { refreshToken: tokens.refresh_token, expiresAt: expiresAt.toISOString(), scopes },
@@ -292,9 +307,9 @@ export async function completeClaudeSubscriptionOAuth(
     const connected = await connectClaudeCore(
       tx,
       {
-        accountId: scope.accountId,
-        workspaceId: scope.workspaceId,
-        subjectId: scope.actorSubjectId,
+        accountId: where.accountId,
+        workspaceId: where.workspaceId,
+        subjectId: where.actorSubjectId,
         ...(personal ? { personal: true } : {}),
         encryptionKey: key,
         credential: bundle,
@@ -337,10 +352,10 @@ export async function completeClaudeSubscriptionOAuth(
   });
   await deliverClaudeCoreWake(deps, saved.wake);
   await offerClaudeDefaultModels(deps, {
-    ...(scope.workspaceId
-      ? { accountId: scope.accountId, workspaceId: scope.workspaceId }
-      : { organizationId: scope.accountId }),
-    actorSubjectId: scope.actorSubjectId,
+    ...(where.workspaceId
+      ? { accountId: where.accountId, workspaceId: where.workspaceId }
+      : { organizationId: where.accountId }),
+    actorSubjectId: where.actorSubjectId,
     providerKind: "claude_subscription",
   });
   return ClaudeSubscriptionOAuthCompleteResponse.parse({

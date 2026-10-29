@@ -738,7 +738,7 @@ describe("native approval without recorded arguments", () => {
 });
 
 describe("native MCP service card", () => {
-  test("a reviewed catalog service shows its provider, not an MCP server label", async () => {
+  test("a service card shows its provider and no kind badge", async () => {
     const render = async (source: string) => {
       const item = {
         id: "mcp:example-calendar",
@@ -786,6 +786,6 @@ describe("native MCP service card", () => {
       };
     };
     expect(await render("library")).toEqual({ label: false, provider: true });
-    expect(await render("manual")).toEqual({ label: true, provider: true });
+    expect(await render("manual")).toEqual({ label: false, provider: true });
   });
 });

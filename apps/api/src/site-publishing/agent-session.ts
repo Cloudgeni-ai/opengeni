@@ -1,7 +1,6 @@
 import {
   permissionsRequiredByFirstPartyTools,
   resolveAgentConfig,
-  type Permission,
   type SessionToolPolicy,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -38,7 +37,6 @@ export async function normalizeSiteAgentSession(
   viewer: SiteRuntimeViewer,
   sessionId: string,
   retainedToolIds: readonly string[],
-  memberPermissions?: readonly Permission[],
 ): Promise<void> {
   // Saved member settings are the person's ordinary chat settings. Never
   // replace them on Send merely because the chat was opened from a Site.
@@ -61,10 +59,8 @@ export async function normalizeSiteAgentSession(
     ? (await getSiteSqlDatabase(deps.db, { ...host.scope, siteId: host.site.id }))?.enabled === true
     : false;
   const dataTools = siteAgentDataToolNames({
-    viewerKind: viewer.kind,
     siteSql: sqlEnabled,
     allowed: resolveFirstPartyMcpToolPolicy(deps.settings).allowed,
-    ...(memberPermissions === undefined ? {} : { memberPermissions }),
   });
   const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
   const config = resolveAgentConfig({

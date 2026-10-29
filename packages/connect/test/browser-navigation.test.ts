@@ -236,3 +236,32 @@ test("redirect rejects credentials and retains an allowed URL unchanged", () => 
   navigation.redirect("https://provider.example?state=%2f#done");
   expect(destination).toBe("https://provider.example?state=%2f#done");
 });
+
+for (const reserved of [false, true]) {
+  test(`${reserved ? "reserved" : "direct"} popup tells whether its window is still open and can ask it forward`, () => {
+    const provider = {
+      opener: {} as unknown,
+      closed: false,
+      focused: 0,
+      location: { replace() {} },
+      close() {},
+      focus() {
+        provider.focused += 1;
+      },
+    };
+    const browser = { open: () => provider, location: { assign() {} } };
+    const navigation = reserved
+      ? reserveBrowserConnectNavigation(browser).navigation
+      : createBrowserConnectNavigation(browser);
+    const popup = navigation.openPopup("https://provider.example/authorize")!;
+    // A window on the provider's site ignores close(): it is still open.
+    popup.close();
+    expect(popup.isOpen?.()).toBe(true);
+    popup.focus?.();
+    expect(provider.focused).toBe(1);
+    // The handle still reports no `closed`: COOP can make it read true early.
+    expect("closed" in popup).toBe(false);
+    provider.closed = true;
+    expect(popup.isOpen?.()).toBe(false);
+  });
+}

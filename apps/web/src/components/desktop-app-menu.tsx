@@ -18,7 +18,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { detectConnectOs } from "@opengeni/react/app/lib/deployment";
-import { desktopBridge } from "@opengeni/react/app/lib/desktop";
+import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
 import {
   desktopDownloadsFor,
   desktopDownloadUrl,
@@ -30,10 +30,11 @@ import { currentPhoneAppPlatform } from "@opengeni/react/app/lib/open-in-app";
 /**
  * The account menu's "Desktop app" row: the download for this computer, the
  * install command for Mac and Linux, and the release page with every
- * platform. Hidden inside the desktop app and on phones and tablets.
+ * platform. Hidden inside the desktop app (by its bridge or its user agent,
+ * as the layout decides) and on phones and tablets.
  */
 export function DesktopAppSubmenu() {
-  if (desktopBridge || typeof window === "undefined" || currentPhoneAppPlatform()) return null;
+  if (desktopPlatform || typeof window === "undefined" || currentPhoneAppPlatform()) return null;
   const origin = apiBaseUrl || window.location.origin;
   const userAgent = navigator.userAgent;
   const os = detectConnectOs(userAgent);

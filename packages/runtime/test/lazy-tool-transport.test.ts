@@ -19,13 +19,14 @@ import {
   LazyToolModelProvider,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
+  isOpeningToolLoadResponse,
   restoreGenericDispatchHistory,
   restoreGenericDispatchHistoryItems,
   transformGenericDispatchResponse,
 } from "../src/lazy-tool-transport";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "../src/mcp-network";
-import { normalizeSdkEvent } from "../src/run-events";
+import { modelTerminalResponseFromSdkEvent, normalizeSdkEvent } from "../src/run-events";
 import { restoreInterruptedRunState } from "../src/index";
 import { formatSkillCatalog } from "../src/skill-catalog";
 import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
@@ -3453,5 +3454,280 @@ describe("OpenAI/Azure native client tool search", () => {
       bound!.invoke(resumedInternals._context, JSON.stringify({ city: "Tromso" })),
     ).resolves.toBe("sandbox-fresh:Tromso");
     expect(executions).toBe(1);
+  });
+});
+
+describe("opening tool load", () => {
+  const NEIGHBOUR_TOOL = `${SERVER_ID}__forecast_lookup`;
+
+  function neighbourTool(): Tool {
+    return tool({
+      name: NEIGHBOUR_TOOL,
+      description: "Look up the weather forecast for a city",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: () => "unused",
+    }) as unknown as Tool;
+  }
+
+  function weatherAgent(execute: (input: { city: string }) => string) {
+    return new Agent({
+      name: "lazy-test",
+      instructions: "Use tools.",
+      model: "scripted",
+      tools: [weatherTool({ execute }), neighbourTool()],
+    });
+  }
+
+  function directCall(transport: string): ModelResponse["output"][number] {
+    return (
+      transport === "generic_dispatch"
+        ? {
+            type: "function_call",
+            callId: "weather",
+            name: "tool_invoke",
+            arguments: JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Oslo" } }),
+          }
+        : {
+            type: "function_call",
+            callId: "weather",
+            name: WEATHER_TOOL,
+            arguments: JSON.stringify({ city: "Oslo" }),
+          }
+    ) as never;
+  }
+
+  for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+    test(`${transport}: the first provider request already holds the tool, with an unchanged tool block`, async () => {
+      const cities: string[] = [];
+      const plainAgent = weatherAgent(() => "unused");
+      const plainRuntime = installLazyToolRuntime(plainAgent, transport, new Set([SERVER_ID]));
+      const plain = new ScriptedStreamingModel([[finalMessage("plain")]]);
+      await runStreamed(plainAgent, plain, plainRuntime);
+
+      const agent = weatherAgent((input) => {
+        cities.push(input.city);
+        return `weather:${input.city}`;
+      });
+      const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+      runtime.loadAtOpening(["weather_lookup", "not_a_tool"]);
+      const model = new ScriptedStreamingModel([[directCall(transport)], [finalMessage("done")]]);
+      const result = await runStreamed(agent, model, runtime);
+
+      expect(result.finalOutput).toBe("done");
+      expect(cities).toEqual(["Oslo"]);
+      // No provider round trip searched: the model's first step called the tool.
+      expect(model.requests).toHaveLength(2);
+      const first = model.requests[0]!;
+      expect(JSON.stringify(first.tools)).toBe(JSON.stringify(plain.requests[0]!.tools));
+      expect(JSON.stringify(first.tools)).not.toContain(WEATHER_TOOL);
+      expect(first.systemInstructions).toBe(plain.requests[0]!.systemInstructions);
+      const input = first.input as Array<Record<string, unknown>>;
+      // The person's message is unchanged and the load follows it.
+      expect(JSON.stringify(input[0])).toBe(
+        JSON.stringify((plain.requests[0]!.input as unknown[])[0]),
+      );
+      const call = input[1]!;
+      const args = { query: "", names: [WEATHER_TOOL] };
+      if (transport === "generic_dispatch") {
+        expect(call).toMatchObject({
+          type: "function_call",
+          callId: "call_opening_tools",
+          name: "tool_search",
+          arguments: JSON.stringify(args),
+        });
+      } else {
+        expect(call).toMatchObject({
+          type: "tool_search_call",
+          execution: "client",
+          arguments: args,
+        });
+        expect(input[2]).toMatchObject({ type: "tool_search_output" });
+        expect(JSON.stringify(input[2])).toContain(WEATHER_TOOL);
+      }
+      const loaded = JSON.stringify(input.slice(1));
+      expect(loaded).toContain("Look up the current weather for a city");
+      expect(loaded).not.toContain(NEIGHBOUR_TOOL);
+      expect(loaded).not.toContain("not_a_tool");
+      expect(JSON.stringify(input)).not.toContain("opengeni.opening_tool_load");
+    });
+  }
+
+  test("a non-streamed run loads the same way", async () => {
+    const agent = weatherAgent(() => "unused");
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+    runtime.loadAtOpening([WEATHER_TOOL]);
+    const model = new CapturingModel();
+    const result = await new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    }).run(agent, "What is the weather?", {
+      historyOwnership: "external",
+      maxTurns: 4,
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+    });
+    expect(result.finalOutput).toBe("ok");
+    expect(model.requests).toHaveLength(1);
+    const input = model.requests[0]!.input as Array<Record<string, unknown>>;
+    expect(input.map((item) => item.type ?? item.role)).toEqual([
+      "message",
+      "tool_search_call",
+      "tool_search_output",
+    ]);
+  });
+
+  test("the local load is never reported as a provider response", async () => {
+    const agent = weatherAgent(() => "unused");
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+    runtime.loadAtOpening([WEATHER_TOOL]);
+    const model = new ScriptedStreamingModel([[finalMessage("done")]]);
+    const result = await new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    }).run(agent, "What is the weather?", {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 4,
+    });
+    const terminals: Array<ReturnType<typeof modelTerminalResponseFromSdkEvent>> = [];
+    let openings = 0;
+    for await (const event of result.toStream()) {
+      if (event.type !== "raw_model_stream_event" || event.data.type !== "response_done") continue;
+      if (isOpeningToolLoadResponse(event.data)) openings++;
+      terminals.push(modelTerminalResponseFromSdkEvent(event as never));
+    }
+    await result.completed;
+    expect(openings).toBe(1);
+    // Usage, billing and timing see only the one provider response.
+    expect(terminals.map((terminal) => terminal?.responseId ?? null)).toEqual([null, "response-1"]);
+    expect(result.rawResponses).toHaveLength(2);
+    expect(result.state.usage.requests).toBe(1);
+  });
+
+  for (const transport of ["openai_native", "generic_dispatch"] as const) {
+    test(`${transport}: a later attempt whose history holds the load never loads again`, async () => {
+      const definition = {
+        type: "function",
+        name: WEATHER_TOOL,
+        description: "Look up the current weather for a city",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+          additionalProperties: false,
+        },
+        strict: false,
+      };
+      const args = { query: "", names: [WEATHER_TOOL] };
+      const stored =
+        transport === "generic_dispatch"
+          ? [
+              {
+                type: "function_call",
+                callId: "call_opening_tools",
+                name: "tool_search",
+                arguments: JSON.stringify(args),
+                status: "completed",
+              },
+              {
+                type: "function_call_result",
+                callId: "call_opening_tools",
+                name: "tool_search",
+                status: "completed",
+                output: JSON.stringify({
+                  tools: [{ name: WEATHER_TOOL, description: definition.description }],
+                  schemasLoaded: true,
+                  unavailable: [],
+                }),
+              },
+            ]
+          : [
+              {
+                type: "tool_search_call",
+                call_id: "call_opening_tools",
+                execution: "client",
+                status: "completed",
+                arguments: args,
+              },
+              {
+                type: "tool_search_output",
+                execution: "client",
+                status: "completed",
+                tools: [definition],
+                providerData: { call_id: "call_opening_tools", execution: "client" },
+              },
+            ];
+      // The first attempt's message and load, then an update delivered before
+      // a later attempt of the same turn.
+      const history = [
+        { type: "message", role: "user", content: "What is the weather?" },
+        ...stored,
+        { type: "message", role: "user", content: "Update: the person is in Oslo." },
+      ];
+      const agent = weatherAgent(() => "unused");
+      const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+      runtime.loadAtOpening([WEATHER_TOOL]);
+      const model = new ScriptedStreamingModel([[finalMessage("ok")]]);
+      const result = await new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      }).run(agent, structuredClone(history) as never, {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+      });
+      for await (const _event of result.toStream()) void _event;
+      await result.completed;
+      expect(model.requests).toHaveLength(1);
+      const input = model.requests[0]!.input as Array<Record<string, unknown>>;
+      // The stored load keeps its place before the later message, once.
+      expect(input.map((item) => item.type ?? item.role)).toEqual(history.map((item) => item.type));
+      expect(input.at(-1)).toMatchObject({
+        role: "user",
+        content: "Update: the person is in Oslo.",
+      });
+    });
+  }
+
+  test("nothing loads without opening tools, for unknown names, or mid-turn", async () => {
+    const run = async (names: string[] | null, history: boolean) => {
+      const agent = weatherAgent(() => "unused");
+      const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+      if (names) runtime.loadAtOpening(names);
+      const model = new ScriptedStreamingModel([[finalMessage("ok")]]);
+      const runner = new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      });
+      const input = history
+        ? [
+            { type: "message", role: "user", content: "What is the weather?" },
+            {
+              type: "function_call",
+              callId: "earlier",
+              name: "other",
+              arguments: "{}",
+              status: "completed",
+            },
+            { type: "function_call_result", callId: "earlier", name: "other", output: "ok" },
+          ]
+        : "What is the weather?";
+      const result = await runner.run(agent, input as never, {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+      });
+      for await (const _event of result.toStream()) void _event;
+      await result.completed;
+      return model.requests;
+    };
+    const plain = await run(null, false);
+    expect(plain).toHaveLength(1);
+    for (const requests of [await run(["unknown_tool"], false), await run([WEATHER_TOOL], true)]) {
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0]!.input)).not.toContain("call_opening_tools");
+    }
+    expect(JSON.stringify((await run(["unknown_tool"], false))[0])).toBe(JSON.stringify(plain[0]));
   });
 });

@@ -128,7 +128,8 @@ export type CodexRealtimeControllerSnapshot = {
    * Set when Opengeni refused or ended deployment-funded voice for credits or
    * availability. Codes match voice input: `insufficient_credits`,
    * `allowance_exhausted`, `monthly_model_cost_limit`, plus
-   * `realtime_voice_unavailable`. Cleared on the next start.
+   * `realtime_voice_unavailable` and `region_restricted` (EU-only workspace,
+   * voice model not EU). Cleared on the next start.
    */
   refusal?: CodexRealtimeRefusal | null;
 };
@@ -140,6 +141,7 @@ const REALTIME_REFUSAL_CODES = new Set([
   "allowance_exhausted",
   "monthly_model_cost_limit",
   "realtime_voice_unavailable",
+  "region_restricted",
 ]);
 
 /** A definitive credit/availability refusal from Opengeni, with its plain message. */

@@ -7,7 +7,9 @@ import {
 } from "@opengeni/config";
 import {
   ClientModel,
+  isEuResidency,
   projectClientModelResidency,
+  REGION_RESTRICTED,
   UNKNOWN_MODEL_RESIDENCY,
   WorkspaceModelCatalogResponse,
   type DefaultModelSelection,
@@ -138,6 +140,31 @@ function withoutUnavailableLatencyModes(selection: WorkspaceModelSelection): Con
       ),
     },
   };
+}
+
+/**
+ * EU-only inference: in an EU-only workspace a model whose route is not EU by
+ * its residency record is listed as unavailable with `region_restricted`
+ * (clients show "Not supported in EU"). Availability stays a hint; the
+ * worker refuses such a model before any request.
+ */
+export function withRegionAvailability<
+  Selection extends Pick<WorkspaceModelSelection, "model" | "availability">,
+>(selections: readonly Selection[], requiredModelGeography: "eu" | undefined): Selection[] {
+  if (requiredModelGeography !== "eu") return [...selections];
+  return selections.map((selection) =>
+    isEuResidency(selection.model.residency)
+      ? selection
+      : {
+          ...selection,
+          availability: {
+            status: "unavailable" as const,
+            selectable: false,
+            reason: REGION_RESTRICTED,
+            checkedAt: selection.availability.checkedAt,
+          },
+        },
+  );
 }
 
 export function projectWorkspaceModelCatalog(

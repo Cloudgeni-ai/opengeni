@@ -87,6 +87,7 @@ import {
   LatestBrowserFrameSubscription,
   assertImageDimensions,
   decodeBoundedBase64Image,
+  fitImageWithin,
   imageDimensions,
   normalizeFrameStreamOptions,
   normalizeScreenshotOptions,
@@ -423,6 +424,15 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 
 class DialogOpenedSignal extends Error {}
 
+/** A frame skipped because another capture of its tab, still within that
+ * capture's own deadline, had not been answered. Frames are latest-only, so
+ * the stream waits for its next round instead of counting a failure. */
+class CaptureBusyError extends Error {
+  constructor() {
+    super("browser frame skipped behind another capture of the tab");
+  }
+}
+
 /** Whether an error is about the browser's transport rather than the page:
  * the browser or the connection to it or to the tab is gone, or a command
  * deadline passed (which the unresponsive-tab path reports). */
@@ -724,8 +734,9 @@ type TargetState = {
    * capture and puts back what it saw when it began, which would undo a
    * change that landed in between. */
   framesPaused?: Promise<void> | undefined;
-  /** Clipped captures of this tab Chromium has not answered yet. */
-  capturesRunning: Set<Promise<void>>;
+  /** Captures of this tab not answered yet, each with the time its caller
+   * stops waiting for it. At most one is sent at a time (see sendCapture). */
+  capturesRunning: Map<Promise<void>, number>;
 };
 
 /** The page's size, screen and scale as it reports them, in CSS pixels, and
@@ -1438,26 +1449,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * it and it is still blank, such as the empty tab a new session starts in.
    * The agent has moved on to another tab, and an empty tab would otherwise
    * stay in the person's browser until the session is released or ends.
-   * Never touches a tab the session did not open, a tab showing a page, or a
-   * tab another session is using. Best effort: a tab that could not be
-   * closed stays recorded, so the session's cleanup closes it later. */
+   * Never touches a tab the session did not open, a tab showing a page, a tab
+   * on its way to one (Chrome still lists a blank address until a navigation
+   * commits), or a tab another session is using. A tab whose navigation this
+   * session cannot see, because it no longer follows that tab, is left too.
+   * Best effort: a tab that could not be closed stays recorded, so the
+   * session's cleanup closes it later. */
   private async closeLeftBlankTarget(
     connection: BrowserCdpConnection,
     targetId: string | null,
   ): Promise<void> {
     if (!this.ownedTabs || targetId === null || targetId === this.selectedTargetId) return;
     if (!this.createdTargetIds.has(targetId) || this.ownedTabs.inUseElsewhere?.(targetId)) return;
+    if (!this.leftWithoutNavigation(targetId)) return;
     try {
       const info = (await this.targetInfos(connection)).find(
         (candidate) => candidate.targetId === targetId,
       );
-      if (!info || !isBlankTabUrl(info.url)) return;
+      // Read again after listing: a navigation may have started meanwhile.
+      if (!info || !isBlankTabUrl(info.url) || !this.leftWithoutNavigation(targetId)) return;
       await this.closeTargetAndSettle(connection, targetId);
     } catch {
       return;
     }
     this.recordClosedBlankTarget(targetId);
     this.ownedTabsChanged();
+  }
+
+  /** Whether this session follows the tab and no navigation of its page has
+   * started without committing. */
+  private leftWithoutNavigation(targetId: string): boolean {
+    const state = this.states.get(targetId);
+    return state !== undefined && !state.navigationPending;
   }
 
   /** Forget a blank tab this session opened and has just closed, keeping its
@@ -2094,12 +2117,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                         ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
                         : timeoutMs;
                     try {
-                      return await this.sendTarget<{ data?: unknown }>(
-                        state,
-                        "Page.captureScreenshot",
-                        capture,
-                        { timeoutMs: stallBound },
-                      );
+                      // Never overlaps a frame capture of the tab: a full-page
+                      // capture is clipped (see sendCapture).
+                      return await this.sendCapture<{ data?: unknown }>(state, capture, stallBound);
                     } catch (error) {
                       if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
                         throw new InteractionControllerError(
@@ -2524,6 +2544,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Chromium does not emit Page.screencastFrame for a background tab in a
       // headed browser. Seed every subscriber from the same target-scoped CDP
       // surface so attachment readiness never depends on focusing Chrome.
+      // A screenshot of the tab still within its deadline holds the first
+      // frame back for up to a screenshot's deadline, not a frame's.
+      const seedBusyUntil = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
       let seedFailure: unknown;
       for (let attempt = 0; attempt < FRAME_CAPTURE_FAILURE_LIMIT; attempt += 1) {
         try {
@@ -2532,6 +2555,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           break;
         } catch (error) {
           seedFailure = error;
+          if (error instanceof CaptureBusyError && Date.now() < seedBusyUntil) {
+            attempt -= 1;
+            continue;
+          }
           if (attempt + 1 < FRAME_CAPTURE_FAILURE_LIMIT) await delay(25 * (attempt + 1));
         }
       }
@@ -3761,7 +3788,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       navigationSequence: 0,
       navigationPending: false,
       screencasts: new Map(),
-      capturesRunning: new Set(),
+      capturesRunning: new Map(),
       tail: Promise.resolve(),
       unsubscribe: [],
       oopifs: new Map(),
@@ -4590,23 +4617,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ).catch(() => undefined);
   }
 
-  /** Sends a clipped Page.captureScreenshot. Chromium changes the page's
-   * emulation while such a capture runs and puts back what it saw when it
-   * began, so the capture counts as running until Chromium answers it, even
-   * after the caller stops waiting or its frame stream closes. */
+  /** Sends a Page.captureScreenshot. Chromium serves a clipped capture, or
+   * any capture of an emulated device, by changing the page's emulation and
+   * drawing the tab at the capture's size, and puts back the size and
+   * emulation it saw when the capture began. A capture that began while
+   * another ran would take that temporary size for the tab's own and put it
+   * back last, leaving the tab drawn small for good. So a capture counts as
+   * running until the connection settles it (Chromium answers, or the
+   * connection gives up on it), even after the caller stops waiting or its
+   * frame stream closes, and the next capture of the tab is sent only after
+   * that, within its own deadline. A frame (`frame: true`) still behind a
+   * capture that is within its own deadline throws CaptureBusyError, so a
+   * slow screenshot is not counted against the live view. */
   private async sendCapture<T>(
     state: TargetState,
     params: Readonly<Record<string, unknown>>,
     timeoutMs: number,
+    options: { frame?: boolean } = {},
   ): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    while (state.capturesRunning.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        if (options.frame && [...state.capturesRunning.values()].some((due) => due > Date.now()))
+          throw new CaptureBusyError();
+        throw new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId);
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(state.capturesRunning.keys()),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, remaining);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+    // Registered in the same step as the check above, so two waiting
+    // captures cannot both be sent.
     const answered = this.sendTarget<T>(state, "Page.captureScreenshot", params, {
-      timeoutMs: SCREENSHOT_CAPTURE_TIMEOUT_MS,
+      timeoutMs: Math.max(SCREENSHOT_CAPTURE_TIMEOUT_MS, timeoutMs),
     });
     const running = answered.then(
       () => undefined,
       () => undefined,
     );
-    state.capturesRunning.add(running);
+    state.capturesRunning.set(running, deadline);
     void running.then(() => state.capturesRunning.delete(running));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -4615,7 +4669,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () => reject(new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId)),
-            timeoutMs,
+            Math.max(0, deadline - Date.now()),
           );
         }),
       ]);
@@ -4626,7 +4680,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Resolves once no capture of this tab is running in the browser. */
   private async capturesSettled(state: TargetState): Promise<void> {
-    while (state.capturesRunning.size > 0) await Promise.all([...state.capturesRunning]);
+    while (state.capturesRunning.size > 0) await Promise.all(state.capturesRunning.keys());
   }
 
   /** Sends a viewport change and checks that the page took it, sending it
@@ -5770,69 +5824,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.screencasts.get(expected.key) !== expected) return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
-      // Reuse the accepted clip scale for this viewport. Inferring a new device
-      // scale from rounded image pixels feeds quantization back into every frame
-      // and makes an unchanged mobile viewport oscillate in size.
-      const previous = expected.captureScale;
-      let scale =
-        previous?.width === viewport.width && previous.height === viewport.height
-          ? previous.scale
-          : Math.min(
-              1,
-              expected.options.maxWidth / viewport.width,
-              expected.options.maxHeight / viewport.height,
-            );
-      let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
-      let dimensions = { width: 0, height: 0 };
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        // A stream closed meanwhile no longer holds off viewport changes.
-        if (state.screencasts.get(expected.key) !== expected) return;
-        const response = await this.sendCapture<{ data?: unknown }>(
-          state,
-          {
-            format: expected.options.format,
-            ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
-            fromSurface: true,
-            captureBeyondViewport: false,
-            clip: {
-              x: viewport.x,
-              y: viewport.y,
-              width: viewport.width,
-              height: viewport.height,
-              scale,
-            },
-          },
-          FRAME_CAPTURE_TIMEOUT_MS,
-        );
-        data = decodeBoundedBase64Image(response.data);
-        dimensions = imageDimensions(data, expected.options.format);
-        if (
-          dimensions.width <= expected.options.maxWidth &&
-          dimensions.height <= expected.options.maxHeight
-        ) {
-          break;
-        }
-        scale *= Math.min(
-          expected.options.maxWidth / dimensions.width,
-          expected.options.maxHeight / dimensions.height,
-        );
-      }
-      if (
-        dimensions.width > expected.options.maxWidth ||
-        dimensions.height > expected.options.maxHeight
-      ) {
-        throw new Error("browser screenshot could not honor the frame dimension bound");
-      }
+      const captured =
+        this.engine === "chrome"
+          ? await this.captureOwnChromeFrame(state, expected, viewport)
+          : await this.captureClippedFrame(state, expected, viewport);
+      if (!captured) return;
       if (state.screencasts.get(expected.key) !== expected) return;
-      expected.captureScale = { width: viewport.width, height: viewport.height, scale };
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,
         format: expected.options.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+        data: captured.data,
+        width: captured.width,
+        height: captured.height,
+        deviceScaleFactor: captured.deviceScaleFactor,
         scrollX: viewport.x,
         scrollY: viewport.y,
       });
@@ -5845,6 +5850,127 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } finally {
       if (expected.capturePromise === capture) expected.capturePromise = null;
     }
+  }
+
+  /**
+   * A frame of a tab in a person's own Chrome. Chromium serves a clipped
+   * capture by drawing the tab itself at the clip's scaled size until the
+   * capture is answered, which the person sees: their tab shrinks into a
+   * corner on every frame, and stays shrunk when a capture of a tab they
+   * are not looking at outlives the next one. A capture without a clip
+   * changes nothing on the tab (the driver never emulates a device there),
+   * so the frame is captured whole and scaled down here.
+   */
+  private async captureOwnChromeFrame(
+    state: TargetState,
+    expected: TargetScreencast,
+    viewport: { width: number; height: number },
+  ): Promise<{
+    data: Uint8Array;
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+  } | null> {
+    const response = await this.sendCapture<{ data?: unknown }>(
+      state,
+      {
+        format: expected.options.format,
+        ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+        fromSurface: true,
+        captureBeyondViewport: false,
+      },
+      FRAME_CAPTURE_TIMEOUT_MS,
+      { frame: true },
+    );
+    if (state.screencasts.get(expected.key) !== expected) return null;
+    const data = decodeBoundedBase64Image(response.data);
+    const dimensions = imageDimensions(data, expected.options.format);
+    const fitted = await fitImageWithin(data, dimensions, expected.options);
+    // A classic scrollbar is in the image but not in the CSS viewport, so the
+    // axis with less scrollbar gives the closer scale, as for screenshots.
+    const captureScale = Math.min(
+      dimensions.width / viewport.width,
+      dimensions.height / viewport.height,
+    );
+    return {
+      ...fitted,
+      deviceScaleFactor: finiteScale(captureScale * (fitted.width / dimensions.width)),
+    };
+  }
+
+  /** A frame captured with a clip that scales it to the stream's bound. */
+  private async captureClippedFrame(
+    state: TargetState,
+    expected: TargetScreencast,
+    viewport: { x: number; y: number; width: number; height: number },
+  ): Promise<{
+    data: Uint8Array;
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+  } | null> {
+    // Reuse the accepted clip scale for this viewport. Inferring a new device
+    // scale from rounded image pixels feeds quantization back into every frame
+    // and makes an unchanged mobile viewport oscillate in size.
+    const previous = expected.captureScale;
+    let scale =
+      previous?.width === viewport.width && previous.height === viewport.height
+        ? previous.scale
+        : Math.min(
+            1,
+            expected.options.maxWidth / viewport.width,
+            expected.options.maxHeight / viewport.height,
+          );
+    let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
+    let dimensions = { width: 0, height: 0 };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      // A stream closed meanwhile no longer holds off viewport changes.
+      if (state.screencasts.get(expected.key) !== expected) return null;
+      const response = await this.sendCapture<{ data?: unknown }>(
+        state,
+        {
+          format: expected.options.format,
+          ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+          fromSurface: true,
+          captureBeyondViewport: false,
+          clip: {
+            x: viewport.x,
+            y: viewport.y,
+            width: viewport.width,
+            height: viewport.height,
+            scale,
+          },
+        },
+        FRAME_CAPTURE_TIMEOUT_MS,
+        { frame: true },
+      );
+      data = decodeBoundedBase64Image(response.data);
+      dimensions = imageDimensions(data, expected.options.format);
+      if (
+        dimensions.width <= expected.options.maxWidth &&
+        dimensions.height <= expected.options.maxHeight
+      ) {
+        break;
+      }
+      scale *= Math.min(
+        expected.options.maxWidth / dimensions.width,
+        expected.options.maxHeight / dimensions.height,
+      );
+    }
+    if (
+      dimensions.width > expected.options.maxWidth ||
+      dimensions.height > expected.options.maxHeight
+    ) {
+      throw new Error("browser screenshot could not honor the frame dimension bound");
+    }
+    if (state.screencasts.get(expected.key) !== expected) return null;
+    expected.captureScale = { width: viewport.width, height: viewport.height, scale };
+    return {
+      data,
+      width: dimensions.width,
+      height: dimensions.height,
+      deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+    };
   }
 
   private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {
@@ -5860,6 +5986,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.captureFallbackFrame(targetId, expected);
           consecutiveFailures = 0;
         } catch (error) {
+          if (error instanceof CaptureBusyError) continue;
           consecutiveFailures += 1;
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);
@@ -7404,6 +7531,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { type: "mouseMoved", x, y },
         input,
       );
+      // A background tab can take seconds to acknowledge the pointer's move
+      // (it draws no frames), long enough for the guard to have disarmed
+      // itself before the press arrives. Its clock restarts here, right
+      // before the press. Best effort: a guard this cannot reach is judged
+      // by its readback, as before.
+      if (guard !== null && !state.dialog) {
+        await this.sendTarget(
+          state,
+          "Runtime.callFunctionOn",
+          { objectId: guard.objectId, functionDeclaration: "function () { this.arm(); }" },
+          { timeoutMs: 2_000 },
+        ).catch(() => undefined);
+      }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
           state,
@@ -10549,10 +10689,13 @@ const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
 
 /** Resolves once work a page scheduled in response to the last key (a task
  * queued in the next animation frame, such as a React effect moving focus)
- * has run, or after 50 ms in a tab that does not animate (background). */
-const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
+ * has run. A hidden tab produces no frames, so it is waited on for 50 ms only.
+ * A visible tab's next frame can come well after 50 ms on a busy machine, and
+ * giving up early sends the next key to the old field, so it gets a longer
+ * safety cap. */
+export const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
   const done = () => resolve(true);
-  setTimeout(done, 50);
+  setTimeout(done, document.visibilityState === "hidden" ? 50 : 1000);
   requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
@@ -10996,8 +11139,9 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
 // judged by their own target: pointer capture can retarget a release, and a
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
-// reports what was held back. A guard that is never settled (a JavaScript
-// dialog interrupted the click) disarms itself after a few seconds.
+// reports what was held back, and its arm() restarts the clock below just
+// before the press. A guard that is never settled (a JavaScript dialog
+// interrupted the click) disarms itself a few seconds after that.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
@@ -11082,7 +11226,7 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   };
   const types = [...presses, ...followers];
   const guard = { blocked: null };
-  const expiresAt = Date.now() + 5000;
+  let expiresAt = Date.now() + 5000;
   let pointerDowns = 0;
   const listener = (event) => {
     if (Date.now() > expiresAt) {
@@ -11115,6 +11259,9 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   guard.settle = () => {
     for (const type of types) view.removeEventListener(type, listener, true);
     return guard.blocked;
+  };
+  guard.arm = () => {
+    expiresAt = Date.now() + 5000;
   };
   return guard;
 }`;

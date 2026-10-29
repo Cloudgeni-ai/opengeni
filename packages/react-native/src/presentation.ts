@@ -51,6 +51,8 @@ export interface OpenGeniNativeLabels {
     agentAnswered?: string;
     /** An agent skipped the question; defaults to `skipped`. */
     agentSkipped?: string;
+    /** The person let the agent decide; defaults to `skipped`. */
+    agentDecides?: string;
     skipped: string;
     expired: string;
     cancelled: string;
@@ -186,6 +188,7 @@ export const DEFAULT_OPENGENI_NATIVE_LABELS = (t: OpenGeniText) =>
       answered: t("native.presentation.youAnswered"),
       agentAnswered: t("native.presentation.agentAnswered"),
       agentSkipped: t("native.presentation.agentSkipped"),
+      agentDecides: t("native.presentation.youLetTheAgentDecide"),
       skipped: t("native.presentation.skipped"),
       expired: t("native.presentation.expired"),
       cancelled: t("native.presentation.cancelled"),

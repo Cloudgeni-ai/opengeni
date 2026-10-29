@@ -1,4 +1,4 @@
-import { Menu, nativeImage, Tray } from "electron";
+import { Menu, nativeImage, Tray, type MenuItemConstructorOptions } from "electron";
 
 import type { ThisComputerPermissionId } from "../contract";
 import type { DesktopAppConfig } from "./config";
@@ -17,6 +17,8 @@ export interface TraySummary {
   running: boolean;
   /** On, but its agent is starting again. Absent means no. */
   reconnecting?: boolean;
+  /** On, but the server stopped signing it in: it must be connected again. Absent means no. */
+  needsReconnect?: boolean;
   /** Screen-control permissions still to allow, in order. */
   missingPermissions?: readonly ThisComputerPermissionId[];
 }
@@ -48,42 +50,9 @@ export class AppTray {
   }
 
   update(summary: TraySummary): void {
-    const missing = summary.running ? (summary.missingPermissions ?? []) : [];
-    this.tray.setToolTip(
-      !summary.connected
-        ? this.config.productName
-        : `${this.config.productName}: ${
-            !summary.running
-              ? "this computer is paused"
-              : summary.reconnecting
-                ? "connecting this computer…"
-                : "this computer is available to agents"
-          }`,
-    );
-    const computer = !summary.connected
-      ? []
-      : [
-          {
-            label: statusText(summary.running, summary.reconnecting === true, missing.length > 0),
-            enabled: false,
-          },
-          ...missing.map((permission) => ({
-            label: PERMISSION_LABELS[permission],
-            click: () => this.actions.allow(permission),
-          })),
-          summary.running
-            ? { label: "Pause This Computer", click: () => this.actions.pause() }
-            : { label: "Resume This Computer", click: () => this.actions.resume() },
-          { type: "separator" as const },
-        ];
-    this.tray.setContextMenu(
-      Menu.buildFromTemplate([
-        ...computer,
-        { label: `Open ${this.config.productName}`, click: () => this.actions.open() },
-        { type: "separator" },
-        { label: `Quit ${this.config.productName}`, click: () => this.actions.quit() },
-      ]),
-    );
+    const { toolTip, template } = trayMenu(summary, this.config.productName, this.actions);
+    this.tray.setToolTip(toolTip);
+    this.tray.setContextMenu(Menu.buildFromTemplate(template));
   }
 
   destroy(): void {
@@ -91,8 +60,56 @@ export class AppTray {
   }
 }
 
-function statusText(running: boolean, reconnecting: boolean, needsPermissions: boolean): string {
-  if (!running) return "This computer: paused";
-  if (needsPermissions) return "This computer: screen control needs permission";
-  return reconnecting ? "This computer: connecting…" : "This computer: available to agents";
+/** The tray's tooltip and menu for a summary of this computer. */
+export function trayMenu(
+  summary: TraySummary,
+  productName: string,
+  actions: TrayActions,
+): { toolTip: string; template: MenuItemConstructorOptions[] } {
+  const missing = summary.running ? (summary.missingPermissions ?? []) : [];
+  const status = !summary.running
+    ? "paused"
+    : summary.needsReconnect
+      ? "needs reconnecting"
+      : missing.length > 0
+        ? "screen control needs permission"
+        : summary.reconnecting
+          ? "connecting…"
+          : "available to agents";
+  const toolTip = !summary.connected
+    ? productName
+    : `${productName}: ${
+        !summary.running
+          ? "this computer is paused"
+          : summary.needsReconnect
+            ? "this computer needs reconnecting"
+            : summary.reconnecting
+              ? "connecting this computer…"
+              : "this computer is available to agents"
+      }`;
+  const computer: MenuItemConstructorOptions[] = !summary.connected
+    ? []
+    : [
+        { label: `This computer: ${status}`, enabled: false },
+        // Reconnecting needs the account and workspace, which the window has.
+        ...(summary.running && summary.needsReconnect
+          ? [{ label: "Reconnect This Computer…", click: () => actions.open() }]
+          : missing.map((permission) => ({
+              label: PERMISSION_LABELS[permission],
+              click: () => actions.allow(permission),
+            }))),
+        summary.running
+          ? { label: "Pause This Computer", click: () => actions.pause() }
+          : { label: "Resume This Computer", click: () => actions.resume() },
+        { type: "separator" },
+      ];
+  return {
+    toolTip,
+    template: [
+      ...computer,
+      { label: `Open ${productName}`, click: () => actions.open() },
+      { type: "separator" },
+      { label: `Quit ${productName}`, click: () => actions.quit() },
+    ],
+  };
 }

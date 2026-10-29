@@ -123,3 +123,33 @@ export function SessionUiFeaturesProvider(props: {
 export function useSessionUiFeature(feature: keyof SessionUiFeatures): boolean {
   return useContext(SessionUiFeaturesContext)[feature];
 }
+
+/**
+ * Turns features off for part of the surface, such as the chat beside a
+ * Site, which has no room for the session panel. It only hides: a feature
+ * the surrounding surface leaves off stays off.
+ */
+export function SessionUiFeaturesOff(props: {
+  features: readonly (keyof SessionUiFeatures)[];
+  children?: ReactNode;
+}) {
+  const parent = useContext(SessionUiFeaturesContext);
+  const key = props.features.join(",");
+  const value = useMemo(
+    () => ({
+      ...parent,
+      ...Object.fromEntries(
+        key
+          .split(",")
+          .filter(Boolean)
+          .map((feature) => [feature, false]),
+      ),
+    }),
+    [key, parent],
+  );
+  return (
+    <SessionUiFeaturesContext.Provider value={value}>
+      {props.children}
+    </SessionUiFeaturesContext.Provider>
+  );
+}

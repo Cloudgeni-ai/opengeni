@@ -603,11 +603,6 @@ describe("an organization administrator's read (organization route)", () => {
       [org.accountId, org.ownerSubjectId, personal],
     ] as const)
       expect(await probe(accountId, subjectId, id)).toEqual({ kind: "not_visible" });
-    await setCutover(org.accountId, false);
-    expect(await probe(org.accountId, org.ownerSubjectId, connectionId)).toEqual({
-      kind: "not_visible",
-    });
-    await setCutover(org.accountId, true);
     expect(upstream.calls).toEqual([]);
     for (const id of [connectionId, managed, personal]) expect(await storedQuota(id)).toBeNull();
 
@@ -702,9 +697,6 @@ describe("a personal connection's owner (own Personal workspace)", () => {
     await refused(org.personalWorkspaceId, org.ownerSubjectId);
     await shared.admin`update organization_user_resource_authorities
       set generation = 1 where resource_id = ${personal}::uuid`;
-    await setCutover(org.accountId, false);
-    await refused(org.personalWorkspaceId, org.ownerSubjectId);
-    await setCutover(org.accountId, true);
     expect(upstream.calls).toEqual([]);
     expect(await storedQuota(personal)).toBeNull();
     expect(await storedQuota(sharedId)).toBeNull();

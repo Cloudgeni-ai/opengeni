@@ -1,11 +1,8 @@
 import {
-  claimDueTranscriptionRecordingObjectCleanup,
   claimExpiredFileUploadCleanup,
-  completeDueTranscriptionRecordingObjectCleanup,
   completeExpiredFileUploadCleanup,
   claimVideoGenerationOperations,
   claimSessionTitleWorkflows,
-  purgeExpiredTranscriptionRecordings,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
@@ -64,9 +61,6 @@ export type FileUploadReaperActivityOptions = {
   deleteObject?: (storage: ObjectStorage, key: string) => Promise<void>;
   claimFileUploads?: typeof claimExpiredFileUploadCleanup;
   completeFileUpload?: typeof completeExpiredFileUploadCleanup;
-  claimTranscriptionObjects?: typeof claimDueTranscriptionRecordingObjectCleanup;
-  completeTranscriptionObject?: typeof completeDueTranscriptionRecordingObjectCleanup;
-  purgeTranscriptionRecordings?: typeof purgeExpiredTranscriptionRecordings;
 };
 
 /**
@@ -84,25 +78,10 @@ export function createFileUploadReaperActivities(
   const deleteObject = options.deleteObject ?? (async (storage, key) => storage.deleteObject(key));
   const claimFileUploads = options.claimFileUploads ?? claimExpiredFileUploadCleanup;
   const completeFileUpload = options.completeFileUpload ?? completeExpiredFileUploadCleanup;
-  const claimTranscriptionObjects =
-    options.claimTranscriptionObjects ?? claimDueTranscriptionRecordingObjectCleanup;
-  const completeTranscriptionObject =
-    options.completeTranscriptionObject ?? completeDueTranscriptionRecordingObjectCleanup;
-  const purgeTranscriptionRecordings =
-    options.purgeTranscriptionRecordings ?? purgeExpiredTranscriptionRecordings;
 
   async function reapExpiredFileUploads(): Promise<ReapExpiredFileUploadsResult> {
     const { db, objectStorage, observability } = await services();
-    if (!objectStorage) {
-      try {
-        await purgeTranscriptionRecordings(db, { graceMs, limit: batchSize });
-      } catch (error) {
-        observability.warn("expired transcription recording metadata purge failed", {
-          ...cleanupErrorAttributes(error),
-        });
-      }
-      return { claimed: 0, deleted: 0, failed: 0 };
-    }
+    if (!objectStorage) return { claimed: 0, deleted: 0, failed: 0 };
 
     const claims = await claimFileUploads(db, {
       graceMs,
@@ -129,52 +108,9 @@ export function createFileUploadReaperActivities(
         });
       }
     }
-    const recordingClaims = await claimTranscriptionObjects(db, {
-      graceMs,
-      claimTimeoutMs,
-      limit: batchSize,
-    });
-    for (const claim of recordingClaims) {
-      try {
-        await deleteObject(objectStorage, claim.objectKey);
-        const settled = await completeTranscriptionObject(db, claim);
-        if (!settled) {
-          throw new Error("cleanup claim no longer owns a transcription recording object");
-        }
-        deleted += 1;
-      } catch (error) {
-        failed += 1;
-        observability.warn(
-          "expired transcription recording object cleanup failed; claim remains reclaimable",
-          {
-            workspaceId: claim.workspaceId,
-            recordingId: claim.recordingId,
-            ...cleanupErrorAttributes(error),
-          },
-        );
-      }
-    }
-    let transcriptionRecordingsPurged = 0;
-    try {
-      transcriptionRecordingsPurged = await purgeTranscriptionRecordings(db, {
-        graceMs,
-        limit: batchSize,
-      });
-    } catch (error) {
-      observability.warn("expired transcription recording metadata purge failed", {
-        ...cleanupErrorAttributes(error),
-      });
-    }
-    const claimed = claims.length + recordingClaims.length;
-    if (claimed > 0 || transcriptionRecordingsPurged > 0) {
-      observability.info("expired file upload cleanup swept", {
-        claimed,
-        deleted,
-        failed,
-        fileUploads: claims.length,
-        transcriptionRecordingObjects: recordingClaims.length,
-        transcriptionRecordingsPurged,
-      });
+    const claimed = claims.length;
+    if (claimed > 0) {
+      observability.info("expired file upload cleanup swept", { claimed, deleted, failed });
     }
     return { claimed, deleted, failed };
   }

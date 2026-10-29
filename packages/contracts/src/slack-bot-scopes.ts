@@ -25,6 +25,12 @@ export const OPENGENI_SLACK_REACTION_REQUIRED_SCOPE = "reactions:read" as const;
 export const OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE = "files:write" as const;
 
 /**
+ * Optional grant that lets a bot chat post under its own name and avatar
+ * instead of the app's. Slack still marks every such post as the app's.
+ */
+export const OPENGENI_SLACK_BOT_IDENTITY_SCOPE = "chat:write.customize" as const;
+
+/**
  * Bot-token search scopes for Slack's Real-time Search API
  * (`assistant.search.context`). Slack accepts these as BOT scopes, so
  * workspace-wide public search runs under the bot identity and never needs a
@@ -40,15 +46,17 @@ export const OPENGENI_SLACK_BOT_SEARCH_SCOPES = [
 /**
  * Scopes requested by the managed and generated self-hosted manifests.
  *
- * `reactions:read`, `files:write`, and the bot search scopes are not part of the
- * base eligibility contract: legacy installations may continue using existing
- * Slack interactions and tools while the reaction setting stays disabled, bot
- * search and file delivery stay unavailable, and the tools ask an admin to reinstall.
+ * `reactions:read`, `files:write`, `chat:write.customize`, and the bot search
+ * scopes are not part of the base eligibility contract: legacy installations
+ * may continue using existing Slack interactions and tools while the reaction
+ * setting stays disabled, bot search and file delivery stay unavailable, bots
+ * post as the app, and the tools ask an admin to reinstall.
  */
 export const OPENGENI_SLACK_BOT_REQUESTED_SCOPES = [
   ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
+  OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
 ] as const;
 
 export function openGeniSlackBotRequestedScopes(mode: "limited" | "full" = "limited"): string[] {
@@ -197,11 +205,16 @@ export const OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES = [
   "team:read",
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
+  OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
   ...OPENGENI_SLACK_BOT_SEARCH_SCOPES,
 ] as const;
 
 export function hasOpenGeniSlackFileUploadScope(grantedScopes: readonly string[]): boolean {
   return grantedScopes.includes(OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE);
+}
+
+export function hasOpenGeniSlackBotIdentityScope(grantedScopes: readonly string[]): boolean {
+  return grantedScopes.includes(OPENGENI_SLACK_BOT_IDENTITY_SCOPE);
 }
 
 export function hasOpenGeniSlackBotSearchScopes(grantedScopes: readonly string[]): boolean {

@@ -16,13 +16,8 @@ const run = (id: number, path: string, event = "push", head_branch = "main") => 
   run_attempt: 1,
   pull_requests: [{ number: 42 }],
 });
-test("executable admin and non-document files under docs never skip source checks", () => {
-  for (const path of [
-    "docs/merge-batcher-admin/off.ts",
-    "docs/merge-batcher-admin/README.md",
-    "docs/a.sh",
-    "docs/config.json",
-  ])
+test("non-document files under docs never skip source checks", () => {
+  for (const path of ["docs/off.ts", "docs/a.sh", "docs/config.json"])
     expect(docsOnly([path])).toBe(false);
   expect(docsOnly(["docs/guide.md", "README.md"])).toBe(true);
 });
@@ -30,7 +25,7 @@ test("cancellation selects only older heads of the exact PR CI workflow", () => 
   const runs = [
     run(1, ".github/workflows/pr-ci.yml", "pull_request", "feature"),
     run(2, ".github/workflows/ci.yml"),
-    run(3, ".github/workflows/batch-ci.yml", "push", "queue/live/x"),
+    run(3, ".github/workflows/ci.yml", "push", "batch/0123456789ab"),
     {
       ...run(4, ".github/workflows/pr-ci.yml", "pull_request", "feature"),
       pull_requests: [{ number: 43 }],
@@ -56,26 +51,28 @@ test("Version dispatch supersession cannot select main or batch runs", () => {
     ),
   ).toEqual([1]);
 });
-test("main outranks batch and PR; batch outranks PR but not another batch", () => {
+test("Version validation yields to main and batch CI only", () => {
   const main = { run: run(1, ".github/workflows/ci.yml"), jobs: [] };
   const batch = {
-    run: run(2, ".github/workflows/batch-ci.yml", "push", "queue/live/x"),
+    run: run(2, ".github/workflows/ci.yml", "push", "batch/0123456789ab"),
     jobs: [{ name: "unit", status: "queued", conclusion: null }],
   };
-  expect(priorityHold("batch", [main], 3)).toContain("main");
-  expect(priorityHold("pr", [main], 3)).toContain("main");
-  expect(priorityHold("pr", [batch], 3)).toContain("batch");
-  expect(priorityHold("batch", [batch], 3)).toBeNull();
+  expect(priorityHold([main], 3)).toContain("main");
+  expect(priorityHold([batch], 3)).toContain("batch");
+  expect(priorityHold([batch], 2)).toBeNull();
+  const production = { ...batch, run: run(5, ".github/workflows/ci.yml", "push", "production") };
+  expect(priorityHold([production], 3)).toBeNull();
+  const pullRequest = { ...batch, run: run(6, ".github/workflows/pr-ci.yml", "pull_request") };
+  expect(priorityHold([pullRequest], 3)).toBeNull();
 });
 test("pre-fanout and unknown job states hold; proven approval waits do not", () => {
   const r = run(1, ".github/workflows/ci.yml");
   for (const status of ["queued", "in_progress", "pending", "requested", "mystery"])
     expect(
-      priorityHold("pr", [{ run: r, jobs: [{ name: "job", status, conclusion: null }] }], 2),
+      priorityHold([{ run: r, jobs: [{ name: "job", status, conclusion: null }] }], 2),
     ).not.toBeNull();
   expect(
     priorityHold(
-      "pr",
       [
         {
           run: r,
@@ -88,7 +85,7 @@ test("pre-fanout and unknown job states hold; proven approval waits do not", () 
       2,
     ),
   ).toBeNull();
-  expect(priorityHold("pr", [{ run: r, jobs: [] }], 1)).toBeNull();
+  expect(priorityHold([{ run: r, jobs: [] }], 1)).toBeNull();
 });
 test("main public-release approval tail with pending descendants is zero demand", () => {
   const main = { ...run(1, ".github/workflows/ci.yml"), status: "waiting" };
@@ -100,8 +97,7 @@ test("main public-release approval tail with pending descendants is zero demand"
   const job = (patch: Record<string, unknown>, index = 1) =>
     tail.map((j, i) => (i === index ? { ...j, ...patch } : j));
   expect(mainReleaseApprovalOnly(main, tail)).toBe(true);
-  for (const lane of ["pr", "batch"] as const)
-    expect(priorityHold(lane, [{ run: main, jobs: tail }], 99)).toBeNull();
+  expect(priorityHold([{ run: main, jobs: tail }], 99)).toBeNull();
   for (const jobs of [
     [],
     job({ name: "Deploy production" }),
@@ -115,18 +111,18 @@ test("main public-release approval tail with pending descendants is zero demand"
     [...tail, { id: 13, name: "Build API workload image", status: "waiting", conclusion: null }],
   ]) {
     expect(mainReleaseApprovalOnly(main, jobs)).toBe(false);
-    expect(priorityHold("pr", [{ run: main, jobs }], 99)).toContain("main run 1");
+    expect(priorityHold([{ run: main, jobs }], 99)).toContain("main run 1");
   }
   // Run status must itself be waiting; listed demand is never re-read as idle.
   expect(mainReleaseApprovalOnly({ ...main, status: "in_progress" }, tail)).toBe(false);
   // The release-tail proof applies only to main push CI: Batch handling is unchanged.
   const batch = {
-    ...run(2, ".github/workflows/batch-ci.yml", "push", "queue/live/x"),
+    ...run(2, ".github/workflows/ci.yml", "push", "batch/0123456789ab"),
     status: "waiting",
   };
-  expect(priorityHold("pr", [{ run: batch, jobs: tail }], 99)).toContain("batch run 2");
+  expect(priorityHold([{ run: batch, jobs: tail }], 99)).toContain("batch run 2");
   expect(
-    priorityHold("pr", [{ run: batch, jobs: tail.filter((j) => j.status !== "pending") }], 99),
+    priorityHold([{ run: batch, jobs: tail.filter((j) => j.status !== "pending") }], 99),
   ).toBeNull();
 });
 test("docs-only filters never hide code/workflow/renamed source", () => {
@@ -152,7 +148,7 @@ test("legacy full Version validation cancellation is exact-title bound, never ma
         { ...old, id: 11, event: "push" },
         { ...old, id: 12, display_title: `Version PR 43 head ${"a".repeat(40)}` },
         { ...old, id: 13, display_title: `Version PR 42 head ${"b".repeat(40)}` },
-        { ...old, id: 14, path: ".github/workflows/batch-ci.yml" },
+        { ...old, id: 14, path: ".github/workflows/pr-ci.yml" },
       ],
       42,
       "b".repeat(40),

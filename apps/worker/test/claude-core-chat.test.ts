@@ -28,7 +28,7 @@ import {
   claudeResponseInspector,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
-  selectClaudeTurnCapacityByRoute,
+  selectClaudeTurnCapacity,
 } from "../src/activities/agent-turn/claude-core";
 import {
   subscriptionCoreTurnOf,
@@ -124,12 +124,11 @@ function capacityDeps(overrides: { source?: string; isClaudeTurn?: boolean } = {
   return deps as unknown as CapacityPhaseDeps;
 }
 
-function route(value: db.SubscriptionCoreProviderRoute) {
+function scopedDb() {
   spy(db, "withRlsContext").mockImplementation(
     async (_db: unknown, _context: unknown, callback: (scoped: never) => Promise<unknown>) =>
       await callback({} as never),
   );
-  return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
 function coreTurns(
@@ -163,44 +162,21 @@ const runPlacement = {
   connectedCount: 1,
 } as unknown as db.SubscriptionCorePlacement;
 
-describe("Claude capacity by provider route", () => {
-  test("the legacy route fails closed after exactly one route read (the legacy selection is deleted)", async () => {
-    const read = route("legacy");
-    const { place } = coreTurns(runPlacement);
-    const deps = capacityDeps();
-    await expect(selectClaudeTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_core_cutover_disabled", retryable: false },
-    });
-    expect(read).toHaveBeenCalledTimes(1);
-    expect(read.mock.calls[0]![1]).toEqual({ accountId: "account-1", provider: "claude" });
-    expect(place).not.toHaveBeenCalled();
-    expect(deps.leases.claude.holderId).toBeNull();
-  });
-
-  test("a non-Claude turn reads no route", async () => {
-    const read = route("core");
-    expect(await selectClaudeTurnCapacityByRoute(capacityDeps({ isClaudeTurn: false }))).toEqual({
+describe("Claude capacity on the shared core", () => {
+  test("a non-Claude turn is not placed", async () => {
+    scopedDb();
+    expect(await selectClaudeTurnCapacity(capacityDeps({ isClaudeTurn: false }))).toEqual({
       ok: true,
     });
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  test("maintenance fails closed and reads neither selector", async () => {
-    route("maintenance");
-    const { place } = coreTurns(runPlacement);
-    await expect(selectClaudeTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
-      payload: { code: "subscription_core_cutover_disabled", retryable: false },
-    });
-    expect(place).not.toHaveBeenCalled();
   });
 
   test("core places the accepted turn and adopts the core lease", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const { place, recover } = coreTurns(runPlacement);
     const deps = capacityDeps();
     try {
-      expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(await selectClaudeTurnCapacity(deps)).toEqual({ ok: true });
       expect(recover).toHaveBeenCalledTimes(1);
       expect(place).toHaveBeenCalledWith(deps.db, {
         identity,
@@ -230,14 +206,14 @@ describe("Claude capacity by provider route", () => {
   });
 
   test("a recovered connection wakes the account's Claude waiters, never Codex's", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
     const codexWake = spy(db, "wakeSubscriptionCoreCodexCapacityWaiters");
     const { recover } = coreTurns(runPlacement, undefined, 1);
     const deps = capacityDeps();
     try {
-      expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(await selectClaudeTurnCapacity(deps)).toEqual({ ok: true });
       expect(recover).toHaveBeenCalledTimes(1);
       expect(wake).toHaveBeenCalledWith(deps.db, "claude", {
         accountId: identity.accountId,
@@ -250,7 +226,7 @@ describe("Claude capacity by provider route", () => {
   });
 
   test("a core wait parks the same turn on its Claude core waiter and re-evaluates it", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
       productModelId: PRODUCT_MODEL,
@@ -302,7 +278,7 @@ describe("Claude capacity by provider route", () => {
       events: [],
     });
     const deps = capacityDeps();
-    expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({
+    expect(await selectClaudeTurnCapacity(deps)).toEqual({
       exit: {
         status: "waiting_capacity",
         capacityWait: {
@@ -339,7 +315,7 @@ describe("Claude capacity by provider route", () => {
   });
 
   test("a core wait for compaction defers with its request preserved, never parks", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     coreTurns({
       kind: "wait",
@@ -354,7 +330,7 @@ describe("Claude capacity by provider route", () => {
       settled.push(value);
       return true;
     };
-    expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({
+    expect(await selectClaudeTurnCapacity(deps)).toEqual({
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
     expect(JSON.stringify(settled)).toContain('"requestPreserved":true');
@@ -969,15 +945,6 @@ describe("Claude model scope and provider ids", () => {
     // set, each model once, and no other provider's models.
     expect(ids.toSorted()).toEqual(["claude-haiku-5", "claude-opus-5-5", "claude-sonnet-5"]);
   });
-});
-
-test("no Claude turn on the legacy route touches durable events through the core", async () => {
-  route("legacy");
-  const publish = spy(events, "publishDurableSessionEvents");
-  await expect(selectClaudeTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
-    payload: { code: "subscription_core_cutover_disabled" },
-  });
-  expect(publish).not.toHaveBeenCalled();
 });
 
 test("a core-placed Claude turn is the turn's placement for attribution, checkpoints and revalidation", async () => {

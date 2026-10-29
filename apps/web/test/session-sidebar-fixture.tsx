@@ -17,7 +17,12 @@ import {
   sessionBrowsePreferenceStorageId,
   writeSessionBrowsePreferences,
 } from "@opengeni/react/app/lib/session-browse-preferences";
-import { client, evidence, subjectId, workspaceId } from "./session-sidebar-context";
+import {
+  previewClient as client,
+  evidence,
+  subjectId,
+  workspaceId,
+} from "./session-sidebar-context";
 import "../src/styles.css";
 
 function RequestProfile() {

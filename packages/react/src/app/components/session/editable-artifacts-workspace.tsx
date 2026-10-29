@@ -12,6 +12,7 @@ import {
 import { lazy, useEffect, useRef, useState } from "react";
 
 import { Button } from "../../../ui/button";
+import { useWorkspacePanelOwnsExpand } from "../../../components/workspace-dock";
 import { useAppContext } from "../../app-context";
 import { EditableArtifactSurface, usePreloadAppSurface } from "../../lib/app-surfaces";
 import { ArtifactLibrary, type ArtifactPinAction } from "../artifacts/artifact-library";
@@ -26,6 +27,9 @@ const RetainedArtifactRoute = lazy(() =>
 const ArtifactDetailRoute = lazy(() =>
   import("../../routes/artifacts").then((module) => ({ default: module.ArtifactDetailRoute })),
 );
+
+/** The panel's one expand for a Site, named for what it does. */
+const EXPAND_SITE = "Expand Site to full window";
 
 export type SessionEditableArtifactSummary = Readonly<{
   id: string;
@@ -122,7 +126,12 @@ export function SessionEditableArtifactsWorkspace({
 
   const artifact =
     artifacts.find((candidate) => matchesArtifact(candidate, selectedArtifactId)) ?? artifacts[0];
-  if (browsing && catalogItems.length > 0) {
+  const listShown = browsing && catalogItems.length > 0;
+  const settingsOpen = artifact?.modality === "site" && settingsFor === artifact.id;
+  // A Site on screen has its own expand (its full window): the dock's
+  // Maximize would be a second, look-alike one, so the Site's is the one.
+  useWorkspacePanelOwnsExpand(!listShown && artifact?.modality === "site" && !settingsOpen);
+  if (listShown) {
     return (
       <div className="@container h-full min-h-0 overflow-y-auto bg-bg p-3 text-fg">
         <div className="mb-4 flex min-h-10 items-center justify-between gap-2">
@@ -197,7 +206,6 @@ export function SessionEditableArtifactsWorkspace({
     );
   }
 
-  const settingsOpen = artifact.modality === "site" && settingsFor === artifact.id;
   const settingsLabel = settingsOpen ? "Back to Site" : "Site settings";
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-fg">
@@ -248,8 +256,8 @@ export function SessionEditableArtifactsWorkspace({
                   variant="ghost"
                   size="icon-sm"
                   className="shrink-0"
-                  aria-label="Open full screen"
-                  title="Open full screen"
+                  aria-label={EXPAND_SITE}
+                  title={EXPAND_SITE}
                   onClick={() => setFullScreenSite(artifact.id)}
                 >
                   <Maximize2Icon className="size-4" />

@@ -104,6 +104,7 @@ test("stream component retains the completed compaction checkpoint before refusi
         generateSessionTitleInParallel: true,
         groupBoxBackend: "none",
         agent: {},
+        compactionModeOptions: {},
       } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
     } catch (caught) {
       error = caught;

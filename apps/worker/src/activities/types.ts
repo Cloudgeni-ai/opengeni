@@ -544,7 +544,6 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_authority_unavailable"
         | "machine_target_unavailable"
         | "machine_enrollment_inactive"
-        | "variable_set_unavailable"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
         | "knowledge_source_paused"
@@ -585,19 +584,6 @@ export type RunKnowledgeSourceSyncBatchInput = {
   sourceId: string;
   overlapPolicy: "skip" | "buffer_one";
 };
-
-export type DispatchAutomationRunInput = {
-  accountId: string;
-  workspaceId: string;
-  runId: string;
-};
-
-export type DispatchAutomationRunResult =
-  | { action: "started"; sessionId: string }
-  | { action: "already_dispatched"; sessionId: string }
-  | { action: "skipped"; reason: string }
-  | { action: "failed"; reason: string }
-  | { action: "not_found" };
 
 export type RunKnowledgeSourceSyncBatchResult = (
   | { action: "continue" }

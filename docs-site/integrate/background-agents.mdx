@@ -168,14 +168,6 @@ import { AutomationsPanel } from "@opengeni/react/automations";
 
 Its words come from the `automations.*` message keys, so `OpenGeniMessagesProvider` translates it. Sessions and session list entries carry `automationWait`: the next run, or the event and source the chat waits for. `sessionAutomationWaitWords(t, session, { now })` turns it into "Waiting for project.updated from Acme" or "Next run: Tomorrow, 09:00" for your own chat list.
 
-### Moving from the first automation API
-
-`@opengeni/sdk/automations`, `@opengeni/sdk/pr-review`, the `/v1/workspaces/:workspaceId/automations/*` and `/pr-review/*` routes, and `POST /v1/webhooks/automations/:endpointId` are deprecated. Their responses carry `Deprecation` and `Sunset` headers; they keep working until January 25, 2027 and are removed in the next major SDK.
-
-- A `signed-json.v1` source becomes a `{ kind: "webhook", adapter: "standard" }` event source. Senders sign with Standard Webhooks and the new secret instead of `x-opengeni-signature-256`.
-- A trigger becomes a scheduled task with `events`: its event types carry over, and its session template becomes the task's `agentConfig`.
-- Pull-request review becomes a scheduled task on the GitHub source, for `pull_request.opened` and `pull_request.ready_for_review`, with the repositories to review in `agentConfig.resources`. In the web app, **Automations › New › Review new pull requests** sets it up.
-
 ## Work until done
 
 Give a session a **goal** and it keeps working across turns until the goal is met or it pauses with a reason:

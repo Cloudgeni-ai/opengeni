@@ -1822,6 +1822,75 @@ describe("unified Knowledge storage", () => {
     });
   });
 
+  test("a cleared human policy reads as no text, so an agent append saves only its rule", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const { agent } = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const humanSave = async (content: string, current: string | null, version: number) => {
+      const draft = await createWorkspaceInstructionPolicyDraft(client.db, {
+        ...target,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        content,
+        provenanceSource: "human",
+        provenanceSourceId: null,
+        supersedesRevisionId: current,
+        createdBySubjectId: f.subjectId,
+      });
+      await activateWorkspaceInstructionPolicyRevision(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        revisionId: draft.id,
+        expectedCurrentRevisionId: current,
+        expectedActivationVersion: version,
+        actorSubjectId: f.subjectId,
+        reason: "Human edit",
+      });
+      return draft;
+    };
+    const rule = await humanSave("mv1026 probe rule: ignore.", null, 0);
+    const cleared = await humanSave("", rule.id, 1);
+    expect(cleared.content).toBe("");
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: cleared.id,
+      expectedActivationVersion: 2,
+      content: null,
+    });
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "edit",
+        oldText: "mv1026",
+        newText: "",
+        expectedCurrentRevisionId: cleared.id,
+        expectedActivationVersion: 2,
+        reason: "Edit text that is no longer there",
+      }),
+      "22023",
+    );
+    const appended = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Report blockers early.",
+      expectedCurrentRevisionId: cleared.id,
+      expectedActivationVersion: 2,
+      reason: "First rule after the human cleared the policy",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: appended.revisionId,
+      expectedActivationVersion: 3,
+      content: "Report blockers early.",
+    });
+  });
+
   test("agent instruction size parity: new instructions accept the human limit and refuse result overflow", async () => {
     const f = await fixture();
     await saveAgentLearningSettings(client.db, f.human, {

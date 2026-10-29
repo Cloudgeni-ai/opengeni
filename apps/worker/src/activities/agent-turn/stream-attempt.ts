@@ -33,6 +33,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
 import { withAppActionApprovalTitle } from "./app-action-confirmation";
+import { withApprovalDisplayTitle } from "./approval-display-title";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
@@ -53,10 +54,12 @@ import {
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
+  isOpeningToolLoadResponse,
   isPreemptedModelResponse,
   preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
+  secretValueModelInputFilter,
   type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
@@ -124,6 +127,12 @@ import {
   settleOpenSuffixResumeIfNeeded,
 } from "../open-suffix-resume";
 import {
+  interactionInterventionRequestsForPause,
+  recordedInteractionRequestCalls,
+  type InteractionPauseCall,
+} from "./interaction-pause";
+import {
+  modelCallProcessingResidency,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
   withPublicApprovalFields,
@@ -139,8 +148,6 @@ import { revalidatePlacedSubscriptionCore } from "./subscription-core-placed";
 import {
   assertWorkspaceHumanInputAllowed,
   stableHumanInputRequestId,
-  stableInteractionInterventionId,
-  stableInteractionInterventionOperationId,
   ensureRunAllowedBetweenModelCalls,
 } from "./admission";
 import {
@@ -177,6 +184,7 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
+  servedRouteProcessingResidency,
 } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 import {
@@ -200,7 +208,11 @@ import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./own
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
-import type { PromptCacheRequestFingerprint, TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type {
+  ModelCallProcessingResidencyV1,
+  PromptCacheRequestFingerprint,
+  TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -214,6 +226,7 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
+import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
 
 export type TurnStreamAttemptDeps = {
@@ -485,9 +498,33 @@ export async function runTurnStreamAttempt(
   if (!activeTurnId) {
     throw new Error("Turn id was not initialized");
   }
+  // Agent-requested human handoffs open in the worker, never through the API
+  // intervention route, so they are counted at their durable boundary: the
+  // pause or re-freeze that recorded them. A refused request opened nothing.
+  const observeOpenedInteractionRequests = async (calls: readonly InteractionPauseCall[]) => {
+    if (!calls.some((call) => call.input.operation === "request")) return;
+    const observeIntervention = interactionInterventionMetricObserver(observability);
+    for (const call of await recordedInteractionRequestCalls(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      calls,
+    })) {
+      if (call.input.operation !== "request") continue;
+      observeIntervention({ kind: call.input.kind, outcome: "opened" });
+    }
+  };
   const sessionTitleUsageState = createSessionTitleModelUsageEventState(
     claimedModelUsageSourceKeys,
   );
+  // Where this turn's route processes data, recorded on every call it serves.
+  // The title records its own route's residency once that route is chosen.
+  const turnProcessingResidency = servedRouteProcessingResidency(
+    settings,
+    resolvedModel,
+    turnExecutionPolicy.productModelId,
+  );
+  let titleProcessingResidency: ModelCallProcessingResidencyV1 | null = null;
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let independentTitleAdmission: Promise<void> | null = null;
   let beginIndependentTitleAdmission: (() => Promise<void>) | null = null;
@@ -539,6 +576,9 @@ export async function runTurnStreamAttempt(
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
         leaseLostMessage: "Provider credential lease expired during session title generation",
+        // The title's own route; a title whose route was never resolved is
+        // unknown, never the turn's residency.
+        processingResidency: titleProcessingResidency ?? modelCallProcessingResidency(null),
       });
     }
     if (!generated.title) {
@@ -611,6 +651,9 @@ export async function runTurnStreamAttempt(
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
+        ...(compactionModeOptions.isCodexSubscriptionTurn !== true
+          ? { omitRemoteCompactionItems: true }
+          : {}),
         ...(settings.subscriptionCrossProviderFailoverEnabled &&
         compactionModeOptions.codexCompactionMode === "portable" &&
         turnExecutionPolicy.credentialRestriction === undefined
@@ -984,6 +1027,7 @@ export async function runTurnStreamAttempt(
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
       deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
+    const attemptSecretValues = currentAttemptSecretValues();
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
@@ -1041,7 +1085,15 @@ export async function runTurnStreamAttempt(
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
-          onModelVisibleContext: async (snapshot) => {
+          // Final guard: no known secret value reaches the provider, whatever
+          // path brought it into the model input (docs/secrets.md, Masking).
+          ...(attemptSecretValues
+            ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
+            : {}),
+          onModelVisibleContext: async (rawSnapshot) => {
+            const snapshot = attemptSecretValues
+              ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
+              : rawSnapshot;
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1288,6 +1340,9 @@ export async function runTurnStreamAttempt(
     const iterator = eventing.stream.toStream()[Symbol.asyncIterator]();
     const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();
     let streamDone = false;
+    // The local opening tool load and its search result precede the first
+    // provider response; they are not its first byte.
+    let openingToolLoadInFlight = false;
     try {
       while (true) {
         const next = await nextStreamEvent(iterator, activityContext);
@@ -1296,7 +1351,9 @@ export async function runTurnStreamAttempt(
           streamDone = true;
           break;
         }
-        await settleFallbackProviderFirstByte();
+        if (next.value.type === "raw_model_stream_event")
+          openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
+        if (!openingToolLoadInFlight) await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
         let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
@@ -1349,6 +1406,7 @@ export async function runTurnStreamAttempt(
             latestPromptCacheRequest = null;
             return request;
           },
+          processingResidency: turnProcessingResidency,
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -2052,6 +2110,7 @@ export async function runTurnStreamAttempt(
               servingAccountHash: aggregateAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
               emittedSourceKeys: emittedModelUsageSourceKeys,
+              processingResidency: turnProcessingResidency,
             });
             if (aggregateAuthoritative && billing) {
               await recordAuthoritativeModelCallFact({
@@ -2070,6 +2129,7 @@ export async function runTurnStreamAttempt(
                 subscriptionConnectionId:
                   subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
                 contextContributions: eventing.companyBrainContextContributions,
+                processingResidency: turnProcessingResidency,
               });
               recordAuthoritativeModelUsageMetrics({
                 observability,
@@ -2165,22 +2225,12 @@ export async function runTurnStreamAttempt(
             },
           },
         }));
-      const interactionInterventionRequests = interactionInterventionInterruptions.map(
-        (interruption) => ({
-          id: stableInteractionInterventionId(
-            input.sessionId,
-            activeTurnId,
-            interruption.toolCallId,
-          ),
-          operationId: stableInteractionInterventionOperationId(
-            input.sessionId,
-            activeTurnId,
-            interruption.toolCallId,
-          ),
-          toolCallId: interruption.toolCallId,
-          input: interruption.input,
-        }),
-      );
+      const interactionInterventionRequests = await interactionInterventionRequestsForPause({
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        calls: interactionInterventionInterruptions,
+        readTarget: eventing.interactionRequestTargetReader,
+      });
       const pendingApprovals = [
         ...approvals,
         ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
@@ -2237,12 +2287,14 @@ export async function runTurnStreamAttempt(
                     payload: {
                       approvals: approvals.map((approval) =>
                         withPublicApprovalFields(
-                          withAppActionApprovalTitle(
-                            withMcpToolDisplayMetadata(
-                              eventing.preparedTools?.mcpServers ?? [],
-                              approval,
+                          withApprovalDisplayTitle(
+                            withAppActionApprovalTitle(
+                              withMcpToolDisplayMetadata(
+                                eventing.preparedTools?.mcpServers ?? [],
+                                approval,
+                              ),
+                              { workspaceId: input.workspaceId, sessionId: input.sessionId },
                             ),
-                            { workspaceId: input.workspaceId, sessionId: input.sessionId },
                           ),
                         ),
                       ),
@@ -2268,13 +2320,7 @@ export async function runTurnStreamAttempt(
       ) {
         return claimedResult({ status: "cancelled" });
       }
-      // Agent-requested human handoffs open here, in the worker, never through
-      // the API intervention route, so they are counted at their durable boundary.
-      const observeIntervention = interactionInterventionMetricObserver(observability);
-      for (const interruption of interactionInterventionInterruptions) {
-        if (interruption.input.operation !== "request") continue;
-        observeIntervention({ kind: interruption.input.kind, outcome: "opened" });
-      }
+      await observeOpenedInteractionRequests(interactionInterventionInterruptions);
       // The interruption and its preceding tool results are now durable.
       await finalizeTurnOpStreamOps();
       // A Steer that was waiting for this turn's next model step would
@@ -2531,6 +2577,16 @@ export async function runTurnStreamAttempt(
     modelToolOutputTruncationTokens: eventing.modelRunSettings.modelToolOutputTruncationTokens,
     settle: eventing.settle!,
     publish: eventing.publish,
+    interactionRequests: {
+      build: async (calls) =>
+        await interactionInterventionRequestsForPause({
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          calls,
+          readTarget: eventing.interactionRequestTargetReader,
+        }),
+      recorded: observeOpenedInteractionRequests,
+    },
   });
   if (openSuffixResume.action === "cancelled") {
     return claimedResult({ status: "cancelled" });
@@ -2576,6 +2632,11 @@ export async function runTurnStreamAttempt(
       ? serviceTierForLatencyMode(turnExecutionPolicy.providerId, turnExecutionPolicy.latencyMode)
       : undefined;
     titleUsageModelId = titleRoute.usageModelId;
+    titleProcessingResidency = servedRouteProcessingResidency(
+      settings,
+      titleRoute.resolvedModel,
+      titleRoute.usageModelId ?? turnExecutionPolicy.productModelId,
+    );
     if (
       startSessionTitleWorkflow &&
       titleRoute.resolvedModel &&

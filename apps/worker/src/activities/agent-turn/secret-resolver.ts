@@ -26,6 +26,7 @@ import {
   type VaultProviderRegistry,
   type VaultProviderAuthority,
 } from "@opengeni/vaults";
+import { rememberingAttemptSecretResolver } from "./secret-values";
 
 /**
  * Q-17: a frozen configuration without the key reads `from === "all"` (the
@@ -104,23 +105,27 @@ function attemptPrincipal(
 
 export function attemptSecretResolver(input: AttemptSecretInput): SecretResolver {
   const bus = input.bus;
-  return createSecretResolver(
-    {
-      db: input.db,
-      encryptionKey: environmentsEncryptionKeyBytes(input.settings) ?? null,
-      ...(input.vaultAccess ? { providers: input.vaultAccess.providers } : {}),
-    },
-    attemptPrincipal(input),
-    {
-      capabilityEnabled: secretsCapabilityEnabled(input.agentConfig),
-      ...(input.vaultAccess ? { attemptBudget: input.vaultAccess.attemptBudget } : {}),
-      ...(bus
-        ? {
-            publishEvents: (events) =>
-              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
-          }
-        : {}),
-    },
+  // Every value this attempt resolves, on any surface, is masked afterwards
+  // in its tool results and stored text (docs/secrets.md, Masking).
+  return rememberingAttemptSecretResolver(
+    createSecretResolver(
+      {
+        db: input.db,
+        encryptionKey: environmentsEncryptionKeyBytes(input.settings) ?? null,
+        ...(input.vaultAccess ? { providers: input.vaultAccess.providers } : {}),
+      },
+      attemptPrincipal(input),
+      {
+        capabilityEnabled: secretsCapabilityEnabled(input.agentConfig),
+        ...(input.vaultAccess ? { attemptBudget: input.vaultAccess.attemptBudget } : {}),
+        ...(bus
+          ? {
+              publishEvents: (events) =>
+                publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+            }
+          : {}),
+      },
+    ),
   );
 }
 

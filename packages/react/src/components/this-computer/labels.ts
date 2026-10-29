@@ -218,6 +218,8 @@ export function defaultThisComputerLabels(
           return t("thisComputer.error.removed");
         case "signed_out":
           return t("thisComputer.error.signedOut");
+        case "reconnect_required":
+          return t("thisComputer.error.reconnectRequired");
         default:
           return detail ?? t("thisComputer.error.other");
       }

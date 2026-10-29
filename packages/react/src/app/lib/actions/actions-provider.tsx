@@ -16,6 +16,7 @@ import {
   type ReactNode,
 } from "react";
 import type { SessionListRow } from "../../../session-list-model";
+import { useMeetingRecorderControls } from "../../../meetings/recorder-context";
 import { useAppContext } from "../../app-context";
 import { useRail } from "../../components/rail/rail-context";
 import { requestConversationFind } from "../conversation-find-event";
@@ -162,6 +163,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const workspacePanel = useSessionUiFeature("dock");
   const { inspectorOpen, setInspectorOpen } = app;
   const keyboardShortcuts = useSessionUiFeature("keyboardShortcuts");
+  const recorder = useMeetingRecorderControls();
   const platform = useMemo(() => currentPlatform(), []);
   const workspaceId = rail.workspaceId;
   const subjectId = app.accessContext.subjectId;
@@ -198,6 +200,34 @@ export function ActionsProvider(props: { children: ReactNode }) {
     app.authSession !== null &&
     Boolean(app.session?.tenancy) &&
     hasWorkspacePermission(app.accessContext, workspaceId, "sessions:create");
+
+  // Meetings record where a host mounts the recorder, in a browser that can;
+  // the same rule as the Meetings page's Start recording button.
+  const meetings = useMemo<ActionEnv["meetings"]>(() => {
+    if (!recorder || recorder.supported === false) return null;
+    const showMeetings = () => {
+      rail.setDrawerOpen(false);
+      void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } });
+    };
+    return {
+      state: recorder.state,
+      start: () => {
+        recorder.requestStart();
+        showMeetings();
+      },
+      show: showMeetings,
+      stop: async () => {
+        const stopped = await recorder.stop();
+        // Hosts that give the recorder no way to open a meeting get the console's route.
+        if (stopped && !stopped.opened) {
+          void navigate({
+            to: "/workspaces/$workspaceId/meetings/$recordingId",
+            params: { workspaceId: stopped.workspaceId, recordingId: stopped.recordingId },
+          });
+        }
+      },
+    };
+  }, [recorder, rail, navigate, workspaceId]);
 
   const [menu, setMenu] = useState<{
     open: boolean;
@@ -289,6 +319,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       workspacePanel,
       workspaces,
       canForkCurrentChat,
+      meetings,
       newChat: () => rail.startNewSession(),
       openChat: (chatId, inWorkspaceId) => openChatForTyping(chatId, inWorkspaceId),
       openSite: (siteId) => {
@@ -339,6 +370,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       workspaces,
       canForkCurrentChat,
       reachable,
+      meetings,
       inspectorOpen,
       setInspectorOpen,
       rail,

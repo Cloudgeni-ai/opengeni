@@ -246,4 +246,37 @@ describe("a scheduled occurrence aimed at a paused target", () => {
       "active",
     );
   }, 180_000);
+
+  test("a chat waiting for a model account skips the run and tells the owner how to move on", async () => {
+    const workspace = await fixture();
+    // The chat's last turn is parked on a model account (for example its
+    // Codex plan ran out of usage or was disconnected).
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update session_turns set status = 'failed', finished_at = now()
+        where session_id = ${workspace.targetId}::uuid`;
+      await tx`update sessions set status = 'waiting_capacity', active_turn_id = null
+        where id = ${workspace.targetId}::uuid`;
+    });
+    const task = await schedule(workspace, { runMode: "existing_session", overlapPolicy: "skip" });
+    expect(await fire(workspace, task.id)).toEqual({
+      action: "blocked",
+      reason: "scheduled_run_terminal",
+    });
+    expect(await runs(workspace, task.id)).toEqual([
+      { status: "skipped", error: "scheduled_session_waiting_capacity" },
+    ]);
+    // A daily schedule tells its owner at once; it keeps running.
+    await reviewScheduledTaskBlockerInventory({ db: client.db, bus });
+    expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
+      "active",
+    );
+    const notices = (
+      await listSessionEvents(client.db, workspace.workspaceId, workspace.targetId)
+    ).filter((event) => event.type === "session.notification.posted");
+    expect(notices).toHaveLength(1);
+    const body = String((notices[0]!.payload as { body?: unknown }).body);
+    expect(body).toContain("waiting for a model account");
+    expect(body).toContain("Pick another model in that chat");
+  }, 180_000);
 });

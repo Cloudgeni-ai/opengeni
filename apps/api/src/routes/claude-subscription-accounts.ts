@@ -19,10 +19,9 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
-import { claudeUsageRoute, coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
+import { coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
 import {
   claudeCoreAccount,
-  claudeCoreRoute,
   claudePoolCore,
   connectClaudeCore,
   requireClaudeCorePersonalWorkspace,
@@ -77,7 +76,6 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     if (organization) {
       const accountId = c.req.param("organizationId")!;
       const human = await requireOrganizationCodexHuman(c, deps, accountId);
-      await claudeUsageRoute(deps, accountId, null);
       return {
         core: true,
         accountId,
@@ -88,7 +86,6 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     }
     const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await claudeUsageRoute(deps, grant.accountId, workspaceId);
     return {
       core: true,
       accountId: grant.accountId,
@@ -132,36 +129,32 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
             ...(await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!)),
           }
         : null;
-      const workspaceId = organization ? null : c.req.param("workspaceId")!;
-      // The runtime first (one receipt read), so a private account on the
-      // core is authorized in the owner's Personal workspace, where the core
-      // keeps it, and refused (403) anywhere else. The read grant naming the
-      // organization is taken only once a receipt exists (the callback), so
-      // legacy authorizes exactly as before.
+      const requestWorkspaceId = organization ? null : c.req.param("workspaceId")!;
+      // A private account lives on the core in its owner's Personal
+      // workspace; the person connects it from any workspace of the
+      // organization, and it is written there.
       const read: { grant?: Awaited<ReturnType<typeof requireAccessGrant>> } = {};
-      await claudeCoreRoute(deps, async () => {
-        if (actor) return actor.organizationId;
-        read.grant = await requireAccessGrant(c, deps, workspaceId!, "workspace:read");
-        return read.grant.accountId;
-      });
-      if (workspaceId && parsed.data.scope === "user") {
+      if (!actor)
+        read.grant = await requireAccessGrant(c, deps, requestWorkspaceId!, "workspace:read");
+      if (requestWorkspaceId && parsed.data.scope === "user") {
         if (!read.grant) throw new Error("core Claude route without its read grant");
         await requireClaudeCorePersonalWorkspace(deps, {
           accountId: read.grant.accountId,
-          workspaceId,
           subjectId: read.grant.subjectId,
         });
       }
-      const authority = workspaceId
+      const authority = requestWorkspaceId
         ? await requireSubscriptionScopeMutation(
             c,
             deps,
-            workspaceId,
+            requestWorkspaceId,
             parsed.data.scope,
             "Claude",
-            "personal_workspace",
+            "own_personal_workspace",
           )
         : null;
+      // Where the account lives: this workspace, or the owner's Personal workspace.
+      const workspaceId = authority?.workspaceId ?? null;
       const accountId = actor?.organizationId ?? authority!.accountId;
       const subjectId = actor?.subjectId ?? authority!.subjectId;
       const encryptionKey = requireEnvironmentEncryption(deps.settings);

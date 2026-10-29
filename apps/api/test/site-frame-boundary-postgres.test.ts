@@ -887,24 +887,6 @@ test("a schedule created from a Site records the Site; another Site cannot chang
   await expect(
     assertScheduledTaskMutationOwner(db.db, await f.agentGrant(fromA), directTask.id),
   ).rejects.toMatchObject({ status: 403 });
-
-  // Automations are never created or changed from a Site page, even by an admin.
-  const automation = await withSiteSessionOrigin(originA, () =>
-    f.app.request(`/v1/workspaces/${f.workspace.id}/automations/sources`, {
-      method: "POST",
-      headers: f.service,
-      body: JSON.stringify({}),
-    }),
-  );
-  expect(automation.status).toBe(403);
-  expect(await automation.text()).toContain("A Site page cannot create or change automations");
-  // Outside a Site the same admin request reaches validation.
-  const outside = await f.app.request(`/v1/workspaces/${f.workspace.id}/automations/sources`, {
-    method: "POST",
-    headers: f.service,
-    body: JSON.stringify({}),
-  });
-  expect(outside.status).not.toBe(403);
 });
 
 test("Site pages cannot change publications; their agents use normal owner authorization", async () => {
@@ -1473,4 +1455,52 @@ test("a conversation started in the console's Site view begins knowing its Site;
   });
   expect(asReader.status, await asReader.clone().text()).toBe(202);
   expect(await initialContext(((await asReader.json()) as { id: string }).id)).toBeNull();
+});
+
+test("the console's Site view attaches the person's files to a new conversation; Site code can't", async () => {
+  const f = await fixture();
+  const site = await f.publish("Sales dashboard");
+  // The console's Site view: the Site's id and version, no frame marker.
+  const siteView = {
+    "x-opengeni-site-id": site.siteId,
+    "x-opengeni-site-version": site.versionId,
+  };
+  const fileId = crypto.randomUUID();
+  await shared.admin`
+    insert into files (
+      id, account_id, workspace_id, status, filename, safe_filename,
+      content_type, size_bytes, bucket, object_key
+    ) values (
+      ${fileId}, ${f.accountId}, ${f.workspace.id}, 'ready', 'screenshot.png',
+      'screenshot.png', 'image/png', 4, 'test', ${fileId}
+    )`;
+  const file = { kind: "file", fileId };
+  const created = await f.call("POST", "/sessions", siteView, {
+    initialMessage: "What's wrong in this screenshot?",
+    idempotencyKey: crypto.randomUUID(),
+    resources: [file],
+  });
+  expect(created.status, await created.clone().text()).toBe(202);
+  const { id } = (await created.json()) as { id: string };
+  const [row] = await shared.admin<{ resources: unknown[] }[]>`
+    select resources from sessions where id = ${id}`;
+  expect(row!.resources).toEqual([expect.objectContaining({ kind: "file", fileId })]);
+
+  // Site code (the bridge always marks it) still can't attach files, and the
+  // Site view attaches files only, not repositories or other resources.
+  for (const [headers, resources] of [
+    [site.frame("frame-a"), [file]],
+    [siteView, [file, { kind: "repository", uri: "https://github.com/acme/app", ref: "main" }]],
+  ] as const) {
+    const response = await f.call("POST", "/sessions", headers, {
+      initialMessage: "Hello",
+      resources,
+    });
+    const json = (await response.json()) as { code?: string; details?: { field?: string } };
+    expect({ status: response.status, code: json.code, field: json.details?.field }).toEqual({
+      status: 403,
+      code: "SITE_SESSION_TOOLS_FORBIDDEN",
+      field: "resources",
+    });
+  }
 });

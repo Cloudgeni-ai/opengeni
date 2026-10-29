@@ -130,7 +130,9 @@ function ScopedCard({
       typeLabel={
         dialogSubtitle ?? (showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : "")
       }
-      description={hostDescription || item?.description || rationale}
+      badge={showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : undefined}
+      description={hostDescription || rationale || item?.description || ""}
+      clampDescription={!hostDescription && Boolean(rationale)}
       skill={false}
       expanded={flow.expanded}
       complete={flow.complete}
@@ -172,8 +174,9 @@ function ScopedCard({
           <>
             <p>{hostDescription || item.description || rationale}</p>
             {busy ? (
-              <>
-                <p role="status" className="og-session-capability-progress">
+              <div className="og-session-capability-waiting">
+                <span aria-hidden className="og-session-capability-spinner" />
+                <p role="status">
                   {waiting
                     ? t("sessionMcpCapabilityCard.finishSigningInWithName", { name: item.name })
                     : reconciling
@@ -189,7 +192,7 @@ function ScopedCard({
                     {t("sessionMcpCapabilityCard.stopWaiting")}
                   </button>
                 ) : null}
-              </>
+              </div>
             ) : !connected ? (
               <>
                 {!item.connectionRef && !personalOnly ? (

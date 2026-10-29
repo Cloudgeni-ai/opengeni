@@ -5,7 +5,7 @@ export const MAX_CAPACITY_WAIT_CANDIDATES = 32;
 
 /** Null denotes a legacy home-only evaluation. An empty array still denotes
  * a failover-aware evaluation and therefore requires bounded reconciliation:
- * settings or a cutover can introduce a candidate after this snapshot.
+ * settings can introduce a candidate after this snapshot.
  */
 export function capacityWaitCandidateProviders(
   providers: readonly ProviderId[] | null | undefined,
