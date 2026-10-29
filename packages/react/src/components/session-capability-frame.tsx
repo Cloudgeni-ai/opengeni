@@ -126,7 +126,8 @@ export function SessionCapabilityFrame({
           {complete ? <CheckIcon size={16} aria-hidden /> : null}
         </div>
         {complete ? (
-          <p role="status" className="og-session-capability-copy">
+          // Focusable so a card that just finished can keep keyboard focus.
+          <p role="status" tabIndex={-1} className="og-session-capability-copy">
             {completeLabel ??
               (skill
                 ? t("sessionCapabilityFrame.installedWorkspace")

@@ -497,6 +497,7 @@
       "version": "5.4.2",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
+        "entities": "^7.0.1",
         "yaml": "2.9.0",
         "zod": "^4.2.1",
       },
@@ -600,6 +601,7 @@
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
+        "@opengeni/network": "workspace:*",
         "@opengeni/storage": "workspace:*",
         "drizzle-orm": "^0.45.2",
         "openai": "6.47.0",

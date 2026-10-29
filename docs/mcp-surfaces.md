@@ -477,16 +477,27 @@ query clause; ranking is not certainty. Native Responses routes retain hosted
 client `tool_search` and real loaded function definitions. Generic routes return
 compact alternatives in `suggestions`. Exact ties, operation-only queries and
 no matches return no loaded schemas; generic results still include compact candidates.
+Native search outputs carry only loaded definitions, so when a search neither
+names a tool nor matches one clearly, its close candidates (compact name and
+description preview) and any requested names no tool has follow the result as
+a developer note, frozen on the search call like its selection.
 An optional decision model selects from a wider shortlist for ambiguous searches;
 strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
 means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
 inference. Past results and schema snapshots are frozen and
 never rerun, so catalog changes do not alter any earlier prompt item.
+Exact names and named query tokens resolve a tool by its full model name, its
+dotted form (`server.tool_name`), or the name its server publishes
+(`projects.search` or `projects_search` for a digest-aliased
+`mcp_<digest>__projects_search`); the published name selects the exact tool
+even where aliases shortened two names to the same part.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
 pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
-view, group and optional literal `namePrefix` filter. An invalid cursor requires restarting
+view, group and optional `namePrefix` filter, which matches the full name or the
+part after the server separator (`projects.` or `projects_`). Digest aliases sort by
+that readable part. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
 

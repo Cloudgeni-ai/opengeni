@@ -70,8 +70,8 @@ export interface LibraryView {
   layout: LibraryLayout;
 }
 
-export function initialLibraryView(personal: boolean): LibraryView {
-  return { query: "", scope: personal ? "personal" : "all", filters: {}, layout: "list" };
+export function initialLibraryView(): LibraryView {
+  return { query: "", scope: "all", filters: {}, layout: "list" };
 }
 
 const TYPE_FILTERS: KnowledgeEntryKind[] = [
@@ -426,8 +426,6 @@ export interface LibraryTabProps {
   onNewCollection?: () => void;
   /** The Library has nothing at all: the page hides its Add menu, the empty state has it. */
   onEmptyChange?: (empty: boolean) => void;
-  /** A Personal workspace starts on "Only me"; that is not a filter the person chose. */
-  personal?: boolean;
 }
 
 export function LibraryTab({
@@ -444,7 +442,6 @@ export function LibraryTab({
   onUpload,
   onNewCollection,
   onEmptyChange,
-  personal = false,
 }: LibraryTabProps) {
   const search = useDebounced(view.query.trim(), 450);
   const searching = search.length > 0;
@@ -481,7 +478,7 @@ export function LibraryTab({
       ...(narrow ? { scope: (scope?.[0] as LibraryScope | undefined) ?? "all" } : {}),
     });
   };
-  const filtered = searching || view.scope !== initialLibraryView(personal).scope || narrowed;
+  const filtered = searching || view.scope !== initialLibraryView().scope || narrowed;
   const nothingAtAll =
     !collections && !list.loading && !list.error && list.entries.length === 0 && !filtered;
   useEffect(() => onEmptyChange?.(nothingAtAll), [nothingAtAll, onEmptyChange]);

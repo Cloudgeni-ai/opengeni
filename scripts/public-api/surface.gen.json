@@ -14185,6 +14185,7 @@
         "$.screenCapture": "boolean!",
         "$.semanticActions": "boolean!",
         "$.semanticObservation": "boolean!",
+        "$.targetFocus": "boolean?",
         "$.windowCapture": "boolean!"
       }
     },
@@ -36470,6 +36471,7 @@
       "projectPendingApprovals": "value",
       "projectPendingHumanInputRequests": "value",
       "projectPickerRows": "value",
+      "promptSendDestination": "value",
       "PROVIDER_RECOVERY_NOTICE_DETAIL": "value",
       "ProviderRecoveryCondition": "type",
       "providerRecoveryExhaustedText": "value",
@@ -38541,6 +38543,7 @@
       "presentedToolKind": "value",
       "PresentedToolKind": "type",
       "presentsToolOutputPreview": "value",
+      "promptSendDestination": "value",
       "QUESTION_NAV_HIDDEN_PX": "value",
       "QUESTION_NAV_MARGIN_PX": "value",
       "QuestionNavPrompt": "type",

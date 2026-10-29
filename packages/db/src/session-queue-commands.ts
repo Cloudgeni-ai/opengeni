@@ -2226,6 +2226,16 @@ async function promptCausalHuman(
   );
 }
 
+/**
+ * Session statuses whose active turn waits with no live attempt and that an
+ * ordinary human Send takes over (Steer semantics) instead of queueing behind:
+ * a pending decision, or a turn parked on provider capacity such as a used-up
+ * subscription. See `submitHumanPromptInTransaction`.
+ */
+export function sendTakesOverActiveWait(status: string): boolean {
+  return status === "requires_action" || status === "waiting_capacity";
+}
+
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2481,12 +2491,17 @@ export async function submitHumanPromptInTransaction(
 
   // A normal Send received while the active branch is waiting in
   // `requires_action` is the human choosing to continue conversationally
-  // instead of through the pending decision surface. Promote only that active
-  // wait to Steer semantics so the frozen wait is cancelled and the new prompt
-  // runs next. A queue-edit submission preserves the identity and placement of
-  // already accepted queued work, so it must never cancel an unrelated active
-  // wait. An explicitly paused branch remains inert until Resume or an explicit
-  // Steer; running, recovering, and capacity-waiting work also retain ordinary
+  // instead of through the pending decision surface. A turn parked in
+  // `waiting_capacity` (a usage limit, an account that needs reconnecting)
+  // has no live attempt either: the person already saw it stop, and their new
+  // message, often on another model, must not sit behind a wait that can last
+  // until a quota resets. Promote only those ownerless active waits to Steer
+  // semantics so the wait is cancelled (a capacity waiter goes with its
+  // superseded turn) and the new prompt runs next on its own accepted model.
+  // A queue-edit submission preserves the identity and placement of already
+  // accepted queued work, so it must never cancel an unrelated active wait. An
+  // explicitly paused branch remains inert until Resume or an explicit Steer;
+  // running and recovering work, and agent or machine input, retain ordinary
   // queue semantics.
   const effectiveDelivery = waitsForMachineOwner
     ? "send"
@@ -2494,7 +2509,7 @@ export async function submitHumanPromptInTransaction(
         (input.actor.type === "human" || input.actor.type === "operator") &&
         !isQueueEditSubmission &&
         before.state === "active" &&
-        session.status === "requires_action" &&
+        sendTakesOverActiveWait(session.status) &&
         !session.admissionBlock &&
         session.activeTurnId !== null
       ? "steer"
