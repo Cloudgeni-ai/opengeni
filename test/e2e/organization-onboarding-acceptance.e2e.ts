@@ -1493,7 +1493,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     // The setup chat opens ready in its workspace's composer, and starts on Send.
     await page.getByRole("button", { name: "Let Opengeni implement it" }).click();
     await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions$/u, { timeout: 30_000 });
-    const composer = page.getByRole("textbox", { name: "Message the agent" });
+    const composer = page.getByRole("textbox", { name: "Ask anything" });
     await composer.waitFor({ timeout: 30_000 });
     const composerDeadline = Date.now() + 30_000;
     while (

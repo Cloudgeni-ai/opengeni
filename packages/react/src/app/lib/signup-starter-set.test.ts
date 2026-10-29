@@ -39,7 +39,11 @@ test("help with everyday things leads with the everyday set, for that account an
     useCase: "everyday",
   });
   expect(signupStarterSet("ada@example.test", "org-a")).toBe("everyday");
-  rememberSignupUseCase({ account: "grace@example.test", organizationId: "org-a", useCase: "cloud" });
+  rememberSignupUseCase({
+    account: "grace@example.test",
+    organizationId: "org-a",
+    useCase: "cloud",
+  });
   expect(signupStarterSet("grace@example.test", "org-a")).toBe("general");
   expect(signupStarterSet("ada@example.test", "org-a")).toBe("everyday");
 });
