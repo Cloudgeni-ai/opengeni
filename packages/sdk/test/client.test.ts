@@ -2370,6 +2370,47 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.url).toContain("needsYouOnly=true");
   });
 
+  test("selects sessions by id only on servers that acknowledge the selection", async () => {
+    const ids = [crypto.randomUUID(), crypto.randomUUID()];
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { sessionIds: ids }),
+    ).rejects.toThrow("session id filtering");
+    const latestTurn = {
+      id: ids[1]!,
+      status: "completed" as const,
+      startedAt: null,
+      finishedAt: null,
+    };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        projection: "summary",
+        pinned: [],
+        sessions: [{ id: ids[0], latestTurn }],
+        nextCursor: null,
+        filtersApplied: true,
+        sessionIdsApplied: true,
+      }),
+    );
+    const page = await client.listSessionSummaryPage(WORKSPACE_ID, {
+      sessionIds: ids,
+      includePinned: false,
+    });
+    expect(page.sessions[0]!.latestTurn).toEqual(latestTurn);
+    const url = new URL(requests[0]!.url);
+    expect(url.searchParams.get("sessionIds")).toBe(ids.join(","));
+    expect(url.searchParams.get("projection")).toBe("summary");
+    // An empty selection matches nothing without a request.
+    expect(await client.listSessionSummaryPage(WORKSPACE_ID, { sessionIds: [] })).toMatchObject({
+      projection: "summary",
+      sessions: [],
+      nextCursor: null,
+    });
+    expect(requests).toHaveLength(1);
+  });
+
   test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({

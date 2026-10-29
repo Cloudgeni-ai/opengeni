@@ -25,6 +25,10 @@
 //! a guard stops only at a step that may feed it all the same, so a
 //! device systemd did not keep is closed only then.
 //!
+//! On a machine the host shares, the guard feeds systemd's watchdog of its
+//! own service instead, and the service's stop hook kills the VMs
+//! ([`super::fence`], ADR 26).
+//!
 //! [`kept`]: super::kept
 
 use std::fs::File;
@@ -43,6 +47,7 @@ use compute_engine::watchdog::Watchdog;
 use compute_fleet::{Guard, GuardAction, Observed};
 use rustix::fs::{FlockOperation, flock};
 
+use super::fence::ServiceWatchdog;
 use super::gate::boot_now;
 use super::gate::nanos;
 use super::kept;
@@ -71,9 +76,33 @@ pub struct GuardConfig {
     pub lock: PathBuf,
     /// The mark the sleep hook leaves while a suspend is under way.
     pub suspending: PathBuf,
-    /// The watchdog device and its timeout; `None` runs without one, which
-    /// leaves a stalled guard unchecked (tests only).
-    pub watchdog: Option<(PathBuf, Duration)>,
+    /// What stops the VMs if the guard stalls or ends.
+    pub fence: Fence,
+}
+
+/// What stops the VMs if the guard stalls or ends: the watchdog it feeds
+/// at every step that may feed one (the lease valid or the VMs stopped).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fence {
+    /// The machine's watchdog device, set up with the lease terms' timeout
+    /// and `nowayout`: a guard that stops feeding it resets the machine.
+    /// For a host that has its machine to itself.
+    Machine {
+        /// The device, such as `/dev/watchdog0`.
+        device: PathBuf,
+        /// The lease terms' watchdog timeout.
+        timeout: Duration,
+    },
+    /// systemd's watchdog of the guard's own service, of at most `timeout`
+    /// (the lease terms'): systemd kills a guard that stops feeding it,
+    /// and the service's stop hook kills every VM. For a host that shares
+    /// its machine (ADR 26).
+    Service {
+        /// The lease terms' watchdog timeout.
+        timeout: Duration,
+    },
+    /// None, which leaves a stalled guard unchecked (tests only).
+    None,
 }
 
 /// Takes the guard's lock: an exclusive lock on `path`, held while the
@@ -300,17 +329,29 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let _lock = hold_lock(&config.lock)?;
-    let mut watchdog = if let Some((device, timeout)) = &config.watchdog {
-        let kept = kept::kept(device, *timeout).with_context(|| {
-            format!("taking over the watchdog {} systemd kept", device.display())
-        })?;
-        if kept.is_some() {
-            tracing::info!("took over the watchdog systemd kept");
+    let mut watchdog = match &config.fence {
+        Fence::Machine { device, timeout } => {
+            let kept = kept::kept(device, *timeout).with_context(|| {
+                format!("taking over the watchdog {} systemd kept", device.display())
+            })?;
+            if kept.is_some() {
+                tracing::info!("took over the watchdog systemd kept");
+            }
+            kept
         }
-        kept
-    } else {
-        tracing::warn!("no watchdog: a stalled guard leaves VMs running past their lease");
-        None
+        Fence::Service { .. } => None,
+        Fence::None => {
+            tracing::warn!("no watchdog: a stalled guard leaves VMs running past their lease");
+            None
+        }
+    };
+    let mut service = match &config.fence {
+        Fence::Service { timeout } => {
+            let service = ServiceWatchdog::from_env(*timeout)?;
+            tracing::info!("the guard feeds its service's watchdog: the machine is shared");
+            Some(service)
+        }
+        Fence::Machine { .. } | Fence::None => None,
     };
     let cgroup = Cgroup::at(&config.cgroup);
     let guard = Guard::new();
@@ -331,7 +372,7 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
         let feed = step_once(&guard, &cgroup, config, &mut last, &mut saying);
         if feed {
             if watchdog.is_none()
-                && let Some((device, timeout)) = &config.watchdog
+                && let Fence::Machine { device, timeout } = &config.fence
             {
                 watchdog = Some(
                     Watchdog::open(device, *timeout)
@@ -341,13 +382,21 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
             if let Some(watchdog) = &mut watchdog {
                 watchdog.feed().context("feeding the watchdog")?;
             }
+            if let Some(service) = &mut service {
+                service.feed();
+            }
         }
         if let Some(watchdog) = &watchdog
             && !kept_open
         {
             kept_open = keeping.kept(watchdog.as_fd(), socket.as_deref());
         }
-        if ready.is_none() && (kept_open || config.watchdog.is_none()) {
+        let armed = match &config.fence {
+            Fence::Machine { .. } => kept_open,
+            Fence::Service { .. } => service.as_ref().is_some_and(ServiceWatchdog::fed),
+            Fence::None => true,
+        };
+        if ready.is_none() && armed {
             // Armed and stepped once: the VMs are guarded from here on. A
             // look at whether a guard is ready (the agent's, at its start)
             // holds the lock for a moment; then it is taken a step later.
@@ -741,7 +790,10 @@ mod tests {
             lease_file: dir.join("lease.json"),
             lock: dir.join("guard.lock"),
             suspending: dir.join("suspending"),
-            watchdog,
+            fence: watchdog.map_or(Fence::None, |(device, timeout)| Fence::Machine {
+                device,
+                timeout,
+            }),
         }
     }
 
