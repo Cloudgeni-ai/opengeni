@@ -178,51 +178,61 @@ describe("own-key admission", () => {
     allowance.mockRestore();
   });
 
-  test("with no paid credit an own-key run is refused with Add credits, everywhere", async () => {
-    const balance = paidCredit(0);
-    try {
-      const services = { db, settings: settings(), entitlements: null };
-      const input = {
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        model: OWN_KEY_MODEL,
-        requestedAgentRuns: 1,
-      };
-      expect(await checkLimit(services, { ...input, action: "agent_run:create" })).toEqual({
-        allowed: false,
-        code: BYOK_PAID_CREDIT_REQUIRED_CODE,
-        message: BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
-      });
-      await expect(
-        ensureRunAllowedBetweenModelCalls({
-          ...services,
+  test.each([
+    { host: "without host entitlements", entitlements: null },
+    {
+      // A host's own entitlements admit the run; the fee rule is the same.
+      host: "with host entitlements bound",
+      entitlements: { admitRun: async () => ({ allowed: true as const }) },
+    },
+  ])(
+    "with no paid credit an own-key run is refused with Add credits, everywhere ($host)",
+    async ({ entitlements }) => {
+      const balance = paidCredit(0);
+      try {
+        const services = { db, settings: settings(), entitlements };
+        const input = {
           accountId: ACCOUNT,
           workspaceId: WORKSPACE,
-          modelId: OWN_KEY_MODEL,
-          isExternallyBilledTurn: true,
-          chargesOpenGeniCredits: false,
-          countsTowardTokenCap: false,
-          initiatingHumanSubjectId: null,
-          billingOrigin: "app",
-          byok: true,
-        }),
-      ).rejects.toThrow(BYOK_PAID_CREDIT_REQUIRED_MESSAGE);
-      expect(
-        await admitModelCall(services, {
-          accountId: ACCOUNT,
-          workspaceId: WORKSPACE,
-          chargesOpenGeniCredits: false,
-          countsTowardTokenCap: false,
-          subjectId: null,
-          billingOrigin: "api",
-          byok: true,
-        }),
-      ).toMatchObject({ allowed: false, byokPaidCreditRequired: true });
-      expect(balance.mock.calls.map((call) => call[2])).toEqual([undefined, "app", "api"]);
-    } finally {
-      balance.mockRestore();
-    }
-  });
+          model: OWN_KEY_MODEL,
+          requestedAgentRuns: 1,
+        };
+        expect(await checkLimit(services, { ...input, action: "agent_run:create" })).toEqual({
+          allowed: false,
+          code: BYOK_PAID_CREDIT_REQUIRED_CODE,
+          message: BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
+        });
+        await expect(
+          ensureRunAllowedBetweenModelCalls({
+            ...services,
+            accountId: ACCOUNT,
+            workspaceId: WORKSPACE,
+            modelId: OWN_KEY_MODEL,
+            isExternallyBilledTurn: true,
+            chargesOpenGeniCredits: false,
+            countsTowardTokenCap: false,
+            initiatingHumanSubjectId: null,
+            billingOrigin: "app",
+            byok: true,
+          }),
+        ).rejects.toThrow(BYOK_PAID_CREDIT_REQUIRED_MESSAGE);
+        expect(
+          await admitModelCall(services, {
+            accountId: ACCOUNT,
+            workspaceId: WORKSPACE,
+            chargesOpenGeniCredits: false,
+            countsTowardTokenCap: false,
+            subjectId: null,
+            billingOrigin: "api",
+            byok: true,
+          }),
+        ).toMatchObject({ allowed: false, byokPaidCreditRequired: true });
+        expect(balance.mock.calls.map((call) => call[2])).toEqual([undefined, "app", "api"]);
+      } finally {
+        balance.mockRestore();
+      }
+    },
+  );
 
   test("on the Free plan the app refusal is Upgrade to Pro; API work still says Add credits", async () => {
     const balance = paidCredit(0, "free");

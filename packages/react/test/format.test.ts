@@ -226,6 +226,13 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion({ detail: "insufficient Opengeni credits" })).toBe(true);
   });
 
+  test("matches the refusal of an own-key turn that has no paid credit", () => {
+    expect(isCreditExhaustion("Add credits to use your own key.")).toBe(true);
+    expect(
+      isCreditExhaustion({ error: "Activity task failed: Upgrade to Pro to use your own key." }),
+    ).toBe(true);
+  });
+
   test("matches the refusal of an API turn that has no credits", () => {
     expect(isCreditExhaustion("API usage uses credits, not your plan credit.")).toBe(true);
     expect(

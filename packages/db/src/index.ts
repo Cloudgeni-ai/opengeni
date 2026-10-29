@@ -6952,6 +6952,7 @@ export async function applyCreditDebitAfterUse(
           undefined,
           settledAt,
           true,
+          true,
         );
         const planPaidMicros =
           usageOrigin === "app"

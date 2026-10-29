@@ -75,7 +75,6 @@ export async function agentRunAdmissionDenial(
   // The person's own key pays the platform fee, payable only from paid credit.
   if (
     funding.byok &&
-    !services.entitlements &&
     byokPlatformFeeActive(services.settings, input.accountId)
   ) {
     const billingOrigin = chargeBillingOrigin(

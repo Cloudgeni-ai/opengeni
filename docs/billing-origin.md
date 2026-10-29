@@ -212,9 +212,11 @@ pays a platform fee instead, in the app and over the API alike:
 `byokPlatformFeeBps` (`OPENGENI_BYOK_PLATFORM_FEE_BPS`, default 500 = 5%) of
 the call's list-price equivalent, rounded up to the micro-dollar. The fee is
 charged only with Stripe billing (`OPENGENI_BILLING_MODE=stripe`), where people
-can buy the credit it needs; `0` turns it off. A host that binds its own
-entitlements owns funding and is skipped, and so is an account on legacy
-billing terms (CloudGeni, above).
+can buy the credit it needs; `0` turns it off. An account on legacy billing
+terms (CloudGeni, above) is skipped. A host that binds its own entitlements
+is not special: its own-key calls are admitted, charged and refused by the
+same rule everywhere (session and run admission, model calls, limits and
+settlement).
 
 - **List-price equivalent:** the reviewed list price of the served model, even
   on a Gateway route; else a positive cost the provider or Gateway reported (a
@@ -228,19 +230,29 @@ billing terms (CloudGeni, above).
   response (`credit:byok_platform_fee:<sourceId>`, idempotent), with
   `listEquivalentMicros`, `listEquivalentSource`, `feeBps`, and how it was
   funded (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`).
-- **Paid credit only:** the fee may draw on a paid plan's credit (Pro, Max)
-  for app use, then on credits up to what was paid for: top-ups and operator
-  credit grants, net of refunds and disputes and of what earlier fees took
-  (`BillingBalance.paidPlanCreditMicros`, `paidCreditsMicros`). The Free plan's
+- **Paid credit only:** the fee may draw on an active paid plan's credit (Pro,
+  Max) for app use, then on paid credits: credits that were paid for (top-ups
+  and operator credit grants, net of refunds and disputes, plus debt a paid
+  plan's period absorbed when it opened) and are still there
+  (`BillingBalance.paidPlanCreditMicros`, `paidCreditsMicros`). Ordinary
+  spending draws unpaid credits (unscoped promotional grants, refunds of
+  usage) first, in ledger order, so paid credit that was spent stays spent and
+  a later promotional grant never pays a fee. Usage a monthly unrestricted
+  plan allowance covered is left out of that walk, which can only understate
+  paid credits. The walk is read for fee decisions and whenever fees left
+  debt, never for accounts without fee debt. The Free plan's
   monthly credit, signup credit and promotional credit never pay it: the fee
   is a general debit and never draws on model-scoped grants, and Free monthly
   credit is always model-scoped. API-origin fees come from credits only, like
   all API use.
 - **Fee debt:** admission only checks that paid credit is above zero, so
   parallel calls can settle past it. The excess (`unfundedMicros`) is fee debt
-  (`BillingBalance.byokFeeDebtMicros`): it never draws promotional credit
-  (spendable figures add it back), no own-key call is admitted while it is
-  owed, and the next top-up repays it first.
+  (`BillingBalance.byokFeeDebtMicros`) until paid credit covers it again: it
+  never draws plan or promotional credit (spendable figures add it back), no
+  own-key call is admitted on paid credits while it is owed (app use may still
+  run on a paid plan's remaining credit), and the next top-up repays it first.
+  A response that reports no tokens has no list-price equivalent and pays no
+  fee.
 - **Refusal:** with no paid credit an own-key call is refused before it runs:
   HTTP 402, code `byok_paid_credit_required`, with one action. On the Free
   plan in the app, "Upgrade to Pro to use your own key." and the
@@ -257,7 +269,8 @@ key.
 What counts as paid: `credit_topup` (a partially discounted coupon checkout
 records the full top-up, so its discount counts as paid) and
 `manual_credit_grant` (operators should use `grant` for goodwill credit that
-must not pay fees). Coupon redemptions that write `grant` never pay it.
+must not pay fees). Coupon redemptions that write `grant` never pay it, and
+neither does any other unscoped `grant`.
 
 Workspace and member allowances count fee debits like any other debit, so an
 allowance that also counts unbilled usage at list price sees an own-key call

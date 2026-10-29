@@ -6589,10 +6589,11 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
      */
     apiDebtMicros: primitives.nonnegativeInteger.optional(),
     /**
-     * Paid credit the bring-your-own-key platform fee may draw: a paid
-     * plan's remaining credit (app use only) and credits that were paid
-     * for (top-ups and operator grants), never Free, signup or promotional
-     * credit.
+     * Paid credit the bring-your-own-key platform fee may draw: an active
+     * paid plan's remaining credit (app use only) and credits that were paid
+     * for (top-ups and operator grants) and not yet spent, never Free,
+     * signup or promotional credit. Ordinary spending draws promotional
+     * credits first. `paidCreditsMicros` is present only on fee reads.
      */
     paidPlanCreditMicros: primitives.nonnegativeInteger.optional(),
     paidCreditsMicros: primitives.nonnegativeInteger.optional(),

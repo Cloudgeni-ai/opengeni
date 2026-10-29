@@ -63,7 +63,6 @@ export async function admitModelCall(
   if (
     !input.chargesOpenGeniCredits &&
     input.byok &&
-    !services.entitlements &&
     byokPlatformFeeActive(settings, input.accountId)
   ) {
     const balance = await getByokFeeSpendableBalance(db, input.accountId, input.billingOrigin);
