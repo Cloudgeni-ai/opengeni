@@ -1,4 +1,10 @@
-import type { Settings } from "@opengeni/config";
+import { isLegacyBillingAccount, type Settings } from "@opengeni/config";
+import {
+  BYOK_PAID_CREDIT_REQUIRED_MESSAGE,
+  BYOK_UPGRADE_REQUIRED_MESSAGE,
+  type BillingBalance,
+  type BillingOrigin,
+} from "@opengeni/contracts";
 
 /* ----------------------------------------------------------------------------
    Bring-your-own-key platform fee (docs/billing-origin.md).
@@ -20,26 +26,40 @@ export const BYOK_FALLBACK_LIST_RATE = Object.freeze({
   outputMicrosPerMillionTokens: 10_000_000,
 });
 
-/** Is the fee charged at all (credit billing active and a positive rate)? */
-export function byokPlatformFeeActive(settings: Settings): boolean {
+/**
+ * Is the fee charged for this account? Only with Stripe billing (people can
+ * buy the credit it needs) and a positive rate, and never for an account on
+ * legacy billing terms (CloudGeni). A host that binds its own entitlements
+ * owns funding, so callers skip the fee there too.
+ */
+export function byokPlatformFeeActive(
+  settings: Pick<Settings, "billingMode" | "byokPlatformFeeBps" | "billingLegacyAccountIds">,
+  accountId: string | null | undefined,
+): boolean {
   return (
-    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") &&
-    (settings.byokPlatformFeeBps ?? 0) > 0
+    settings.billingMode === "stripe" &&
+    (settings.byokPlatformFeeBps ?? 0) > 0 &&
+    !isLegacyBillingAccount(settings, accountId)
   );
 }
 
 /**
- * The list-price equivalent of one bring-your-own-key call: the reviewed
- * list (or provider-reported) cost when settlement priced it, else the
+ * The list-price equivalent of one bring-your-own-key call: the model's
+ * reviewed list price when it has one; else a positive provider-reported
+ * cost (a gateway can report $0 on the person's own upstream key); else the
  * fallback rate on the tokens the provider reported.
  */
 export function byokListEquivalent(input: {
-  estimatedProviderCostMicros: number | null;
+  listPriceMicros: number | null;
+  reportedCostMicros: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
-}): { listMicros: number; source: "list_price" | "fallback_rate" } {
-  if (input.estimatedProviderCostMicros !== null && input.estimatedProviderCostMicros >= 0) {
-    return { listMicros: input.estimatedProviderCostMicros, source: "list_price" };
+}): { listMicros: number; source: "list_price" | "reported_cost" | "fallback_rate" } {
+  if (input.listPriceMicros !== null && input.listPriceMicros > 0) {
+    return { listMicros: input.listPriceMicros, source: "list_price" };
+  }
+  if (input.reportedCostMicros !== null && input.reportedCostMicros > 0) {
+    return { listMicros: input.reportedCostMicros, source: "reported_cost" };
   }
   const inputTokens = Math.max(0, input.inputTokens ?? 0);
   const outputTokens = Math.max(0, input.outputTokens ?? 0);
@@ -57,4 +77,18 @@ export function byokListEquivalent(input: {
 export function byokPlatformFeeMicros(listMicros: number, bps: number): number {
   if (!Number.isFinite(listMicros) || listMicros <= 0 || bps <= 0) return 0;
   return Math.ceil((listMicros * bps) / 10_000);
+}
+
+/**
+ * What an own-key refusal tells the person: on the Free plan in the app,
+ * upgrading is the fix; otherwise (a paid plan, top-ups, any API use) adding
+ * credits is.
+ */
+export function byokPaidCreditRefusalMessage(
+  balance: Pick<BillingBalance, "plan">,
+  origin: BillingOrigin,
+): string {
+  return origin === "app" && balance.plan?.key === "free"
+    ? BYOK_UPGRADE_REQUIRED_MESSAGE
+    : BYOK_PAID_CREDIT_REQUIRED_MESSAGE;
 }

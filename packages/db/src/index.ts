@@ -6929,15 +6929,20 @@ export async function applyCreditDebitAfterUse(
       const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       // App use: plan credit (the Free plan's scoped credit too) pays for
-      // tools as well as models.
-      if (usageOrigin === "app") {
+      // tools as well as models. An own-key fee never allocates: Free plan,
+      // signup and promotional grants never pay it.
+      if (usageOrigin === "app" && !input.byokPlatformFee) {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
       }
-      let feeFunding: { planPaidMicros: number; creditPaidMicros: number } | null = null;
+      let feeFunding: {
+        planPaidMicros: number;
+        creditPaidMicros: number;
+        unfundedMicros: number;
+      } | null = null;
       if (input.byokPlatformFee) {
         // A paid plan's credit pays first (it counts the fee as period usage),
         // then paid-for credits. Free plan credit never counts the fee.
@@ -6952,7 +6957,17 @@ export async function applyCreditDebitAfterUse(
           usageOrigin === "app"
             ? Math.min(input.amountMicros, before.paidPlanCreditMicros ?? 0)
             : 0;
-        feeFunding = { planPaidMicros, creditPaidMicros: input.amountMicros - planPaidMicros };
+        // Parallel calls admitted on the same paid credit can run past it:
+        // the rest is fee debt the next top-up repays (see paidCredit).
+        const creditPaidMicros = Math.min(
+          input.amountMicros - planPaidMicros,
+          before.paidCreditsMicros ?? 0,
+        );
+        feeFunding = {
+          planPaidMicros,
+          creditPaidMicros,
+          unfundedMicros: input.amountMicros - planPaidMicros - creditPaidMicros,
+        };
       }
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)

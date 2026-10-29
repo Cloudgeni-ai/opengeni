@@ -581,6 +581,7 @@ export async function runTurnStreamAttempt(
         externallyBilled: billingState.isExternallyBilledTurn,
         chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
         countsTowardTokenCap: billingState.countsTowardTokenCap,
+        ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
         subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -1419,6 +1420,7 @@ export async function runTurnStreamAttempt(
           externallyBilled: billingState.isExternallyBilledTurn,
           chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
           countsTowardTokenCap: billingState.countsTowardTokenCap,
+          ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
           subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -2730,6 +2732,7 @@ export async function runTurnStreamAttempt(
             externallyBilled: billingState.isExternallyBilledTurn,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             countsTowardTokenCap: billingState.countsTowardTokenCap,
+            ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
             ...(serviceTier ? { serviceTier } : {}),
           });
         })().catch((error) => {

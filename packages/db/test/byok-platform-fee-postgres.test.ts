@@ -12,6 +12,7 @@ import {
   getBillingBalance,
   getByokFeeSpendableBalance,
   grantPlanCreditPeriod,
+  spendableCreditMicros,
   upsertOrganizationPlan,
   type DbClient,
 } from "../src";
@@ -186,6 +187,35 @@ test("paid funding already spent on fees is not reused, and a retried fee debits
 
   await credit(accountId, "credit_refund", -6 * M);
   expect(await spendable(accountId, "app")).toBe(0);
+}, 180_000);
+
+test("parallel fees past paid credit become debt the next top-up repays, never promotional credit", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "grant", 25 * M); // unscoped promotional credit
+  await credit(accountId, "credit_topup", 1);
+  const start = await getBillingBalance(client.db, accountId);
+  expect(start.paidCreditsMicros).toBe(1);
+  // Five calls admitted on the same 1 micro of paid credit settle at once.
+  await Promise.all(Array.from({ length: 5 }, () => fee(accountId, M, "app")));
+  const after = await getBillingBalance(client.db, accountId);
+  expect(after.paidCreditsMicros).toBe(0);
+  expect(after.byokFeeDebtMicros).toBe(5 * M - 1);
+  expect(await spendable(accountId, "app")).toBe(0);
+  // The promotional credit still pays for app and API work in full; only
+  // the 1 micro of paid credit went to fees.
+  expect(spendableCreditMicros(after, undefined, "app")).toBe(
+    spendableCreditMicros(start, undefined, "app") - 1,
+  );
+  expect(spendableCreditMicros(after, undefined, "api")).toBe(25 * M);
+  const rows = await feeRows(accountId);
+  expect(rows.reduce((sum, row) => sum + row.metadata.creditPaidMicros!, 0)).toBe(1);
+  expect(rows.reduce((sum, row) => sum + row.metadata.unfundedMicros!, 0)).toBe(5 * M - 1);
+  // A top-up repays the fee debt before it pays new fees.
+  await credit(accountId, "credit_topup", 10 * M);
+  const repaid = await getBillingBalance(client.db, accountId);
+  expect(repaid.byokFeeDebtMicros).toBeUndefined();
+  expect(repaid.paidCreditsMicros).toBe(5 * M + 1);
 }, 180_000);
 
 test("an own-key fee must be a general byok_platform_fee debit", async () => {

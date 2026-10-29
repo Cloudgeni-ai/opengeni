@@ -328,6 +328,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       externallyBilled: billingState.isExternallyBilledTurn,
       chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
       countsTowardTokenCap: billingState.countsTowardTokenCap,
+      ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
       turnAttemptId: input.attemptId,
       servingCredentialId: providerTurn.effectiveCodexCredentialId,
       priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,

@@ -3,6 +3,7 @@ import {
   API_CREDITS_REQUIRED_CODE,
   AgentConfigError,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
+  byokRefusalAction,
   AllowanceExhaustedRefusal,
   ModelUnavailableError,
   ScheduledTaskTargetAccessChange,
@@ -121,9 +122,11 @@ export function insufficientCreditsHttpError(error: unknown): ApiHttpError | nul
     retryable: false,
     outcomeUnknown: false,
     details:
-      cause.code === API_CREDITS_REQUIRED_CODE || cause.code === BYOK_PAID_CREDIT_REQUIRED_CODE
+      cause.code === API_CREDITS_REQUIRED_CODE
         ? { code: cause.code, action: { ...ADD_CREDITS_ACTION } }
-        : { code: "insufficient_credits" },
+        : cause.code === BYOK_PAID_CREDIT_REQUIRED_CODE
+          ? { code: cause.code, action: { ...byokRefusalAction(error.message) } }
+          : { code: "insufficient_credits" },
   });
 }
 

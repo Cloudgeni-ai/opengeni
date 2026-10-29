@@ -6598,6 +6598,11 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     paidCreditsMicros: primitives.nonnegativeInteger.optional(),
     /** Own-key platform fees charged this calendar month (UTC). Absent means none. */
     byokPlatformFeeMonthMicros: primitives.nonnegativeInteger.optional(),
+    /**
+     * Own-key fees that ran past paid credit (parallel calls settle after
+     * use). The next top-up repays it; promotional credit never does.
+     */
+    byokFeeDebtMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),
