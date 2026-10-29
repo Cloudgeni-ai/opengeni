@@ -6895,48 +6895,100 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       case "check": {
         const startedAt = Date.now();
-        const node = await this.resolveActionLocator(state, action.locator);
-        const current = await this.callOnNode(state, node.backendDOMNodeId, CHECKED_FUNCTION, []);
-        if (!isRecord(current) || typeof current.checked !== "boolean") {
-          throw new InteractionDefiniteDriverError(
-            "invalid_action",
-            "browser locator is not a checkable control",
-          );
+        // A disabled control is refused at once below, so the locator does
+        // not wait for it to be enabled, as other input does.
+        const node = await this.resolveActionLocator(state, action.locator, { input: false });
+        // The control the located element stands for (itself, the box it is
+        // in, or its label's control); else the element itself, whose state
+        // the accessibility tree may still give (a custom element's own role).
+        const control = async (backendId: number | null) =>
+          (await this.relatedNode(state, backendId, CHECKABLE_FUNCTION, []).catch(() => null)) ??
+          backendId;
+        let target = await control(node.backendDOMNodeId);
+        const current =
+          (await this.callOnNode(state, target, CHECKED_FUNCTION, [])) ??
+          (await this.accessibleCheckedState(state, target));
+        if (
+          !isRecord(current) ||
+          (typeof current.checked !== "boolean" && current.checked !== "mixed")
+        ) {
+          throw new InteractionDefiniteDriverError("invalid_action", NOT_CHECKABLE_MESSAGE);
         }
         if (current.checked === action.checked) return;
-        if (current.radio === true && !action.checked) {
+        if (current.radio === true && current.checked === true && !action.checked) {
           throw new InteractionDefiniteDriverError(
             "invalid_action",
             "a radio button turns off only when another option in its group is chosen; check that option instead",
           );
         }
-        await this.clickNode(
-          state,
-          node.backendDOMNodeId,
-          "left",
-          1,
-          node.frameId ?? state.frame.id,
-        );
+        if (current.disabled === true) {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            `this ${typeof current.kind === "string" ? current.kind : "checkbox"} is disabled`,
+          );
+        }
+        // A native input a person cannot see or reach is clicked through its
+        // label, as a person does, where the click lands on the label's own
+        // content rather than a link or other control in it; anything else is
+        // clicked itself.
+        const frameId = node.frameId ?? state.frame.id;
+        const click = async (located: number | null) => {
+          let part =
+            (await this.relatedNode(state, located, CHECK_CLICK_FUNCTION, []).catch(() => null)) ??
+            target;
+          if (part === target) {
+            // A native input under a box its own label draws on top of it (a
+            // style library's checkbox) is clicked on that box, where a
+            // person clicks; it is measured once scrolled into view.
+            await this.actionPoint(state, target, false, frameId);
+            part =
+              (await this.relatedNode(state, target, CHECK_COVERING_LABEL_FUNCTION, []).catch(
+                () => null,
+              )) ?? target;
+          }
+          if (part !== target) {
+            await this.actionPoint(state, part, false, frameId);
+            if ((await this.callOnNode(state, part, CHECK_LABEL_SPOT_FUNCTION, [])) !== true) {
+              throw new InteractionDefiniteDriverError(
+                "invalid_action",
+                `this ${typeof current.kind === "string" ? current.kind : "checkbox"} does not show, and a click on its label would land on a link or other control in it; find the box the page draws for it and click that`,
+              );
+            }
+          }
+          await this.clickNode(state, part, "left", 1, frameId);
+        };
+        let located = node.backendDOMNodeId;
+        await click(located);
+        // A box in the mixed state may turn on first and off with a second
+        // click (a tri-state box); it gets that second click once, and only
+        // when it then shows the opposite of what was asked.
+        let clickedAgain = current.checked !== "mixed";
         // A page may show the new state a while after the click (a framework's
         // next render, a switch that saves first), within the time the action
         // has to find its element. A control the page replaced is found again
         // by its locator; one that cannot be read is not counted as done.
         const deadline = state.locatorDeadline ?? startedAt + LOCATOR_WAIT_MS;
         const read = async (backendId: number | null) =>
-          await this.callOnNode(state, backendId, CHECKED_FUNCTION, []).catch(() => null);
-        let target = node.backendDOMNodeId;
+          (await this.callOnNode(state, backendId, CHECKED_FUNCTION, []).catch(() => null)) ??
+          (await this.accessibleCheckedState(state, backendId));
         let shown: unknown = null;
         for (;;) {
           shown = await read(target);
           if (isRecord(shown) && shown.connected === false && action.locator.kind !== "ref") {
             const replacement = await this.resolveLocator(state, action.locator).catch(() => null);
             if (replacement && replacement.backendDOMNodeId !== null) {
-              target = replacement.backendDOMNodeId;
+              located = replacement.backendDOMNodeId;
+              target = await control(replacement.backendDOMNodeId);
               shown = await read(target);
             }
           }
           const readable = isRecord(shown) && shown.connected === true;
           if (isRecord(shown) && readable && shown.checked === action.checked) return;
+          if (isRecord(shown) && readable && !clickedAgain && shown.checked === !action.checked) {
+            clickedAgain = true;
+            await click(located);
+            continue;
+          }
           if (Date.now() >= deadline) break;
           await delay(readable ? 50 : 100);
         }
@@ -9123,6 +9175,68 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await this.relatedNode(state, backendDOMNodeId, POPUP_OPTION_FUNCTION, [
       { value: label },
     ]);
+  }
+
+  /** A control's checked state as the accessibility tree gives it, for one
+   * whose role and state the page sets where its markup does not show them
+   * (a custom element's own role and state); null when the tree has no
+   * checkbox, switch or radio button for the node. A checkbox or switch can
+   * be "mixed". `connected` is false for a node the page removed. */
+  private async accessibleCheckedState(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+  ): Promise<{
+    checked?: boolean | "mixed";
+    radio?: boolean;
+    kind?: string;
+    disabled?: boolean;
+    connected: boolean;
+  } | null> {
+    if (backendDOMNodeId === null) return null;
+    const connected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      "function() { return this.isConnected; }",
+      [],
+    ).catch(() => null);
+    if (connected === false) return { connected: false };
+    if (connected !== true) return null;
+    const response = await this.sendTarget<{ nodes?: unknown }>(
+      state,
+      "Accessibility.getPartialAXTree",
+      { backendNodeId: backendDOMNodeId, fetchRelatives: false },
+    ).catch(() => null);
+    const node = Array.isArray(response?.nodes)
+      ? response.nodes.find(
+          (candidate: unknown) =>
+            isRecord(candidate) &&
+            candidate.backendDOMNodeId === backendDOMNodeId &&
+            candidate.ignored !== true,
+        )
+      : undefined;
+    if (!isRecord(node) || !isRecord(node.role)) return null;
+    const role = String(node.role.value);
+    if (!["checkbox", "switch", "radio", "menuitemcheckbox", "menuitemradio"].includes(role)) {
+      return null;
+    }
+    const property = (name: string): unknown => {
+      const found = Array.isArray(node.properties)
+        ? node.properties.find(
+            (candidate: unknown) => isRecord(candidate) && candidate.name === name,
+          )
+        : undefined;
+      return isRecord(found) && isRecord(found.value) ? found.value.value : undefined;
+    };
+    const value = property("checked");
+    const radio = role === "radio" || role === "menuitemradio";
+    return {
+      checked:
+        value === true || value === "true" ? true : value === "mixed" && !radio ? "mixed" : false,
+      radio,
+      kind: radio ? "radio button" : role === "switch" ? "switch" : "checkbox",
+      disabled: property("disabled") === true,
+      connected: true,
+    };
   }
 
   /** The element a function run on a node returns, as a node ID, or null when
@@ -12362,30 +12476,133 @@ const VISIBLE_FUNCTION = `function() {
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }`;
 
-/** A checkable control's state, or null for anything else: a native
- * checkbox or radio (or an element with a boolean checked property), a
- * label's own control, or an element with an ARIA checkable role, whose
- * "mixed" state counts as unchecked. `radio` marks a control that is turned
- * off only by choosing another option, and `connected` whether the page
- * still shows it rather than one it put in its place. */
-const CHECKED_FUNCTION = `function() {
-  const element = this instanceof HTMLLabelElement && this.control ? this.control : this;
-  if (!(element instanceof Element)) return null;
-  const connected = element.isConnected;
-  if (element instanceof HTMLInputElement) {
-    if (element.type !== "checkbox" && element.type !== "radio") return null;
-    return { checked: element.checked, radio: element.type === "radio", connected };
-  }
-  if (typeof element.checked === "boolean") {
-    return { checked: element.checked, radio: element.getAttribute("type") === "radio", connected };
-  }
-  const role = (element.getAttribute("role") || "").trim().split(/\\s+/)[0];
-  if (!["checkbox", "switch", "radio", "menuitemcheckbox", "menuitemradio"].includes(role)) return null;
-  return {
-    checked: element.getAttribute("aria-checked") === "true",
-    radio: role === "radio" || role === "menuitemradio",
-    connected,
+/** Why check refuses a target that is no checkbox, switch or radio button,
+ * and what does work on it. */
+const NOT_CHECKABLE_MESSAGE =
+  "browser locator is not a checkbox, switch or radio button; to toggle something else, click it and then look at it";
+
+/** Finds the checkable control a node stands for, as `checkable(this)`, and
+ * reads a control's own state, as `stateOf(element)`. A control is a native
+ * checkbox or radio (or an element with a boolean checked property), or an
+ * element with an ARIA checkable role in its role list, any case. Its state
+ * is true, false, or "mixed" for an indeterminate checkbox or aria-checked
+ * "mixed" (any case); any other aria-checked counts as false. `kind` names
+ * it for a person, and `disabled` is a native or aria-disabled refusal on it
+ * or a box around it. A node stands for the control it is or is inside (the
+ * box's text or icon), up to the nearest label: a label, or a node in one,
+ * stands for the control its for= names, else for the one control it holds
+ * (a component library's label that wraps a box drawn with an ARIA role, or
+ * a hidden input), and only when a click on the label goes to that control.
+ * A label holding more than one control, or none, stands for none. */
+const CHECKABLE_HELPERS = `
+  const checkableRoles = ["checkbox", "switch", "radio", "menuitemcheckbox", "menuitemradio"];
+  const stateOf = (element) => {
+    if (!(element instanceof Element)) return null;
+    const disabled = element.matches(":disabled") || element.closest('[aria-disabled="true" i]') !== null;
+    const roles = (element.getAttribute("role") || "").trim().toLowerCase().split(/\\s+/);
+    const role = roles.find((candidate) => checkableRoles.includes(candidate));
+    if (element instanceof HTMLInputElement) {
+      if (element.type !== "checkbox" && element.type !== "radio") return null;
+      const radio = element.type === "radio";
+      return {
+        checked: !radio && element.indeterminate ? "mixed" : element.checked,
+        radio,
+        kind: radio ? "radio button" : role === "switch" ? "switch" : "checkbox",
+        disabled,
+      };
+    }
+    if (typeof element.checked === "boolean") {
+      const radio = element.getAttribute("type") === "radio";
+      return {
+        checked: element.indeterminate === true ? "mixed" : element.checked,
+        radio,
+        kind: radio ? "radio button" : role === "switch" ? "switch" : "checkbox",
+        disabled,
+      };
+    }
+    if (!role) return null;
+    const value = (element.getAttribute("aria-checked") || "").trim().toLowerCase();
+    const radio = role === "radio" || role === "menuitemradio";
+    return {
+      checked: value === "true" ? true : value === "mixed" && !radio ? "mixed" : false,
+      radio,
+      kind: radio ? "radio button" : role === "switch" ? "switch" : "checkbox",
+      disabled,
+    };
   };
+  const labelControl = (label) => {
+    if (label.hasAttribute("for")) return label.control && stateOf(label.control) ? label.control : null;
+    const held = Array.from(label.querySelectorAll("*")).filter(
+      (element) => stateOf(element) && !element.closest('[aria-hidden="true"]'),
+    );
+    if (held.length !== 1) return null;
+    // A click on the label goes to its first form control; one that is not
+    // the box would take it.
+    return !label.control || label.control === held[0] ? held[0] : null;
+  };
+  const checkable = (node) => {
+    const start = node instanceof Element ? node : node && node.parentElement;
+    if (!(start instanceof Element)) return null;
+    for (let element = start; element; element = element.parentElement) {
+      if (stateOf(element)) return element;
+      if (element instanceof HTMLInputElement) return null;
+      if (element instanceof HTMLLabelElement) return labelControl(element);
+    }
+    return null;
+  };`;
+
+/** The state of the checkable control a node stands for (see
+ * CHECKABLE_HELPERS), or null for anything else. `radio` marks a control
+ * that is turned off only by choosing another option, and `connected`
+ * whether the page still shows it rather than one it put in its place. */
+const CHECKED_FUNCTION = `function() {${CHECKABLE_HELPERS}
+  const element = checkable(this);
+  const state = element && stateOf(element);
+  return state ? { ...state, connected: element.isConnected } : null;
+}`;
+
+/** The checkable control a node stands for (see CHECKABLE_HELPERS), or null. */
+const CHECKABLE_FUNCTION = `function() {${CHECKABLE_HELPERS}
+  return checkable(this);
+}`;
+
+/** Where check clicks for the control a node stands for (see
+ * CHECKABLE_HELPERS), or null: the control itself, unless it is a native
+ * input a person cannot see or reach (not rendered, hidden, clipped to
+ * nothing, or placed off the page where no scroll reaches it, as a box a
+ * label draws instead), which is clicked through its label as a person does:
+ * at the located part of the label, else at a label on the page. */
+const CHECK_CLICK_FUNCTION = `function() {${CHECKABLE_HELPERS}
+  const control = checkable(this);
+  if (!control) return null;
+  if (!(control instanceof HTMLInputElement) || !control.labels) return control;
+  const style = getComputedStyle(control);
+  const box = control.getBoundingClientRect();
+  const offPage = box.right + window.scrollX <= 0 || box.bottom + window.scrollY <= 0;
+  const reachable = control.getClientRects().length > 0 && style.visibility === "visible" &&
+    box.width > 1 && box.height > 1 && (style.clip === "auto" || style.clip === "") &&
+    style.clipPath === "none" && !offPage;
+  if (reachable) return control;
+  const start = this instanceof Element ? this : this.parentElement;
+  const labels = Array.from(control.labels);
+  const own = labels.find((label) => label.contains(start));
+  if (own) return start === control ? own : start;
+  return labels.find((label) => label.getClientRects().length > 0 &&
+    getComputedStyle(label).visibility === "visible") || control;
+}`;
+
+/** For a native input in view, what of its own label is on top of it at its
+ * center (a box the label draws over it), or null when the input itself, or
+ * anything not in one of its labels, is there. */
+const CHECK_COVERING_LABEL_FUNCTION = `function() {
+  if (!(this instanceof HTMLInputElement) || !this.labels || this.labels.length === 0) return null;
+  const box = this.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) return null;
+  const root = this.getRootNode();
+  const hit = (typeof root.elementFromPoint === "function" ? root : document).elementFromPoint(
+    box.left + box.width / 2, box.top + box.height / 2);
+  if (!hit || hit === this || this.contains(hit)) return null;
+  return Array.from(this.labels).some((label) => label.contains(hit)) ? hit : null;
 }`;
 
 /** Whether a form control takes no pointer input itself (pointer-events:
@@ -12396,6 +12613,10 @@ const POINTER_LABELLED_FUNCTION = `function() {
     Array.from(this.labels).some((label) => label.getClientRects().length > 0 && getComputedStyle(label).pointerEvents !== "none");
 }`;
 
+/** What inside a label takes a click on it instead of the label's control. */
+const LABEL_INTERACTIVE_SELECTOR =
+  'a[href], area[href], button, input, select, textarea, summary, iframe, object, embed, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), [role=link], [role=button], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=tab], [role=option], [role=combobox], [role=textbox], [role=slider]';
+
 /** For a control that takes no pointer input, the part of its label a person
  * clicks instead, or null: the box the label draws over the control, else the
  * label itself, and only when a click at its center lands on the label's own
@@ -12404,7 +12625,7 @@ const POINTER_LABELLED_FUNCTION = `function() {
  * in view. */
 const POINTER_LABEL_FUNCTION = `function() {
   if (!(this instanceof HTMLElement) || !this.labels) return null;
-  const interactive = 'a[href], area[href], button, input, select, textarea, summary, iframe, object, embed, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), [role=link], [role=button], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=tab], [role=option], [role=combobox], [role=textbox], [role=slider]';
+  const interactive = ${JSON.stringify(LABEL_INTERACTIVE_SELECTOR)};
   const center = (element) => {
     const box = element.getBoundingClientRect();
     return [box.left + box.width / 2, box.top + box.height / 2];
@@ -12428,6 +12649,26 @@ const POINTER_LABEL_FUNCTION = `function() {
     }
   }
   return null;
+}`;
+
+/** Whether a click at the center of a part of a label (or the label) lands
+ * on the label's own content rather than a link or other control in it.
+ * Run with the part in view. */
+const CHECK_LABEL_SPOT_FUNCTION = `function() {
+  const interactive = ${JSON.stringify(LABEL_INTERACTIVE_SELECTOR)};
+  const part = this instanceof Element ? this : this.parentElement;
+  const label = part && part.closest("label");
+  if (!label) return false;
+  const box = part.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) return false;
+  const root = part.getRootNode();
+  const hit = (typeof root.elementFromPoint === "function" ? root : document).elementFromPoint(
+    box.left + box.width / 2, box.top + box.height / 2);
+  if (!hit || !label.contains(hit)) return false;
+  for (let node = hit; node && node !== label; node = node.parentElement) {
+    if (node.matches(interactive)) return false;
+  }
+  return true;
 }`;
 
 /** Disabled natively (including inside a disabled fieldset) or with aria-disabled. */
