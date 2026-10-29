@@ -910,6 +910,110 @@ for (const posture of ["production", "restricted"] as const) {
       await fresh.close();
     }
   }, 180_000);
+
+  // A lower catalog limit or a downgrade leaves organizations over their cap
+  // with invitations they already reserved. Binding one at sign-in takes no new
+  // seat, so it must never be refused: a refusal aborts the whole membership
+  // lookup and locks the recipient out of every organization.
+  test(`sign-in binds a reserved invitation into an over-limit organization and keeps every organization (${posture} owner)`, async () => {
+    if (!client || !shared) return;
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
+    const { accountId, subject } = await account();
+    await activate(accountId, "max");
+    const userId = crypto.randomUUID();
+    const email = `${userId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'Over-limit recipient', ${email}, true)`;
+    const own = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email,
+      name: "Over-limit recipient",
+    });
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: accountId,
+      actorSubjectId: subject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail: email,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    for (let i = 0; i < 6; i++) await invite(accountId, subject);
+    // Downgrade to the five-seat Free plan with eight seats in use.
+    await upsertOrganizationPlan(client.db, { accountId, planKey: "free", status: "active" });
+    expect((await getBillingBalance(client.db, accountId)).plan).toMatchObject({
+      seatLimit: 5,
+      seatsUsed: 8,
+    });
+
+    const fresh = createDb(shared.appUrl, { max: 1, searchPath: shared.schema });
+    try {
+      const signIn = () =>
+        ensureManagedAccessForUserWithOrganizationMemberships(fresh.db, {
+          userId,
+          email,
+          name: "Over-limit recipient",
+          emailVerified: true,
+        });
+      const signedIn = await run(signIn);
+      expect(signedIn.organizationMemberships.map((m) => m.organizationId)).toContain(
+        own.defaultAccountId!,
+      );
+      const [bound] = await shared.admin<
+        Array<{ target_subject_id: string | null; revision: string }>
+      >`
+        select target_subject_id, revision::text from organization_membership_invitations where id = ${invitation.id}`;
+      expect(bound?.target_subject_id).toBe(`user:${userId}`);
+      expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(8);
+      // The organization stays closed to new people until it upgrades.
+      await expectState(() => invite(accountId, subject), "P0S01");
+
+      await run(() =>
+        acceptOrganizationInvitation(client!.db, {
+          organizationId: accountId,
+          actorSubjectId: `user:${userId}`,
+          operationId: crypto.randomUUID(),
+          invitationId: invitation.id,
+          expectedRevision: Number(bound!.revision),
+        }),
+      );
+      expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(8);
+      expect((await run(signIn)).organizationMemberships.map((m) => m.organizationId)).toEqual(
+        expect.arrayContaining([own.defaultAccountId!, accountId]),
+      );
+    } finally {
+      await fresh.close();
+    }
+  }, 180_000);
+
+  // Lifecycle seams such as ensure_managed_human_personal_workspace insert the
+  // membership anchor with ON CONFLICT DO NOTHING on every call. The BEFORE
+  // trigger sees that proposed row even when it only conflicts with the
+  // member's existing row, so it must not count it as a new seat.
+  test(`an idempotent membership insert for an existing member is not refused at the cap (${posture} owner)`, async () => {
+    if (!client || !shared) return;
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
+    const { accountId, subject } = await account();
+    const existing = `user:${crypto.randomUUID()}`;
+    await provision(accountId, existing);
+    for (let i = 0; i < 3; i++) await provision(accountId, `user:${crypto.randomUUID()}`);
+    await activate(accountId, "free");
+    expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+    for (const member of [subject, existing]) {
+      await run(() =>
+        shared!.admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.organization_tenancy_lifecycle','organization_membership_lifecycle',true),set_config('opengeni.account_id',${accountId},true)`;
+          await tx`insert into organization_memberships(account_id,subject_id,role,status) values (${accountId},${member},'member','provisioning') on conflict (account_id, subject_id) do nothing`;
+        }),
+      );
+    }
+    expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+    // A genuinely new person is still refused.
+    await expectState(() => run(() => provision(accountId, `user:${crypto.randomUUID()}`)), "P0S01");
+  }, 180_000);
 }
 
 test("seat limits apply to lifecycle writers without the organization's account context", async () => {
