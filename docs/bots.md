@@ -39,6 +39,13 @@ image is refused, because everyone else would see only initials; the agent is
 told to share the image first. Each viewer opens the image with their own
 access, and anyone who cannot sees the name's initials instead.
 
+Avatars are mostly seen small: 16 pixels in the sidebar list and 20 in the
+chat header. Detailed pictures, such as characters told apart by a hat or a
+held object, all look alike at that size. The tools therefore ask the agent to
+make an image avatar a flat icon that fills the square: one bold symbol for the
+chat's job on a solid, strong colour that differs from other bots' avatars,
+with no frame, faces, fine detail or text.
+
 Forking a chat copies its description and avatar along with its title and
 agent settings (the fork routines copy the whole source row), so forking a bot
 is the simple way to clone one together with its history.
