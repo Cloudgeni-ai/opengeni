@@ -1091,14 +1091,16 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // The account whose card in this chat opened the reconnect: once it is done,
+  // the agent continues the request that stopped, as after a first setup.
+  const reconnectCardConnection = useRef<string | null>(null);
   // Workspace GitHub App setup from the follow-up repository menu uses this
   // route-level Connect dialog: the menu closes when GitHub's authorization
   // popup takes focus, which would unmount a dialog hosted inside it.
-  const connectGitHubApp = useCallback(
-    () =>
-      setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href())),
-    [page, reconnectTransport, workspaceId],
-  );
+  const connectGitHubApp = useCallback(() => {
+    reconnectCardConnection.current = null;
+    setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
+  }, [page, reconnectTransport, workspaceId]);
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1117,6 +1119,7 @@ export function SessionRoute({
           item.connectionId,
         );
         if (account) {
+          reconnectCardConnection.current = item.connectionId;
           setReconnectRequest({
             scope: { workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
@@ -1522,6 +1525,20 @@ export function SessionRoute({
                 void context.refreshGitHub(workspaceId, undefined, { sync: true });
                 return;
               }
+              // Same continuation as after a first setup from a card: the
+              // server checks the account now has what its card asked for,
+              // wakes the agent at most once per card, and not at all once
+              // the person has written since. Never fails the finished setup.
+              const connectionId = reconnectCardConnection.current;
+              reconnectCardConnection.current = null;
+              if (connectionId)
+                void Promise.resolve()
+                  .then(() =>
+                    context.client.continueAfterCapabilitySetup(workspaceId, sessionId, {
+                      connectionId,
+                    }),
+                  )
+                  .catch(() => undefined);
               toast.success("Connection updated", {
                 description: "New tool calls can use the updated connection.",
               });

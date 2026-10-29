@@ -14634,8 +14634,11 @@
         "input"
       ],
       "shape": {
-        "$": "object",
-        "$.capabilityId": "string!"
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "object",
+        "$|0.capabilityId": "string!",
+        "$|1": "object",
+        "$|1.connectionId": "string!"
       }
     },
     "ContinueAfterCapabilitySetupResponse": {

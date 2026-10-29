@@ -3030,6 +3030,8 @@ export const englishMessages = {
   "messageTimeline.accessOrganizeMailbox": "organize your mailbox",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
+  "messageTimeline.agentCarriesOnAfterAllowing":
+    "After you allow it, the agent carries on where it stopped.",
   "messageTimeline.agentDecided": "Agent decided",
   "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
@@ -3132,8 +3134,6 @@ export const englishMessages = {
   "messageTimeline.timelineItemUnavailable": "Timeline item unavailable",
   "messageTimeline.timelineItemUnavailableDetail":
     "This item could not be displayed. The rest of the conversation is still available.",
-  "messageTimeline.toolCallNotReplayedAfterAllowing":
-    "This tool call wasn't replayed. After you allow it, send a new message to try again.",
   "messageTimeline.toolCallNotReplayedAfterConnecting":
     "This tool call wasn't replayed. After connecting, send a new message to try again.",
   "messageTimeline.toolCallNotReplayedAfterReconnecting":

@@ -119,9 +119,7 @@ describe("authNeededPresentation", () => {
     expect(view.reasonLine).toBe(
       "It needs your permission to draft and send email. Everything it can already do stays the same.",
     );
-    expect(view.footnote).toBe(
-      "This tool call wasn't replayed. After you allow it, send a new message to try again.",
-    );
+    expect(view.footnote).toBe("After you allow it, the agent carries on where it stopped.");
     expect(view.canRecover).toBe(true);
     expect(`${view.title} ${view.footnote}`).not.toMatch(/reconnect/i);
     // Unknown access keeps the generic line; the button still says Allow.

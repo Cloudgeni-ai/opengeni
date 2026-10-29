@@ -24,6 +24,11 @@ The reviewed tools use three Google scopes, `gmail.readonly`, `gmail.compose` an
 - The callback requires `gmail.readonly`. If the person unticks the extra
   permission on Google's screen, the account keeps what it had and the next
   call asks again.
+- After Allow, the chat asks to continue through the existing capability
+  continuation (`POST .../capability-continuations` with `{ connectionId }`).
+  When the account is active and holds every scope the card asked for, the
+  agent gets the usual "finished setting up" update and carries on by itself,
+  at most once per card. The person does not need to send a new message.
 
 Accounts connected before this change keep all three scopes. Tools by area:
 

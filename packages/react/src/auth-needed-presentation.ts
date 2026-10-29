@@ -144,7 +144,7 @@ export function authNeededPresentation(
               missing
                 ? "messageTimeline.toolCallNotReplayedAfterConnecting"
                 : moreAccess
-                  ? "messageTimeline.toolCallNotReplayedAfterAllowing"
+                  ? "messageTimeline.agentCarriesOnAfterAllowing"
                   : "messageTimeline.toolCallNotReplayedAfterReconnecting",
             ),
     unavailable,
