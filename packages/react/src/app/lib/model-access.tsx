@@ -1,4 +1,5 @@
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
+import type { CreditRefusalKind } from "../../lib/format";
 
 // Eager app-shell helper for model access. Onboarding selection, draft, and
 // checkout logic lives in ./model-access-onboarding so it stays out of the
@@ -10,12 +11,32 @@ export function isPaymentRequiredError(error: unknown): error is OpenGeniApiErro
   );
 }
 
-/** A refusal only credits fix: the own-key platform fee, or API use. */
-export type PaymentRefusalCode = "byok_paid_credit_required" | "api_credits_required";
+/** A refusal one action fixes: Upgrade to Pro (own key on Free) or Add credits. */
+export type PaymentRefusalCode = CreditRefusalKind;
+
+/** What a chat route keeps about a credit refusal of a Send, for its notice. */
+export type CreditRefusalRecord<Scope> = Scope & {
+  model: string;
+  message: string;
+  code: PaymentRefusalCode | null;
+};
+
+/** The notice record for a payment refusal of a Send, or null for any other error. */
+export function creditRefusalRecord<Scope extends object>(
+  error: unknown,
+  scope: Scope,
+  model: string,
+): CreditRefusalRecord<Scope> | null {
+  if (!isPaymentRequiredError(error)) return null;
+  return { ...scope, model, message: error.message, code: paymentRefusalCode(error) };
+}
 
 /** Which credit a payment refusal needs, when it is more specific than "no credit". */
 export function paymentRefusalCode(error: unknown): PaymentRefusalCode | null {
   if (!isPaymentRequiredError(error)) return null;
-  const code = error.details?.code;
-  return code === "byok_paid_credit_required" || code === "api_credits_required" ? code : null;
+  const details = error.details as { code?: unknown; action?: { type?: unknown } } | undefined;
+  if (details?.code === "api_credits_required") return "api_credits_required";
+  if (details?.code !== "byok_paid_credit_required") return null;
+  // On the Free plan the server offers Upgrade to Pro as the fix.
+  return details.action?.type === "upgrade_plan" ? "byok_upgrade_required" : details.code;
 }

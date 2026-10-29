@@ -125,22 +125,75 @@ export function tryParseJson(text: string): unknown {
 export const CREDIT_EXHAUSTION_MESSAGE = (t: OpenGeniText) =>
   t("lib.format.outOfCreditsThisWorkspace");
 
-// The server's own refusals that only credits fix. Each gets its own sentence.
+// The server's own refusals that one action fixes. Each gets its own sentence.
+const BYOK_UPGRADE_TEXT = /upgrade to pro to use your own key/i;
 const BYOK_PAID_CREDIT_TEXT = /add credits to use your own key/i;
 const API_CREDITS_TEXT = /api usage uses credits, not your plan credit/i;
+
+/**
+ * A credit refusal more specific than "no credit": the own-key platform fee
+ * (on the Free plan, Upgrade to Pro fixes it; otherwise Add credits), or API
+ * use, which only credits pay for. No model choice fixes any of them.
+ */
+export type CreditRefusalKind =
+  | "byok_upgrade_required"
+  | "byok_paid_credit_required"
+  | "api_credits_required";
+
+/** The refusal kind named in recorded failure text, if any. */
+export function creditRefusalKindFromText(
+  ...texts: ReadonlyArray<string | null | undefined>
+): CreditRefusalKind | null {
+  const matches = (pattern: RegExp) =>
+    texts.some((text) => typeof text === "string" && pattern.test(text));
+  if (matches(BYOK_UPGRADE_TEXT)) return "byok_upgrade_required";
+  if (matches(BYOK_PAID_CREDIT_TEXT)) return "byok_paid_credit_required";
+  if (matches(API_CREDITS_TEXT)) return "api_credits_required";
+  return null;
+}
+
+/** The refusal kind of a 402 from the API: its stable code, then its action. */
+export function creditRefusalKind(error: unknown): CreditRefusalKind | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 402) return null;
+  const details = error.details as { code?: unknown; action?: { type?: unknown } } | undefined;
+  if (details?.code === "api_credits_required") return "api_credits_required";
+  if (details?.code === "byok_paid_credit_required") {
+    return details.action?.type === "upgrade_plan" || BYOK_UPGRADE_TEXT.test(error.message)
+      ? "byok_upgrade_required"
+      : "byok_paid_credit_required";
+  }
+  return null;
+}
+
+/** The one action that fixes a refusal of this kind. */
+export function creditRefusalFix(kind: CreditRefusalKind): "upgrade" | "add_credits" {
+  return kind === "byok_upgrade_required" ? "upgrade" : "add_credits";
+}
+
+const CREDIT_REFUSAL_KEYS = {
+  byok_upgrade_required: "lib.format.byokUpgradeRequired",
+  byok_paid_credit_required: "lib.format.byokPaidCreditRequired",
+  api_credits_required: "lib.format.apiCreditsRequired",
+} as const;
+
+const CREDIT_REFUSAL_HEADLINE_KEYS = {
+  byok_upgrade_required: "lib.format.byokUpgradeRequiredHeadline",
+  byok_paid_credit_required: "lib.format.byokPaidCreditRequiredHeadline",
+  api_credits_required: "lib.format.apiCreditsRequiredHeadline",
+} as const;
+
+/** The short sentence that names a refusal of this kind, without what was kept. */
+export function creditRefusalHeadline(t: OpenGeniText, kind: CreditRefusalKind): string {
+  return t(CREDIT_REFUSAL_HEADLINE_KEYS[kind]);
+}
 
 /** The credit-stop sentence for a refusal: own-key fee, API use, or no credit. */
 export function creditExhaustionText(
   t: OpenGeniText,
   ...texts: ReadonlyArray<string | null | undefined>
 ): string {
-  if (texts.some((text) => typeof text === "string" && BYOK_PAID_CREDIT_TEXT.test(text))) {
-    return t("lib.format.byokPaidCreditRequired");
-  }
-  if (texts.some((text) => typeof text === "string" && API_CREDITS_TEXT.test(text))) {
-    return t("lib.format.apiCreditsRequired");
-  }
-  return CREDIT_EXHAUSTION_MESSAGE(t);
+  const kind = creditRefusalKindFromText(...texts);
+  return kind ? t(CREDIT_REFUSAL_KEYS[kind]) : CREDIT_EXHAUSTION_MESSAGE(t);
 }
 
 /** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
@@ -156,6 +209,12 @@ export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE = (t: OpenGeniText) =>
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE = (t: OpenGeniText) =>
   t("lib.format.yourOrganizationDoesnTHave");
+
+const COMPOSER_CREDIT_REFUSAL_KEYS = {
+  byok_upgrade_required: "lib.format.composerByokUpgradeRequired",
+  byok_paid_credit_required: "lib.format.composerByokPaidCreditRequired",
+  api_credits_required: "lib.format.composerApiCreditsRequired",
+} as const;
 
 /** Trusted, composer-owned guidance; unlike remote diagnostic prose, this is UI copy. */
 export class ComposerStateError extends Error {}
@@ -289,9 +348,14 @@ export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): s
         : COMPOSER_MEMBER_ALLOWANCE_MESSAGE(t);
     return composerErrorReference(t, error, message);
   }
-  return isComposerCreditRefusal(error)
-    ? composerErrorReference(t, error, COMPOSER_PAYMENT_REQUIRED_MESSAGE(t))
-    : formatErrorMessage(error);
+  if (!isComposerCreditRefusal(error)) return formatErrorMessage(error);
+  // Own-key and API refusals name their one fix; no model choice helps.
+  const kind = creditRefusalKind(error) ?? creditRefusalKindFromText(error.message);
+  return composerErrorReference(
+    t,
+    error,
+    kind ? t(COMPOSER_CREDIT_REFUSAL_KEYS[kind]) : COMPOSER_PAYMENT_REQUIRED_MESSAGE(t),
+  );
 }
 
 function composerErrorReference(t: OpenGeniText, error: Error, message: string): string {

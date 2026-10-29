@@ -59,12 +59,30 @@ export function OrganizationCreditBalance({
   // A period without a monthly grant shows no "$0.00 monthly plan credit" row.
   const plan = showPlanCredit && (balance.plan?.creditGrantedMicros ?? 0) > 0 ? balance.plan : null;
   const byokFee = balance.byokPlatformFeeMonthMicros ?? 0;
-  if (balance.promotionalCredits?.length || plan || byokFee > 0) {
-    // Credits: what API use spends, and app use beyond plan credit.
-    const general =
-      balance.creditsMicros ??
-      (balance.generalBalanceMicros ?? balance.balanceMicros) -
-        (plan?.creditScoped ? 0 : (plan?.creditRemainingMicros ?? 0));
+  // A charge, not a balance: set apart below the balances.
+  const feeLine =
+    byokFee > 0 ? (
+      <div
+        data-testid="byok-platform-fee"
+        className="mt-3 flex items-center justify-between gap-4 border-t border-border pt-3 pr-6"
+      >
+        <div className="min-w-0">
+          <p className="text-sm text-fg-muted">Platform fee on your own keys</p>
+          <p className="mt-0.5 text-xs leading-[18px] text-fg-subtle">Charged this month</p>
+        </div>
+        <span className="shrink-0 text-sm text-fg-muted tabular-nums">
+          {formatMoneyMicros(byokFee, balance.currency)}
+        </span>
+      </div>
+    ) : null;
+  if (balance.promotionalCredits?.length || plan) {
+    // Credits: what API use spends, and app use beyond plan credit. Without a
+    // plan row, plan credit stays in this row so the rows add up.
+    const general = plan
+      ? (balance.creditsMicros ??
+        (balance.generalBalanceMicros ?? balance.balanceMicros) -
+          (plan.creditScoped ? 0 : plan.creditRemainingMicros))
+      : (balance.generalBalanceMicros ?? balance.balanceMicros);
     const scopedPlan = balance.promotionalCredits?.find((grant) => grant.planCredit);
     return (
       <div className="min-w-0">
@@ -122,18 +140,8 @@ export function OrganizationCreditBalance({
               {formatMoneyMicros(general, balance.currency)}
             </span>
           </div>
-          {byokFee > 0 ? (
-            <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-fg">Platform fee on your own keys</p>
-                <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">This month.</p>
-              </div>
-              <span className="shrink-0 text-sm font-medium text-fg tabular-nums">
-                {formatMoneyMicros(byokFee, balance.currency)}
-              </span>
-            </div>
-          ) : null}
         </div>
+        {feeLine}
       </div>
     );
   }
@@ -150,6 +158,7 @@ export function OrganizationCreditBalance({
           : "Total balance"}
       </p>
       {holdNotice}
+      {feeLine}
     </div>
   );
 }

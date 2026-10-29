@@ -89,11 +89,19 @@ export function FailedSessionBanner({
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
   const creditGap = billingFailure ? freeCreditGap : null;
-  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit, compaction } =
-    failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
-  // Offer the switch until the composer selects a model that can run.
+  const {
+    reason,
+    unavailableModel,
+    retryUnhelpful,
+    detail,
+    dailyLimit,
+    compaction,
+    creditRefusal,
+  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
+  // Offer the switch until the composer selects a model that can run. An
+  // own-key or API stop has one fix, never another model.
   const switchTo =
-    creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
+    !creditRefusal && creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
       ? creditGap.covered[0]
       : undefined;
   // The free model's daily allowance is deployment-wide: name it and offer the
@@ -206,7 +214,15 @@ export function FailedSessionBanner({
           </>
         ) : null}
         {billingFailure ? (
-          switchTo ? (
+          creditRefusal === "byok_upgrade_required" ? (
+            workspaceId && canBuyCredits ? (
+              <UpgradeLink workspaceId={workspaceId} />
+            ) : null
+          ) : creditRefusal ? (
+            workspaceId && canBuyCredits ? (
+              <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
+            ) : null
+          ) : switchTo ? (
             <>
               <Button
                 type="button"
@@ -281,6 +297,22 @@ function BuyCreditsLink({
         {...analyticsAction("buy_credits")}
       >
         Add credits
+      </Link>
+    </Button>
+  );
+}
+
+function UpgradeLink({ workspaceId }: { workspaceId: string }) {
+  return (
+    <Button asChild size="sm">
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={{ section: "billing" }}
+        onClick={() => noteTurnFailureAction("buy_credits")}
+        {...analyticsAction("buy_credits")}
+      >
+        Upgrade to Pro
       </Link>
     </Button>
   );

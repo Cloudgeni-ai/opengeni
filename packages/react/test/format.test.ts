@@ -277,6 +277,53 @@ describe("isCreditExhaustion", () => {
     expect(creditExhaustionText(englishText, "insufficient workspace credits")).toBe(
       CREDIT_EXHAUSTION_MESSAGE(englishText),
     );
+    const upgrade = "Activity task failed: Upgrade to Pro to use your own key.";
+    expect(isCreditExhaustion(upgrade)).toBe(true);
+    expect(humanizeFailureReason(englishText, upgrade)).toBe(
+      "Upgrade to Pro to use your own key. The conversation is preserved.",
+    );
+  });
+});
+
+describe("composer own-key and API refusals", () => {
+  const refusal = (message: string, details: Record<string, unknown>) =>
+    new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: { status: 402, code: "payment_required", message, retryable: false, details },
+      }),
+    );
+
+  test("name their one fix instead of suggesting another model", () => {
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal("Add credits to use your own key.", {
+          code: "byok_paid_credit_required",
+          action: { type: "add_credits", href: "/billing" },
+        }),
+      ),
+    ).toBe("Add credits to use your own key. Your message and attachments are saved.");
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal("Upgrade to Pro to use your own key.", {
+          code: "byok_paid_credit_required",
+          action: { type: "upgrade_plan", href: "/billing" },
+        }),
+      ),
+    ).toBe("Upgrade to Pro to use your own key. Your message and attachments are saved.");
+    const api = composerSubmissionErrorMessage(
+      englishText,
+      refusal("API usage uses credits, not your plan credit.", {
+        code: "api_credits_required",
+        action: { type: "add_credits", href: "/billing" },
+      }),
+    );
+    expect(api).toBe(
+      "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+    );
+    expect(api).not.toContain("another model");
   });
 });
 

@@ -188,7 +188,17 @@ export function SubscriptionPlans({
       <Section
         variant="open"
         title="Plans"
-        description="Plan credit pays for app use and resets monthly. API use, and app use beyond it, use credits."
+        description={
+          <>
+            <span className="block">
+              Subscriptions give 5x the plan price in credits for the Opengeni apps, and you can
+              bring your own keys.
+            </span>
+            <span className="block">
+              API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.
+            </span>
+          </>
+        }
       >
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {catalog.plans.map((item) => {

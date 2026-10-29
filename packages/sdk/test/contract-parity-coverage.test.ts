@@ -287,6 +287,18 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptRepository = (value: z.infer<typeof ContractGitHubRepository>): GitHubRepository =>
       value;
     const acceptBalance = (value: z.infer<typeof ContractBillingBalance>): BillingBalance => value;
+    // The reverse direction too: every billing split field the contract has.
+    const splitFields = {
+      creditsMicros: 0,
+      apiDebtMicros: 0,
+      paidPlanCreditMicros: 0,
+      paidCreditsMicros: 0,
+      byokPlatformFeeMonthMicros: 0,
+      byokFeeDebtMicros: 0,
+    } satisfies Partial<
+      Record<keyof BillingBalance & keyof z.infer<typeof ContractBillingBalance>, number>
+    >;
+    expect(Object.keys(splitFields).length).toBe(6);
     const acceptUsageEvent = (value: z.infer<typeof ContractUsageEvent>): UsageEvent => value;
     const acceptCheckout = (
       value: z.infer<typeof ContractCreateCheckoutResponse>,

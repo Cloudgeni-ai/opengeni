@@ -91,7 +91,8 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "./lib/session-create";
-import { isPaymentRequiredError } from "./lib/model-access";
+import { isPaymentRequiredError, paymentRefusalCode } from "./lib/model-access";
+import type { CreditRequired } from "./components/credit-required-gate";
 import {
   applySessionPinProjection,
   notifySessionPinChanged,
@@ -378,10 +379,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   >(host.initialInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
-  const [creditRequired, setCreditRequired] = useState<{
-    workspaceId: string;
-    accountId: string | null;
-  } | null>(null);
+  const [creditRequired, setCreditRequired] = useState<CreditRequired | null>(null);
   const [model, setModel] = useState("gpt-6-astra");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -2017,6 +2015,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setCreditRequired({
             workspaceId,
             accountId: workspace?.accountId ?? null,
+            code: paymentRefusalCode(problem),
           });
         } else if (handled !== true) {
           toast.error("Failed to start session", {

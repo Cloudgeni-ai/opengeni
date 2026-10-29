@@ -468,3 +468,45 @@ test("codes that record operator text get the plain headline, like unclassified 
     ).toEqual({ reason: "The session stopped unexpectedly.", unavailableModel: false, detail });
   }
 });
+
+test("own-key and API credit stops name their one fix, never another model's free credit", () => {
+  const gap = {
+    modelLabel: "Claude Opus 5.5",
+    covered: [{ id: "free-model", label: "Free model" }],
+    selectionUsable: false,
+  } as never;
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "Activity task failed: Add credits to use your own key." },
+      true,
+      false,
+      true,
+      gap,
+    ),
+  ).toEqual({
+    reason: "Add credits to use your own key.",
+    unavailableModel: false,
+    creditRefusal: "byok_paid_credit_required",
+  });
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "Activity task failed: Upgrade to Pro to use your own key." },
+      true,
+      false,
+      true,
+      gap,
+    ),
+  ).toMatchObject({
+    reason: "Upgrade to Pro to use your own key.",
+    creditRefusal: "byok_upgrade_required",
+  });
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "API usage uses credits, not your plan credit." },
+      true,
+    ),
+  ).toMatchObject({
+    reason: "API usage uses credits, not your plan credit.",
+    creditRefusal: "api_credits_required",
+  });
+});
