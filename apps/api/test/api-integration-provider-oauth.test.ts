@@ -1338,20 +1338,27 @@ describe("API Integration provider OAuth", () => {
     });
     expect(narrowShared.status).toBe(403);
 
-    // A workspace account is integration management.
+    // A member (connections:write) adds a workspace account integration too.
     const workspaceOwned = await connectAndPreview({ ownership: "workspace" });
     const sharedInstall = await workspaceOwned.install();
-    expect(sharedInstall.status).toBe(403);
-    expect(await sharedInstall.text()).toContain("capabilities:manage");
-
-    // So is binding an instance this account is not already bound to.
-    const other = await connectAndPreview({
-      ownership: "personal",
-      installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+    expect(sharedInstall.status).toBe(200);
+    expect(await sharedInstall.json()).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
     });
+
+    // Binding an instance this account is not already bound to is adding an
+    // integration, which the narrow "connect my own account" permission is not.
+    const other = await connectAndPreview(
+      {
+        ownership: "personal",
+        installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+      },
+      narrowHeaders,
+    );
     const otherInstall = await other.install();
     expect(otherInstall.status).toBe(403);
-    expect(await otherInstall.text()).toContain("capabilities:manage");
+    expect(await otherInstall.text()).toContain("connections:write");
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {
