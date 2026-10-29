@@ -186,6 +186,22 @@ export function tourEvents(): SessionEvent[] {
     },
     turn,
   );
+  // exec_command — credentials under plain names (TOKEN=, --password, a JSON
+  // "secret" field, a YAML-style "secret:") are hidden in the command and its
+  // output; their names stay so the step still says what it held.
+  log.tool(
+    {
+      name: "exec_command",
+      id: "call-exec-bare-secrets",
+      arguments: {
+        cmd: "TOKEN=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8 ./scripts/migrate.sh --password hunter2",
+        workdir: "/workspace",
+      },
+      output:
+        'Chunk ID: 9d0e1f\nWall time: 1.1000 seconds\nProcess exited with code 0\nOutput:\nconfig: {"user": "app", "password": "hunter2", "secret": "opensesame"}\nsecret: hunter2\nMigrated 3 tables\n',
+    },
+    turn,
+  );
   // exec_command — a connector tool called through the tool client reads as the tool.
   log.tool(
     {

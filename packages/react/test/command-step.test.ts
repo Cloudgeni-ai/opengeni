@@ -309,6 +309,50 @@ describe("credentials in other shapes", () => {
     }
   });
 
+  const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+  test.each([
+    ["a bare token assignment", `TOKEN=${GH} gh pr list`],
+    ["an exported token", `export TOKEN=plainword && gh pr list`],
+    ["a bare password assignment", "PASSWORD=hunter2 ./migrate"],
+    ["a lowercase password assignment", "mysql password=hunter2 db"],
+    ["a password flag", "mysql --password hunter2 db"],
+    ["a password flag with =", "mysql --password=hunter2 db"],
+    ["an API key flag", `tool --api-key ${KEY} run`],
+    ["a JSON password", '{"password": "hunter2"}'],
+    ["a JSON password with spaces", '{"password": "pa55word and more"}'],
+    ["an escaped JSON password", '{\\"password\\":\\"hunter2\\"}'],
+    ["a JSON token", '{"token": "plainword"}'],
+    ["a JSON secret", '{"secret": "plainword"}'],
+    ["a JSON key holding a credential", `{"key": "${GH}"}`],
+    ["a YAML secret", `secret: ${GH}`],
+    ["a YAML secret with a short value", "secret: hunter2"],
+    ["a YAML auth", `auth: ${GH}`],
+    ["a letters-only bearer token", "Authorization: Bearer abcdefghijklmnopqrstuvwx"],
+  ])("hide the value under a bare name: %s", (_shape, text) => {
+    const redacted = redactSignedUrls(text);
+    expect(redacted).toContain("[hidden]");
+    for (const secret of [GH, KEY, "plainword", "hunter2", "pa55word", "abcdefghijklmnop"]) {
+      expect(redacted).not.toContain(secret);
+    }
+  });
+
+  test.each([
+    "token: 5",
+    "monkey: 12",
+    "auth: required",
+    "curl https://x.example.com/a?policy=strict&key=value",
+    "secret: sauce",
+    "the token: it expires hourly",
+    "key: value",
+    '{"key": "Enter"}',
+    "keyboard: us, author: Sam",
+    "tokens: 1200, max_tokens=4096",
+    "the bearer of good news",
+    "mysql --password-file /etc/pw.cnf --max-tokens 5",
+  ])("leave prose under a bare name readable: %s", (text) => {
+    expect(redactSignedUrls(text)).toBe(text);
+  });
+
   test("a webhook keeps its host so the row still says where it went", () => {
     expect(redactSignedUrls(`https://hooks.slack.com/services/T0A1/B0C2/${KEY}`)).toBe(
       "https://hooks.slack.com/services/[hidden]",

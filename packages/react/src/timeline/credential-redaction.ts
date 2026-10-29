@@ -27,15 +27,37 @@ const PARAM_EQUALS = String.raw`(?:=|%3[Dd])`;
 const PARAM_VALUE = String.raw`(?:\\\/|(?!%26)[^&\s'"\x60<>#\\,;()[\]{}|])+`;
 const PARAM_SOURCE = `(${PARAM_SEPARATOR})(${CREDENTIAL_PARAM_NAMES}|${AMBIGUOUS_PARAM_NAMES})(${PARAM_EQUALS})(${PARAM_VALUE})`;
 
+/** Words that, in a name, say it holds a credential. */
+const SECRET_NAME_WORDS =
+  "passw(?:or)?d|passwd|secret|token|api[-_]?key|apikey|access[-_]?key|private[-_]?key|credential|auth|key";
 /**
  * `name: value` and `name=value` where the name says it holds a credential:
- * headers (`X-Api-Key: …`, `Authorization: Bearer …`), JSON and YAML fields,
- * environment assignments (`GITHUB_TOKEN=…`). Password-named values are always
- * hidden; others only when the value looks like a credential, so
- * `max_tokens: 100` and `author: Sam` stay readable.
+ * headers (`X-Api-Key: …`, `Authorization: Bearer …`), JSON and YAML fields
+ * (`"password": "…"`, `secret: …`), environment assignments (`TOKEN=…`,
+ * `GITHUB_TOKEN=…`). The name may be the bare word. A quoted value is taken
+ * whole, up to its closing quote. A name may follow an escaped line break
+ * (`\nsecret: …` inside JSON text). See `hidesNamed` for which values are hidden.
  */
-const NAMED_SECRET =
-  /(?<![\w-])([A-Za-z_][\w-]{0,40}?(?:passw(?:or)?d|passwd|secret|token|api[-_]?key|apikey|access[-_]?key|private[-_]?key|credential|auth|key)[\w-]{0,40})(["']?[ \t]*[:=][ \t]*)(["']?)((?:Bearer|Basic|token)[ \t]+)?([^\s'"`,;&}\]]+)/gi;
+const NAMED_SECRET = new RegExp(
+  String.raw`(?<=^|[^\w\\-]|\\[nrt])((?:[A-Za-z_][\w-]{0,40}?)?(?:${SECRET_NAME_WORDS})[\w-]{0,40})(\\?["']?[ \t]*[:=][ \t]*)(\\?["']?)((?:Bearer|Basic|token)[ \t]+)?((?<=")[^"\\\n]+|(?<=')[^'\\\n]+|[^\s'"\x60,;&}\]\\]+)`,
+  "gi",
+);
+/** `--password …`, `--token=…`, `--api-key …`: a flag whose name ends in a credential's name. */
+const FLAG_SECRET =
+  /((?:^|[\s'"]|\\[nrt])--?(?:[A-Za-z][\w-]{0,40}?[-_])?(?:passw(?:or)?d|passwd|secret|token|api[-_]?key|apikey|access[-_]?key|private[-_]?key|credentials?))(=|[ \t]+)(["']?)([A-Za-z0-9_.~+/][^\s'"`\\]*)/gi;
+/** `{"name": "X-Api-Key", "value": "…"}` written out as JSON text (headers, cookies). */
+const NAME_VALUE_PAIR =
+  /((\\?")(?:name|key|header)\2[ \t]*:[ \t]*\2([^"\\]{1,80})\2[ \t]*,[ \t]*\2value\2[ \t]*:[ \t]*\2)([^"\\]*)(?=\2)/gi;
+/** A field name that says its value is a credential (see `hidesField`). */
+const SECRET_FIELD_NAME = new RegExp(
+  `^(?:[A-Za-z_-][\\w-]{0,40}?)?(?:${SECRET_NAME_WORDS})[\\w-]{0,40}$`,
+  "i",
+);
+/** Header fields whose whole value is a credential. */
+const WHOLE_SECRET_FIELD = /^(?:proxy-)?authorization$|^(?:set-)?cookie$/i;
+/** A bare credential word as a name, where `token: 5` or `secret: sauce` may be prose. */
+const BARE_SECRET_NAME =
+  /^(?:secret|token|credentials?|api[-_]?key|apikey|access[-_]?key|private[-_]?key)$/i;
 const PASSWORD_NAME = /passw(?:or)?d|passwd/i;
 /** A name that is itself a credential's name (`X-Api-Key`, `GITHUB_TOKEN`, `client_secret`). */
 const SECRET_NAME_END =
@@ -43,7 +65,7 @@ const SECRET_NAME_END =
 const PLAIN_SCALAR = /^(?:\d+|true|false|null|none|yes|no)$/i;
 /** `Bearer …`, `Basic …` and `Authorization: token …` anywhere else. */
 const AUTH_SCHEME_VALUE =
-  /\b([Bb]earer|Basic|(?<=[Aa]uthorization:\s*)token)(\s+)((?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,})/g;
+  /\b([Bb]earer|Basic|(?<=[Aa]uthorization:\s*)token)(\s+)((?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}|(?<=[Bb]earer\s+)[A-Za-z]{16,}(?![A-Za-z0-9._~+/=-]))/g;
 /** `curl -u user:password` and `--user user:password`. */
 const USER_PASSWORD_FLAG = /((?:^|\s)(?:-u|--user)(?:\s+|=)["']?[^\s:'"]+:)([^\s'"]+)/g;
 /** `scheme://user:password@host`. */
@@ -93,10 +115,40 @@ function hidesParam(name: string, value: string): boolean {
   return AMBIGUOUS_PARAM.test(name) ? credentialShaped(value) : true;
 }
 
-function hidesNamed(name: string, value: string): boolean {
+/**
+ * Whether a `name: value` or `name=value` value is hidden. A password-named
+ * value always is, and any value that looks like a credential. A value named
+ * as a secret, token or key (`X-Api-Key`, `GITHUB_TOKEN`, `secret`) is too,
+ * unless it is a number or a constant, or the bare word is followed by a
+ * colon and one plain lowercase word (`token: 5`, `secret: sauce` read as
+ * prose). Other names that merely contain a credential word (`max_tokens`,
+ * `author`, `monkey`, a bare `key` or `auth`) are hidden only when the value
+ * looks like a credential, so `{"key": "Enter"}` stays readable.
+ */
+function hidesNamed(name: string, value: string, separator = "=", quote = ""): boolean {
   if (!value || isReference(value)) return false;
   if (PASSWORD_NAME.test(name) || credentialShaped(value)) return true;
-  return SECRET_NAME_END.test(name) && !PLAIN_SCALAR.test(value);
+  if (!SECRET_NAME_END.test(name) || PLAIN_SCALAR.test(value)) return false;
+  const prose =
+    BARE_SECRET_NAME.test(name) && !/["'=]/.test(separator) && !quote && /^[a-z]+$/.test(value);
+  return !prose;
+}
+
+/**
+ * Whether an object field's value is hidden, by the field's name: `{password:
+ * …}`, `{api_key: …}`, `{"X-Api-Key": …}`, an `Authorization` or cookie
+ * header, and the value of a `{name: "X-Api-Key", value: …}` pair. A field is
+ * structured, so a bare `token` or `secret` field hides any word.
+ */
+function hidesField(name: string, value: string): boolean {
+  if (WHOLE_SECRET_FIELD.test(name)) return value.trim() !== "" && !isReference(value.trim());
+  return SECRET_FIELD_NAME.test(name) && hidesNamed(name, value);
+}
+
+/** A hidden field's value as shown: an `Authorization` header keeps its scheme. */
+function hiddenField(value: string): string {
+  const scheme = /^\s*(Bearer|Basic|token|Digest)\s+/i.exec(value)?.[0] ?? "";
+  return `${scheme}${SECRET_VALUE_PLACEHOLDER}`;
 }
 
 /** `-u 1000:1000` (a user and group id) is not a password. */
@@ -127,6 +179,10 @@ export function signedValues(text: string): string[] {
     if (hidesParam(match[2]!, match[4]!)) add(match[4]);
   }
   for (const match of text.matchAll(NAMED_SECRET)) add(match[5]);
+  for (const match of text.matchAll(FLAG_SECRET)) add(match[4]);
+  for (const match of text.matchAll(NAME_VALUE_PAIR)) {
+    if (hidesField(match[3]!, match[4]!)) add(match[4]);
+  }
   for (const match of text.matchAll(AUTH_SCHEME_VALUE)) add(match[3]);
   for (const match of text.matchAll(USER_PASSWORD_FLAG)) {
     if (hidesUserPassword(match[2]!)) add(match[2]);
@@ -206,14 +262,26 @@ export function redactSignedUrls(
         scheme: string | undefined,
         value: string,
       ) =>
-        hidesNamed(name, value)
+        hidesNamed(name, value, equals, quote)
           ? `${name}${equals}${quote}${scheme ?? ""}${SECRET_VALUE_PLACEHOLDER}`
           : match,
+    );
+    out = out.replace(
+      NAME_VALUE_PAIR,
+      (match, head: string, _quote: string, name: string, value: string) =>
+        hidesField(name, value) ? `${head}${hiddenField(value)}` : match,
     );
     out = out.replace(USER_PASSWORD_FLAG, (match, head: string, password: string) =>
       hidesUserPassword(password) ? `${head}${SECRET_VALUE_PLACEHOLDER}` : match,
     );
   }
+  out = out.replace(
+    FLAG_SECRET,
+    (match, flag: string, separator: string, quote: string, value: string) =>
+      hidesNamed(flag.trim(), value)
+        ? `${flag}${separator}${quote}${SECRET_VALUE_PLACEHOLDER}`
+        : match,
+  );
   out = out.replace(
     AUTH_SCHEME_VALUE,
     (_match, scheme: string, space: string) => `${scheme}${space}${SECRET_VALUE_PLACEHOLDER}`,
@@ -226,18 +294,32 @@ export function redactSignedUrls(
   return out;
 }
 
-/** Every credential-shaped value in a nested value's strings. */
+/**
+ * Every credential-shaped value in a nested value's strings, including the
+ * values of secret-named fields (`{access_token: …}`, `{"X-Api-Key": …}`).
+ */
 export function signedValuesDeep(value: unknown): string[] {
   const values = new Set<string>();
-  walkStrings(value, 0, (text) => {
+  walkStrings(value, 0, undefined, (text, field) => {
+    if (field !== undefined && credentialShaped(text) && hidesField(field, text)) {
+      values.add(text);
+    }
     for (const found of signedValues(text)) values.add(found);
   });
   return [...values];
 }
 
-/** A copy of a nested value with every string redacted; other leaves are kept as they are. */
+/**
+ * A copy of a nested value with every string redacted and every secret-named
+ * field's value hidden (see `hidesField`); other leaves are kept as they are.
+ * Field names are kept, so `{password: "…"}` shows as `{password: "[hidden]"}`.
+ */
 export function redactDeep<T>(value: T, values: readonly string[]): T {
-  return mapStrings(value, 0, (text) => redactSignedUrls(text, values)) as T;
+  return mapStrings(value, 0, undefined, (text, field) =>
+    field !== undefined && hidesField(field, text)
+      ? hiddenField(text)
+      : redactSignedUrls(text, values),
+  ) as T;
 }
 
 const MAX_DEPTH = 16;
@@ -277,33 +359,67 @@ function isPlainObject(value: object): boolean {
   return prototype === Object.prototype || prototype === null;
 }
 
-function walkStrings(value: unknown, depth: number, visit: (text: string) => void): void {
-  if (typeof value === "string") return visit(value);
+/**
+ * The name a field's value goes by: its own key, or for the `value` of a
+ * `{name: "X-Api-Key", value: …}` pair (headers, cookies, form fields), that
+ * name. Array entries go by their array's name.
+ */
+function fieldNames(value: Record<string, unknown>): (key: string) => string {
+  const pairName = ["name", "key", "header"]
+    .map((key) => value[key])
+    .find((name): name is string => typeof name === "string");
+  return (key) => (key === "value" && pairName !== undefined ? pairName : key);
+}
+
+type FieldVisitor = (text: string, field: string | undefined) => void;
+
+function walkStrings(
+  value: unknown,
+  depth: number,
+  field: string | undefined,
+  visit: FieldVisitor,
+): void {
+  if (typeof value === "string") return visit(value, field);
+  if (typeof value === "number") return visit(String(value), field);
   if (depth > MAX_DEPTH || value === null || typeof value !== "object") return;
   if (Array.isArray(value)) {
-    for (const entry of value) walkStrings(entry, depth + 1, visit);
+    for (const entry of value) walkStrings(entry, depth + 1, field, visit);
   } else if (isPlainObject(value)) {
-    for (const entry of Object.values(value)) walkStrings(entry, depth + 1, visit);
+    const nameOf = fieldNames(value as Record<string, unknown>);
+    for (const [key, entry] of Object.entries(value)) {
+      walkStrings(entry, depth + 1, nameOf(key), visit);
+    }
   }
 }
 
-function mapStrings(value: unknown, depth: number, map: (text: string) => string): unknown {
-  if (typeof value === "string") return map(value);
+function mapStrings(
+  value: unknown,
+  depth: number,
+  field: string | undefined,
+  map: (text: string, field: string | undefined) => string,
+): unknown {
+  if (typeof value === "string") return map(value, field);
+  if (typeof value === "number") {
+    // A number is a credential only under a password-like name (a PIN).
+    const mapped = field === undefined ? null : map(String(value), field);
+    return mapped !== null && mapped !== String(value) ? mapped : value;
+  }
   if (depth > MAX_DEPTH || value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) {
     let changed = false;
     const next = value.map((entry) => {
-      const mapped = mapStrings(entry, depth + 1, map);
+      const mapped = mapStrings(entry, depth + 1, field, map);
       if (mapped !== entry) changed = true;
       return mapped;
     });
     return changed ? next : value;
   }
   if (!isPlainObject(value)) return value;
+  const nameOf = fieldNames(value as Record<string, unknown>);
   let changed = false;
   const next: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    const mapped = mapStrings(entry, depth + 1, map);
+    const mapped = mapStrings(entry, depth + 1, nameOf(key), map);
     if (mapped !== entry) changed = true;
     next[key] = mapped;
   }

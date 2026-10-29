@@ -23,11 +23,32 @@ const { ToolReviewHistoryProvider } = await import("../src/components/tool-revie
 const SECRET = "Q9xVt3Lm7Rk2Wp8Zs4Nb6Hy1";
 const SIGNED = `https://store.example.com/exports/report.json?sv=2024-11-04&sp=r&sig=${SECRET}`;
 const PROSE = `Saved report.json from ${SIGNED}. The signature on its own: ${SECRET}`;
+/* Credentials under plain names, too short to look like one by shape: only
+   their names say what they are. */
+const PASSWORD = "hunter2pw";
+const TOKEN = "opensesame";
+const LETTERS_TOKEN = "abcdefghijklmnopqrstuvwx";
+const NAMED = [
+  `export TOKEN=${TOKEN} && PASSWORD=${PASSWORD} ./migrate --password ${PASSWORD}`,
+  `{"password": "${PASSWORD}", "token": "${TOKEN}", "secret": "${TOKEN}"}`,
+  `secret: ${PASSWORD}`,
+  `curl -H 'Authorization: Bearer ${LETTERS_TOKEN}' https://api.example.com`,
+].join("\n");
+/* Secret-named fields a renderer may print itself, such as write_stdin's input. */
+const KEYED = {
+  access_token: TOKEN,
+  api_key: TOKEN,
+  password: PASSWORD,
+  headers: { "X-Api-Key": TOKEN, Authorization: `Bearer ${LETTERS_TOKEN}` },
+  cookies: [{ name: "auth_token", value: TOKEN }],
+};
+const HIDDEN_VALUES = [SECRET, PASSWORD, TOKEN, LETTERS_TOKEN];
 
 const ARGUMENTS = {
-  cmd: `curl -o report.json '${SIGNED}' && echo ${SECRET}`,
-  command: `curl -o report.json '${SIGNED}'`,
-  chars: `curl '${SIGNED}'\n`,
+  cmd: `curl -o report.json '${SIGNED}' && echo ${SECRET}\n${NAMED}`,
+  command: `curl -o report.json '${SIGNED}'\n${NAMED}`,
+  chars: `curl '${SIGNED}'\n${NAMED}\n`,
+  ...KEYED,
   session_id: 3,
   input: `*** Begin Patch\n*** Add File: notes.md\n+${PROSE}\n*** End Patch`,
   patch: `*** Begin Patch\n*** Add File: notes.md\n+${PROSE}\n*** End Patch`,
@@ -42,7 +63,7 @@ const ARGUMENTS = {
   content: PROSE,
   message: PROSE,
   prompt: PROSE,
-  summary: PROSE,
+  summary: `${PROSE}\n${NAMED}`,
   value: SECRET,
   questions: [{ id: "q1", kind: "text", prompt: PROSE, helpText: PROSE }],
 };
@@ -51,7 +72,8 @@ const RESULT = {
   ok: true,
   title: PROSE,
   text: PROSE,
-  output: PROSE,
+  output: `${PROSE}\n${NAMED}`,
+  ...KEYED,
   content: [{ type: "text", text: PROSE }],
   url: SIGNED,
   path: SIGNED,
@@ -61,7 +83,7 @@ const RESULT = {
 };
 
 const OUTPUTS: ReadonlyArray<[string, unknown]> = [
-  ["text output", `Process exited with code 0\nOutput:\n${PROSE}`],
+  ["text output", `Process exited with code 0\nOutput:\n${PROSE}\n${NAMED}`],
   ["JSON output", JSON.stringify(RESULT)],
   ["structured output", RESULT],
 ];
@@ -141,7 +163,7 @@ describe("every tool renderer only sees credentials hidden", () => {
       `%s, ${label}`,
       async (_name, entry) => {
         const page = shown(await renderOpened(<ActivityRail items={[call(entry, output)]} bare />));
-        expect(page).not.toContain(SECRET);
+        for (const value of HIDDEN_VALUES) expect(page).not.toContain(value);
         if (page.includes("hidden]")) rowsShowingAPlaceholder++;
       },
     );
@@ -170,7 +192,10 @@ describe("every tool renderer only sees credentials hidden", () => {
       ),
     );
     expect(seen.length).toBeGreaterThan(0);
-    expect(JSON.stringify(seen)).not.toContain(SECRET);
+    for (const value of HIDDEN_VALUES) expect(JSON.stringify(seen)).not.toContain(value);
+    // Field names stay, so the step still says what it held.
+    expect(JSON.stringify(seen)).toContain('"password":"[hidden]"');
+    expect(JSON.stringify(seen)).toContain('"X-Api-Key":"[hidden]"');
     expect(page).toContain("report.json?[signature hidden]");
     expect(page).not.toContain(SECRET);
   });
