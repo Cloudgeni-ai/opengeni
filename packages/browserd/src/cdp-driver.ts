@@ -3943,6 +3943,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.javascriptDialogClosed",
         () => {
           state.dialog = null;
+          // A click the dialog interrupted left its guard armed; with the
+          // dialog gone, nothing is left for it to judge.
+          void this.settleUnsettledHitTargetGuards(state).catch(() => undefined);
         },
         sessionId,
       ),
@@ -6693,6 +6696,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           ...(action.promptText !== undefined ? { promptText: action.promptText } : {}),
         });
         state.dialog = null;
+        await this.settleUnsettledHitTargetGuards(state);
         return;
       case "upload": {
         if (!this.resolveWorkspaceFiles) {
@@ -11535,16 +11539,23 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
 // reports what was held back. A guard that is never settled (a JavaScript
-// dialog interrupted the click) disarms itself a few seconds after the press.
-// Until the press arrives it stays armed however long the page takes to get
-// there (a page busy on the pointer's arrival), up to a limit; one that
-// reaches that limit first settles as "lapsed", and one that saw no press at
-// all (the browser dropped it, or it went to another document) as
-// "unpressed", so neither click is counted as delivered.
+// dialog interrupted the click) disarms itself a few seconds after the page
+// has handled the pointer's move, or after the press. However long the page
+// takes to handle that move (a page busy on the pointer's arrival) the guard
+// stays armed through it, and a press without a move waits up to a limit; one
+// that runs out before its press settles as "lapsed", and one that saw no
+// press at all (the browser dropped it, or it went to another document) as
+// "unpressed", so neither click is counted as delivered. A press the page
+// stopped before the guard saw it (a window listener added before the guard)
+// still counts as seen, and as reaching the target, once the click it makes
+// lands on the target.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
 /** How long a click's guard waits for its press: longer than the input
  * commands of one click can take (each is bounded at 30 s). */
 const HIT_TARGET_GUARD_UNPRESSED_LIMIT_MS = 60_000;
+/** How long a click's guard stays armed once the page has handled the
+ * pointer's move, or the press. */
+const HIT_TARGET_GUARD_ARMED_MS = 5_000;
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported
@@ -11631,6 +11642,26 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   let pressed = false;
   let expiresAt = Date.now() + ${HIT_TARGET_GUARD_UNPRESSED_LIMIT_MS};
   let pointerDowns = 0;
+  let landedClicks = 0;
+  // Once the page has handled the pointer's move (its listeners for the
+  // move, and the tasks they queued right away), the press is due: from
+  // then on the guard waits only the usual few seconds, so a click a
+  // JavaScript dialog interrupted before its press does not hold back the
+  // person's own presses for long.
+  const moves = ["pointermove", "mousemove"];
+  let moveSeen = false;
+  const moveListener = (event) => {
+    if (!event.isTrusted || moveSeen || pressed) return;
+    moveSeen = true;
+    setTimeout(() => setTimeout(() => {
+      if (!pressed) expiresAt = Math.min(expiresAt, Date.now() + ${HIT_TARGET_GUARD_ARMED_MS});
+    }, 0), 0);
+  };
+  const press = () => {
+    if (pressed) return;
+    pressed = true;
+    expiresAt = Date.now() + ${HIT_TARGET_GUARD_ARMED_MS};
+  };
   const listener = (event) => {
     if (Date.now() > expiresAt) {
       if (!pressed) guard.lapsed = true;
@@ -11639,10 +11670,7 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
     }
     if (!event.isTrusted) return;
     if (presses.includes(event.type)) {
-      if (!pressed) {
-        pressed = true;
-        expiresAt = Date.now() + 5000;
-      }
+      press();
       if (event.type === "pointerdown") pointerDowns += 1;
       const hit = event.composedPath()[0];
       // Only a click's first press is judged: a double-click's second press
@@ -11659,13 +11687,30 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
       }
       if (onTarget && guard.blocked === null) return;
       if (guard.blocked === null) guard.blocked = verdict;
-    } else if (guard.blocked === null) return;
+    } else if (guard.blocked === null) {
+      // A click on the target shows that its press landed there, even when
+      // the page stopped that press before this guard could see it.
+      if (
+        (event.type === "click" || event.type === "auxclick") &&
+        reaches(event.composedPath()[0])
+      ) {
+        landedClicks += 1;
+        if (pointerDowns < landedClicks) {
+          press();
+          pointerDowns = landedClicks;
+          if (typeof report === "function") report(JSON.stringify({ token, blocked: null }));
+        }
+      }
+      return;
+    }
     event.preventDefault();
     event.stopImmediatePropagation();
   };
   for (const type of types) view.addEventListener(type, listener, true);
+  for (const type of moves) view.addEventListener(type, moveListener, true);
   guard.settle = () => {
     for (const type of types) view.removeEventListener(type, listener, true);
+    for (const type of moves) view.removeEventListener(type, moveListener, true);
     if (guard.blocked !== null) return guard.blocked;
     if (guard.lapsed) return "lapsed";
     return pressed ? null : "unpressed";
