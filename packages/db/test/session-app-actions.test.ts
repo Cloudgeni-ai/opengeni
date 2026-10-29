@@ -543,7 +543,8 @@ describe("app actions in a chat", () => {
       expect(can).toBe(lastAccess !== null);
       return can;
     };
-    let lastAccess: Awaited<ReturnType<typeof turnWorkspaceSettingsAccess>> = null;
+    // Typed by assertion so the closure's assignments aren't narrowed away to null.
+    let lastAccess = null as Awaited<ReturnType<typeof turnWorkspaceSettingsAccess>>;
     const admin = ["workspace:admin"] as const;
 
     // An admin signed in to the app, whose changes they confirm in the chat.
