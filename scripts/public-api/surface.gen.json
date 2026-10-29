@@ -35520,6 +35520,10 @@
     },
     "@opengeni/sdk/model-picker-order": {
       "compareModelPickerOrder": "value",
+      "ModelLabelCandidate": "type",
+      "ModelLabelDistinction": "type",
+      "modelLabelDistinctions": "value",
+      "ModelLabelGeography": "type",
       "ModelPickerBillingCandidate": "type",
       "ModelPickerBillingClass": "type",
       "modelPickerBillingClassFor": "value"
@@ -37822,7 +37826,8 @@
       "projectPickerRows": "value",
       "runnableLatencyModesForModel": "value",
       "scopedBillingClassLabel": "value",
-      "sortPickerRows": "value"
+      "sortPickerRows": "value",
+      "withDistinctLabels": "value"
     },
     "@opengeni/react/native-previews": {
       "inlineHtmlDocument": "value",
