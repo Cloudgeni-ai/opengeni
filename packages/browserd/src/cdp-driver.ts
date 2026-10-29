@@ -7525,11 +7525,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const input = sessionId === undefined ? {} : { sessionId };
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
     try {
-      // The guard's clock restarts just before the input, and it reports
-      // whether the page is hidden (a background tab without focus
-      // emulation). Best effort: a guard this cannot reach is judged by its
-      // readback, as before.
-      const hidden =
+      // Restarts the guard's clock and reports whether the page is hidden (a
+      // background tab without focus emulation). Best effort: a guard this
+      // cannot reach is judged by its readback, as before.
+      const arm = async () =>
         guard !== null &&
         !state.dialog &&
         (await this.sendTarget<{ result?: unknown }>(
@@ -7544,6 +7543,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         )
           .then((armed) => isRecord(armed.result) && armed.result.value === true)
           .catch(() => false));
+      const hidden = await arm();
       // A hidden page draws no frames, and Chrome holds the pointer's move
       // there for about five seconds before acknowledging it. The press
       // that follows delivers the move first, in order, so there the press
@@ -7563,6 +7563,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await Promise.race([sent, moved]);
       } else {
         await moved;
+        // A page busy as the pointer arrives acknowledges the move only once
+        // it is done, which can outlast the guard's clock. Restart it right
+        // before the press.
+        await arm();
       }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
@@ -11068,13 +11072,17 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   // outside that box, which is where a person clicks it: a link whose text
   // is positioned elsewhere, or whose box does not grow to hold its floated
   // children (no box at all). Only boxes that reach past its own are new.
+  // Bounded, so a large element (a whole list or table) is not measured
+  // descendant by descendant.
   if (!points) {
     const outside = (box) =>
       box.left < rect.left || box.top < rect.top || box.right > rect.right || box.bottom > rect.bottom;
-    const descendants = element.querySelectorAll("*");
+    const descendants = element.getElementsByTagName("*");
     let tried = 0;
-    for (let index = 0; index < descendants.length && tried < 50 && !points; index += 1) {
-      const box = descendants[index].getBoundingClientRect();
+    for (let index = 0; index < 500 && tried < 50 && !points; index += 1) {
+      const descendant = descendants[index];
+      if (!descendant) break;
+      const box = descendant.getBoundingClientRect();
       if (box.width <= 0 || box.height <= 0 || !outside(box)) continue;
       tried += 1;
       points = shown(box);

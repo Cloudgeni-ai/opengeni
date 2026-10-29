@@ -136,6 +136,27 @@ e2e(
 );
 
 e2e(
+  "a layer that appears as the pointer arrives on a page busy for longer than five seconds receives no click",
+  async () => {
+    // Moving the pointer onto "Confirm" keeps the page busy for 6.5 seconds
+    // and then opens a card over it, so Chrome acknowledges the move only
+    // after that. The press that follows would land on the card.
+    const fixture = await openFixture(
+      '<!doctype html><title>Busy hover card</title><style>body{margin:0}#card{display:none;position:absolute;top:0;left:0;width:300px;height:100px;background:#fff}</style><div style="padding:30px"><button id="target">Confirm</button></div><div id="card" role="dialog" aria-label="Profile card"><button id="follow">Follow</button></div><script>globalThis.clicks={confirm:0,card:0};target.addEventListener("click",()=>clicks.confirm++);card.addEventListener("click",()=>clicks.card++);target.addEventListener("mouseenter",()=>{const until=performance.now()+6500;while(performance.now()<until){}card.style.display="block"});</script>',
+    );
+    try {
+      const refused = await fixture.click(fixture.initial, "Confirm");
+      expect(refused.state).not.toBe("completed");
+      expect(refused.error?.message).toContain('covered by dialog "Profile card"');
+      expect(await fixture.evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
   "a target the page re-renders as the pointer arrives still takes the click",
   async () => {
     // Moving the pointer onto "Confirm" re-renders it: the page swaps in an
