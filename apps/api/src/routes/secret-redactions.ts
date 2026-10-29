@@ -9,7 +9,7 @@ import {
 import {
   createSecretResolver,
   hasPermission,
-  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   requireSessionAuthorizations,
   runSessionSecretRedaction,
   secretRedactionMatchersForPatterns,
@@ -176,7 +176,8 @@ export function registerSecretRedactionRoutes(app: Hono, deps: ApiRouteDeps): vo
     // Bearer callers carry no ambient browser credentials; cookie sessions must be same-origin.
     if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // Workspace admins, and the owner of a Personal workspace.
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const request = parseRequestBody(SecretRedactionRequest, await c.req.json().catch(() => null), {
       status: 422,
       message: "invalid secret redaction request",
