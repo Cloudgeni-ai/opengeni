@@ -313,6 +313,36 @@ describe("channel routes", () => {
       ).status,
     ).toBe(422);
 
+    // Everyone in the workspace sees a project, so an Only me image is
+    // refused even for its owner (a person's request can't open it here at
+    // all; projects-mcp covers the "Only me" refusal), and a shared image is
+    // accepted.
+    const image = async (privateTo: string | null) => {
+      const id = crypto.randomUUID();
+      await shared!
+        .admin`insert into files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+        values(${id},${ws.accountId},${ws.workspaceId},'ready','logo.png','logo.png','image/png',4,${"a".repeat(64)},'fixture',
+          ${`workspaces/${ws.workspaceId}/files/${id}/logo.png`},${privateTo ? [privateTo] : null},${privateTo})`;
+      return id;
+    };
+    const onlyMe = await app().request(`${base}/${project.id}`, {
+      method: "PATCH",
+      headers: writer,
+      body: JSON.stringify({ avatar: { kind: "image", artifactId: await image("user:w") } }),
+    });
+    expect(onlyMe.status).toBe(422);
+    const sharedImage = await image(null);
+    const pictured = await app().request(`${base}/${project.id}`, {
+      method: "PATCH",
+      headers: writer,
+      body: JSON.stringify({ avatar: { kind: "image", artifactId: sharedImage } }),
+    });
+    expect(pictured.status).toBe(200);
+    expect(((await pictured.json()) as Channel).avatar).toEqual({
+      kind: "image",
+      artifactId: sharedImage,
+    });
+
     // Clearing the avatar brings back the folder; the list carries it too.
     const cleared = await app().request(`${base}/${project.id}`, {
       method: "PATCH",

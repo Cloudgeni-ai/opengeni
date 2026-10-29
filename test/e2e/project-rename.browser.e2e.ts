@@ -96,9 +96,12 @@ test("the project menu's Edit project renames, guards saves, and preserves faile
   const open = async (name: string) => {
     await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
     await capture("project-rename-menu");
-    await page.getByRole("menuitem", { name: "Edit project…", exact: true }).click();
+    const edit = page.getByRole("menuitem", { name: "Edit project…", exact: true });
+    await edit.waitFor();
+    // Edit project is the one way to rename; there is no separate item.
+    expect(await page.getByRole("menuitem", { name: "Rename project" }).count()).toBe(0);
+    await edit.click();
   };
-  expect(await page.getByRole("menuitem", { name: "Rename project" }).count()).toBe(0);
   await open("Website redesign");
   const dialog = page.getByRole("dialog", { name: "Edit project" });
   const input = dialog.getByRole("textbox", { name: "Name" });

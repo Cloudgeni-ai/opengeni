@@ -7,6 +7,7 @@ import {
   getSession,
   createChannel,
   type DbClient,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -201,6 +202,37 @@ describe("project MCP tools", () => {
         avatar: { kind: "image", artifactId: crypto.randomUUID() },
       }),
     ).rejects.toThrow();
+
+    // The whole workspace sees a project: an Only me image is refused even for
+    // its owner in a turn that can open it, and a workspace image is accepted.
+    const image = async (privateTo: string | null) => {
+      const fileId = crypto.randomUUID();
+      await shared!
+        .admin`insert into files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+        values(${fileId},${accountId},${workspaceId},'ready','logo.png','logo.png','image/png',4,${"a".repeat(64)},'fixture',
+          ${`workspaces/${workspaceId}/files/${fileId}/logo.png`},${privateTo ? [privateTo] : null},${privateTo})`;
+      return fileId;
+    };
+    const onlyMe = await image("user:mcp");
+    await expect(
+      withSessionRlsActorContext(
+        { subjectId: "user:mcp", privateFileOwnerSubjectId: "user:mcp" },
+        () =>
+          callMcpTool(server, "project_update", {
+            projectId: id,
+            avatar: { kind: "image", artifactId: onlyMe },
+          }),
+      ),
+    ).rejects.toThrow(/This image is Only me/);
+    const sharedImage = await image(null);
+    expect(
+      (
+        await callMcpTool<ProjectResult>(server, "project_update", {
+          projectId: id,
+          avatar: { kind: "image", artifactId: sharedImage },
+        })
+      ).project.avatar,
+    ).toEqual({ kind: "image", artifactId: sharedImage });
 
     const cleared = await callMcpTool<ProjectResult>(server, "project_update", {
       projectId: id,

@@ -5194,7 +5194,7 @@ export const channels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
-    // The project's avatar (1065), the same shape and bounds as a chat's.
+    // The project's avatar (1092), the same shape and bounds as a chat's.
     // Display metadata for people only.
     avatar: jsonb("avatar").$type<SessionAvatar>(),
     pinned: boolean("pinned").notNull().default(false),
