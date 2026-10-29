@@ -46,6 +46,32 @@ path. Leave it unset for official endpoints. Model IDs are provider-native IDs,
 not IDs resolved through the ordinary chat-model registry. OpenRouter's Decisions
 models need not appear in its normal chat `/models` response.
 
+### Azure OpenAI
+
+An Azure OpenAI resource serves the same typed endpoint on its v1 API. Use provider
+`openai`, the deployment name as the model ID, and the resource's v1 base URL:
+
+```dotenv
+OPENGENI_DECISION_MODEL_PROVIDER=openai
+OPENGENI_DECISION_MODEL_ID=<deployment name>
+OPENGENI_DECISION_MODEL_BASE_URL=https://<resource>.openai.azure.com/openai/v1
+OPENGENI_DECISION_MODEL_AUTH=deployment_identity
+```
+
+`OPENGENI_DECISION_MODEL_AUTH=deployment_identity` signs each request with a
+Microsoft Entra token for the deployment's own identity, so resources with key
+sign-in turned off work. The identity is the standard `AZURE_TENANT_ID` and
+`AZURE_CLIENT_ID` with `AZURE_FEDERATED_TOKEN_FILE` (a workload identity) or
+`AZURE_CLIENT_SECRET`, the same one the deployment's Azure OpenAI chat route can
+use, and it needs an Azure OpenAI user role on the resource. Tokens are cached and
+renewed before they expire; a rejected token is dropped so the next request signs
+in again. Without a usable identity, the decision model is not configured. The
+default, `api_key`, sends `OPENGENI_DECISION_MODEL_API_KEY` as before.
+
+Give the selector its own deployment rather than sharing one that serves the
+agents' own model calls: a tool-search selection with 40 candidates is roughly
+10 to 20 thousand input tokens, so its rate limit should be sized for that.
+
 Legacy `OPENGENI_JEV_API_KEY/BASE_URL/MODEL/REQUEST_TIMEOUT_MS` still serve existing
 code-search deployments when **no** shared category setting is present. They never
 silently enable paid tool discovery. The existing Jev timeout/chunking/retries and

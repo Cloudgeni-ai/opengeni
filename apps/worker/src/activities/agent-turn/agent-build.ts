@@ -920,6 +920,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        ...(resolvedModel?.configured.hostedWebSearchContextSize === undefined
+          ? {}
+          : { hostedWebSearchContextSize: resolvedModel.configured.hostedWebSearchContextSize }),
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,

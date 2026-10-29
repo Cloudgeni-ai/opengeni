@@ -32,6 +32,24 @@ test("a table cell macOS repeats under its AXColumn is one element to a locator"
   );
 });
 
+test("a macOS combo box reads as a combobox whose value can be set, like a popup button", () => {
+  const [combo, popup] = projectElements(
+    [
+      { role: "AXComboBox", label: "City", value: "Oslo", actions: ["AXConfirm", "AXShowMenu"] },
+      { role: "AXPopUpButton", label: "Size", value: "Medium", actions: ["AXPress"] },
+    ].map((element, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      ...element,
+    })),
+    "macos",
+  );
+  expect(combo).toMatchObject({ role: "combobox", name: "City", value: "Oslo" });
+  expect(combo!.actions).toContain("set_value");
+  expect(popup).toMatchObject({ role: "combobox", name: "Size", value: "Medium" });
+  expect(popup!.actions).toContain("set_value");
+});
+
 test("an exact name is the whole name in any case and spacing", () => {
   const [save, saveAs] = projectElements(
     ["  Save  changes ", "Save changes as"].map((label, offset) => ({
