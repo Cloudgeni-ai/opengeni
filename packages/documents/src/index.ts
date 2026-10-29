@@ -1,6 +1,7 @@
 export { knowledgeIndexChunks } from "./knowledge-index";
 export type { KnowledgeIndexChunk } from "./knowledge-index";
-import type { Settings } from "@opengeni/config";
+import { deploymentAzureEntraCredential, type Settings } from "@opengeni/config";
+import { sharedAzureEntraAccessTokenSource } from "@opengeni/network/azure-entra";
 import {
   KnowledgeProviderCitation,
   type KnowledgeProviderCitation as KnowledgeProviderCitationValue,
@@ -391,20 +392,63 @@ export class RecursiveTextChunker implements DocumentChunker {
   }
 }
 
+/**
+ * How a document model provider signs in: a static key, or an access token
+ * fetched before each request, such as a cached Microsoft Entra token for
+ * the deployment's own identity. `discard` drops a token the provider
+ * rejected, so the next request signs in again.
+ */
+export type DocumentModelCredential =
+  | string
+  | { (): Promise<string>; discard?(token: string): void };
+
+/** One provider's credential as an OpenAI client uses it. */
+class ProviderSignIn {
+  private lastToken: string | undefined;
+  readonly credential: DocumentModelCredential | undefined;
+
+  /** `null` means no credential at all, not the OPENAI_API_KEY fallback. */
+  constructor(credential: DocumentModelCredential | null | undefined) {
+    this.credential = credential === null ? undefined : (credential ?? process.env.OPENAI_API_KEY);
+  }
+
+  /** The OpenAI client's API key: the key, or a function it calls before each request. */
+  clientApiKey(): string | (() => Promise<string>) | undefined {
+    const credential = this.credential;
+    return typeof credential === "function"
+      ? async () => (this.lastToken = await credential())
+      : credential;
+  }
+
+  /** Forgets a token the provider rejected. */
+  rejected(error: unknown): void {
+    const credential = this.credential;
+    if (typeof credential === "function" && this.lastToken && hasStatus(error, 401))
+      credential.discard?.(this.lastToken);
+  }
+}
+
+function hasStatus(error: unknown, status: number): boolean {
+  return (
+    typeof error === "object" && error !== null && (error as { status?: unknown }).status === status
+  );
+}
+
 export class OpenAIEmbeddingProvider implements DocumentEmbedder {
   private clientPromise: Promise<OpenAI> | null = null;
-  private readonly apiKey: string | undefined;
+  private readonly signIn: ProviderSignIn;
   private readonly baseURL: string | undefined;
 
   constructor(args: {
-    apiKey?: string | undefined;
+    /** A key or token source; `null` for none, without the OPENAI_API_KEY fallback. */
+    apiKey?: DocumentModelCredential | null | undefined;
     baseURL?: string | undefined;
     defaultHeaders?: Record<string, string> | undefined;
     defaultQuery?: Record<string, string> | undefined;
     model?: string | undefined;
     dimensions?: number | undefined;
   }) {
-    this.apiKey = args.apiKey ?? process.env.OPENAI_API_KEY;
+    this.signIn = new ProviderSignIn(args.apiKey);
     this.baseURL = args.baseURL;
     this.defaultHeaders = args.defaultHeaders;
     this.defaultQuery = args.defaultQuery;
@@ -420,9 +464,9 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
   private readonly defaultHeaders: Record<string, string> | undefined;
   private readonly defaultQuery: Record<string, string> | undefined;
 
-  /** Without an API key every request fails before reaching the provider. */
+  /** Without a credential every request fails before reaching the provider. */
   get available(): boolean {
-    return Boolean(this.apiKey);
+    return Boolean(this.signIn.credential);
   }
 
   async embedMany(texts: string[]): Promise<number[][]> {
@@ -430,13 +474,13 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
     const out: number[][] = [];
     for (let start = 0; start < texts.length; start += 64) {
       const batch = texts.slice(start, start + 64);
-      const response = await (
-        await this.openai()
-      ).embeddings.create({
-        model: this.model,
-        input: batch,
-        dimensions: this.dimensions,
-      });
+      const client = await this.openai();
+      const response = await client.embeddings
+        .create({ model: this.model, input: batch, dimensions: this.dimensions })
+        .catch((error: unknown) => {
+          this.signIn.rejected(error);
+          throw error;
+        });
       for (const item of response.data) {
         out.push(validateEmbedding(item.embedding, this.dimensions, this.model));
       }
@@ -453,13 +497,14 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
   }
 
   private async openai(): Promise<OpenAI> {
-    if (!this.apiKey) {
+    const apiKey = this.signIn.clientApiKey();
+    if (!apiKey) {
       throw new Error("OpenAI document embeddings require an API key");
     }
     this.clientPromise ??= import("openai").then(
       ({ default: OpenAIClient }) =>
         new OpenAIClient({
-          apiKey: this.apiKey,
+          apiKey,
           ...(this.baseURL ? { baseURL: this.baseURL } : {}),
           ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
           ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
@@ -553,20 +598,21 @@ const CURATION_SYSTEM_PROMPT = [
 
 export class OpenAICurationProvider implements DocumentCurator {
   private clientPromise: Promise<OpenAI> | null = null;
-  private readonly apiKey: string | undefined;
+  private readonly signIn: ProviderSignIn;
   private readonly baseURL: string | undefined;
   private readonly defaultHeaders: Record<string, string> | undefined;
   private readonly defaultQuery: Record<string, string> | undefined;
   readonly model: string;
 
   constructor(args: {
-    apiKey?: string | undefined;
+    /** A key or token source; `null` for none, without the OPENAI_API_KEY fallback. */
+    apiKey?: DocumentModelCredential | null | undefined;
     baseURL?: string | undefined;
     defaultHeaders?: Record<string, string> | undefined;
     defaultQuery?: Record<string, string> | undefined;
     model?: string | undefined;
   }) {
-    this.apiKey = args.apiKey ?? process.env.OPENAI_API_KEY;
+    this.signIn = new ProviderSignIn(args.apiKey);
     this.baseURL = args.baseURL;
     this.defaultHeaders = args.defaultHeaders;
     this.defaultQuery = args.defaultQuery;
@@ -574,24 +620,28 @@ export class OpenAICurationProvider implements DocumentCurator {
   }
 
   async curate(input: DocumentCurationInput): Promise<DocumentCurationOutcome> {
-    const response = await (
-      await this.openai()
-    ).chat.completions.create({
-      model: this.model,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: CURATION_SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: JSON.stringify({
-            filename: input.filename,
-            currentTitle: input.title,
-            bases: input.bases,
-            text: input.text,
-          }),
-        },
-      ],
-    });
+    const client = await this.openai();
+    const response = await client.chat.completions
+      .create({
+        model: this.model,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: CURATION_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: JSON.stringify({
+              filename: input.filename,
+              currentTitle: input.title,
+              bases: input.bases,
+              text: input.text,
+            }),
+          },
+        ],
+      })
+      .catch((error: unknown) => {
+        this.signIn.rejected(error);
+        throw error;
+      });
     const raw = response.choices[0]?.message?.content;
     if (!raw) {
       throw new Error("curation model returned no content");
@@ -600,13 +650,14 @@ export class OpenAICurationProvider implements DocumentCurator {
   }
 
   private async openai(): Promise<OpenAI> {
-    if (!this.apiKey) {
+    const apiKey = this.signIn.clientApiKey();
+    if (!apiKey) {
       throw new Error("OpenAI document curation requires an API key");
     }
     this.clientPromise ??= import("openai").then(
       ({ default: OpenAIClient }) =>
         new OpenAIClient({
-          apiKey: this.apiKey,
+          apiKey,
           ...(this.baseURL ? { baseURL: this.baseURL } : {}),
           ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
           ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
@@ -687,9 +738,16 @@ function createDocumentCurator(settings?: Settings): DocumentCurator | undefined
   if (provider === "none") return undefined;
   if (provider === "heuristic") return new HeuristicCurationProvider();
   const embeddingConfig = documentOpenAIEmbeddingConfig(settings);
+  const baseURL = settings?.documentCurationBaseUrl ?? embeddingConfig.baseURL;
+  // A deployment-identity token only ever goes to the embedding resource it
+  // was issued for; curation at another address needs its own key.
+  const inherited =
+    typeof embeddingConfig.apiKey === "function" && baseURL !== embeddingConfig.baseURL
+      ? null
+      : embeddingConfig.apiKey;
   return new OpenAICurationProvider({
-    apiKey: settings?.documentCurationApiKey ?? embeddingConfig.apiKey,
-    baseURL: settings?.documentCurationBaseUrl ?? embeddingConfig.baseURL,
+    apiKey: settings?.documentCurationApiKey ?? inherited,
+    baseURL,
     defaultHeaders: embeddingConfig.defaultHeaders,
     defaultQuery: embeddingConfig.defaultQuery,
     model: settings?.documentCurationModel ?? DEFAULT_DOCUMENT_CURATION_MODEL,
@@ -697,12 +755,22 @@ function createDocumentCurator(settings?: Settings): DocumentCurator | undefined
 }
 
 export function documentOpenAIEmbeddingConfig(settings?: Settings): {
-  apiKey?: string | undefined;
+  apiKey?: DocumentModelCredential | null | undefined;
   baseURL?: string | undefined;
   defaultHeaders?: Record<string, string> | undefined;
   defaultQuery?: Record<string, string> | undefined;
 } {
   if (!settings) return {};
+  if (settings.documentEmbeddingAuth === "deployment_identity") {
+    // An Azure OpenAI v1 resource, signed in to as the deployment's own
+    // identity. Without that identity or the resource's base URL nothing is
+    // sent, and no other key is tried.
+    const identity = deploymentAzureEntraCredential(settings);
+    const baseURL = settings.documentEmbeddingBaseUrl;
+    return identity && baseURL
+      ? { apiKey: sharedAzureEntraAccessTokenSource(identity), baseURL }
+      : { apiKey: null };
+  }
   if (settings.documentEmbeddingApiKey || settings.documentEmbeddingBaseUrl) {
     return {
       apiKey:
