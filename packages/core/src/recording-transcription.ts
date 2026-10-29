@@ -763,10 +763,6 @@ type ElevenLabsResponse = {
 };
 
 /**
- * The shortest standard form of a provider's language code: ISO 639-3 "eng"
- * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
- */
-/**
  * ElevenLabs knows Norwegian as one language ("no", "nor"), so Bokmål and
  * Nynorsk are sent as Norwegian.
  */
@@ -774,12 +770,39 @@ export function elevenLabsLanguage(code: string): string {
   return code === "nb" || code === "nn" || code === "nob" || code === "nno" ? "no" : code;
 }
 
+/**
+ * The shortest standard form of a provider's language code: ISO 639-3 "eng"
+ * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
+ */
 export function canonicalLanguageTag(code: string): string {
   try {
     return Intl.getCanonicalLocales(code.trim())[0] ?? code;
   } catch {
     return code;
   }
+}
+
+/**
+ * The languages a transcript is in. One asked for in a language is in that
+ * language, even when the model labels a few phrases with a neighbour (Danish
+ * in Norwegian speech): the languages it heard that are the one asked for are
+ * kept as it named them, or else the one asked for.
+ */
+export function transcriptLanguages(
+  requested: string | null | undefined,
+  heard: Iterable<string>,
+): string[] {
+  const all = [...new Set(heard)];
+  if (!requested?.trim()) return all;
+  const asked = canonicalLanguageTag(requested);
+  const matching = all.filter((tag) => languageFamily(tag) === languageFamily(asked));
+  return matching.length > 0 ? matching : [asked];
+}
+
+/** A language without its region or script; Norwegian's written forms are one. */
+function languageFamily(code: string): string {
+  const base = canonicalLanguageTag(code).toLowerCase().split("-")[0] ?? code;
+  return base === "nb" || base === "nn" || base === "no" ? "no" : base;
 }
 
 function seconds(value: unknown): number | null {

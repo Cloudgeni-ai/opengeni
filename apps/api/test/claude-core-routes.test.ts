@@ -1,10 +1,7 @@
 /**
  * M4 C2b: the Claude routes on the shared subscription core, on real
- * PostgreSQL as the application role. Without the Claude (`claude`) cutover
- * receipt the legacy routes answer; with the receipt and no switch row every
- * route (including OAuth start) fails closed with the typed 503; with an
- * enabled switch row the same paths, verbs and response shapes are served
- * from core connections (setup-token connect and replace, OAuth sign-in,
+ * PostgreSQL as the application role. The same paths, verbs and response
+ * shapes are served from core connections (setup-token connect and replace, OAuth sign-in,
  * list, rename, allocator, activate, rotation, the access policy, alias
  * translation, disconnect), and a private account is connected only in the
  * person's own Personal workspace.
@@ -268,31 +265,6 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     );
     expect((await listed()).accounts).toEqual([]);
     expect((await keyOAuthStart()).status).toBe(200);
-  });
-
-  test("after the receipt, without an enabled switch row, every route fails closed", async () => {
-    await shared!
-      .admin`update subscription_provider_cutovers set enabled = false where provider = 'claude'`;
-    const id = crypto.randomUUID();
-    for (const [path, method, body] of [
-      ["/claude/accounts", "GET", undefined],
-      ["/claude/accounts/setup-token", "POST", { token: setupToken(), scope: "workspace" }],
-      ["/claude/settings", "PATCH", { rotationEnabled: false }],
-      [`/claude/accounts/${id}`, "DELETE", undefined],
-      [`/model-connections/claude_subscription/${id}/access`, "GET", undefined],
-    ] as const) {
-      const response = await request(path, { method, ...(body ? { body } : {}) });
-      expect({ path, status: response.status, body: await response.json() }).toMatchObject({
-        path,
-        status: 503,
-        body: { reason: "subscription_core_cutover_disabled" },
-      });
-    }
-    const start = await keyOAuthStart();
-    expect({ status: start.status, body: await start.json() }).toMatchObject({
-      status: 503,
-      body: { reason: "subscription_core_cutover_disabled" },
-    });
   });
 
   test("with the switch row the same routes answer from core connections", async () => {
@@ -708,22 +680,18 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     ).rejects.toMatchObject({ status: 409 });
   });
 
-  test("a private account is connected only in the owner's own Personal workspace", async () => {
-    await expect(
-      requireClaudeCorePersonalWorkspace(deps, { accountId, workspaceId, subjectId }),
-    ).rejects.toMatchObject({ status: 403 });
+  test("a private account is kept in the owner's own Personal workspace", async () => {
+    // From wherever the person is, a private account lives in their own
+    // Personal workspace; a subject without one is refused.
+    expect(await requireClaudeCorePersonalWorkspace(deps, { accountId, subjectId })).toBe(
+      personalWorkspaceId,
+    );
     await expect(
       requireClaudeCorePersonalWorkspace(deps, {
         accountId,
-        workspaceId: personalWorkspaceId,
         subjectId: "service:claude-core",
       }),
     ).rejects.toMatchObject({ status: 403 });
-    await requireClaudeCorePersonalWorkspace(deps, {
-      accountId,
-      workspaceId: personalWorkspaceId,
-      subjectId,
-    });
     // A personal sign-in completed in the Personal workspace is the owner's.
     const core = { connectedBySubjectId: subjectId };
     const scope = oauthScope(personalWorkspaceId);
@@ -743,7 +711,8 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     const [stored] = await shared!.admin<{ ownership: string }[]>`
       select ownership from subscription_connections where id = ${complete.accountId}::uuid`;
     expect(stored!.ownership).toBe("personal");
-    // The writer refuses the same sign-in in a shared workspace.
+    // The writer itself still refuses a personal sign-in written in a shared
+    // workspace: the route must place it in the owner's Personal workspace.
     const sharedScope = oauthScope(workspaceId);
     const refused = await startClaudeSubscriptionOAuth(deps, sharedScope, { scope: "user" }, core);
     await expect(

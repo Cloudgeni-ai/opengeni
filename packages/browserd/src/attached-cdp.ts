@@ -509,6 +509,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly browserVersion: string;
   private readonly browserPlatform: NodeJS.Platform;
   private cursor = 0;
+  // The extension worker's event stream the cursor counts in. A new worker
+  // (Chrome restarts extension workers at will, keeping their tabs and
+  // debugger attachments) starts its buffer again under a new stream.
+  // Extensions that predate it name none.
+  private stream: string | null = null;
   private pollTask: Promise<void> | null = null;
   private pollReady: Promise<void> | null = null;
   private wakePoll: (() => void) | null = null;
@@ -980,6 +985,10 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       case "Target.attachToTarget": {
         const targetId = requireTargetId(params.targetId);
+        // A tab left uncertain by a command the extension's worker held is
+        // certain again once a new worker has taken over (see pollEvents).
+        if (this.uncertainTabs.has(targetId))
+          await this.pollEvents(Number.MAX_SAFE_INTEGER).catch(() => undefined);
         this.assertAttachAllowed(targetId);
         // Establish the event cursor before attaching, so a disconnect during
         // initialization cannot be discarded as pre-existing history.
@@ -1105,6 +1114,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     if (this.pollTask || this.stopped || this.failure) return;
     this.pollReady = this.pollEvents(Number.MAX_SAFE_INTEGER).then((initial) => {
       this.cursor = initial.cursor;
+      this.stream = initial.stream;
     });
     this.pollTask = this.poll(this.pollReady);
   }
@@ -1167,7 +1177,8 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     const firstSequence = batch.events[0]?.sequence;
     if (
       (firstSequence !== undefined && firstSequence !== this.cursor + 1) ||
-      (batch.truncated && firstSequence === undefined)
+      (batch.truncated && firstSequence === undefined) ||
+      batch.stream !== this.stream
     ) {
       throw new CdpTransportError("attached Chrome debugger event history was truncated");
     }
@@ -1204,8 +1215,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     const ready = (async () => {
       for (const tabId of [...this.tabSessions.keys()])
         this.detachLocally(tabId, "event_stream_resynchronized", { synthetic: true });
-      const { cursor } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
+      const { cursor, stream } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
       this.cursor = cursor;
+      this.stream = stream;
       this.resyncing = false;
     })();
     this.pollReady = ready;
@@ -1251,15 +1263,18 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     events: BridgeDebuggerEvent[];
     cursor: number;
     truncated: boolean;
+    stream: string | null;
   }> {
     const value = await this.bridge.request<{
       events: unknown;
       cursor: unknown;
       truncated: unknown;
+      stream?: unknown;
     }>({ type: "debugger.poll", afterSequence, limit: POLL_LIMIT });
     if (!Array.isArray(value.events) || typeof value.truncated !== "boolean") {
       throw new CdpTransportError("attached Chrome returned an invalid event batch");
     }
+    const stream = typeof value.stream === "string" ? value.stream : null;
     const cursor = boundedInteger(value.cursor, 0, Number.MAX_SAFE_INTEGER, "debugger cursor");
     const events = value.events.map(parseDebuggerEvent);
     if (
@@ -1270,7 +1285,14 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     if (events.length > 0 && cursor !== events.at(-1)!.sequence) {
       throw new CdpTransportError("attached Chrome debugger cursor does not match its event batch");
     }
-    return { events, cursor, truncated: value.truncated };
+    if (this.stream !== null && stream !== null && stream !== this.stream) {
+      // A new extension worker answered. The worker that held this
+      // connection's unanswered commands is gone, and they with it: none can
+      // reach a tab later, so a tab they left uncertain can be used again.
+      // Their own outcome stays unknown.
+      this.uncertainTabs.clear();
+    }
+    return { events, cursor, truncated: value.truncated, stream };
   }
 
   private emit(input: BridgeDebuggerEvent): void {

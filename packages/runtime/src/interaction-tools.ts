@@ -2591,7 +2591,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "requestHuman"],
     title: "Request human interaction",
     description:
-      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise give resourceKind, resourceId, targetId and a concise reason, and leave out the expected generation fields unless you have their exact values. The same tool call resumes with the settled intervention and a fresh observation.",
     input: RequestHumanInteractionToolInput,
     output: RequestHumanInteractionToolOutput,
     readOnly: false,
@@ -3740,8 +3740,29 @@ const FIRST_PARTY_INTERACTION_IDLE_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_
 export function createFirstPartyInteractionAttemptToolDefinitions(
   input: CreateFirstPartyInteractionAttemptToolsInput,
 ): AttemptToolDefinition[] {
+  const client = firstPartyInteractionClient(input);
+  if (!client) return [];
+  return createInteractionAttemptToolDefinitions({
+    transport: client,
+    workspaceId: input.scope.workspaceId,
+    sessionId: input.scope.sessionId,
+    browserExtension: {
+      name: input.settings.browserExtensionName,
+      installUrl: input.settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+    },
+    selectedTools: input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    permissions: input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+    ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
+    ...(input.postSetupCard ? { postSetupCard: input.postSetupCard } : {}),
+  });
+}
+
+/** The attempt's own API client, signed with exactly its delegated authority. */
+function firstPartyInteractionClient(
+  input: CreateFirstPartyInteractionAttemptToolsInput,
+): OpenGeniClient | null {
   const secret = resolveFirstPartyDelegationSecret(input.settings);
-  if (!secret) return [];
+  if (!secret) return null;
   const selectedTools = input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS;
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const baseUrl = firstPartyApiBaseUrl(input.settings, input.scope.workspaceId);
@@ -3760,7 +3781,7 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
       ...(process.versions.bun ? { pinResolvedDestination: false } : {}),
     },
   );
-  const client = new OpenGeniClient({
+  return new OpenGeniClient({
     baseUrl,
     fetch: async (request, init) => {
       const bearer = await signDelegatedAccessToken(secret, {
@@ -3785,19 +3806,92 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
       return await guarded(request, { ...init, headers });
     },
   });
-  return createInteractionAttemptToolDefinitions({
-    transport: client,
-    workspaceId: input.scope.workspaceId,
-    sessionId: input.scope.sessionId,
-    browserExtension: {
-      name: input.settings.browserExtensionName,
-      installUrl: input.settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
-    },
-    selectedTools,
-    permissions,
-    ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
-    ...(input.postSetupCard ? { postSetupCard: input.postSetupCard } : {}),
-  });
+}
+
+/** Where an interaction_request_human call that paused the turn stands. */
+export type InteractionRequestTargetReading =
+  | {
+      controllerGeneration: string;
+      targetGeneration: string;
+      documentGeneration: string | null;
+    }
+  /** Why the target could not be read; the request is refused with it. */
+  | string;
+
+export type InteractionRequestTargetReader = (
+  request: Extract<RequestHumanInteractionToolInput, { operation: "request" }>,
+) => Promise<InteractionRequestTargetReading>;
+
+/**
+ * The request a pause must read its target for: every request that names no
+ * auth run (an auth run supplies its own generations). The reading fills the
+ * generations a request left out and checks the ones it supplied.
+ */
+export function interactionRequestNeedingCurrentTarget(
+  input: RequestHumanInteractionToolInput,
+): Extract<RequestHumanInteractionToolInput, { operation: "request" }> | null {
+  if (input.operation !== "request" || input.authRunId) return null;
+  return input;
+}
+
+const INTERACTION_REQUEST_TARGET_READ_TIMEOUT_MS = 15_000;
+
+/**
+ * Read the target a person-handoff request names, as it is now, so a request
+ * that leaves its generations out records the target's current ones. Runs
+ * with the attempt's own authority when the turn pauses; null when this
+ * deployment has no first-party interaction access.
+ */
+export function createFirstPartyInteractionRequestTargetReader(
+  input: CreateFirstPartyInteractionAttemptToolsInput,
+): InteractionRequestTargetReader | null {
+  const client = firstPartyInteractionClient(input);
+  if (!client) return null;
+  return async (request) =>
+    await readInteractionRequestTarget(client, input.scope.workspaceId, request);
+}
+
+export async function readInteractionRequestTarget(
+  transport: Pick<OpenGeniClient, "getBrowserTargetState" | "listComputerTargets">,
+  workspaceId: string,
+  request: Extract<RequestHumanInteractionToolInput, { operation: "request" }>,
+): Promise<InteractionRequestTargetReading> {
+  const browser = request.resourceKind === "browser_session";
+  const options = { signal: AbortSignal.timeout(INTERACTION_REQUEST_TARGET_READ_TIMEOUT_MS) };
+  try {
+    if (browser) {
+      const state = await transport.getBrowserTargetState(
+        workspaceId,
+        request.resourceId,
+        request.targetId,
+        options,
+      );
+      return {
+        controllerGeneration: state.controllerGeneration,
+        targetGeneration: state.targetGeneration,
+        documentGeneration: state.documentGeneration,
+      };
+    }
+    const listed = await transport.listComputerTargets(workspaceId, request.resourceId, options);
+    const target = listed.targets.find((candidate) => candidate.id === request.targetId);
+    if (!target) return `computer target ${request.targetId} was not found`;
+    return {
+      controllerGeneration: target.controllerGeneration,
+      targetGeneration: target.targetGeneration,
+      documentGeneration: null,
+    };
+  } catch (error) {
+    const what = browser
+      ? `browser tab ${request.targetId}`
+      : `computer target ${request.targetId}`;
+    if (error instanceof OpenGeniApiError && error.status === 404) {
+      return `${what} was not found`;
+    }
+    if (error instanceof OpenGeniApiError && error.status === 409) {
+      return `the ${browser ? "browser" : "computer"} session is not active or has changed`;
+    }
+    return `the current state of ${what} could not be read`;
+  }
 }
 
 /** Failures the browser resume route can continue from the browser's own
@@ -5079,9 +5173,13 @@ function assertInterventionResumeMatches(
     request.resourceKind !== intervention.resourceKind ||
     request.resourceId !== intervention.resourceId ||
     request.targetId !== intervention.targetId ||
-    request.expectedControllerGeneration !== intervention.controllerGeneration ||
-    request.expectedTargetGeneration !== intervention.targetGeneration ||
-    request.expectedDocumentGeneration !== intervention.documentGeneration ||
+    // An omitted generation was filled in from the target when it paused.
+    (request.expectedControllerGeneration !== undefined &&
+      request.expectedControllerGeneration !== intervention.controllerGeneration) ||
+    (request.expectedTargetGeneration !== undefined &&
+      request.expectedTargetGeneration !== intervention.targetGeneration) ||
+    (request.expectedDocumentGeneration !== undefined &&
+      request.expectedDocumentGeneration !== intervention.documentGeneration) ||
     request.kind !== intervention.kind ||
     request.reason !== intervention.reason ||
     (request.authRunId ?? null) !== intervention.authRunId

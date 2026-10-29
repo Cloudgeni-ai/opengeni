@@ -1,6 +1,6 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
-import type { CreditDebitAttribution } from "@opengeni/db";
+import type { CreditDebitAttribution, UsageEventProcessingResidency } from "@opengeni/db";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
@@ -29,6 +29,8 @@ export type TranscriptionRequest = {
   durationSeconds?: number | undefined;
   /** ISO 639 hint for what is spoken; omitted means detect. */
   language?: string | undefined;
+  /** Names and terms to listen for; a model that can't take them ignores them. */
+  keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
   requestId: string;
   /** Absolute server-owned provider deadline persisted for resumable attempts. */
@@ -139,6 +141,8 @@ export type TranscriptionBilling = {
     pricing: VoiceInputPricing;
     usage: VoiceInputUsage | null;
     billing: TranscriptionBillingContext;
+    /** Where the provider processed the audio (its route's residency claim). */
+    processingResidency?: UsageEventProcessingResidency;
   }): Promise<{ creditCostMicros: number }>;
 };
 

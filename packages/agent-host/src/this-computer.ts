@@ -348,6 +348,13 @@ const MACHINE_READ_TIMEOUT_MS = 10_000;
 
 const REMOVED_MESSAGE =
   "This computer was removed from this workspace. Reconnect it to let agents use it again.";
+/** The server turned down this connection's sign-in: agents can't use it for now. */
+const signingIn = (connection: AgentConnection) => connection.authentication !== undefined;
+/** The agent stopped retrying it: only connecting it again helps. */
+const refusedSignIn = (connection: AgentConnection) =>
+  connection.authentication === "reconnect_required";
+const RECONNECT_REQUIRED_MESSAGE =
+  "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.";
 
 /**
  * This computer as a place agents can work. The app ships the
@@ -609,13 +616,14 @@ export class ThisComputer {
    * Whether the app should now start ("open") or stop ("stop") opening at
    * login, given whether this computer is connected; null when nothing changes.
    * A connected computer stays available after a restart, and one that was
-   * disconnected no longer opens the app at login.
+   * disconnected no longer opens the app at login. `wanted` is something else
+   * in the app that needs it running from login on, such as dictation shortcuts.
    */
-  openAtLoginChange(connected: boolean): "open" | "stop" | null {
-    connected = connected && !this.serviceBacked;
-    if (connected === this.state.openAtLogin) return null;
-    this.saveState({ openAtLogin: connected });
-    return connected ? "open" : "stop";
+  openAtLoginChange(connected: boolean, wanted = false): "open" | "stop" | null {
+    const open = (connected && !this.serviceBacked) || wanted;
+    if (open === this.state.openAtLogin) return null;
+    this.saveState({ openAtLogin: open });
+    return open ? "open" : "stop";
   }
 
   /**
@@ -704,6 +712,16 @@ export class ThisComputer {
       state: "not_connected",
       ...(base.error ? {} : { error: REMOVED_MESSAGE, errorCode: "removed" as const }),
     });
+    // The server turned down the agent's sign-in. It keeps renewing it on its
+    // own (still turning on, and why), or has stopped and needs connecting again.
+    const signIn = this.state.paused ? undefined : connection.authentication;
+    const signInStatus: Partial<ThisComputerStatus> =
+      signIn === "reconnect_required" && !base.error
+        ? { error: RECONNECT_REQUIRED_MESSAGE, errorCode: "reconnect_required" }
+        : {};
+    const waitingDetail = connection.authenticationNote
+      ? { waitingDetail: connection.authenticationNote }
+      : {};
     if (this.serviceBacked) {
       let service: AgentServiceStatus;
       try {
@@ -732,21 +750,38 @@ export class ThisComputer {
             )
           : undefined;
       if (service.running && !this.state.paused) this.hostService(machine);
+      const reconnecting =
+        this.hosting !== null ||
+        !service?.running ||
+        !machine?.online ||
+        signIn === "renewal_required" ||
+        (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions);
+      const paused = Boolean(service?.installed && !service.enabled && !this.hosting);
+      // Only while on and still connecting; a stopped connection is an error instead.
+      const waitingOn =
+        !reconnecting || paused || signIn === "reconnect_required"
+          ? null
+          : this.hosting !== null
+            ? ("handover" as const)
+            : !service?.running
+              ? ("agent" as const)
+              : signIn === "renewal_required"
+                ? ("sign_in" as const)
+                : ("server" as const);
       return {
         ...base,
         // While it moves into the app, its service is briefly off: still on.
-        state: service?.installed && !service.enabled && !this.hosting ? "paused" : "connected",
-        reconnecting:
-          this.hosting !== null ||
-          !service?.running ||
-          !machine?.online ||
-          (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions),
+        state: paused ? "paused" : "connected",
+        reconnecting,
+        ...(waitingOn ? { waitingOn, ...(waitingOn === "sign_in" ? waitingDetail : {}) } : {}),
         ...(permissions ? { permissions } : {}),
         // Only a read that failed is an error; a listed machine that is offline
         // is still connecting, and its own reason is unknown here.
         ...(unread && service.enabled && !base.error
           ? { error: unread.message, errorCode: unread.code }
-          : {}),
+          : service.enabled
+            ? signInStatus
+            : {}),
       };
     }
     const reading = accountId
@@ -761,8 +796,19 @@ export class ThisComputer {
     // answer: agents read files whether or not they see the screen.
     const folders =
       !permissions && this.deps.platform === "darwin" ? await this.foldersAllowed() : undefined;
+    const waitingOn =
+      this.state.paused || signIn === "reconnect_required"
+        ? null
+        : this.agent.state === "elsewhere"
+          ? ("another_agent" as const)
+          : this.agent.state !== "running"
+            ? ("agent" as const)
+            : signIn === "renewal_required"
+              ? ("sign_in" as const)
+              : null;
     return {
       ...base,
+      ...signInStatus,
       state: this.state.paused ? "paused" : "connected",
       enrollmentId: connection.agentId,
       ...(permissions
@@ -774,7 +820,9 @@ export class ThisComputer {
       ...(folders !== undefined ? { folders } : {}),
       ...(missing && this.askingRecently ? { setupPending: true } : {}),
       ...(permissions ? { requestedPermissions: [...this.state.requested] } : {}),
-      ...(!this.state.paused && this.agent.state !== "running" ? { reconnecting: true } : {}),
+      ...(waitingOn
+        ? { reconnecting: true, waitingOn, ...(waitingOn === "sign_in" ? waitingDetail : {}) }
+        : {}),
     };
   }
 
@@ -785,6 +833,11 @@ export class ThisComputer {
     running: boolean;
     /** On, but the agent is starting again, so agents can't use it for the moment. */
     reconnecting: boolean;
+    /**
+     * On, but the server stopped signing it in and the agent stopped retrying:
+     * it stays unavailable until the person connects it again.
+     */
+    needsReconnect: boolean;
     needsPermissions: boolean;
     /** In the order to allow them. */
     missingPermissions: ThisComputerPermissionId[];
@@ -798,6 +851,7 @@ export class ThisComputer {
         connected: false,
         running: false,
         reconnecting: false,
+        needsReconnect: false,
         needsPermissions: false,
         missingPermissions: [],
       };
@@ -809,7 +863,11 @@ export class ThisComputer {
         installed: true,
         connected: connections.length > 0,
         running: service?.running ?? false,
-        reconnecting: Boolean(service?.enabled && !service.running),
+        // Running, but the server won't sign it in yet: not available either.
+        reconnecting: Boolean(
+          service?.enabled && (!service.running || connections.some(signingIn)),
+        ),
+        needsReconnect: Boolean(service?.enabled && connections.some(refusedSignIn)),
         needsPermissions: false,
         missingPermissions: [],
         management: "service",
@@ -825,7 +883,11 @@ export class ThisComputer {
       connected: connections.length > 0,
       // Serving only removed connections, it gives agents nothing.
       running: !this.state.paused && this.agent.state !== "stopped" && connections.length > 0,
-      reconnecting: !this.state.paused && connections.length > 0 && this.agent.state !== "running",
+      reconnecting:
+        !this.state.paused &&
+        connections.length > 0 &&
+        (this.agent.state !== "running" || connections.some(signingIn)),
+      needsReconnect: !this.state.paused && connections.some(refusedSignIn),
       needsPermissions: missingPermissions.length > 0,
       missingPermissions,
       ...(this.handsBackOnQuit ? { handsBackOnQuit: true } : {}),
@@ -845,58 +907,158 @@ export class ThisComputer {
       // older standalone agent to make this setup action succeed.
       if (this.serviceBacked) await this.requireService();
       if (await this.connectThroughAnother(accountId, baseUrl, workspaceId, options)) return;
+      if (await this.reconnectWhereMade(accountId, baseUrl, workspaceId, options)) return;
       const token = await this.deps
         .mintEnrollToken(accountId, workspaceId, options.screenControl)
         .catch((caught: unknown) => {
           throw serverFailure(caught, "Couldn't start setting up this computer");
         });
-      // Authenticate before downloading, enrolling, or starting any local runner.
-      const binary = await this.ensureInstalled(baseUrl);
-      await this.expect(
-        // The name people know the computer by, not its network hostname.
-        this.run(
-          binary,
-          [
-            "--api-url",
-            baseUrl,
-            "connect",
-            "--non-interactive",
-            "--machine-name",
-            await computerName(),
-          ],
-          {
-            env: { OPENGENI_API_URL: baseUrl, OPENGENI_ENROLL_TOKEN: token },
-            timeoutMs: 120_000,
-          },
-        ),
-        "Couldn't connect this computer",
-        "connect_failed",
+      const connection = await this.enroll(
+        accountId,
+        baseUrl,
+        workspaceId,
+        workspaceId,
+        token,
+        options,
       );
-      this.saveState({
-        adopted: true,
-        management: this.serviceBacked ? "service" : "app",
-        paused: false,
-        screenControl: this.state.screenControl || options.screenControl,
-        setupPending: options.screenControl && this.deps.platform === "darwin",
-        askedAt: Date.now(),
-        turnedOff: this.state.turnedOff.filter((key) => key !== useKey(baseUrl, workspaceId)),
-      });
-      // A running agent reads its connections when it starts.
-      if (this.serviceBacked) await this.serviceAction("start");
-      else if (this.agent.state === "stopped") this.agent.start(baseUrl);
-      else await this.agent.restart();
-      const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
-      if (!connection) {
-        throw new ThisComputerError("connect_failed", "Couldn't connect this computer. Try again.");
-      }
-      this.enrolledAt.set(connection.agentId, Date.now());
-      this.removed.delete(connection.agentId);
-      this.own(connection.agentId, accountId);
       await this.deps.allowAgents(accountId, workspaceId, connection.agentId).catch((caught) => {
         throw serverFailure(caught, "Couldn't let agents use this computer");
       });
     });
     return await this.status(baseUrl, workspaceId, accountId);
+  }
+
+  /**
+   * Connects this computer with a setup token for `enrollIn` (authenticated
+   * before downloading, enrolling, or starting any local runner) and turns it
+   * on for `workspaceId`. Returns the new connection.
+   */
+  private async enroll(
+    accountId: string,
+    baseUrl: string,
+    workspaceId: string,
+    enrollIn: string,
+    token: string,
+    options: ThisComputerConnectOptions,
+  ): Promise<AgentConnection> {
+    const binary = await this.ensureInstalled(baseUrl);
+    await this.expect(
+      // The name people know the computer by, not its network hostname.
+      this.run(
+        binary,
+        [
+          "--api-url",
+          baseUrl,
+          "connect",
+          "--non-interactive",
+          "--machine-name",
+          await computerName(),
+        ],
+        {
+          env: { OPENGENI_API_URL: baseUrl, OPENGENI_ENROLL_TOKEN: token },
+          timeoutMs: 120_000,
+        },
+      ),
+      "Couldn't connect this computer",
+      "connect_failed",
+    );
+    this.saveState({
+      adopted: true,
+      management: this.serviceBacked ? "service" : "app",
+      paused: false,
+      screenControl: this.state.screenControl || options.screenControl,
+      setupPending: options.screenControl && this.deps.platform === "darwin",
+      askedAt: Date.now(),
+      turnedOff: this.state.turnedOff.filter((key) => key !== useKey(baseUrl, workspaceId)),
+    });
+    // A running agent reads its connections when it starts.
+    if (this.serviceBacked) await this.serviceAction("start");
+    else if (this.agent.state === "stopped") this.agent.start(baseUrl);
+    else await this.agent.restart();
+    const connection = connectionFor(await this.connections(true), baseUrl, enrollIn);
+    if (!connection) {
+      throw new ThisComputerError("connect_failed", "Couldn't connect this computer. Try again.");
+    }
+    this.enrolledAt.set(connection.agentId, Date.now());
+    this.removed.delete(connection.agentId);
+    this.own(connection.agentId, accountId);
+    return connection;
+  }
+
+  /**
+   * This workspace uses a connection made in another one, and the server
+   * stopped signing it in while still listing it there. A personal computer
+   * has one live connection on a server, so setting it up anew here would be
+   * refused: connect it again where it was made, then let this workspace (and
+   * every other one that used it) use it again. False when it was removed
+   * there (connecting it there again would undo that) or can't be set up
+   * there any more, so it is set up here.
+   */
+  private async reconnectWhereMade(
+    accountId: string,
+    baseUrl: string,
+    workspaceId: string,
+    options: ThisComputerConnectOptions,
+  ): Promise<boolean> {
+    const connections = await this.connections(true);
+    if (connectionFor(connections, baseUrl, workspaceId)) return false;
+    const key = useKey(baseUrl, workspaceId);
+    const shared = this.state.alsoIn[key];
+    const origin = normalizeServerUrl(baseUrl);
+    const refused = connections.find(
+      (connection) =>
+        connection.apiUrl === origin &&
+        connection.workspaceId !== workspaceId &&
+        connection.authentication === "reconnect_required" &&
+        (shared === undefined || connection.agentId === shared),
+    );
+    if (!refused) return false;
+    if (this.removed.has(refused.agentId)) return false;
+    // No longer allowed to set it up there (e.g. no longer a member, so its
+    // machines can't be read either): set it up here instead.
+    const token = await this.deps
+      .mintEnrollToken(accountId, refused.workspaceId, options.screenControl)
+      .catch(() => null);
+    if (token === null) return false;
+    const reading = await this.reportedMachine(accountId, baseUrl, refused.workspaceId, refused);
+    if (this.removedOnServer(reading, refused)) return false;
+    // Whether it is still listed there decides where to connect it: unknown, ask again.
+    if (reading?.kind === "unread") throw reading.failure;
+    const connection = await this.enroll(
+      accountId,
+      baseUrl,
+      workspaceId,
+      refused.workspaceId,
+      token,
+      options,
+    );
+    // Live there now, so setting it up here would be refused: say what failed.
+    await this.deps.allowAgents(accountId, workspaceId, connection.agentId).catch((caught) => {
+      throw serverFailure(caught, "Couldn't let agents use this computer");
+    });
+    // Every workspace that used the old connection uses the new one.
+    const users = Object.entries(this.state.alsoIn)
+      .filter(([entry, agentId]) => agentId === refused.agentId && entry !== key)
+      .map(([entry]) => entry);
+    this.saveState({
+      alsoIn: {
+        ...this.state.alsoIn,
+        ...Object.fromEntries(users.map((entry) => [entry, connection.agentId])),
+        [key]: connection.agentId,
+      },
+    });
+    if (connection.agentId !== refused.agentId) {
+      const where = [
+        ...(this.state.turnedOff.includes(useKey(baseUrl, refused.workspaceId))
+          ? []
+          : [refused.workspaceId]),
+        ...users.map((entry) => workspaceOfKey(entry)).filter((id): id is string => id !== null),
+      ];
+      for (const other of where) {
+        await this.deps.allowAgents(accountId, other, connection.agentId).catch(() => undefined);
+      }
+    }
+    return true;
   }
 
   async pause(): Promise<void> {
@@ -915,6 +1077,10 @@ export class ThisComputer {
     await this.act(async () => {
       if (this.serviceBacked) {
         if (!this.state.adopted) return;
+        // Already running (e.g. Try again while it can't sign in or connect):
+        // started afresh, so it tries again now rather than after its backoff.
+        const service = await this.serviceStatus().catch(() => null);
+        if (service?.running) await this.serviceAction("stop");
         await this.serviceAction("start");
         return;
       }
@@ -927,7 +1093,8 @@ export class ThisComputer {
           "This computer isn't connected to a workspace yet.",
         );
       }
-      this.agent.start(first.apiUrl);
+      if (this.agent.state === "running") await this.agent.restart();
+      else this.agent.start(first.apiUrl);
     });
   }
 
@@ -1202,6 +1369,9 @@ export class ThisComputer {
       ),
     ];
     for (const connection of candidates) {
+      // A connection the agent stopped retrying (the server needs it connected
+      // again) can't be reused either: connecting enrolls this computer afresh below.
+      if (connection.authentication === "reconnect_required") continue;
       // An enrollment the server no longer lists can't be reused: it was removed
       // there, and connecting again enrolls this computer afresh below.
       const reading = await this.reportedMachine(accountId, baseUrl, workspaceId, connection);
@@ -2016,6 +2186,12 @@ function killTree(pid: number, platform: AgentPlatform, force: boolean, now = fa
 /** A workspace on a server, as the state keeps it. */
 function useKey(baseUrl: string, workspaceId: string): string {
   return `${normalizeServerUrl(baseUrl)} ${workspaceId}`;
+}
+
+/** The workspace in a `useKey` key. */
+function workspaceOfKey(key: string): string | null {
+  const space = key.lastIndexOf(" ");
+  return space > 0 && space < key.length - 1 ? key.slice(space + 1) : null;
 }
 
 /** A request that never got an answer: fetch's TypeError, or the SDK's transport failure. */

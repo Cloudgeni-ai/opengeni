@@ -6,6 +6,7 @@ import type {
   HumanInputSecretAnswerResult,
   HumanInputSecretSaveTo,
   HumanInputSecretSpec,
+  SessionHumanInputRequest,
 } from "@opengeni/sdk";
 import { secretUseApprovalIdFromQuestionId } from "@opengeni/sdk/secret-use-approval";
 import { type OpenGeniText } from "./messages/runtime";
@@ -23,6 +24,29 @@ export function choiceOffersOther(
   return !question.skillReview && secretUseApprovalIdFromQuestionId(question.id) === null;
 }
 
+/**
+ * Whether a card offers "Let the agent decide". Secret questions, Skill
+ * reviews and secret-use approvals stay with the person, as do settled
+ * requests. The server applies the same rule.
+ */
+export function humanInputAgentMayDecide(
+  request: Pick<SessionHumanInputRequest, "questions"> &
+    Partial<Pick<SessionHumanInputRequest, "origin" | "status">>,
+): boolean {
+  if ((request.origin ?? "tool_call") !== "tool_call") return false;
+  if (request.status !== undefined && request.status !== "pending") return false;
+  return (
+    request.questions.length > 0 &&
+    request.questions.every(
+      (question) =>
+        question.kind !== "secret" &&
+        question.secret == null &&
+        question.skillReview == null &&
+        secretUseApprovalIdFromQuestionId(question.id) === null,
+    )
+  );
+}
+
 export type HumanInputAnswerDraft = {
   values: string[];
   other: string;
@@ -33,7 +57,17 @@ export type HumanInputFormMessages = {
   title: string;
   description: string;
   submit: string;
+  /** The submit label when the request asks one question; falls back to {@link submit}. */
+  submitOne?: string;
   skip: string;
+  /**
+   * The one secondary action on an ordinary question: the agent chooses.
+   * Optional so a host's complete message set from before it existed stays
+   * valid; unset, the card uses the default copy.
+   */
+  letAgentDecide?: string | undefined;
+  /** Shown in place of that action once an agent was asked to decide; optional like `letAgentDecide`. */
+  agentDeciding?: string | undefined;
   submitting: string;
   other: string;
   deadlineLabel: string;
@@ -83,7 +117,10 @@ export const defaultHumanInputFormMessages = (t: OpenGeniText): HumanInputFormMe
   /** Multi-question chrome has no default subtitle; hosts may still override. */
   description: "",
   submit: t("humanInputModel.sendAnswers"),
+  submitOne: t("humanInputModel.sendAnswer"),
   skip: t("humanInputModel.skip"),
+  letAgentDecide: t("humanInputModel.letTheAgentDecide"),
+  agentDeciding: t("humanInputModel.yourAgentIsDeciding"),
   submitting: t("humanInputModel.submitting"),
   other: t("humanInputModel.other"),
   deadlineLabel: t("humanInputModel.expires"),
@@ -135,6 +172,20 @@ export const defaultHumanInputFormMessages = (t: OpenGeniText): HumanInputFormMe
   secretSaved: (vaultName, itemName) =>
     t("humanInputModel.savedToVaultnameItemname", { vaultName, itemName }),
 });
+
+/**
+ * The default copy overlaid with a host's. A host that sets its own submit
+ * label keeps it for single questions too, unless it also sets submitOne.
+ */
+export function mergeHumanInputFormMessages(
+  defaults: HumanInputFormMessages,
+  overrides?: Partial<HumanInputFormMessages>,
+): HumanInputFormMessages {
+  const merged = { ...defaults, ...overrides };
+  if (overrides?.submit !== undefined && overrides.submitOne === undefined)
+    merged.submitOne = overrides.submit;
+  return merged;
+}
 
 /**
  * Text, single- and multi-select drafts. Secret questions are not drafted:

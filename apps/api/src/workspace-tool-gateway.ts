@@ -27,6 +27,7 @@ import {
   isSecretReferenceError,
   type AccessGrant,
   type ToolGatewayIdentity,
+  type ToolReviewContext,
   type ToolRef,
   type ToolGatewayTarget,
 } from "@opengeni/contracts";
@@ -71,6 +72,7 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import {
+  ConnectionApprovalPreflightError,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -126,12 +128,27 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
+  /**
+   * The provider's own review of exact arguments (for Gmail, the message as it
+   * would be sent), read through the same fenced connection. Empty when the
+   * provider has none.
+   */
+  review?: (
+    identity: ToolGatewayIdentity,
+    args: Record<string, unknown>,
+  ) => Promise<Partial<ToolReviewContext>>;
 };
 
 type WorkspaceSiteToolContext = {
   siteArtifactId: string;
   siteVersionId: string;
   identity: { serverId: string; toolName: string };
+  /**
+   * The declared identity that authorizes `identity` when the Site routed a
+   * declared canonical connector to the viewer's own account
+   * (`site-tool-routing.ts`). Server-derived, never a request field.
+   */
+  declaredIdentity?: { serverId: string; toolName: string };
 };
 
 type AuthorizeWorkspaceSiteTool = (
@@ -218,13 +235,24 @@ export async function prepareWorkspaceToolGateway(
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
   if (isPublishedSiteToolAuthorization(authorization)) {
     const site = publishedSiteToolAuthority(authorization);
+    const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
+      left.serverId === right.serverId && left.toolName === right.toolName;
     const allowed = site.requestedTools.filter(
       (identity) =>
         !options.allowedIdentities ||
-        options.allowedIdentities.some(
-          (item) => item.serverId === identity.serverId && item.toolName === identity.toolName,
-        ),
+        options.allowedIdentities.some((item) => same(item, identity)),
     );
+    // A declared canonical identity runs on the viewer's own account route.
+    const route = options.siteRoute;
+    if (
+      route &&
+      options.target &&
+      "identity" in options.target &&
+      same(route.identity, options.target.identity) &&
+      site.requestedTools.some((identity) => same(identity, route.declaredIdentity)) &&
+      !allowed.some((identity) => same(identity, route.identity))
+    )
+      allowed.push(route.identity);
     // Targeted preparation replaces its allowlist with the target. It must be
     // an exact declared identity first; paths are resolved by the Site adapter.
     const target = options.target;
@@ -572,6 +600,14 @@ export type WorkspaceToolGatewayPreparationOptions = {
    * executes exactly as it would from the complete gateway.
    */
   firstPartySettings?: "prepared" | "caller";
+  /**
+   * Trusted Site routing of `target` (never a request-body field): the
+   * viewer's own account route and the declared identity that authorizes it.
+   */
+  siteRoute?: {
+    identity: ToolGatewayIdentity;
+    declaredIdentity: ToolGatewayIdentity;
+  };
 };
 
 /** Keep live caller authority independent of native connection acquisition and refresh. */
@@ -1000,6 +1036,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       subjectId: grant.subjectId,
       ...(options.signal ? { requestSignal: options.signal } : {}),
       ...(authorizeTransportRequest ? { authorizeProviderRequest: authorizeTransportRequest } : {}),
+      // A person may confirm an approval-required connection tool here, so
+      // every connection-backed server gets the non-refreshing preflight.
+      connectionApprovalPreflight: true,
       credentialSubjectId: grant.subjectId,
       mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
@@ -1130,6 +1169,24 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+    review: async (identity, args) => {
+      const server = prepared.mcpServers.find(
+        (candidate) => (candidate as { registryId?: unknown }).registryId === identity.serverId,
+      ) as
+        | {
+            reviewContext?: (
+              toolName: string,
+              args: Record<string, unknown>,
+            ) => Promise<Partial<ToolReviewContext>>;
+          }
+        | undefined;
+      // The route's own server is always prepared here; failing to find it
+      // must not read as "this provider has no review".
+      if (!server) throw new Error("tool review server unavailable");
+      return typeof server.reviewContext === "function"
+        ? await server.reviewContext(identity.toolName, args)
+        : {};
+    },
   };
 }
 
@@ -1501,6 +1558,16 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   if (error instanceof ToolGatewayBlockedError) {
     throw new HTTPException(403, { message: error.code, cause: error });
   }
+  if (error instanceof ConnectionApprovalPreflightError) {
+    // Nothing reached the provider: the person's connection needs attention.
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: "Reconnect this account in Opengeni, then try again.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "tool_connection_needs_attention", reason: error.reason },
+    });
+  }
   if (isSecretReferenceError(error)) {
     // Nothing ran. The failures name references, never values.
     throw new ApiHttpError(422, {
@@ -1572,10 +1639,10 @@ export async function requireWorkspaceSiteToolAuthorization(
       context.siteArtifactId,
       context.siteVersionId,
     );
+    const declared = context.declaredIdentity ?? context.identity;
     const requested = version.requestedTools.some(
       (identity) =>
-        identity.serverId === context.identity.serverId &&
-        identity.toolName === context.identity.toolName,
+        identity.serverId === declared.serverId && identity.toolName === declared.toolName,
     );
     if (status !== "active" || version.id !== context.siteVersionId || !requested) {
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
@@ -1600,7 +1667,7 @@ function workspaceToolGatewayOutcome(error: unknown) {
   return "failed" as const;
 }
 
-function allGatewayToolRefs(settings: Settings): ToolRef[] {
+export function allGatewayToolRefs(settings: Settings): ToolRef[] {
   return settings.mcpServers.map((server) => ({
     kind: "mcp" as const,
     id: server.id,

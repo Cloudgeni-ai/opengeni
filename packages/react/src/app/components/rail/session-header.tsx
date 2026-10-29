@@ -24,11 +24,13 @@ import type { SessionEventsConnectionState } from "../../../hooks/use-session-ev
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
+import type { CreateBotTemplateRequest, WorkspaceBotTemplate } from "@opengeni/contracts";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   BellIcon,
   BellOffIcon,
+  BotIcon,
   CalendarClockIcon,
   GaugeIcon,
   LinkIcon,
@@ -43,6 +45,7 @@ import {
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
+  UserRoundPenIcon,
   ZapIcon,
   ZapOffIcon,
 } from "lucide-react";
@@ -97,6 +100,13 @@ import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
+import { toast } from "../../lib/toast";
+import { SessionAvatar } from "../session/session-avatar";
+import {
+  SessionProfileEditorDialog,
+  type UpdateSessionProfileFn,
+} from "../session/session-profile-editor";
+import { BotTemplateDialog } from "../bots/bot-template-dialog";
 import { useUiEventTarget } from "../../lib/ui-events";
 
 const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
@@ -119,6 +129,8 @@ export function SessionHeader({
   onToggleInspector,
   onRename,
   onPin,
+  onUpdateProfile,
+  onSaveBotTemplate,
   onArchive,
   repliesMute,
   adminAccess,
@@ -155,6 +167,13 @@ export function SessionHeader({
   onToggleInspector?: (() => void) | undefined;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
+  /** Saves the chat's name, description and avatar. Absent hides Edit profile. */
+  onUpdateProfile?: UpdateSessionProfileFn | null | undefined;
+  /** Saves a bot template in the workspace. Absent hides Save as bot template. */
+  onSaveBotTemplate?:
+    | ((request: CreateBotTemplateRequest) => Promise<WorkspaceBotTemplate>)
+    | null
+    | undefined;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: ((session: Session, archived: boolean) => Promise<void>) | undefined;
   /**
@@ -244,6 +263,9 @@ export function SessionHeader({
   const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
+  const canEditProfile = Boolean(onUpdateProfile);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -336,8 +358,27 @@ export function SessionHeader({
         >
           <div
             ref={overflow.titleRef}
-            className={cn("flex min-w-0 items-center", rename.editing && "flex-1")}
+            className={cn("flex min-w-0 items-center gap-1.5", rename.editing && "flex-1")}
           >
+            {/* A bot's avatar travels with its title. */}
+            {session.avatar ? (
+              <button
+                type="button"
+                aria-label="Edit profile"
+                title="Edit profile"
+                disabled={!canEditProfile}
+                onClick={() => setProfileOpen(true)}
+                className="-mr-0.5 flex shrink-0 items-center justify-center rounded-[6px] outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 enabled:hover:opacity-85 pointer-coarse:size-11"
+              >
+                <SessionAvatar
+                  avatar={session.avatar}
+                  name={sessionDisplayTitle(session)}
+                  workspaceId={session.workspaceId}
+                  seed={session.id}
+                  size="sm"
+                />
+              </button>
+            ) : null}
             <SessionTitleEditor session={session} rename={rename} />
           </div>
           {/* Below lg (or when the full badge has no room) the lifecycle is a
@@ -569,6 +610,26 @@ export function SessionHeader({
               <PencilIcon />
               Rename
             </DropdownMenuItem>
+            {canEditProfile ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setProfileOpen(true);
+                }}
+              >
+                <UserRoundPenIcon />
+                Edit profile…
+              </DropdownMenuItem>
+            ) : null}
+            {onSaveBotTemplate ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setSaveTemplateOpen(true);
+                }}
+              >
+                <BotIcon />
+                Save as bot template…
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               aria-keyshortcuts={copyLinkKeys?.ariaKeys}
               onSelect={() => void chatOps.copyLink(session)}
@@ -697,6 +758,37 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {onUpdateProfile && profileOpen ? (
+          <SessionProfileEditorDialog
+            session={session}
+            update={onUpdateProfile}
+            open={profileOpen}
+            onOpenChange={setProfileOpen}
+          />
+        ) : null}
+        {onSaveBotTemplate && saveTemplateOpen ? (
+          <BotTemplateDialog
+            open={saveTemplateOpen}
+            onOpenChange={setSaveTemplateOpen}
+            workspaceId={session.workspaceId}
+            seed={session.id}
+            mode="save"
+            initial={{
+              name: sessionDisplayTitle(session),
+              description: session.description ?? "",
+              avatar: session.avatar ?? null,
+              setupInstructions: "",
+              // Shared like the chat, so an Only me chat stays private by default.
+              visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
+            }}
+            onSubmit={async (values) => {
+              const created = await onSaveBotTemplate({ ...values, sourceSessionId: session.id });
+              toast.success("Bot template saved", {
+                description: created.name,
+              });
+            }}
+          />
+        ) : null}
         {adminAccess ? (
           <GrantSessionAdminAccessDialog
             control={adminAccess}

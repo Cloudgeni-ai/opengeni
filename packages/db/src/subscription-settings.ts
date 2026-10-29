@@ -53,7 +53,7 @@ export type SubscriptionRotationMode = "spread" | "primary_first";
 
 /** The caller may not read or write these settings. */
 export class SubscriptionSettingsForbiddenError extends Error {
-  constructor(message = "missing permission to manage these model account settings") {
+  constructor(message = "You don't have permission to manage these model account settings.") {
     super(message);
     this.name = "SubscriptionSettingsForbiddenError";
   }

@@ -10,7 +10,6 @@ import {
   readCodexPlanEntitlementExclusion,
   serializeCodexPlanEntitlementExclusion,
 } from "../src/codex-plan-entitlement";
-import { unresolvedCodexCredentialFailures } from "../src/codex-failure-eligibility";
 import {
   buildCodexTokenResolver,
   recheckCodexCredentialPlan,
@@ -136,37 +135,6 @@ describe("Codex plan entitlement exclusion", () => {
       planType: "free",
       models: [{ modelId: "a", excludedAt: hoursAgo(1).toISOString() }],
     });
-  });
-
-  test("a plan refusal stays excluded for the turn until a different plan is observed", () => {
-    const metadata = {
-      codexCredentialFailedIds: ["cred-free"],
-      codexCredentialFailureEvidenceV1: {
-        "cred-free": { kind: "plan", credentialVersion: 3, planType: "free" },
-      },
-    };
-    const account = (planType: string | null) => ({
-      id: "cred-free",
-      status: "active",
-      exhaustedUntil: null,
-      exhaustedKind: null,
-      credentialVersion: 3,
-      planType,
-    });
-    expect(unresolvedCodexCredentialFailures(metadata, [account("free")])).toEqual(["cred-free"]);
-    expect(unresolvedCodexCredentialFailures(metadata, [account("pro")])).toEqual([]);
-    expect(
-      unresolvedCodexCredentialFailures(metadata, [{ ...account("pro"), status: "error" }]),
-    ).toEqual(["cred-free"]);
-    // A refusal recorded without a fresh plan observation names no plan, so no
-    // later observation makes the account eligible again within this turn.
-    const unobserved = {
-      ...metadata,
-      codexCredentialFailureEvidenceV1: {
-        "cred-free": { kind: "plan", credentialVersion: 3, planType: null },
-      },
-    };
-    expect(unresolvedCodexCredentialFailures(unobserved, [account("pro")])).toEqual(["cred-free"]);
   });
 });
 

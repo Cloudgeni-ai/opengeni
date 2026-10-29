@@ -56,6 +56,7 @@ import {
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
   updateGitHubActionPolicyGroup,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -100,6 +101,7 @@ import {
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
@@ -449,6 +451,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
       installationId,
       eventRouteSecret: eventRouteSecret(settings),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
     return c.body(null, 204);
   });
@@ -1133,9 +1136,7 @@ export function requirePublicGitHubRepositoryVerificationPermission(
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: "missing permission: sessions:create or sessions:control",
-  });
+  throw new MissingPermissionRefusal("sessions:create");
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {

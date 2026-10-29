@@ -6,6 +6,7 @@ import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "ele
 
 import { DESKTOP_IPC, type DesktopDictationReport } from "../../contract";
 import type { Dictation } from "./index";
+import { parseDictationAudio } from "./settings";
 
 /**
  * Answer the dictation calls with this controller. `allow` throws for a sender
@@ -53,6 +54,12 @@ export function handleDictationIpc(input: {
   });
   handle(DESKTOP_IPC.dictationHistory, () => dictation.history());
   handle(DESKTOP_IPC.dictationClearHistory, () => dictation.clearHistory());
+  handle(DESKTOP_IPC.dictationHistoryAudio, (_event, id) =>
+    typeof id === "string" ? dictation.historyAudio(id) : null,
+  );
+  handle(DESKTOP_IPC.dictationTranscribeAgain, (_event, id) => {
+    if (typeof id === "string") dictation.transcribeAgain(id);
+  });
   ipcMain.on(DESKTOP_IPC.dictationListen, (event, listening: unknown) => {
     try {
       allow(event);
@@ -91,12 +98,21 @@ export function parseDictationReport(value: unknown): DesktopDictationReport | n
             : null,
       };
     case "transcribing":
-    case "cancelled":
       return { dictationId, phase: report.phase };
-    case "done":
-      return typeof report.text === "string"
-        ? { dictationId, phase: "done", text: report.text.slice(0, 200_000) }
-        : null;
+    case "cancelled": {
+      const audio = parseDictationAudio(report.audio);
+      return { dictationId, phase: "cancelled", ...(audio ? { audio } : {}) };
+    }
+    case "done": {
+      if (typeof report.text !== "string") return null;
+      const audio = parseDictationAudio(report.audio);
+      return {
+        dictationId,
+        phase: "done",
+        text: report.text.slice(0, 200_000),
+        ...(audio ? { audio } : {}),
+      };
+    }
     case "failed":
       return {
         dictationId,

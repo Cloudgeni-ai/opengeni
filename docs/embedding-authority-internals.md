@@ -153,11 +153,7 @@ causal continuations. Runtime execution and credential-use checks deny revoked
 links without tying durable work to the original API key. Linking does not
 transfer personal connection ownership. Native consent and account inventory reuse the shared
 React link surfaces; inventory is participant-scoped and cursor-bounded.
-The DB create boundary strips retired selection metadata from new input and no
-longer accepts host-selection arguments. `retired-session-create-metadata.ts`
-keeps only a historical replay rejection: nonempty or malformed stored host
-selection cannot be mistaken for a native create using the same idempotency key.
-Historical records are not rewritten. This compatibility check grants no access.
+The DB create boundary does not accept host-selection arguments.
 Curated API Integration OAuth carries encrypted external continuation data in
 signed state. `packages/core/src/application/external-continuation.ts` checks
 the live identity, explicit membership and organization-key ceiling; the

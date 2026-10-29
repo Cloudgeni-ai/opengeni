@@ -18,6 +18,7 @@ import {
   LinkIcon,
   MailIcon,
   MailOpenIcon,
+  MicIcon,
   PanelLeftIcon,
   PanelRightIcon,
   PencilIcon,
@@ -25,14 +26,17 @@ import {
   PinOffIcon,
   PlusIcon,
   SearchIcon,
+  SquareIcon,
   TextSearchIcon,
   type LucideIcon,
 } from "lucide-react";
 import type { SessionListRow } from "../../../session-list-model";
+import type { RecorderState } from "@opengeni/sdk/recordings";
+import { canStartRecording } from "../../../meetings/recorder-state";
 import type { ActionSurface, Chord, ChordPlatform } from "./chords";
 import type { ChatOperations } from "./chat-operations";
 
-export type ActionGroup = "chat" | "navigate" | "view" | "help";
+export type ActionGroup = "chat" | "meetings" | "navigate" | "view" | "help";
 
 /** Where the desktop menu bar shows an action. */
 export type DesktopMenuPlacement = "file" | "view" | "go" | "chat" | "help";
@@ -45,6 +49,18 @@ export type WorkspaceChoice = {
   organization: string;
   /** A Personal workspace, private to its owner. */
   personal: boolean;
+};
+
+/** The meeting recorder, as the actions use it. */
+export type MeetingActions = {
+  /** The recorder's state; null until its capture code loads. */
+  state: RecorderState | null;
+  /** Start recording as the Meetings page's button does, and show Meetings. */
+  start(): void;
+  /** Show Meetings, where the recording going is. */
+  show(): void;
+  /** Stop the recording going and open it. */
+  stop(): void | Promise<void>;
 };
 
 export type ActionEnv = {
@@ -65,6 +81,8 @@ export type ActionEnv = {
   workspaces: readonly WorkspaceChoice[];
   /** Whether the person may fork the chat on screen. */
   canForkCurrentChat: boolean;
+  /** Meetings, when this surface records them and this browser can. */
+  meetings: MeetingActions | null;
   newChat(): void;
   /** Opens a chat; one in another workspace switches to that workspace. */
   openChat(chatId: string, workspaceId?: string): void;
@@ -169,6 +187,11 @@ function switchWorkspace(env: ActionEnv, direction: 1 | -1): void {
 
 const hasOtherWorkspaces = (env: ActionEnv) => env.workspaces.length > 1;
 
+/** A recording is being captured, so Start recording shows it instead. */
+function meetingBusy(env: ActionEnv): boolean {
+  return !canStartRecording(env.meetings?.state);
+}
+
 const PINNED_CHORDS: Chord[] = Array.from({ length: 9 }, (_, index) => ({
   code: `Digit${index + 1}`,
   mod: true,
@@ -210,6 +233,35 @@ export function appActions(): readonly AppAction[] {
       desktopMenu: "file",
       available: ALWAYS,
       run: (env) => env.newChat(),
+    },
+    {
+      // The Meetings page's Start recording button, from anywhere. While one
+      // records, it shows that recording instead of starting a second one, as a
+      // desktop call notification's Record does. ⌃⌘N sits beside New chat's ⌘N
+      // and, like Archive, is Ctrl+Alt elsewhere; see the shortcuts doc.
+      id: "meetings.start",
+      title: (env) => (meetingBusy(env) ? "Go to recording" : "Start recording"),
+      group: "meetings",
+      icon: MicIcon,
+      keywords: ["meeting", "new meeting", "record", "notetaker", "transcript", "audio", "call"],
+      chords: [
+        { code: "KeyN", mod: true, control: true, platform: "mac" },
+        { code: "KeyN", mod: true, alt: true, platform: "other" },
+      ],
+      desktopMenu: "file",
+      available: (env) => env.meetings !== null,
+      run: (env) => (meetingBusy(env) ? env.meetings?.show() : env.meetings?.start()),
+    },
+    {
+      // No key, so a stray press never ends a meeting.
+      id: "meetings.stop",
+      title: "Stop recording",
+      group: "meetings",
+      icon: SquareIcon,
+      keywords: ["meeting", "end", "finish", "record"],
+      desktopMenu: "file",
+      available: (env) => env.meetings?.state === "recording" || env.meetings?.state === "paused",
+      run: (env) => env.meetings?.stop(),
     },
     {
       id: "chat.copyLink",

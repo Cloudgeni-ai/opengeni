@@ -26,7 +26,6 @@ import {
   AGENT_CAPABILITY_GROUPS,
   AGENT_STARTING_POINTS,
   SKILLS_OPTIONS,
-  UNAVAILABLE_CAPABILITY_REASON,
   capabilityDescription,
   capabilityLabel,
   skillsFromOption,
@@ -184,7 +183,7 @@ function CapabilityRow({
         ) : (
           <>
             <LockIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
-            <span className="min-w-0">{UNAVAILABLE_CAPABILITY_REASON}</span>
+            <span className="min-w-0">{availability.unavailableReason(id)}</span>
           </>
         )}
       </span>
@@ -442,14 +441,30 @@ export function AgentCapabilitySummary({
           {off.map(capabilityLabel).join(", ")}.
         </p>
       ) : null}
-      {unavailable.length > 0 ? (
-        <p className="flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-fg-muted">
+      {unavailableByReason(unavailable, availability).map(([reason, ids]) => (
+        <p
+          key={reason}
+          className="flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-fg-muted"
+        >
           <LockIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
           <span className="min-w-0">
-            {UNAVAILABLE_CAPABILITY_REASON}: {unavailable.map(capabilityLabel).join(", ")}.
+            {reason}: {ids.map(capabilityLabel).join(", ")}.
           </span>
         </p>
-      ) : null}
+      ))}
     </div>
   );
+}
+
+/** Unavailable capabilities grouped by why, in their display order. */
+function unavailableByReason(
+  ids: readonly AgentCapabilityId[],
+  availability: CapabilityAvailability,
+): [string, AgentCapabilityId[]][] {
+  const groups = new Map<string, AgentCapabilityId[]>();
+  for (const id of ids) {
+    const reason = availability.unavailableReason(id);
+    groups.set(reason, [...(groups.get(reason) ?? []), id]);
+  }
+  return [...groups];
 }

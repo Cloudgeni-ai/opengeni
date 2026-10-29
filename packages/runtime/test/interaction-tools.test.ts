@@ -25,8 +25,10 @@ import { OpenGeniApiError, type InteractionTransport } from "@opengeni/sdk";
 import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
+  interactionRequestNeedingCurrentTarget,
   nativeCuaSchema,
   openComputerAppWindow,
+  readInteractionRequestTarget,
   type UserSetupCardPoster,
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
@@ -6240,6 +6242,142 @@ describe("interaction attempt tools", () => {
       observation,
       observationErrorCode: null,
     });
+  });
+
+  test("resumes a request that left its generations out with the ones recorded at the pause", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const intervention = completedBrowserIntervention(target);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ observeBrowserTarget: async () => observation }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_request_human"],
+      permissions: ["sessions:control"],
+      interventionResume: { toolCallId: "interaction-human-call", intervention },
+    });
+    const request = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browserSessionId,
+      targetId: target.id,
+      kind: "mfa",
+      reason: intervention.reason,
+    };
+    const resumed = await definitions[0]!.execute(request, {
+      operationId: randomUUID(),
+      caller: { kind: "model", subjectId: "model:test" },
+    });
+    expect(resumed.isError).toBeFalsy();
+    expect(resumed.structuredContent).toMatchObject({ intervention, observation });
+    // A generation the call did name must still be the recorded one.
+    await expect(
+      definitions[0]!.execute(
+        { ...request, expectedTargetGeneration: "target-stale" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toThrow("Interaction response does not match the resumed tool request");
+  });
+
+  test("reads the target a person-handoff request names, or says why it cannot", async () => {
+    const named = {
+      operation: "request" as const,
+      resourceKind: "browser_session" as const,
+      resourceId: browserSessionId,
+      targetId: "tab-1",
+      expectedControllerGeneration: "controller-1",
+      expectedTargetGeneration: "target-4",
+      expectedDocumentGeneration: null,
+      kind: "mfa" as const,
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 900,
+    };
+    // Every request without an auth run is read: the reading fills the
+    // generations it left out and checks the ones it supplied.
+    expect(interactionRequestNeedingCurrentTarget(named)).toBe(named);
+    expect(
+      interactionRequestNeedingCurrentTarget({ operation: "wait", interventionId: randomUUID() }),
+    ).toBeNull();
+    const { expectedDocumentGeneration: _document, ...partial } = named;
+    expect(interactionRequestNeedingCurrentTarget(partial)).toBe(partial);
+    expect(interactionRequestNeedingCurrentTarget({ ...named, authRunId: randomUUID() })).toBe(
+      null,
+    );
+    expect(interactionRequestNeedingCurrentTarget({ ...partial, authRunId: randomUUID() })).toBe(
+      null,
+    );
+
+    const target = browserTarget();
+    const request = {
+      operation: "request" as const,
+      resourceKind: "browser_session" as const,
+      resourceId: browserSessionId,
+      targetId: target.id,
+      kind: "mfa" as const,
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 900,
+    };
+    const reader = (failure: Error | null) => ({
+      getBrowserTargetState: async () => {
+        if (failure) throw failure;
+        return {
+          browserSessionId,
+          targetId: target.id,
+          controllerGeneration: target.controllerGeneration,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: null,
+        };
+      },
+      listComputerTargets: async () => ({
+        computerSessionId,
+        controllerGeneration: "controller-1",
+        targets: [computerTarget()],
+      }),
+    });
+    expect(await readInteractionRequestTarget(reader(null), workspaceId, request)).toEqual({
+      controllerGeneration: target.controllerGeneration,
+      targetGeneration: target.targetGeneration,
+      documentGeneration: target.documentGeneration,
+    });
+    expect(
+      await readInteractionRequestTarget(
+        reader(new OpenGeniApiError(404, "not found")),
+        workspaceId,
+        request,
+      ),
+    ).toBe("browser tab tab-1 was not found");
+    expect(
+      await readInteractionRequestTarget(
+        reader(new OpenGeniApiError(409, "BrowserSession is not active")),
+        workspaceId,
+        request,
+      ),
+    ).toBe("the browser session is not active or has changed");
+    expect(
+      await readInteractionRequestTarget(reader(new Error("socket hang up")), workspaceId, request),
+    ).toBe("the current state of browser tab tab-1 could not be read");
+    const computer = {
+      ...request,
+      resourceKind: "computer_session" as const,
+      resourceId: computerSessionId,
+    };
+    expect(
+      await readInteractionRequestTarget(reader(null), workspaceId, {
+        ...computer,
+        targetId: "window-1",
+      }),
+    ).toEqual({
+      controllerGeneration: "controller-1",
+      targetGeneration: "target-2",
+      documentGeneration: null,
+    });
+    expect(
+      await readInteractionRequestTarget(reader(null), workspaceId, {
+        ...computer,
+        targetId: "window-gone",
+      }),
+    ).toBe("computer target window-gone was not found");
   });
 
   test("uses the pointer action's exact frame instead of silently changing its authority", async () => {

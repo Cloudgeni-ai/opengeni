@@ -4,6 +4,7 @@ import type { ReasoningEffort } from "@opengeni/contracts";
 import type OpenAI from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
+import type { InferenceResidencyRequirement } from "./inference-residency";
 import { modelResponseUsageFromResponse, type ModelResponseUsage } from "./run-events";
 
 /**
@@ -57,7 +58,13 @@ export type SingleModelCallResult = {
  * provider client.
  */
 export type SingleModelCallTarget =
-  | { client: OpenAI; provider: ResolvedModelProvider; modelId: string }
+  | {
+      client: OpenAI;
+      provider: ResolvedModelProvider;
+      modelId: string;
+      /** The EU requirement of the run's settings; see inference-residency.ts. */
+      residency?: InferenceResidencyRequirement | null;
+    }
   | { model: Model };
 
 export type SingleModelCallOptions = {
@@ -98,7 +105,7 @@ export async function runSingleModelCall(
   if ("model" in target) {
     return await runAgentsModelCall(target.model, request, options, false);
   }
-  const { client, provider, modelId } = target;
+  const { client, provider, modelId, residency = null } = target;
   if (provider.api === "chat") {
     return await runChatCall(client, modelId, request, options);
   }
@@ -107,7 +114,7 @@ export async function runSingleModelCall(
       new AnthropicMessagesModel(
         provider,
         modelId,
-        instrumentedModelFetch(provider.id, globalThis.fetch),
+        instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
       ),
       request,
       options,

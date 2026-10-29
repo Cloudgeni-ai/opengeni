@@ -23,7 +23,7 @@ import {
   PanelsTopLeftIcon,
   VideoIcon,
 } from "lucide-react";
-import { lazy, Suspense, useContext, useState, type ReactNode } from "react";
+import { lazy, useContext, useState, type ReactNode } from "react";
 import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import { useToolDetails } from "./tool-details";
@@ -88,6 +88,7 @@ import {
 import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
+import { LazyPart } from "../components/lazy-part";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
@@ -2056,9 +2057,9 @@ const LazyPaymentPageCard = lazy(() =>
 function AppActionCallRenderer(props: ToolRendererProps) {
   const page = paymentPageOf(props.item);
   return page ? (
-    <Suspense fallback={null}>
+    <LazyPart>
       <LazyPaymentPageCard page={page} />
-    </Suspense>
+    </LazyPart>
   ) : (
     <GenericRenderer {...props} />
   );

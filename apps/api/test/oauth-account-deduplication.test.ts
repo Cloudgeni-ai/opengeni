@@ -108,7 +108,8 @@ async function fixture(kind: "gmail" | "opaque") {
       JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
     ),
   };
-  const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+  const attemptsPath = (workspaceId: string) => `/v1/workspaces/${workspaceId}/connect/attempts`;
+  const base = attemptsPath(identity.personalWorkspaceId);
   let email = "mailbox@example.test";
   let exchanges = 0;
   const transport = spyOn(network, "pinnedFetch").mockImplementation(async (input, init) => {
@@ -166,9 +167,11 @@ async function fixture(kind: "gmail" | "opaque") {
       reconnectAccountId?: string;
       mcpUrl?: string;
       ownership?: "personal" | "workspace";
+      workspaceId?: string;
     } = {},
   ) {
-    const begun = await app.request(base, {
+    const attempts = attemptsPath(options.workspaceId ?? identity.personalWorkspaceId);
+    const begun = await app.request(attempts, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -181,7 +184,7 @@ async function fixture(kind: "gmail" | "opaque") {
     });
     expect(begun.status).toBe(200);
     const attempt = await begun.json();
-    const advanced = await app.request(`${base}/${attempt.id}/advance`, {
+    const advanced = await app.request(`${attempts}/${attempt.id}/advance`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -196,24 +199,37 @@ async function fixture(kind: "gmail" | "opaque") {
     expect(advanced.status).toBe(200);
     const ready = await advanced.json();
     expect(ready.state).toBe("requires_user_action");
-    return { id: ready.id, state: new URL(ready.nextAction.url).searchParams.get("state")! };
+    return {
+      id: ready.id,
+      state: new URL(ready.nextAction.url).searchParams.get("state")!,
+      attempts,
+    };
   }
-  const read = async (id: string) => (await app.request(`${base}/${id}`, { headers })).json();
-  const callback = async (attempt: { id: string; state: string }) => {
+  const read = async (id: string, attempts = base) =>
+    (await app.request(`${attempts}/${id}`, { headers })).json();
+  const callback = async (attempt: { id: string; state: string; attempts: string }) => {
     await app.request(
       `/v1/integrations/oauth/callback?${new URLSearchParams({ state: attempt.state, code: "fixture-code" })}`,
     );
-    return read(attempt.id);
+    return read(attempt.id, attempt.attempts);
   };
   return {
     begin,
     callback,
     read,
+    sharedWorkspaceId: grant.workspaceId,
+    joinSharedWorkspace: async () => {
+      await database.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+        values (${grant.accountId}, ${grant.workspaceId}, ${identity.subjectId},
+          ${JSON.stringify(["workspace:read", "connections:read", "connections:write"])}::jsonb)
+        on conflict do nothing`;
+    },
     setEmail: (value: string) => {
       email = value;
     },
-    connections: () =>
-      listConnectionsMetadata(client.db, identity.personalWorkspaceId, identity.subjectId),
+    connections: (workspaceId = identity.personalWorkspaceId) =>
+      listConnectionsMetadata(client.db, workspaceId, identity.subjectId),
     connection: (id: string) =>
       getConnectionMetadata(client.db, identity.personalWorkspaceId, id, identity.subjectId),
     restore: () => transport.mockRestore(),
@@ -257,6 +273,30 @@ describe("OAuth account deduplication across connector profiles", () => {
       expect(mismatch).toMatchObject({ state: "failed", error: { code: "account_mismatch" } });
       expect(await provider.connection(first.account.id)).toEqual(before);
       expect(await provider.connections()).toHaveLength(2);
+    } finally {
+      provider.restore();
+    }
+  }, 60_000);
+
+  test("connecting a personal account again from another workspace reuses it", async () => {
+    const provider = await fixture("gmail");
+    try {
+      const first = await provider.callback(await provider.begin());
+      expect(first.state).toBe("complete");
+      const before = await provider.connection(first.account.id);
+      await provider.joinSharedWorkspace();
+      const again = await provider.callback(
+        await provider.begin({ workspaceId: provider.sharedWorkspaceId }),
+      );
+      expect(again.state).toBe("complete");
+      expect(again.account.id).toBe(first.account.id);
+      expect(await provider.connection(first.account.id)).toEqual(before);
+      expect(await provider.connections()).toHaveLength(1);
+      expect(
+        (await provider.connections(provider.sharedWorkspaceId)).filter(
+          (connection) => connection.subjectId !== null,
+        ),
+      ).toEqual([]);
     } finally {
       provider.restore();
     }

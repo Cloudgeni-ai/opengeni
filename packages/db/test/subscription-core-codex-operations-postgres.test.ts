@@ -15,7 +15,6 @@ import {
   listSubscriptionCoreCodexOperationCandidates,
   placeSubscriptionCoreCodexTurn,
   loadSubscriptionCoreCodexConnectionCredential,
-  readCodexCutoverDisposition,
   readSubscriptionCoreTurnIdentity,
   recordModelCallFact,
   recordSubscriptionCoreCodexUsageObservation,
@@ -405,43 +404,6 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         from pg_catalog.pg_roles where rolname = current_user`,
     );
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
-  });
-
-  test("without a cutover row, and with a disabled one, no operation reads, leases or refreshes", async () => {
-    const org = await organization();
-    const connectionId = await sharedConnection(org, "ops-gate");
-    const scope = workspaceScope(org);
-    for (const state of ["absent", "disabled"] as const) {
-      if (state === "disabled") await setCutover(org.accountId, false);
-      expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
-      expect(await listSubscriptionCoreCodexOperationCandidates(client!.db, scope)).toEqual([]);
-      const lease = ref(connectionId, { operationKind: "transcription" });
-      expect(await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toEqual({
-        kind: "not_enabled",
-      });
-      expect(
-        await loadSubscriptionCoreCodexConnectionCredential(
-          client!.db,
-          settings,
-          scope,
-          connectionId,
-          null,
-        ),
-      ).toEqual({ kind: "not_visible" });
-      expect(
-        await refreshSubscriptionCoreCodexConnectionCredential(
-          client!.db,
-          settings,
-          scope,
-          connectionId,
-          null,
-          1,
-          { refresh: rotate },
-        ),
-      ).toEqual({ kind: "refused" });
-    }
-    expect(await operationLeases(connectionId)).toEqual([]);
-    expect(await connectionRefreshGeneration(connectionId)).toBe(1);
   });
 
   test("image operations lease the turn's connection per call, never the chat lease, fenced on generation", async () => {

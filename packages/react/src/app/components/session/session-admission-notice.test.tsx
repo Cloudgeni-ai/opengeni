@@ -552,3 +552,119 @@ describe("messages other people sent to a chat on a personal machine", () => {
     expect(container.textContent).toContain("A message from Sam is waiting for you");
   });
 });
+
+describe("a saved message approved for another of the person's machines", () => {
+  const onMachine = { ...session("personal_resource_grant_required"), activeSandboxId: "laptop" };
+  const access = (
+    isOwner: boolean,
+    approved = [{ sandboxId: "server", machineName: "Home server" }],
+  ) => ({
+    sandboxId: "laptop",
+    machineName: "Laptop",
+    ownerName: "Alex",
+    isOwner,
+    queuedTurnBlocked: false,
+    queuedTurnNotApprovedHere: true,
+    queuedTurnApprovedMachines: isOwner ? approved : [],
+  });
+  const machine = (sandboxId: string, state = "online") =>
+    ({ sandboxId, state, scope: "user", isSessionGroup: false, active: false }) as never;
+
+  test("names both machines and runs it where it was sent, with no futile recheck", async () => {
+    const order: string[] = [];
+    const onMoveToMachine = mock(async (sandboxId: string) => {
+      order.push(`move:${sandboxId}`);
+      return true;
+    });
+    const onRecheck = mock(async () => {
+      order.push("recheck");
+    });
+    await render({
+      session: onMachine,
+      machineAccess: access(true),
+      machines: [machine("laptop"), machine("server")],
+      onMoveToMachine,
+      onRecheck,
+    });
+    expect(container.textContent).toContain("Your message is waiting for “Home server”");
+    expect(container.textContent).toContain(
+      "You sent it for “Home server”, but this chat now runs on “Laptop”",
+    );
+    expect(container.textContent).toContain("send it again to use “Laptop”");
+    expect(container.textContent).not.toContain("Ask its owner");
+    const buttons = [...container.querySelectorAll("button")];
+    expect(buttons.map((button) => button.textContent)).toEqual(["Run it on Home server"]);
+    await act(async () => buttons[0]!.click());
+    expect(order).toEqual(["move:server", "recheck"]);
+  });
+
+  test("a failed move says so and never rechecks", async () => {
+    const onRecheck = mock(async () => {});
+    await render({
+      session: onMachine,
+      machineAccess: access(true),
+      machines: [machine("server")],
+      onMoveToMachine: async () => false,
+      onRecheck,
+    });
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "machine change could not be confirmed",
+    );
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+
+  test("an offline machine is named, with no button that can't work", async () => {
+    await render({
+      session: onMachine,
+      machineAccess: access(true),
+      machines: [machine("server", "offline")],
+      onMoveToMachine: async () => true,
+    });
+    expect(container.textContent).toContain("“Home server” is offline right now");
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  test("sent before the chat moved to a personal machine: offers the machine picker", async () => {
+    await render({
+      session: onMachine,
+      machineAccess: access(true, []),
+      machineAction: <button type="button">Choose machine</button>,
+    });
+    expect(container.textContent).toContain("Your message can’t run on “Laptop”");
+    expect(container.textContent).toContain("sent before this chat moved to “Laptop”");
+    expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
+      "Choose machine",
+    ]);
+  });
+
+  test("someone else learns who can run it, without the owner's machine names", async () => {
+    await render({ session: onMachine, machineAccess: access(false) });
+    expect(container.textContent).toContain("A message is waiting for another machine");
+    expect(container.textContent).toContain("Alex sent it for another machine");
+    expect(container.textContent).not.toContain("Home server");
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  test("after the chat moves elsewhere, it says the machine changed and offers the recheck", async () => {
+    const onRecheck = await render({
+      session: onMachine,
+      machineAccess: access(true),
+      machines: [machine("server")],
+    });
+    await act(async () =>
+      root!.render(
+        <SessionAdmissionNotice
+          session={{ ...onMachine, activeSandboxId: "server" }}
+          canControl
+          paused={false}
+          busy={false}
+          machineAccess={{ ...access(true), sandboxId: "server", queuedTurnNotApprovedHere: false }}
+          onRecheck={onRecheck}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Machine changed");
+    expect(container.querySelector("button")?.textContent).toBe("Recheck access");
+  });
+});

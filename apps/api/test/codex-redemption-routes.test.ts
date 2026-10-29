@@ -56,12 +56,22 @@ const settings = testSettings({
   codexConnectedAppsEnabled: true,
 });
 
-// Current-core setup adapters retain the historical scenarios' compact fixture
-// vocabulary. Every exercised HTTP route and credential/Apps operation is live
-// production core code; no retired persistence helper is executed here.
-type CredentialFixtureInput = Parameters<
-  typeof import("../../../packages/db/test/fixtures/legacy-codex").upsertCodexSubscriptionCredential
->[1];
+// Compact setup adapters over the live core connection operations.
+type CredentialFixtureInput = {
+  accountId: string;
+  workspaceId: string;
+  credentialEncrypted: string;
+  chatgptAccountId: string | null;
+  chatgptUserId?: string | null;
+  scopes: string | null;
+  planType: string | null;
+  isFedramp: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  accountEmail?: string | null;
+  label?: string | null;
+  connectedBySubjectId?: string | null;
+};
 async function upsertCodexSubscriptionCredential(db: Database, input: CredentialFixtureInput) {
   const result = await connectSubscriptionCoreCodexConnection(db, {
     ...input,
@@ -2225,11 +2235,6 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
         }),
       ]);
       expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-
-      // A disabled cutover row fails closed with the typed 503.
-      await admin`update subscription_provider_cutovers set enabled = false
-        where account_id = ${accountId}::uuid and provider = 'codex'`;
-      expect((await prepare(api, workspaceId, alias, "credit-reset")).response.status).toBe(503);
     } finally {
       await admin`delete from subscription_provider_cutovers
         where account_id = ${accountId}::uuid and provider = 'codex'`;

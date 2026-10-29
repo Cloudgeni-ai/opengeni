@@ -7,9 +7,10 @@ import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import type { TimelineAnnotationSourceDescriptor } from "../timeline";
 import { annotationFromSelection } from "../timeline/annotation-model";
 import {
+  annotationQuoteText,
   clipRangeToSource,
-  matchingQuoteInSource,
-  quoteOccurrenceIndex,
+  occurrenceOffsets,
+  renderedTextAround,
   truncateAnnotationQuote,
   visibleClientRect,
 } from "./timeline-annotation-shared";
@@ -81,11 +82,13 @@ function buildCandidate(
   const sourceKey = startBoundary.dataset.ogAnnotationSourceKey;
   const source = sourceKey ? sources.get(sourceKey) : undefined;
   if (!source) return null;
-  const rawQuote = clipped.toString();
-  const quote = matchingQuoteInSource(source.text, rawQuote) ?? rawQuote;
+  const rendered = clipped.toString();
+  const around = renderedTextAround(startBoundary, clipped);
   const annotation = annotationFromSelection(source, {
-    text: quote,
-    occurrence: quoteOccurrenceIndex(startBoundary, clipped, quote),
+    text: rendered,
+    occurrence: occurrenceOffsets(around.before, rendered.trim()).length,
+    textBefore: around.before,
+    textAfter: around.after,
   });
   if (!annotation) return null;
   const rect = visibleClientRect(range) ?? visibleClientRect(clipped);
@@ -190,7 +193,8 @@ export function TimelineAnnotationSelection({
   }, [candidate]);
 
   if (!candidate || !onAnnotate || typeof document === "undefined") return null;
-  const preview = truncateAnnotationQuote(candidate.annotation.quote, 72);
+  const quoteText = annotationQuoteText(candidate.annotation);
+  const preview = truncateAnnotationQuote(quoteText, 72);
   return createPortal(
     <button
       ref={buttonRef}
@@ -199,7 +203,7 @@ export function TimelineAnnotationSelection({
       style={{ left: candidate.left, top: candidate.top, ...portalStyle }}
       className="og-root fixed z-[80] flex max-w-[min(18rem,calc(100vw-1.5rem))] -translate-x-1/2 items-start gap-2 rounded-2xl border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm font-medium text-og-fg shadow-xl outline-hidden transition hover:border-og-accent/40 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       aria-label={t("timelineAnnotationSelection.addANoteAboutPreview", { preview })}
-      title={candidate.annotation.quote}
+      title={quoteText}
       onPointerDown={(event) => event.preventDefault()}
       onClick={() => {
         onAnnotate(candidate.annotation);

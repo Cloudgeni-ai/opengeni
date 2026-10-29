@@ -646,6 +646,68 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
   }, 60_000);
 
+  test("a computer enrolled both as its owner's own and shared with the workspace is listed once", async () => {
+    if (!available) return;
+    const { accountId, targetWorkspaceId, machine, connectionInstanceId, ctx, services } =
+      await seedPersonalMachineChat("none");
+    // The same running agent also serves the computer shared with this workspace.
+    const sharedEnrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    expect(
+      (
+        await claimEnrollmentConnection(db, {
+          workspaceId: targetWorkspaceId,
+          enrollmentId: sharedEnrollment.id,
+          credentialGeneration: sharedEnrollment.credentialGeneration,
+          connectionInstanceId,
+          leaseMs: 60_000,
+        })
+      ).claimed,
+    ).toBe(true);
+    await admin`update enrollments set last_seen_at = now() where id = ${sharedEnrollment.id}`;
+    const sharedSandbox = await createSandbox(db, {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      kind: "selfhosted",
+      name: "Personal laptop",
+      enrollmentId: sharedEnrollment.id,
+    });
+
+    // The shared enrollment needs no per-chat permission from its owner, so the
+    // chat sees that one.
+    const listed = await listFleet(services, ctx);
+    expect(listed.sandboxes.map((sandbox) => sandbox.id)).toEqual([sharedSandbox.id]);
+
+    // A chat already on the personal enrollment keeps seeing the one it is on.
+    await admin`
+      update sessions
+      set active_sandbox_id = ${machine.sandboxId}, active_epoch = active_epoch + 1
+      where id = ${ctx.sessionId}
+    `;
+    const onPersonal = await listFleet(services, ctx);
+    expect(onPersonal.sandboxes.map((sandbox) => sandbox.id)).toEqual([machine.sandboxId]);
+    expect(onPersonal.sandboxes[0]?.active).toBe(true);
+
+    // Different running agents are different computers, even with one name.
+    await admin`
+      update enrollments
+      set connection_instance_id = ${crypto.randomUUID()}
+      where id = ${sharedEnrollment.id}
+    `;
+    const separate = await listFleet(services, ctx);
+    expect(separate.sandboxes.map((sandbox) => sandbox.id).sort()).toEqual(
+      [machine.sandboxId, sharedSandbox.id].sort(),
+    );
+  }, 60_000);
+
   test("an agent's API requests reach the personal machine its chat may use, as its owner", async () => {
     if (!available) return;
     const {

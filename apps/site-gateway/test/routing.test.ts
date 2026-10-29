@@ -102,6 +102,8 @@ describe("return paths", () => {
     expect(safeReturnPath("/")).toBe("/");
     expect(safeReturnPath("/dash?tab=2")).toBe("/dash?tab=2");
     expect(safeReturnPath("/a/../b")).toBe("/b");
+    // A Site's own address comes back whole, including its #hash.
+    expect(safeReturnPath("/unsubscribe?t=abc#done")).toBe("/unsubscribe?t=abc#done");
     for (const value of [
       null,
       "",

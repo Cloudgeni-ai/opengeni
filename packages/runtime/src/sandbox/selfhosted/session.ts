@@ -91,9 +91,17 @@ import {
   type OpStreamOutputReceipt,
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
-import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
+import {
+  connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
+  isWindowsConnectedMachinePath,
+  relativeConnectedMachinePath,
+  resolveConnectedMachinePath,
+} from "./workspace-path";
 import type { ShellDialect } from "@opengeni/vaults";
 import {
+  carryHasReferences,
+  profileEnvironmentOf,
   secretExecCarryFor,
   secretExecEnvironment,
   secretScopeDirectory,
@@ -1214,9 +1222,19 @@ export class SelfhostedSession {
   private async prepareSecretExec(
     args: SelfhostedExecArgs,
     requestedShell: string | undefined,
-  ): Promise<{ command: string; shell: string; env: Record<string, string> } | null> {
+  ): Promise<{
+    command: string;
+    /** Set when references were spliced: the command must run through this shell. */
+    shell: string | null;
+    env: Record<string, string>;
+    /** Credential profile variables, below every other variable Opengeni sets. */
+    profileEnv: Record<string, string>;
+  } | null> {
     const carry = secretExecCarryFor(args.cmd);
     if (!carry) return null;
+    const profileEnv = profileEnvironmentOf(carry);
+    // Profile variables only: the command and its shell stay exactly as given.
+    if (!carryHasReferences(carry)) return { command: args.cmd, shell: null, env: {}, profileEnv };
     const dialect = carry.spliced ? "posix" : this.describeShellDialect(requestedShell);
     const spliced = spliceCarry(carry, dialect);
     const command = carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text);
@@ -1227,7 +1245,7 @@ export class SelfhostedSession {
       await this.writePlacementPrivate({ ...file, createParents: true });
     });
     const shell = requestedShell || (dialect === "powershell" ? "powershell" : "/bin/sh");
-    return { command, shell, env };
+    return { command, shell, env, profileEnv };
   }
 
   /**
@@ -1324,13 +1342,14 @@ export class SelfhostedSession {
           if (executionTimeoutMs <= 0) throw expired();
         }
         const commandText = secret?.command ?? args.cmd;
+        const spliced = secret?.shell != null;
         const shell = secret?.shell ?? requestedShell;
         execReq = {
           // An explicit shell is encoded as direct argv so every agent version honors
           // it. With no explicit shell, preserve the existing machine-owned default
           // shell behavior byte-for-byte.
           command: shell
-            ? explicitShellArgv(shell, commandText, secret ? false : args.login === true)
+            ? explicitShellArgv(shell, commandText, spliced ? false : args.login === true)
             : [commandText],
           shell: !shell,
           // Relative paths resolve from the exact host root, while absolute paths
@@ -1340,7 +1359,13 @@ export class SelfhostedSession {
           // The machine owns its ambient shell environment and ordinary credentials.
           // Only attempt-local values explicitly supplied by the worker cross here;
           // snapshot now so a later renewal cannot mutate an in-flight request.
-          env: { ...(this.transientExecEnvironment?.() ?? {}), ...(secret?.env ?? {}) },
+          // Credential profile variables come first, so Opengeni's own values
+          // win over them and the command's own assignments win over both.
+          env: {
+            ...(secret?.profileEnv ?? {}),
+            ...(this.transientExecEnvironment?.() ?? {}),
+            ...(secret?.env ?? {}),
+          },
           stdin,
           timeoutMs: executionTimeoutMs,
           // Only a runner that advertises run-as receives a user; older runners
@@ -1892,7 +1917,11 @@ export class SelfhostedSession {
     return exists;
   }
 
-  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. */
+  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. Like the
+   *  other providers, an entry's `path` is absolute when the listed path was and
+   *  workspace-relative otherwise, so it can be passed straight back to
+   *  `readFile`/`listDir`; the machine reports it relative to the listed
+   *  directory, which is only the bare name. */
   async listDir(args: {
     path: string;
     runAs?: string;
@@ -1901,9 +1930,24 @@ export class SelfhostedSession {
       path: args.path,
       ...(args.runAs ? { runAs: args.runAs } : {}),
     });
+    const directory = resolveConnectedMachinePath(this.workspaceRoot, args.path);
+    const windows = isWindowsConnectedMachinePath(this.workspaceRoot);
+    const base = isConnectedMachineAbsolutePath(args.path)
+      ? directory
+      : (relativeConnectedMachinePath(this.workspaceRoot, directory) ?? directory);
+    // Join literally: a POSIX name may contain a backslash or other bytes the
+    // path normalizers reject, and the machine never reports `.` or `..`.
+    const entryPath = (reported: string) => {
+      const relative = windows ? reported.replaceAll("\\", "/") : reported;
+      if (windows ? isConnectedMachineAbsolutePath(relative) : relative.startsWith("/")) {
+        return relative;
+      }
+      if (!base) return relative;
+      return `${base.endsWith("/") ? base : `${base}/`}${relative}`;
+    };
     return result.fsList.entries.map((entry) => ({
       name: entry.name,
-      path: entry.path,
+      path: entryPath(entry.path),
       type:
         entry.kind === FsEntryKind.FS_ENTRY_KIND_DIRECTORY
           ? ("dir" as const)

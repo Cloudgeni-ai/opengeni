@@ -20,6 +20,7 @@ import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { LazyPart } from "./lazy-part";
 import {
   useSessionConversation,
   type SessionConversationController,
@@ -27,6 +28,7 @@ import {
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
 import { useQueuedPromptRecall } from "../hooks/use-queued-prompt-recall";
+import { useLiveSessionEvents } from "../hooks/use-live-session-events";
 import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
 import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
@@ -39,6 +41,10 @@ import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../interactive-answer-model";
 import type {
   ComposerTranscriptionControlProps,
   ComposerVoiceInputOptions,
@@ -348,37 +354,6 @@ export function SessionConversation({
   );
 }
 
-/**
- * `onEvent` for each event newer than any seen since the history first
- * loaded. The first ready read only sets where "new" starts, so loading the
- * history, an older page or a reconnect's replay calls nothing again.
- */
-function useLiveEvents(
-  sessionId: string | null,
-  events: readonly SessionEvent[],
-  ready: boolean,
-  onEvent: ((event: SessionEvent) => void) | undefined,
-) {
-  const callback = useRef(onEvent);
-  callback.current = onEvent;
-  const seen = useRef<{ sessionId: string | null; sequence: number | null }>({
-    sessionId,
-    sequence: null,
-  });
-  useEffect(() => {
-    if (seen.current.sessionId !== sessionId) seen.current = { sessionId, sequence: null };
-    if (!ready || sessionId === null) return;
-    const previous = seen.current.sequence;
-    const newest = events.reduce((max, event) => Math.max(max, event.sequence), previous ?? 0);
-    seen.current = { sessionId, sequence: newest };
-    if (previous === null) return;
-    const fresh = events
-      .filter((event) => event.sequence > previous)
-      .sort((a, b) => a.sequence - b.sequence);
-    for (const event of fresh) callback.current?.(event);
-  }, [events, ready, sessionId]);
-}
-
 function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) {
   // A failed initial load retries by remounting the whole conversation.
   const [attempt, setAttempt] = useState(0);
@@ -467,6 +442,7 @@ function ConversationView({
   const context = conversation;
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerView = useComposerWithStreamState(
     composer,
     feed.connectionState,
@@ -481,7 +457,7 @@ function ConversationView({
   // One recall drives both the composer key and the queue row's ↑ hint.
   const queuedRecall = composerProps?.queuedRecall ?? builtInQueuedRecall;
   const formatError = useErrorMessage();
-  useLiveEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
+  useLiveSessionEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
   // Read means seen: the timeline itself must be on screen (hosts may hide it
@@ -641,7 +617,7 @@ function ConversationView({
     composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
   const voice =
     sessionId && voiceModels.length > 0 && status && !terminal && voiceControl ? (
-      <Suspense fallback={null}>
+      <LazyPart onLoadFailure="hide" fallback={null}>
         <LazyEmbeddedRealtimeVoice
           {...realtimeVoiceProps}
           client={
@@ -657,7 +633,7 @@ function ConversationView({
           getModelContext={conversation.getModelContext}
           onVoiceActiveChange={onVoiceActiveChange}
         />
-      </Suspense>
+      </LazyPart>
     ) : null;
   const view = (
     <SingleSendWording enabled={composer.singleSend === true}>
@@ -704,53 +680,60 @@ function ConversationView({
             </button>
           </div>
         ) : (
-          <MessageTimeline
-            renderMessageText={renderMessageText}
-            resolveLink={links}
-            renderInteractiveBlock={
-              renderInteractiveBlock === false
-                ? undefined
-                : (renderInteractiveBlock ?? defaultInteractiveBlock)
-            }
-            userMessageDisclosureLabels={userMessageDisclosureLabels}
-            genieLoading={loadingOptions}
-            renderAllowanceExhausted={renderAllowanceExhausted}
-            allowanceExhaustedLabels={allowanceExhaustedLabels}
-            // Isolated and clipped: floating navigation stays inside the timeline.
-            className="isolate min-h-0 flex-1 overflow-hidden"
-            {...(toolRegistry ? { toolRegistry } : {})}
-            {...retainedLoaders}
-            {...(onOpenSession ? { onOpenSession } : {})}
-            {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
-            events={feed.events}
-            items={conversation.timeline}
-            turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
-            renderAuthNeeded={(item) =>
-              timelineProps?.renderAuthNeeded?.(item) ??
-              (item.capability?.id === "api:connected-machine" && computerConnection ? (
-                <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
-              ) : (
-                renderStockAuthNeeded(item)
-              ))
-            }
-            emptyState={timelineProps?.emptyState}
-            renderMessageSender={timelineProps?.renderMessageSender}
-            status={status}
-            hasOlder={feed.hasOlder}
-            loadingOlder={feed.loadingOlder}
-            onLoadOlder={feed.loadOlder}
-            hasNewer={feed.hasNewer}
-            loadingNewer={feed.loadingNewer}
-            onLoadNewer={feed.loadNewer}
-            onJumpToStart={async () => {
-              await feed.loadOldest();
-            }}
-            loadingOldest={feed.loadingOldest}
-            onJumpToLatest={feed.jumpToLatest}
-            onAnnotate={importedArchive ? undefined : composer.addAnnotation}
-            // A narrow embed above a decision card has no room for the pill.
-            questionNavMinViewportHeight={320}
-          />
+          <InteractiveAnswerProvider
+            send={composer.send}
+            scope={sessionId ?? undefined}
+            store={answerStore}
+            readOnly={Boolean(importedArchive) || terminal || sessionId === null}
+          >
+            <MessageTimeline
+              renderMessageText={renderMessageText}
+              resolveLink={links}
+              renderInteractiveBlock={
+                renderInteractiveBlock === false
+                  ? undefined
+                  : (renderInteractiveBlock ?? defaultInteractiveBlock)
+              }
+              userMessageDisclosureLabels={userMessageDisclosureLabels}
+              genieLoading={loadingOptions}
+              renderAllowanceExhausted={renderAllowanceExhausted}
+              allowanceExhaustedLabels={allowanceExhaustedLabels}
+              // Isolated and clipped: floating navigation stays inside the timeline.
+              className="isolate min-h-0 flex-1 overflow-hidden"
+              {...(toolRegistry ? { toolRegistry } : {})}
+              {...retainedLoaders}
+              {...(onOpenSession ? { onOpenSession } : {})}
+              {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
+              events={feed.events}
+              items={conversation.timeline}
+              turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+              renderAuthNeeded={(item) =>
+                timelineProps?.renderAuthNeeded?.(item) ??
+                (item.capability?.id === "api:connected-machine" && computerConnection ? (
+                  <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
+                ) : (
+                  renderStockAuthNeeded(item)
+                ))
+              }
+              emptyState={timelineProps?.emptyState}
+              renderMessageSender={timelineProps?.renderMessageSender}
+              status={status}
+              hasOlder={feed.hasOlder}
+              loadingOlder={feed.loadingOlder}
+              onLoadOlder={feed.loadOlder}
+              hasNewer={feed.hasNewer}
+              loadingNewer={feed.loadingNewer}
+              onLoadNewer={feed.loadNewer}
+              onJumpToStart={async () => {
+                await feed.loadOldest();
+              }}
+              loadingOldest={feed.loadingOldest}
+              onJumpToLatest={feed.jumpToLatest}
+              onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+              // A narrow embed above a decision card has no room for the pill.
+              questionNavMinViewportHeight={320}
+            />
+          </InteractiveAnswerProvider>
         )}
         {importedArchive ? (
           <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
@@ -870,9 +853,6 @@ function ConversationView({
                       loading={catalog.loading}
                       error={catalog.error?.message}
                       disabled={sessionId === null || terminal}
-                      // A session frozen on Codex remote compaction refuses
-                      // other providers' models; offer them only as disabled.
-                      codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
                       sessionKey={sessionId ?? undefined}
                       onOpenChange={(open) => {
                         if (open) void catalog.refresh();

@@ -660,7 +660,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
     const workingDir = "/workspace/opengeni";
-    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(exact, 0, {
       text: "private prompt",
       selectedProjectChannelId: channelId,
@@ -688,8 +687,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         sandboxBackend: "selfhosted",
         targetSandboxId,
         workingDir,
-        variableSetIds,
-        variableSetId: variableSetIds[1],
         rigId: crypto.randomUUID(),
         goal: { text: "do not retain", successCriteria: "never" },
         firstPartyMcpPermissions: ["sessions:create"],
@@ -803,9 +800,8 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         const workspaceDefault = await rig("workspace default");
         await setWorkspaceDefaultRig(client.db, workspaceId, workspaceDefault.id);
       }
-      const variableSetIds = [crypto.randomUUID()];
       await saveDraft(context, 0, {
-        options: { rigId: chosen.id, variableSetIds, variableSetId: variableSetIds[0] },
+        options: { rigId: chosen.id },
       });
       const session = await createUninitializedSession(context);
       await initialize(context, session.id, 1);
@@ -818,7 +814,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     // from old drafts are never carried into the seed.
     const replacedDefault = await seedWithRigChoice(true);
     expect(replacedDefault.options).not.toHaveProperty("rigId");
-    expect(replacedDefault.options).not.toHaveProperty("variableSetIds");
 
     // Without a workspace default nothing was replaced, so the choice is
     // remembered like any other selection.
@@ -966,7 +961,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const projectB = crypto.randomUUID();
     const sandboxA = crypto.randomUUID();
     const sandboxB = crypto.randomUUID();
-    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(context, 0, {
       text: "Project A draft",
       selectedProjectChannelId: projectA,
@@ -987,8 +981,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       sandboxBackend: "selfhosted",
       targetSandboxId: sandboxB,
       workingDir: "/workspace/project-b",
-      variableSetIds,
-      variableSetId: variableSetIds[1],
       rigId: crypto.randomUUID(),
     };
     const projectBDraft = await saveDraft(context, 1, {

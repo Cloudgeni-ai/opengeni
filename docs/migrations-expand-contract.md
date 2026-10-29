@@ -246,7 +246,11 @@ recording retention inventory withheld, and 0950 granted it. 0978 created the
 personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
-withheld the same way, with the same caller check.
+withheld the same way, with the same caller check. 1060 created the EU-only
+inference change function withheld the same way; until it is granted the
+setting stays off. 1091 created the secret history scrub's reader and cell
+writer withheld; the scrub checks the grant once per run and reports the
+cells only they reach as pending until then.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

@@ -3,16 +3,11 @@ import { claimServingAttempt, type ServingAttempt } from "./subscription-serving
 import { servingTurnProviders } from "./subscription-serving-providers";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import { measureClaimDatabaseScopes } from "./claim-database-timing";
-import {
-  claimCodexActiveFromCutover,
-  claimMayResolveCoreCodexApps,
-  readClaimCodexCutoverState,
-  readSubscriptionLeaseBusyChain,
-  type ClaimCodexCutoverState,
-} from "./codex-core-claim";
+import { readSubscriptionLeaseBusyChain } from "./codex-core-claim";
 import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
+  convertSessionToPortableCompactionForModelSwitch,
   getSessionEvent,
   getHumanInputResumeForEvent,
   getInteractionInterventionResumeForEvent,
@@ -37,11 +32,11 @@ import {
 import { settingsWithEnabledCapabilityMcpServers } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
 import {
-  assertSessionAllowsProductModel,
   resolveCatalogSettings,
   resolveCodexAppsDesignationForRun,
   resolveContinuedConnectionAccounts,
   recordSessionUsageLimitEvent,
+  sessionNeedsPortableModelSwitch,
   settingsWithModelProviderCredentials,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
@@ -134,9 +129,15 @@ export type ClaimTurnOk = {
   credentialSubjectId: string | undefined;
   fileAuthoritySubjectId: string | null;
   capabilitySettings: Settings;
-  /** The core Codex Apps designation (enabled Codex cutover only). */
+  /** The core Codex Apps designation. */
   codexAppsCoreConnectionId?: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  /**
+   * This turn moves a Codex remote_v2 chat to another model and Codex's
+   * checkpoint still has to be rebuilt in portable form before the first
+   * model call, whatever triggered the turn.
+   */
+  portableModelSwitchPending: boolean;
   servingAttempt?: ServingAttempt;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
@@ -324,24 +325,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const capabilityServerCategories = new Map<string, string>();
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
-  // Resolve the core gate once with bounded retry. Missing or disabled is
-  // maintenance; no claim path consults retired Codex decision state.
-  let codexCutoverRead: Promise<ClaimCodexCutoverState> | null = null;
-  const codexCutoverState = () =>
-    (codexCutoverRead ??= readClaimCodexCutoverState(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-    }));
-  // The core Apps designation is rechecked by the database on every request;
-  // missing or disabled cutover state resolves none. The
-  // organization and cutover are known here, so neither is read again.
+  // The core Apps designation is rechecked by the database on every request.
+  // The organization is known here, so it is not read again.
   const codexAppsDesignationRead = deploymentCatalogSettings.codexConnectedAppsEnabled
-    ? resolveCodexAppsDesignationForRun(db, input.workspaceId, {
-        accountId: input.accountId,
-        disposition: codexCutoverState().then((cutover) =>
-          cutover === "enabled" ? "core" : "maintenance",
-        ),
-      })
+    ? resolveCodexAppsDesignationForRun(db, input.workspaceId, { accountId: input.accountId })
     : Promise.resolve(null);
   void codexAppsDesignationRead.catch(() => undefined);
   // Independent root-pool scopes, only after durable claim ownership. A valid
@@ -349,7 +336,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the exact live attempt fence. Legacy policy installation stays below.
   // Join every scope before failure handling so no policy operation outlives
   // preparation. No transaction-local RLS scopes overlap on one connection.
-  const [session, mcpSettings, preparedPolicy, trigger] = await Promise.allSettled([
+  const [loadedSession, mcpSettings, preparedPolicy, trigger] = await Promise.allSettled([
     measureTurnStartupPhase(
       observability,
       {
@@ -368,6 +355,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       },
       () =>
         settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, deploymentCatalogSettings, {
+          accountId: input.accountId,
           ...(credentialSubjectId
             ? { subjectId: credentialSubjectId }
             : {
@@ -407,14 +395,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       triggerRead.value,
     ] as const;
   });
+  let session = loadedSession;
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
-  // Shared-core placement decides accepted-turn availability. The catalog
-  // overlay is installed only with an enabled cutover, for every turn model.
-  const codexSubscriptionActive = mcpSettings.codexSubscriptionEnabled
-    ? claimCodexActiveFromCutover(await codexCutoverState())
-    : false;
+  // Shared-core placement decides accepted-turn availability; the catalog
+  // overlay is installed for every turn model.
+  const codexSubscriptionActive = mcpSettings.codexSubscriptionEnabled;
   let capabilitySettings = await measureTurnStartupPhase(
     observability,
     { phase: "claim_provider_settings", provider: "unresolved", backend: turn.sandboxBackend },
@@ -433,13 +420,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     ? await codexAppsDesignationRead
     : null;
   const codexAppsCoreConnectionId =
-    codexAppsDesignation?.source === "core" &&
-    claimMayResolveCoreCodexApps({
-      codexConnectedAppsEnabled: true,
-      cutover: await codexCutoverState(),
-    })
-      ? codexAppsDesignation.connectionId
-      : null;
+    codexAppsDesignation?.source === "core" ? codexAppsDesignation.connectionId : null;
   const candidatePolicy =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
@@ -468,6 +449,33 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }));
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
+  }
+  // A Codex remote_v2 chat may switch to any other model. This turn runs with
+  // portable compaction. Codex's opaque checkpoint is unreadable elsewhere, so
+  // when one is active the forced pre-turn compaction requested here rebuilds
+  // a portable summary from the stored transcript before the first model call
+  // and switches the stored session mode with it.
+  let storedCompactionMode = session.codexCompactionMode;
+  if (sessionNeedsPortableModelSwitch(session, installedPolicy.policy.productModelId)) {
+    const converted = await convertSessionToPortableCompactionForModelSwitch(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      {
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: input.attemptId,
+      },
+    );
+    if (converted === "fenced") {
+      throw new TurnAttemptFencedError("turn attempt was fenced while switching compaction mode");
+    }
+    if (converted) storedCompactionMode = converted.codexCompactionMode;
+    session = {
+      ...session,
+      codexCompactionMode: "portable",
+      ...(converted ? { compactRequested: converted.compactRequested } : {}),
+    };
   }
   capabilitySettings = settingsForAcceptedSubscriptionTurn(
     capabilitySettings,
@@ -501,7 +509,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     turnId: turn.id,
     attemptId: input.attemptId,
     executionGeneration: attempt.executionGeneration,
-    compactionMode: session.codexCompactionMode,
+    compactionMode: storedCompactionMode,
     source: turn.source,
     acceptedPolicy: installedPolicy.policy,
     providerIds: servingTurnProviders().map((provider) => provider.id),
@@ -534,7 +542,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     modelLabel: verifiedAcceptedPolicy.model.label,
     providerLabel: verifiedAcceptedPolicy.model.providerLabel,
   };
-  assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
@@ -942,6 +949,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       capabilitySettings,
       codexAppsCoreConnectionId,
       turnExecutionPolicy,
+      portableModelSwitchPending:
+        storedCompactionMode === "remote_v2" && session.codexCompactionMode === "portable",
       ...(servingAttempt ? { servingAttempt } : {}),
       trigger,
       humanInputResume,

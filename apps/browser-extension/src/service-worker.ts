@@ -74,6 +74,28 @@ type StoredState = {
   inventoryRevision?: number;
 };
 
+// What outlives this worker. Chrome stops an extension's worker and starts a
+// new one whenever it likes, and keeps the tabs, their ids and this
+// extension's debugger attachments meanwhile; it drops the attachments when
+// the extension reloads or updates, and everything when Chrome restarts.
+// chrome.storage.session lives exactly as long, so the state generation kept
+// there names that live state, and the debugger attachments recorded there
+// let a new worker carry on with them.
+type LiveState = {
+  stateGeneration: string;
+  lastAttachment: number;
+  // Attached tab ids, each with the number of its current attachment.
+  attachments: Record<string, number>;
+};
+const LIVE_STATE_KEY = "liveState";
+// How a new worker found the live state of the workers before it, newest
+// last, in chrome.storage.local: which attachments it could carry on with.
+const STATE_RESUMPTIONS_KEY = "stateResumptions";
+const MAX_STATE_RESUMPTIONS = 20;
+// A debugger command that reads and changes nothing, and that Chrome refuses
+// unless this extension is attached to the tab.
+const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
+
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
 let readyGeneration: string | null = null;
@@ -116,12 +138,136 @@ let updatePending = false;
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let commandsInFlight = 0;
 let lastAgentCommandAtMs = Date.now();
-// Tab ids, debugger attachments and the event buffer above live exactly as long
-// as this worker. Every native reconnect in that lifetime reports the same
-// state generation, so the agent can keep sessions bound across agent or
-// native-host restarts while the per-port connection generation still fences
-// each transport.
-const STATE_GENERATION = crypto.randomUUID();
+// The live state's generation once read or started (see LiveState). Every
+// native reconnect reports it, from this worker or a later one, so the agent
+// keeps sessions bound across agent, native-host and worker restarts while the
+// per-port connection generation still fences each transport.
+let liveState: Promise<string> | null = null;
+let currentStateGeneration: string | null = null;
+let liveStateWrite: Promise<void> = Promise.resolve();
+// The debugger event buffer lives only as long as this worker, and its
+// sequence numbers start again with the next one. Each poll names this
+// worker's stream, so a reader can tell a restarted buffer from its own.
+const EVENT_STREAM = crypto.randomUUID();
+
+/** The live state's generation: the one an earlier worker recorded, with the
+ * debugger attachments it left that are still attached, or a new one. */
+function stateGeneration(): Promise<string> {
+  liveState ??= resumeLiveState();
+  return liveState;
+}
+
+async function resumeLiveState(): Promise<string> {
+  let stored: LiveState | null;
+  try {
+    stored = parseLiveState((await chrome.storage.session.get(LIVE_STATE_KEY))[LIVE_STATE_KEY]);
+  } catch {
+    // Without session storage this worker's state is all there is.
+    currentStateGeneration = crypto.randomUUID();
+    return currentStateGeneration;
+  }
+  if (!stored) {
+    currentStateGeneration = crypto.randomUUID();
+    await recordLiveState();
+    return currentStateGeneration;
+  }
+  lastAttachment = stored.lastAttachment;
+  let kept = 0;
+  let detached = 0;
+  let closed = 0;
+  for (const [tab, attachment] of Object.entries(stored.attachments)) {
+    const tabId = Number(tab);
+    if (await debuggingTab(tabId)) {
+      attachedDebuggerTabs.set(tabId, attachment);
+      kept += 1;
+    } else if (await tabExists(tabId)) {
+      detached += 1;
+    } else {
+      closed += 1;
+    }
+  }
+  // Only now: until then nothing records the attachments or applies an update.
+  currentStateGeneration = stored.stateGeneration;
+  await recordLiveState();
+  await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
+  maybeApplyUpdate();
+  return stored.stateGeneration;
+}
+
+function parseLiveState(value: unknown): LiveState | null {
+  if (value === null || typeof value !== "object") return null;
+  const state = value as Partial<LiveState>;
+  if (typeof state.stateGeneration !== "string" || state.stateGeneration.length === 0) return null;
+  const attachments: Record<string, number> = {};
+  for (const [tab, attachment] of Object.entries(state.attachments ?? {})) {
+    if (Number.isSafeInteger(Number(tab)) && Number.isSafeInteger(attachment))
+      attachments[tab] = attachment;
+  }
+  return {
+    stateGeneration: state.stateGeneration,
+    lastAttachment: Number.isSafeInteger(state.lastAttachment)
+      ? state.lastAttachment!
+      : lastAttachment,
+    attachments,
+  };
+}
+
+/** Record the live state for the next worker, in order. Best effort: a
+ * worker that cannot record it leaves the next one a new state. */
+function recordLiveState(): Promise<void> {
+  const generation = currentStateGeneration;
+  if (generation === null) return liveStateWrite;
+  const state: LiveState = {
+    stateGeneration: generation,
+    lastAttachment,
+    attachments: Object.fromEntries(
+      [...attachedDebuggerTabs].map(([tabId, attachment]) => [String(tabId), attachment]),
+    ),
+  };
+  liveStateWrite = liveStateWrite
+    .then(async () => await chrome.storage.session.set({ [LIVE_STATE_KEY]: state }))
+    .catch(() => undefined);
+  return liveStateWrite;
+}
+
+async function recordResumption(result: {
+  attachmentsKept: number;
+  attachmentsEnded: number;
+  tabsClosed: number;
+}): Promise<void> {
+  console.info("continued the live state of an earlier worker", result);
+  try {
+    const stored = (await chrome.storage.local.get(STATE_RESUMPTIONS_KEY))[STATE_RESUMPTIONS_KEY];
+    const earlier = Array.isArray(stored) ? stored : [];
+    await chrome.storage.local.set({
+      [STATE_RESUMPTIONS_KEY]: [...earlier, { at: new Date().toISOString(), ...result }].slice(
+        -MAX_STATE_RESUMPTIONS,
+      ),
+    });
+  } catch {
+    // Diagnostics only.
+  }
+}
+
+/** Whether this extension's debugger is attached to the tab, as Chrome
+ * answers a command that does nothing. */
+async function debuggingTab(tabId: number): Promise<boolean> {
+  try {
+    await chrome.debugger.sendCommand({ tabId }, ATTACHMENT_PROBE_METHOD, {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tabExists(tabId: number): Promise<boolean> {
+  try {
+    await chrome.tabs.get(tabId);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function storedState(): Promise<Required<StoredState>> {
   const stored = (await chrome.storage.local.get([
@@ -163,7 +309,11 @@ async function tabs(): Promise<AttachedTab[]> {
 }
 
 async function device(revision: number, generation: string): Promise<ExtensionDevice> {
-  const [state, platform] = await Promise.all([storedState(), chrome.runtime.getPlatformInfo()]);
+  const [state, platform, liveGeneration] = await Promise.all([
+    storedState(),
+    chrome.runtime.getPlatformInfo(),
+    stateGeneration(),
+  ]);
   const product = browserProduct(navigator.userAgent);
   currentDeviceId = state.deviceId;
   currentProfileLabel = state.profileLabel;
@@ -177,7 +327,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
     platform: extensionPlatform(platform),
     architecture: extensionArchitecture(platform),
     connectionGeneration: generation,
-    stateGeneration: STATE_GENERATION,
+    stateGeneration: liveGeneration,
     inventoryRevision: revision,
     capabilities: {
       tabInventory: true,
@@ -353,6 +503,8 @@ async function settleCommandNow(
     if (command.deviceId !== currentDeviceId || command.connectionGeneration !== generation) {
       throw new BridgeCommandError("fenced", "attached browser connection changed", true);
     }
+    // A new worker first takes over the debugger attachments it inherited.
+    await stateGeneration();
     // Event polling and pings continue while nothing is happening; only real
     // tab and debugger work counts as an agent using this browser.
     if (command.payload.type !== "debugger.poll" && command.payload.type !== "ping") {
@@ -502,6 +654,9 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
         cursor: events.at(-1)?.sequence ?? debuggerSequence,
         // Pagination is not history loss: the next poll continues from cursor.
         truncated: debuggerEvents.length > 0 && command.afterSequence < firstSequence - 1,
+        // A different stream than a reader's last poll means this buffer
+        // started again with a new worker: events in between are lost.
+        stream: EVENT_STREAM,
       };
     }
   }
@@ -587,21 +742,28 @@ async function requireControllableTab(tabId: number): Promise<void> {
 }
 
 async function detachDebugger(tabId: number): Promise<void> {
-  if (!attachedDebuggerTabs.delete(tabId)) return;
+  if (attachedDebuggerTabs.delete(tabId)) void recordLiveState();
+  // Also an attachment an earlier worker left without recording it.
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
-    // Already detached is the desired idempotent state.
+    // Not attached is the desired idempotent state.
   }
 }
 
 /** Attaches Chrome's debugger to a tab, first removing other extensions'
- * frames when Chrome refuses because of one. */
+ * frames when Chrome refuses because of one. An attachment an earlier worker
+ * of this extension left on the tab without recording it is taken over. */
 async function attachDebugger(tabId: number): Promise<void> {
   const removalsBefore = finishedFrameRemovalCount(tabId);
   try {
     await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
   } catch (error) {
+    if (alreadyAttached(error) && (await debuggingTab(tabId))) {
+      if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+      void recordLiveState();
+      return;
+    }
     if (!otherExtensionFrameRefusal(error)) throw error;
     let { removed, reused } = await frameRemovalSince(tabId, removalsBefore);
     for (;;) {
@@ -622,6 +784,16 @@ async function attachDebugger(tabId: number): Promise<void> {
   }
   // Another attach of this tab may have finished first; keep its number.
   if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+  void recordLiveState();
+}
+
+/** Chrome refuses a second attach of this extension to a tab with "Another
+ * debugger is already attached to the tab with id: N." */
+function alreadyAttached(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.trim().startsWith("Another debugger is already attached to the tab")
+  );
 }
 
 /** Chrome refuses to attach to a tab holding another extension's page with
@@ -823,7 +995,9 @@ function requestExtensionUpdate(): void {
 }
 
 function maybeApplyUpdate(): void {
-  if (!updatePending || commandsInFlight > 0) return;
+  // Until a new worker has taken over the attachments it inherited, it cannot
+  // tell whether an agent is still driving a tab.
+  if (!updatePending || commandsInFlight > 0 || currentStateGeneration === null) return;
   const idleMs = Date.now() - lastAgentCommandAtMs;
   if (attachedDebuggerTabs.size === 0 || idleMs >= UPDATE_IDLE_RELOAD_MS) {
     chrome.runtime.reload();
@@ -941,6 +1115,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   const attachment = attachedDebuggerTabs.get(source.tabId);
   if (attachment === undefined) return;
   attachedDebuggerTabs.delete(source.tabId);
+  void recordLiveState();
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,

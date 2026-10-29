@@ -39,6 +39,7 @@ const SETTLED_PAYLOAD_KEYS = [
   "outputTokens",
   "pricedCostMicros",
   "pricingSource",
+  "processingResidency",
   "provider",
   "providerApi",
   "purpose",

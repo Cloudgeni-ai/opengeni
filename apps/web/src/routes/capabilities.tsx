@@ -4,9 +4,13 @@ import {
   resolveDriveConnectReturn,
   completeDriveConnectReturn,
 } from "@opengeni/react/app/lib/drive-connect-return";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
+import {
+  personalExtensionOrigin,
+  sortConnectorsForPresentation,
+} from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ConnectionCatalog,
@@ -25,10 +29,11 @@ import { SlackConnectionsPage } from "@/components/capabilities/slack-connection
 import { IntegrationPage } from "@/components/capabilities/integration-page";
 import { ProviderPage, type ProviderMode } from "@/components/capabilities/provider-page";
 import {
+  addConnectionErrorCopy,
   capabilityDescription,
+  catalogConnectAccess,
   isCommunityCapability,
   OWNERSHIP_HELP,
-  personalOnlyCapability,
 } from "@/components/capabilities/capability-copy";
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
@@ -111,6 +116,7 @@ import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
 import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
 import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-integration";
+import { useSharePointIntegration } from "@/components/capabilities/use-sharepoint-integration";
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
 import { useOutlookContactsIntegration } from "@/components/capabilities/use-outlook-contacts-integration";
 import { useOutlookMailIntegration } from "@/components/capabilities/use-outlook-mail-integration";
@@ -126,7 +132,6 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
-import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -408,6 +413,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // explanation and the way to retry don't vanish with a toast.
   const [callbackNotice, setCallbackNotice] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [addError, setAddError] = useState<{ title: string; description: string } | null>(null);
   // Which integration's page is open.
   const openIntegration = openKey?.startsWith("integration:")
     ? openKey.slice("integration:".length)
@@ -590,6 +596,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     onRuntimeChanged,
     refreshRevision: catalogData.revision,
   });
+  const sharePoint = useSharePointIntegration({
+    workspaceId,
+    definitions: apiIntegrationDefinitions,
+    instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
+  });
   const slackBotMode = slack.catalogName === "Opengeni bot";
   const integrations = [
     { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
@@ -611,6 +625,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     outlookCalendar,
     outlookContacts,
     oneDrive,
+    sharePoint,
   ].map((adapter) => ({
     ...adapter,
     model: nativeIntegrationModel(
@@ -681,7 +696,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
               catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
                 ? "Your account"
                 : "Agent tools",
-            description: capabilityDescription(item) ?? undefined,
+            description: personalExtensionOrigin(item)
+              ? `From ${personalExtensionOrigin(item)}`
+              : (capabilityDescription(item) ?? undefined),
             status: connectorChip(item).label,
             state: catalogStatusForChip(connectorChip(item)),
             connected: item.enabled,
@@ -811,13 +828,24 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
+  const currentWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId);
+  const selectedConnectAccess = selectedItem
+    ? catalogConnectAccess(
+        selectedItem,
+        context.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === workspaceId),
+        currentWorkspace?.kind,
+      )
+    : null;
   const selectedSetupUnavailable = selectedItem
-    ? nativeCatalogItemNotice(
+    ? (nativeCatalogItemNotice(
         selectedItem,
         nativeConnectCatalog,
         () => void refresh(),
         nativeConnectionFacts,
-      )
+      ) ??
+      (selectedConnectAccess?.blocked
+        ? { tone: "muted" as const, ...selectedConnectAccess.blocked }
+        : undefined))
     : undefined;
   const selectedSocialConnections = selectedItem
     ? (() => {
@@ -1584,6 +1612,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     const input = capabilityInputFromForm(form);
     if (!input) return;
     setBusyId("add");
+    setAddError(null);
     try {
       const created = await client.createCapability(workspaceId, input);
       if (form.enableAfterAdd) {
@@ -1618,8 +1647,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setAddOpen(false);
       await refresh();
     } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to add capability");
-      toast.error(copy.title, { description: copy.description });
+      // The dialog stays open on failure; say why there, next to the form.
+      setAddError(addConnectionErrorCopy(error));
     } finally {
       setBusyId(null);
     }
@@ -1722,6 +1751,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         busy={busyId === selectedItem.id}
         errorMessage={sheetError}
         setupUnavailable={selectedSetupUnavailable}
+        personalOnly={selectedConnectAccess?.personalOnly === true}
+        workspaces={context.workspaces}
         fikenSetup={{
           oauthAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-oauth"),
           tokenAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-token"),
@@ -1731,6 +1762,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
+          canRemoveOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(
+              context.accessContext,
+              accountWorkspaceId,
+              PERSONAL_INTEGRATION_SETUP_PERMISSION,
+            ) ||
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
+          canReconnectOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
         }}
@@ -2234,24 +2274,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         onRuntimeChanged();
                       }}
                     />
-                    {activeTab === "plugins" ? (
+                    {activeTab === "plugins" && eventTriggersEnabled ? (
                       <div className="mt-6 grid gap-4">
-                        {eventTriggersEnabled ? (
-                          <PrReviewAutomationCard workspaceId={workspaceId} />
-                        ) : null}
-                        <PrReviewSetupCard
-                          client={client}
-                          workspaceId={workspaceId}
-                          retiring={eventTriggersEnabled}
-                          canManage={
-                            canManageApiIntegrationInstances &&
-                            hasWorkspacePermission(
-                              context.accessContext,
-                              workspaceId,
-                              "secrets:write",
-                            )
-                          }
-                        />
+                        <PrReviewAutomationCard workspaceId={workspaceId} />
                       </div>
                     ) : null}
                   </div>
@@ -2280,7 +2305,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             name={selectedItem.name}
             returnUrl={window.location.href}
             dialogOnly
-            personalOnly={personalOnlyCapability(selectedItem)}
+            personalOnly={selectedConnectAccess?.personalOnly === true}
             connectLabel={`Connect ${selectedItem.name}`}
             dialogSubtitle="Review access, then sign in"
             description={capabilityDescription(selectedItem) ?? undefined}
@@ -2324,8 +2349,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             dispatchCustomApi({ type: "new", draft: { protocol, advanced: true } });
           }}
           open={addOpen}
-          onOpenChange={setAddOpen}
+          onOpenChange={(open) => {
+            setAddOpen(open);
+            setAddError(null);
+          }}
           busy={busyId === "add"}
+          error={addError}
           onSubmit={submitAddCustom}
         />
 

@@ -20,7 +20,11 @@ import {
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import {
+  requireConnectOwnerAuthority,
+  MissingPermissionRefusal,
+  WORKSPACE_SETTINGS_REFUSAL,
+} from "@opengeni/core";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
@@ -78,6 +82,7 @@ import {
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   withWorkspaceSubjectRls,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import { atlassianKnowledgeSourceIdentity } from "@opengeni/documents/atlassian";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -89,10 +94,10 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
 } from "@opengeni/contracts/atlassian-native-retirement";
 import {
+  connectOwnerStateFields,
   personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -170,9 +175,9 @@ export async function startAtlassianOAuth(
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/atlassian/callback`;
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
+    // The route admits only a managed human, so reaching here is the proof; the
+    // callback has no live principal and enforces exactly this claim.
+    ...connectOwnerStateFields(input, true),
     kind: ATLASSIAN_OAUTH_STATE_KIND,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(input.externalContinuation
@@ -183,9 +188,6 @@ export async function startAtlassianOAuth(
           ),
         }
       : {}),
-    // The route admits only a managed human, so reaching here is the proof; the
-    // callback has no live principal and enforces exactly this claim.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     returnPath: ATLASSIAN_RETURN_PATH(input.workspaceId),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
@@ -521,10 +523,12 @@ export async function saveAtlassianSources(
     destinationSelection.authorityKind === "organization" &&
     !input.canManageOrganizationDestination
   ) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   if (destinationSelection.authorityKind === "workspace" && !input.canManageWorkspaceDestination) {
-    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+    throw new MissingPermissionRefusal("workspace:admin", {
+      message: WORKSPACE_SETTINGS_REFUSAL,
+    });
   }
   if (destinationSelection.authorityKind === "personal" && !input.canManagePersonalDestination) {
     throw new HTTPException(403, { message: "personal destination requires the exact actor" });
@@ -677,6 +681,8 @@ export async function disconnectAtlassian(
     subjectId: string;
     connection: AtlassianConnectionRecord;
     payload: AtlassianDisconnectRequest;
+    /** Who disconnects: audited in the disconnect's transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ) {
   const metadata = requireAtlassianConnection(input.connection, input.subjectId);
@@ -700,6 +706,7 @@ export async function disconnectAtlassian(
       }),
       lastError: null,
       updatedBySubjectId: input.subjectId,
+      audit: input.audit ?? null,
     });
     await setSchedulePause(deps, input.workspaceId, input.connection.id, true);
     return disconnected;
@@ -1039,8 +1046,6 @@ async function materializeSchedules(
           runMode: "new_session_per_run",
           targetSessionId: null,
           agentConfig: knowledgeSourceAgentConfig(action),
-          variableSetId: null,
-          environmentId: null,
           rigId: null,
           metadata: {
             connectorKind: "atlassian",

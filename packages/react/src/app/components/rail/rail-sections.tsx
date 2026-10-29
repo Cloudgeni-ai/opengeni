@@ -13,7 +13,6 @@ import { useActionShortcut } from "../../lib/actions/actions-provider";
 import { TooltipWithKeys } from "../command-menu/keycaps";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
-import { windowControlsInPage } from "../../lib/desktop";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 
 /**
@@ -58,17 +57,16 @@ export function SessionShellSlotsProvider({
  * the settings rail's top (12px, 32px brand row, 12px gap) so switching
  * between the two rails doesn't jump. The collapse toggle sits at the right end
  * of the brand row; collapsed, only the mark stays, with the expand toggle
- * under it. In the macOS app the row holds just the toggle beside the window
- * controls.
+ * under it.
  */
 export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
   const { switcher } = useContext(SessionShellSlotsContext);
   const sidebarKeys = useActionShortcut("view.sidebar");
-  // Without the brand (an embed, or the macOS app whose window controls sit
-  // in the row), the row holds just the collapse toggle, at its end.
+  // Without the brand (an embed), the row holds just the collapse toggle, at
+  // its end.
   const brand = useSessionUiFeature("brand");
-  const brandless = windowControlsInPage || !brand;
+  const brandless = !brand;
   const collapseToggle = !rail.isMobile ? (
     <Tooltip>
       <TooltipTrigger asChild>

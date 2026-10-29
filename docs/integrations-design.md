@@ -116,7 +116,20 @@ callbacks that persist one — Integration Definition OAuth, MCP OAuth,
 Google Drive, and social — require it; retired Atlassian callbacks retain the
 same check before settling historical attempts. A state minted before the
 claim existed simply lacks it and fails closed, which closes the one
-`oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
+`oauthStateTtlMs` in-flight window across a rolling deploy.
+
+Workspace-owned connectors (Fiken, the Slack bot, GitHub App Connect) sign the
+same claim. Their callbacks re-check the starting person through
+`requireConnectOwnerAuthority`, and a managed human's Personal workspace has
+no membership row, so the claim is the only way that re-check finds its owner
+there. Every owner-bound start mints the owner fields through
+`connectOwnerStateFields` (the claim is a required argument), the
+`ConnectOwner` type makes the claim required on every re-check, and
+`apps/api/test/connect-owner-state-surface.test.ts` keeps new states on the
+helper and keeps callbacks off bare `getWorkspaceGrant` lookups. Fiken and the
+Slack bot once omitted the claim and the legacy social callback re-checked
+through a bare membership lookup; each failed only in Personal workspaces,
+after provider consent. This is also why the
 MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
 machine-owned row. Callback refusals retain each flow's existing bounded
 redirect/error projection rather than sharing one HTTP status: for example,

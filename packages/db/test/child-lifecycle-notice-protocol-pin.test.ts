@@ -32,7 +32,7 @@ test("producer-side notice keys are pinned to the notice protocol revision", () 
       childProgressDedupeKey({ childSessionId: child, receiptId: "r" }),
     ],
   }).toEqual({
-    revision: 1,
+    revision: 2,
     prefixes: {
       requiresAction: "child-requires-action",
       requiresActionResolved: "child-requires-action-resolved",

@@ -15,6 +15,7 @@ import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    Connected agents: outside MCP clients people signed in to the organization
@@ -92,6 +93,7 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
     await revokeOrganizationMcpConnection(deps.db, {
       accountId: organizationId,
       connectionId: connection.id,
+      audit: disconnectAuditActor(c, { subjectId: context.subjectId }),
     });
     return c.body(null, 204);
   });

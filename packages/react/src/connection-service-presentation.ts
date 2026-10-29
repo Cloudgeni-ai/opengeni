@@ -1,5 +1,6 @@
 import type { ConnectAccount, ConnectProvider } from "@opengeni/connect";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
+import teamsLogo from "./assets/microsoft-teams.svg";
 import gmailLogo from "./assets/gmail.ico";
 import outlookLogo from "./assets/outlook.ico";
 
@@ -16,6 +17,7 @@ const services: Record<string, { name: string; logo: string | null; mcpUrl?: str
     logo: null,
     mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1",
   },
+  "microsoft-teams": { name: "Microsoft Teams", logo: teamsLogo },
   "microsoft-outlook-mail": { name: "Outlook Mail", logo: outlookLogo },
   "microsoft-outlook-calendar": { name: "Outlook Calendar", logo: outlookLogo },
   "microsoft-outlook-contacts": { name: "Outlook Contacts", logo: outlookLogo },

@@ -10,7 +10,7 @@ import {
   type ConnectNavigation,
   type ConnectOwnership,
 } from "@opengeni/connect";
-import type { CapabilityCatalogItem } from "@opengeni/sdk";
+import { OpenGeniApiError, type CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { ConnectCardMessage } from "../connect-card-message";
@@ -294,17 +294,31 @@ export function useMcpCapabilityConnect({
         ? previous.subjectScope === "subject"
         : previous.subjectScope !== "subject" && previous.connectionId === connection.id);
     if (!alreadyBound) {
-      await client.enableCapability(workspaceId, capabilityId, {
-        connectionRef:
-          attempt.ownership === "personal"
-            ? { providerDomain: connection.providerDomain, kind: "oauth2", subjectScope: "subject" }
-            : {
-                providerDomain: connection.providerDomain,
-                kind: "oauth2",
-                subjectScope: "workspace",
-                connectionId: connection.id,
-              },
-      });
+      try {
+        await client.enableCapability(workspaceId, capabilityId, {
+          connectionRef:
+            attempt.ownership === "personal"
+              ? {
+                  providerDomain: connection.providerDomain,
+                  kind: "oauth2",
+                  subjectScope: "subject",
+                }
+              : {
+                  providerDomain: connection.providerDomain,
+                  kind: "oauth2",
+                  subjectScope: "workspace",
+                  connectionId: connection.id,
+                },
+        });
+      } catch (failure) {
+        // The account is connected, but turning the integration on here is an
+        // admin's step. Say so: the account is used once an admin turns it on.
+        if (failure instanceof OpenGeniApiError && failure.status === 403)
+          throw new ConnectCardMessage(
+            t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
+          );
+        throw failure;
+      }
       if (!active()) return;
     }
     const enabled = await load(active);

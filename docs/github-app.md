@@ -11,10 +11,6 @@ path uses a separate per-environment OAuth App, callback, encrypted Connection,
 and GitHub user identity. Neither credential may satisfy the other's authority
 checks.
 
-PR Review likewise uses a separately registered, workspace-owned
-provider app. It never inherits this platform App or a personal GitHub
-connection. See [`pr-review.md`](pr-review.md).
-
 ## Status contract
 
 `GET /v1/workspaces/:workspaceId/github/app` and the

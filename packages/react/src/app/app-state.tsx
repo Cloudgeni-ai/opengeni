@@ -12,7 +12,11 @@ import {
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
-import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
+import {
+  startWorkspaceClientConfigRefresh,
+  withWorkspaceClientConfig,
+  type WorkspaceClientConfig,
+} from "./lib/workspace-client-config";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
 import {
@@ -23,7 +27,8 @@ import {
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
-import { useEmbedded, useHostMessageContext } from "./lib/app-host";
+import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
+import { createWithOpeningContext } from "./lib/message-context";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
@@ -31,6 +36,7 @@ import {
 import type {
   McpConnectionAccountSelection,
   PersonalGitHubRepositorySelectionInput,
+  UpdateSessionRequest,
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
@@ -313,6 +319,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const embedded = useEmbedded();
   const hostMessageContext = useRef(messageContext);
   hostMessageContext.current = messageContext;
+  const messageContextTools = useHostMessageContextTools();
+  const hostMessageContextTools = useRef(messageContextTools);
+  hostMessageContextTools.current = messageContextTools;
   const {
     captureProductEvent,
     checkDeploymentRevision,
@@ -338,8 +347,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
-    useState<ClientConfig["voiceInput"]>(undefined);
+  const [workspaceConfig, setWorkspaceConfig] = useState<WorkspaceClientConfig | undefined>(
+    undefined,
+  );
+  const [workspaceConfigVersion, setWorkspaceConfigVersion] = useState(0);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -610,7 +621,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
-      setWorkspaceVoiceInput(undefined);
+      setWorkspaceConfig(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -641,10 +652,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     const workspaceId = workspaceStateOwnerId;
     const accepted = captureWorkspaceInvocation(workspaceId);
     if (!accepted) return;
-    return startWorkspaceVoiceCapabilityRefresh({
+    return startWorkspaceClientConfigRefresh({
       read: (signal) => fetchClientConfig(signal, workspaceId),
       ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
-      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      apply: setWorkspaceConfig,
       subscribeFocus: (refresh) => {
         window.addEventListener("focus", refresh);
         return () => window.removeEventListener("focus", refresh);
@@ -655,11 +666,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clientConfigurationReady,
     authReady,
     workspaceStateOwnerId,
+    workspaceConfigVersion,
     accessContext?.subjectId,
     accessKeyVersion,
     captureWorkspaceInvocation,
     ownsWorkspaceInvocation,
   ]);
+  const refreshWorkspaceConfig = useCallback(
+    () => setWorkspaceConfigVersion((version) => version + 1),
+    [],
+  );
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -1279,6 +1295,37 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  // Name, description and avatar from the profile dialog: one PATCH as the
+  // person, then the open session shows it at once (the rail and other
+  // clients follow through session.title_set / session.profile_set).
+  async function updateSessionProfile(
+    workspaceId: string,
+    sessionId: string,
+    change: UpdateSessionRequest,
+  ): Promise<Session | null> {
+    // Failures reach the dialog, which shows them inside the form.
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
+    const update = await runCurrentTransitionInvocation({
+      isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+      request: async () => await client.updateSession(workspaceId, sessionId, change),
+    });
+    if (update.status === "stale") return null;
+    const updated = update.value;
+    setSession((current) =>
+      current && current.id === updated.id
+        ? {
+            ...current,
+            title: updated.title,
+            titleSource: updated.titleSource,
+            description: updated.description ?? null,
+            avatar: updated.avatar ?? null,
+          }
+        : current,
+    );
+    return updated;
+  }
+
   // Personal session pinning never changes shared session activity. Keep the
   // header immediate on this device, use its known revision when available, and
   // restore the authoritative prior state if the request (including a stale-tab
@@ -1800,6 +1847,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           submission: effectiveSubmission,
           instructions: options?.instructions,
           installedSkillIds: options?.installedSkillIds,
+          bot: options?.bot,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           newSessionDraftToolPolicy: options?.newSessionDraftToolPolicy,
@@ -1826,9 +1874,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // spoken turn does.
       const hostContext =
         attempt.request.startMode === "realtime" ? undefined : hostMessageContext.current?.();
-      const created = await client.createSession(
-        workspaceId,
-        hostContext ? { ...attempt.request, modelContext: hostContext } : attempt.request,
+      const created = await createWithOpeningContext(
+        (request) => client.createSession(workspaceId, request),
+        attempt.request,
+        hostContext,
+        hostContext ? hostMessageContextTools.current?.() : undefined,
       );
       // Do not clear a newer concurrent attempt that replaced this one.
       if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
@@ -2451,6 +2501,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
   const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
+  const contextUpdateSessionProfile = useLatestCallback(updateSessionProfile);
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
@@ -2487,14 +2538,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig: {
-            ...clientConfig,
-            voiceInput:
-              workspaceVoiceInput ??
-              (clientConfig.voiceInput
-                ? { ...clientConfig.voiceInput, available: false, providers: [] }
-                : undefined),
-          },
+          clientConfig: withWorkspaceClientConfig(clientConfig, workspaceConfig),
+          refreshWorkspaceConfig,
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2576,6 +2621,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           updateWorkspaceSettings: contextUpdateWorkspaceSettings,
           setWorkspaceDefaultRig: contextSetWorkspaceDefaultRig,
           updateSessionTitle: contextUpdateSessionTitle,
+          updateSessionProfile: contextUpdateSessionProfile,
           updateSessionPin: contextUpdateSessionPin,
           deleteWorkspace: contextDeleteWorkspace,
           refreshGitHub,
@@ -2604,7 +2650,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clearSlackLinkContinuation,
     client,
     clientConfig,
-    workspaceVoiceInput,
+    workspaceConfig,
+    refreshWorkspaceConfig,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,
@@ -2618,6 +2665,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextReconnectPersonalGitHub,
     contextSavePersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
+    contextUpdateSessionProfile,
     contextSetWorkspaceDefaultRig,
     contextDisconnectGitHubInstallation,
     contextStartGitHubAppManifestFlow,

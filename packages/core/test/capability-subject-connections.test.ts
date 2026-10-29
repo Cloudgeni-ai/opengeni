@@ -40,6 +40,7 @@ import {
   freezeConnectionAccounts,
   workspaceSessionToolPolicyContext,
 } from "../src";
+import { mcpAccountBindingsFromVisibleConnections } from "../src/domain/mcp-account-bindings";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -109,6 +110,7 @@ async function addConnectionOwner(
     .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${workspace.accountId}, ${subjectId}, 'active', ${personal!.id})`;
   await shared!
     .admin`insert into workspace_memberships (account_id, workspace_id, subject_id) values (${workspace.accountId}, ${workspace.workspaceId}, ${subjectId})`;
+  return { accountId: workspace.accountId, workspaceId: personal!.id as string };
 }
 
 function grant(
@@ -160,6 +162,54 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("a personal account connected in another of the owner's workspaces enables here", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const personal = await addConnectionOwner(workspace, "subject-alice");
+    const capabilityId = `mcp:gmail-personal-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      metadata: { defaultConnectionOwnership: "personal" },
+    });
+    const alice = await createConnection(db, {
+      ...personal,
+      subjectId: "subject-alice",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      grantedScopes: gmailGrantedScopes,
+      credentialEncrypted: encryptedFixture(),
+    });
+    expect(alice.authorityId).toBeTruthy();
+    const enable = (subjectId: string, connectionId?: string) =>
+      enableCapability({
+        db,
+        grant: grant(workspace, subjectId),
+        ...workspace,
+        settings,
+        capabilityId,
+        payload: {
+          config: {},
+          metadata: {},
+          headers: {},
+          connectionRef: {
+            ...(connectionId ? { connectionId } : {}),
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      });
+    await expect(enable("subject-bob", alice.id)).rejects.toThrow("visible active connection");
+    await enable("subject-alice", alice.id);
+    await enable("subject-alice");
+    const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    expect(installation?.config.connectionRef).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+  });
+
   test("catalog reads serialize savepoints and preserve the enclosing actor", async () => {
     if (!available) throw new Error("Catalog transaction regression requires PostgreSQL");
     const workspace = await freshWorkspace();
@@ -1302,25 +1352,33 @@ describe("subject-owned capability connection references", () => {
       await getConnectionMetadata(db, workspace.workspaceId, sharedConnection.id, "subject-alice"),
     ).toEqual(sharedConnection);
 
-    await expect(
-      enableCapability({
-        db,
-        grant: grant(workspace, "subject-bob"),
-        ...workspace,
-        settings,
-        capabilityId,
-        payload: {
-          config: {},
-          metadata: {},
-          headers: {},
-          connectionRef: {
-            providerDomain: "gmailmcp.googleapis.com",
-            kind: "oauth2",
-            subjectScope: "subject",
-          },
+    // Each person signs in to their own Gmail: someone who has not connected
+    // their own account can still turn it on, and no account is recorded.
+    const turnedOn = await enableCapability({
+      db,
+      grant: grant(workspace, "subject-bob"),
+      ...workspace,
+      settings,
+      capabilityId,
+      probeMcpServer: async () => {
+        throw new Error("a per-person OAuth server is not probed without a person's account");
+      },
+      payload: {
+        config: {},
+        metadata: {},
+        headers: {},
+        connectionRef: {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          subjectScope: "subject",
         },
-      }),
-    ).rejects.toThrow("visible active connection");
+      },
+    });
+    expect(turnedOn.config.connectionRef).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
 
     await enableCapability({
       db,
@@ -1514,6 +1572,121 @@ describe("subject-owned capability connection references", () => {
       ).rejects.toThrow("authenticated connection owner");
     },
   );
+
+  test("an admin turns on an each-person-signs-in custom OAuth MCP without an account of their own", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:custom-per-person-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://mcp.per-person.example/mcp",
+      authModel: null,
+    });
+    const perPerson = (providerDomain: string, subjectScope: "subject" | "workspace") => ({
+      config: {},
+      metadata: {},
+      headers: {},
+      connectionRef: { providerDomain, kind: "oauth2" as const, subjectScope },
+    });
+    const noProbe = async () => {
+      throw new Error("an OAuth-protected server answers 401 to an anonymous probe");
+    };
+    const admin = grant(workspace, "subject-admin");
+
+    // Another provider's accounts never become this server's accounts, and a
+    // shared reference still needs the shared account. A reference that picks
+    // accounts or resources is not a plain per-person one.
+    const own = perPerson("mcp.per-person.example", "subject");
+    for (const payload of [
+      perPerson("github.com", "subject"),
+      perPerson("mcp.per-person.example", "workspace"),
+      { ...own, connectionRef: { ...own.connectionRef, accountSelection: "all_eligible" } },
+      {
+        ...own,
+        connectionRef: {
+          ...own.connectionRef,
+          selectedResources: [{ id: "one", kind: "repository" }],
+        },
+      },
+    ])
+      await expect(
+        enableCapability({
+          db,
+          grant: admin,
+          ...workspace,
+          settings,
+          capabilityId,
+          probeMcpServer: noProbe,
+          payload: payload as never,
+        }),
+      ).rejects.toThrow("visible active connection");
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
+
+    // Members still cannot turn on a custom server, and are told what to do.
+    await expect(
+      enableCapability({
+        db,
+        grant: grant(workspace, "subject-member"),
+        personalSetup: true,
+        ...workspace,
+        settings,
+        capabilityId,
+        probeMcpServer: noProbe,
+        payload: perPerson("mcp.per-person.example", "subject"),
+      }),
+    ).rejects.toThrow(
+      `Only an admin can turn on ${capabilityId}. Ask an admin to turn it on first, then connect your account.`,
+    );
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
+
+    const installation = await enableCapability({
+      db,
+      grant: admin,
+      ...workspace,
+      settings,
+      capabilityId,
+      probeMcpServer: noProbe,
+      payload: perPerson("MCP.Per-Person.example", "subject"),
+    });
+    expect(installation.status).toBe("active");
+    // Stored the way each person's sign-in records the provider.
+    expect(installation.config.connectionRef).toEqual({
+      providerDomain: "mcp.per-person.example",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect((installation.metadata.mcpConnectivity as { status?: string } | undefined)?.status).toBe(
+      "auth_deferred",
+    );
+
+    // Each member then connects their own account; it is theirs alone and
+    // binds when they use the server.
+    const member = await createConnection(db, {
+      ...workspace,
+      subjectId: "subject-member",
+      providerDomain: "mcp.per-person.example",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+    const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
+    const server = servers.find((entry) => entry.capabilityId === capabilityId)!;
+    expect(server.connectionRef).toEqual({
+      providerDomain: "mcp.per-person.example",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(JSON.stringify(servers)).not.toContain(member.id);
+    const ownAccount = { ...member, authorityId: crypto.randomUUID() };
+    const bind = (subjectId: string) =>
+      mcpAccountBindingsFromVisibleConnections({
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId,
+        servers: [server],
+        connections: [ownAccount],
+      }).map((binding) => binding.connectionId);
+    expect(bind("subject-member")).toEqual([member.id]);
+    expect(bind("subject-admin")).toEqual([]);
+  });
 
   test("hosted Slack MCP respects explicit connection ownership", async () => {
     if (!available) return;

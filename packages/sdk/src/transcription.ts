@@ -119,7 +119,8 @@ export type TranscriptionErrorCode =
   | "unavailable"
   | "too_large"
   | "invalid_audio"
-  | "unknown";
+  | "unknown"
+  | "region_restricted";
 
 /** Native browser voice input defaults to the configured deployment capability. */
 export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | null {

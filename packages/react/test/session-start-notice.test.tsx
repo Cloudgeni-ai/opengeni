@@ -327,4 +327,54 @@ describe("SessionStartNotice", () => {
     expect(container!.textContent).toContain("Permission needed");
     expect(button("Choose machine")).toBeUndefined();
   });
+
+  test("a message sent for the owner's other machine runs there: one move, then one fenced recheck", async () => {
+    const response: MachinesResponse = {
+      activeSandboxId: "owner-laptop",
+      activeEpoch: 3,
+      machines: [
+        ...fleet,
+        machine({ sandboxId: "home-server", name: "Home server", scope: "user" }),
+      ],
+      sessionMachineAccess: {
+        sandboxId: "owner-laptop",
+        machineName: "Kari's laptop",
+        ownerName: "Kari",
+        isOwner: true,
+        queuedTurnBlocked: false,
+        queuedTurnNotApprovedHere: true,
+        queuedTurnApprovedMachines: [{ sandboxId: "home-server", machineName: "Home server" }],
+      },
+    };
+    const { client, resumeSession, swapActiveSandbox } = fakeClient(response);
+    const onSessionChanged = mock(async () => {});
+    await render(
+      <SessionStartNotice
+        client={client as never}
+        workspaceId="workspace-a"
+        session={blockedSession({
+          admissionBlock: {
+            reason: "personal_resource_grant_required",
+            sqlState: "OG002",
+            retryPolicy: "explicit_recheck",
+            blockedAt: "2026-10-28T11:52:00Z",
+          },
+        } as Partial<Session>)}
+        onSessionChanged={onSessionChanged}
+      />,
+    );
+    expect(container!.textContent).toContain("Your message is waiting for “Home server”");
+    expect(container!.textContent).toContain("this chat now runs on “Kari's laptop”");
+    expect(button("Recheck access")).toBeUndefined();
+    await act(async () => button("Run it on Home server")!.click());
+    expect(swapActiveSandbox.mock.calls).toEqual([
+      ["workspace-a", "session-a", { target: "home-server" }],
+    ] as never);
+    expect(resumeSession).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        resumeSession.mock.calls[0] as unknown as [string, string, { expectedControlEtag: string }]
+      )[2].expectedControlEtag,
+    ).toBe("etag-4");
+  });
 });

@@ -48,7 +48,10 @@ export class DictationHud implements DictationHudView {
   show(state: DictationHudState): void {
     this.state = state;
     if (state.kind === "hidden") {
-      if (this.window && !this.window.isDestroyed()) this.window.hide();
+      if (this.window && !this.window.isDestroyed()) {
+        this.window.hide();
+        void this.clear(this.window, state).catch(() => undefined);
+      }
       this.visible = false;
       this.displayId = null;
       return;
@@ -60,6 +63,13 @@ export class DictationHud implements DictationHudView {
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
     this.window = null;
     this.loaded = null;
+  }
+
+  /** Empty the hidden page, so a recording's clock stops ticking out of sight. */
+  private async clear(window: BrowserWindow, state: DictationHudState): Promise<void> {
+    await this.loaded;
+    if (this.state !== state || window.isDestroyed()) return;
+    await window.webContents.executeJavaScript(`render(${JSON.stringify(state)})`);
   }
 
   private ensure(): BrowserWindow {

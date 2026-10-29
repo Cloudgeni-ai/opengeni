@@ -59,7 +59,10 @@ import {
 } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
+import { MissingPermissionRefusal } from "./permission-refusal";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
+
+export * from "./permission-refusal";
 import { sha256Hex } from "@opengeni/contracts/values";
 
 const bearerPrefix = "Bearer ";
@@ -895,7 +898,7 @@ export function requireAccountAdminAuthorizationStamp(
     accountGrant.subjectId !== grant.subjectId ||
     !accountGrant.permissions.includes("account:admin")
   ) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   return Object.freeze({
     authorizationId: crypto.randomUUID(),
@@ -982,13 +985,19 @@ export async function requireAccessGrantAuthorization(
   });
 }
 
+/** The refusal of {@link requireWorkspaceSettingsGrant}, a plain sentence. */
+export const WORKSPACE_SETTINGS_REFUSAL =
+  "Only a workspace admin, or the owner of a Personal workspace, can do this.";
+
 /**
  * Settings administration is narrower than workspace administration. The
  * verified owning user may configure their Personal workspace, but
  * never acquires the admin wildcard (and its membership/delegation powers).
  * Delegated owners also need workspace:admin in their verified dispatch/key
  * ceiling: a read-only delegation cannot turn ownership into a settings write.
- * Only use this boundary for workspace configuration, not access management.
+ * Use this boundary for every admin-only workspace surface the owner of a
+ * Personal workspace should keep (configuration, instructions, automations,
+ * Insights), never for access management (members, keys, delegation).
  */
 export async function requireWorkspaceSettingsGrant(
   c: Context,
@@ -998,8 +1007,8 @@ export async function requireWorkspaceSettingsGrant(
   const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
   if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return grant;
-  throw new HTTPException(403, {
-    message: "workspace settings require a workspace administrator or Personal workspace owner",
+  throw new MissingPermissionRefusal("workspace:admin", {
+    message: WORKSPACE_SETTINGS_REFUSAL,
   });
 }
 
@@ -1421,19 +1430,7 @@ function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
   if (grant.permissionMode === "explicit") explicitPermissions(grant.permissions);
   if (!hasPermission(grant.permissions, permission)) {
-    if (permission === "variable-sets:use") {
-      throw new HTTPException(403, {
-        message: "missing permission: variable-sets:use (deprecated alias: environments:use)",
-      });
-    }
-    if (permission === "variable-sets:manage") {
-      throw new HTTPException(403, {
-        message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
-      });
-    }
-    throw new HTTPException(403, {
-      message: `missing permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }
 
@@ -1445,9 +1442,7 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
  */
 export function requireLiteralPermission(grant: AccessGrant, permission: Permission): void {
   if (!hasLiteralPermission(grant.permissions, permission)) {
-    throw new HTTPException(403, {
-      message: `missing literal permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }
 

@@ -13,6 +13,7 @@ import type { ChatSwitcherState } from "../../lib/actions/chat-switcher";
 import type { ChordPlatform } from "../../lib/actions/chords";
 import type { WorkspaceChoice } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
+import { SessionAvatar } from "../session/session-avatar";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { currentChatStatus } from "../../lib/actions/chat-status";
 import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
@@ -128,10 +129,20 @@ export default function ChatSwitcher(props: {
                   selected ? "bg-hover text-fg" : null,
                 )}
               >
-                <Icon
-                  aria-hidden="true"
-                  className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
-                />
+                {record?.avatar ? (
+                  <SessionAvatar
+                    avatar={record.avatar}
+                    name={record.title}
+                    workspaceId={record.workspaceId}
+                    seed={record.id}
+                    size="xs"
+                  />
+                ) : (
+                  <Icon
+                    aria-hidden="true"
+                    className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
+                  />
+                )}
                 <span className="min-w-0 flex-1 truncate">{record?.title ?? "Untitled chat"}</span>
                 {elsewhere ? <WorkspaceTag name={elsewhere} /> : null}
                 <ChatStatusMarks

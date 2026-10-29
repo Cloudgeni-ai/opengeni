@@ -19,7 +19,6 @@ import {
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
-import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -322,7 +321,6 @@ describe("lossless scheduled-task model updates", () => {
       runMode: "new_session_per_run",
       reusableSessionId: null,
       targetSessionId: null,
-      variableSetId: null,
       rigId: rig.id,
     });
     expect(await getSession(client.db, workspace.workspaceId, session.id)).toEqual(session);
@@ -499,7 +497,6 @@ describe("lossless scheduled-task model updates", () => {
           "runMode",
           "overlapPolicy",
           "metadata",
-          "variableSetId",
           "rigId",
           "targetSessionId",
           "reusableSessionId",
@@ -742,27 +739,21 @@ describe("first-party MCP scheduled task pinned accounts", () => {
     },
   );
 
-  test.each(["legacy", "cancelled", "deleted"] as const)(
+  test.each(["cancelled", "deleted"] as const)(
     "moves away from a %s target without duplicating attachment permission",
     async (state) => {
       if (!available) return;
       const workspace = await workspaceFixture();
       const grant: AccessGrant = {
         ...grantFor(workspace),
-        permissions: ["scheduled_tasks:manage", "sessions:control", "variable-sets:use"],
+        permissions: ["scheduled_tasks:manage", "sessions:control"],
       };
-      const variables = await createLegacyVariableSet(client.db, {
-        ...workspace,
-        scope: "workspace",
-        name: "Review inputs",
-      });
       const makeChat = () =>
         createSession(client.db, {
           ...workspace,
           initialMessage: "Review",
           resources: [],
           metadata: {},
-          variableSetId: variables.id,
           model: "scripted-model",
           reasoningEffort: "medium",
           latencyMode: "standard",
@@ -777,7 +768,6 @@ describe("first-party MCP scheduled task pinned accounts", () => {
         temporalScheduleId: crypto.randomUUID(),
         runMode: "existing_session",
         targetSessionId: source.id,
-        variableSetId: state === "legacy" ? variables.id : null,
         overlapPolicy: "buffer_one",
         agentConfig: {
           prompt: "Review inputs",
@@ -807,7 +797,6 @@ describe("first-party MCP scheduled task pinned accounts", () => {
       });
       const saved = await updateScheduledTaskForApi(client.db, grant, task.id, change);
       expect(saved.targetSessionId).toBe(destination.id);
-      expect(saved.variableSetId).toBeNull();
       expect(saved.agentConfig.prompt).toBe(task.agentConfig.prompt);
     },
     60_000,
@@ -851,7 +840,6 @@ describe("first-party MCP scheduled task pinned accounts", () => {
       expect(task).toMatchObject({
         runMode: "existing_session",
         targetSessionId: session.id,
-        variableSetId: null,
         rigId: null,
         overlapPolicy: "steer",
       });

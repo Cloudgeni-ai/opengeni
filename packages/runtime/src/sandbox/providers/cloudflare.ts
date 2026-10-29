@@ -9,6 +9,7 @@ export const cloudflareProvider: ProviderRegistration = {
   instanceIdFields: ["sandboxId"],
   workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.cloudflare,
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     // workerUrl is the addressing root for the Cloudflare Sandbox Worker — there
     // is no construction without it (it is the one non-optional client option).

@@ -11,6 +11,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   DESKTOP_IPC,
+  type DesktopDictationAction,
+  type DesktopDictationAudio,
   type DesktopDictationHistoryEntry,
   type DesktopDictationPermissionId,
   type DesktopDictationProfile,
@@ -31,11 +33,14 @@ import { mergeDictationSettings } from "./settings";
 import { ENGLISH_DICTATION_WORDS, fillDictationWords, type DictationWords } from "./words";
 
 export {
+  DICTATION_AUDIO_MAX_BYTES,
   DICTATION_HISTORY_MAX,
   DICTATION_PROFILES_MAX,
+  DICTATION_VOCABULARY_MAX,
   DictationSettingsStore,
   defaultDictationSettings,
   mergeDictationSettings,
+  parseDictationAudio,
   parseDictationShortcut,
 } from "./settings";
 export { MacDictation } from "./mac";
@@ -59,6 +64,8 @@ export const DICTATION_CLIPBOARD_RESTORE_MS = 1_000;
 const NOTICE_MS = 2_500;
 const ERROR_NOTICE_MS = 8_000;
 const ESCAPE = "Escape";
+/** How long a cancelled dictation's page may take to send back its speech. */
+const CANCELLED_SPEECH_WAIT_MS = 60_000;
 
 /** A page that records for the shortcuts. */
 export interface DictationTarget {
@@ -92,7 +99,12 @@ export interface DictationDeps {
     read(): DesktopDictationSettings;
     write(settings: DesktopDictationSettings): void;
     history(): DesktopDictationHistoryEntry[];
-    remember(entry: DesktopDictationHistoryEntry): void;
+    /** Keep a finished dictation, with its speech when the page sent it. */
+    remember(entry: DesktopDictationHistoryEntry, audio?: DesktopDictationAudio | null): void;
+    /** A kept dictation's new text, after it was transcribed again. */
+    replaceText(id: string, text: string): void;
+    /** A kept dictation's speech; null when there is none. */
+    audio(id: string): DesktopDictationAudio | null;
     clearHistory(): void;
   };
   globalShortcut: {
@@ -136,11 +148,19 @@ interface Active {
   watchdog: ReturnType<typeof setTimeout> | null;
   /** The page's own throttling setting, put back when the dictation ends. */
   throttled: boolean | null;
+  /**
+   * Kept speech transcribed again rather than recorded: its text replaces the
+   * kept dictation's, and is typed only when the retry shortcut asked for it.
+   */
+  again: { entryId: string; type: boolean } | null;
 }
 
 export class Dictation {
-  private settings: DesktopDictationSettings;
   private shortcutErrors: { profileId: string; problem: DesktopDictationShortcutProblem }[] = [];
+  private actionShortcutErrors: {
+    action: DesktopDictationAction;
+    problem: DesktopDictationShortcutProblem;
+  }[] = [];
   private accelerators: string[] = [];
   private stopWatching: (() => void) | null = null;
   /** Each settings change; a slower earlier setup that finishes late is undone. */
@@ -152,11 +172,20 @@ export class Dictation {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   /** A shortcut pressed while no page could record: it starts once one listens. */
   private waiting: { profileId: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Dictations cancelled lately, whose page may still send back their speech to keep. */
+  private readonly cancelled = new Map<
+    string,
+    { target: DictationTarget; profile: DesktopDictationProfile; at: number }
+  >();
   private readonly listeners = new Set<() => void>();
 
   constructor(private readonly deps: DictationDeps) {
-    this.settings = deps.store.read();
     deps.hud.onAction((action) => this.onHudAction(action));
+  }
+
+  /** Read each time: until the person saves, the defaults follow the app (its language). */
+  private get settings(): DesktopDictationSettings {
+    return this.deps.store.read();
   }
 
   start(): void {
@@ -192,6 +221,7 @@ export class Dictation {
       modifierChords: Boolean(platform?.watchModifiers && platform.modifierChords),
       permissions: platform ? await platform.permissions().catch(() => []) : [],
       shortcutErrors: this.settings.enabled ? [...this.shortcutErrors] : [],
+      actionShortcutErrors: this.settings.enabled ? [...this.actionShortcutErrors] : [],
       paste: platform
         ? await platform.pasteSupport().catch(() => ({ available: false, blocker: null }))
         : { available: false, blocker: "unsupported" as const },
@@ -200,9 +230,9 @@ export class Dictation {
   }
 
   async update(change: unknown): Promise<DesktopDictationStatus> {
-    const next = mergeDictationSettings(this.settings, change);
-    if (JSON.stringify(next) !== JSON.stringify(this.settings)) {
-      this.settings = next;
+    const current = this.settings;
+    const next = mergeDictationSettings(current, change);
+    if (JSON.stringify(next) !== JSON.stringify(current)) {
       this.deps.store.write(next);
       if (!next.enabled && this.active) this.cancel();
       await this.apply();
@@ -216,8 +246,22 @@ export class Dictation {
     this.changed();
   }
 
+  /** Dictation is on: the app should keep running, and open at login. */
+  get enabled(): boolean {
+    return this.settings.enabled;
+  }
+
   history(): DesktopDictationHistoryEntry[] {
     return this.deps.store.history();
+  }
+
+  historyAudio(id: string): DesktopDictationAudio | null {
+    return this.deps.store.audio(id);
+  }
+
+  /** Transcribe a kept dictation's speech again; its new text replaces the old. */
+  transcribeAgain(id: string): void {
+    this.again(id, false);
   }
 
   clearHistory(): void {
@@ -243,6 +287,14 @@ export class Dictation {
 
   /** How the page's dictation is going. */
   report(target: DictationTarget, report: DesktopDictationReport): void {
+    const asked = this.cancelled.get(report.dictationId);
+    if (asked?.target === target && report.phase === "cancelled") {
+      this.cancelled.delete(report.dictationId);
+      if (report.audio) {
+        this.keepCancelled(report.dictationId, asked.profile, asked.at, report.audio);
+      }
+      return;
+    }
     const active = this.active;
     if (!active || active.target !== target || report.dictationId !== active.id) return;
     switch (report.phase) {
@@ -263,12 +315,16 @@ export class Dictation {
         this.show({ kind: "transcribing", label: this.label(active.profile) });
         return;
       case "done":
-        void this.deliver(active, report.text);
+        void this.deliver(active, report.text, report.audio ?? null);
         return;
       case "failed":
         this.fail(report.message, report.retryable);
         return;
       case "cancelled":
+        // Cancelled on the page itself.
+        if (report.audio && !active.again) {
+          this.keepCancelled(active.id, active.profile, this.now(), report.audio);
+        }
         this.finish();
         this.show({ kind: "hidden" });
         return;
@@ -373,6 +429,7 @@ export class Dictation {
       hold,
       paste: null,
       throttled,
+      again: null,
       watchdog: setTimeout(() => {
         if (this.active?.id === id && this.active.phase === "starting") {
           this.send({ kind: "cancel", dictationId: id });
@@ -387,7 +444,96 @@ export class Dictation {
       dictationId: id,
       profileId: profile.id,
       language: profile.language,
+      vocabulary: this.settings.vocabulary ?? [],
     });
+  }
+
+  /**
+   * Transcribe a kept dictation's speech again with its shortcut's language
+   * now and the current vocabulary. `type` puts the text where the person is
+   * typing, as a dictation does (the retry shortcut).
+   */
+  private again(entryId: string, type: boolean): void {
+    if (this.active || this.waiting) return;
+    const entry = this.deps.store.history().find((item) => item.id === entryId);
+    const audio = entry ? this.deps.store.audio(entryId) : null;
+    if (!entry || !audio) {
+      this.notice("info", this.words().nothingToRetry ?? ENGLISH_DICTATION_WORDS.nothingToRetry!);
+      return;
+    }
+    const target = this.target();
+    if (!target) {
+      this.notice("info", this.fill(this.words().signIn), ["open"]);
+      return;
+    }
+    // The shortcut it was dictated with, when it is still there, for its language now.
+    const shortcut =
+      this.settings.profiles.find((profile) => profile.name === entry.profileName) ??
+      this.settings.profiles.find((profile) => profile.language === entry.language);
+    const profile: DesktopDictationProfile = shortcut ?? {
+      ...this.settings.profiles[0]!,
+      name: entry.profileName,
+      language: entry.language,
+    };
+    const id = (this.deps.createId ?? randomUUID)();
+    this.active = {
+      id,
+      profile,
+      target,
+      phase: "transcribing",
+      startedAt: null,
+      level: null,
+      stopRequested: false,
+      hold: false,
+      paste: null,
+      throttled: null,
+      again: { entryId, type },
+      // A page that can't transcribe kept speech never answers.
+      watchdog: setTimeout(() => {
+        if (this.active?.id === id && this.active.watchdog) {
+          this.send({ kind: "cancel", dictationId: id });
+          this.fail(this.fill(this.words().noStart), false);
+        }
+      }, DICTATION_START_TIMEOUT_MS),
+    };
+    this.registerEscape();
+    this.preparePaste();
+    this.show({ kind: "transcribing", label: this.label(profile) });
+    this.send({
+      kind: "transcribe",
+      dictationId: id,
+      profileId: profile.id,
+      language: profile.language,
+      vocabulary: this.settings.vocabulary ?? [],
+      audio,
+    });
+  }
+
+  /** The retry shortcut: a failed dictation again, or else the newest kept one. */
+  private retryLast(): void {
+    if (!this.settings.enabled) return;
+    const active = this.active;
+    if (active) {
+      if (active.phase === "failed") this.retry();
+      return;
+    }
+    const newest = this.deps.store.history().find((entry) => entry.audio);
+    if (!newest) {
+      this.notice("info", this.words().nothingToRetry ?? ENGLISH_DICTATION_WORDS.nothingToRetry!);
+      return;
+    }
+    this.again(newest.id, true);
+  }
+
+  /** Escape and the cancel shortcut: throw the dictation away, or let a failed one go. */
+  private cancelFromKeys(): void {
+    if (this.waiting) {
+      this.clearWaiting();
+      this.show({ kind: "hidden" });
+      return;
+    }
+    if (this.active?.phase === "failed") this.dismiss();
+    else this.cancel();
   }
 
   /** Stop listening and transcribe. */
@@ -409,9 +555,45 @@ export class Dictation {
   private cancel(): void {
     const active = this.active;
     if (!active) return;
+    if (!active.again) {
+      // Its page sends back speech worth keeping, for the recent dictations.
+      const now = this.now();
+      for (const [id, earlier] of this.cancelled) {
+        if (now - earlier.at > CANCELLED_SPEECH_WAIT_MS) this.cancelled.delete(id);
+      }
+      this.cancelled.set(active.id, { target: active.target, profile: active.profile, at: now });
+    }
     this.send({ kind: "cancel", dictationId: active.id });
     this.finish();
     this.show({ kind: "hidden" });
+  }
+
+  /**
+   * A cancelled dictation's speech, kept with the recent dictations only, to
+   * play or transcribe again there; it is deleted everywhere else.
+   */
+  private keepCancelled(
+    id: string,
+    profile: DesktopDictationProfile,
+    at: number,
+    audio: DesktopDictationAudio,
+  ): void {
+    this.deps.store.remember(
+      {
+        id,
+        text: "",
+        at: new Date(at).toISOString(),
+        profileName: profile.name,
+        language: profile.language,
+        cancelled: true,
+      },
+      audio,
+    );
+    this.changed();
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
   }
 
   /** Let a failed dictation go; it stays saved, for the composer to offer. */
@@ -448,7 +630,11 @@ export class Dictation {
     });
   }
 
-  private async deliver(active: Active, raw: string): Promise<void> {
+  private async deliver(
+    active: Active,
+    raw: string,
+    audio: DesktopDictationAudio | null,
+  ): Promise<void> {
     const text = raw.trim();
     const paste = active.paste;
     active.paste = null;
@@ -458,14 +644,27 @@ export class Dictation {
       this.notice("info", this.words().noSpeech);
       return;
     }
-    this.deps.store.remember({
-      id: active.id,
-      text,
-      at: new Date(this.deps.now?.() ?? Date.now()).toISOString(),
-      profileName: active.profile.name,
-      language: active.profile.language,
-    });
-    this.changed();
+    if (active.again) {
+      this.deps.store.replaceText(active.again.entryId, text);
+      this.changed();
+      if (!active.again.type) {
+        paste?.cancel();
+        this.show({ kind: "hidden" });
+        return;
+      }
+    } else {
+      this.deps.store.remember(
+        {
+          id: active.id,
+          text,
+          at: new Date(this.now()).toISOString(),
+          profileName: active.profile.name,
+          language: active.profile.language,
+        },
+        audio,
+      );
+      this.changed();
+    }
     const output = this.settings.output;
     const clipboard = this.deps.clipboard;
     if (output === "copy" || !paste) {
@@ -522,13 +721,7 @@ export class Dictation {
         this.finishSpeaking();
         return;
       case "cancel":
-        if (this.waiting) {
-          this.clearWaiting();
-          this.show({ kind: "hidden" });
-          return;
-        }
-        if (this.active?.phase === "failed") this.dismiss();
-        else this.cancel();
+        this.cancelFromKeys();
         return;
       case "retry":
         this.retry();
@@ -574,6 +767,8 @@ export class Dictation {
     const active = this.active;
     const platform = this.deps.platform;
     if (!active || active.paste || !platform || this.settings.output === "copy") return;
+    // Kept speech transcribed again from the settings only replaces the kept text.
+    if (active.again && !active.again.type) return;
     try {
       active.paste = platform.preparePaste();
     } catch (caught) {
@@ -653,10 +848,7 @@ export class Dictation {
   private registerEscape(): void {
     if (this.escape) return;
     try {
-      this.escape = this.deps.globalShortcut.register(ESCAPE, () => {
-        if (this.active?.phase === "failed") this.dismiss();
-        else this.cancel();
-      });
+      this.escape = this.deps.globalShortcut.register(ESCAPE, () => this.cancelFromKeys());
     } catch (caught) {
       this.deps.log?.("dictation escape shortcut rejected", caught);
     }
@@ -682,6 +874,18 @@ export class Dictation {
     for (const listener of this.listeners) listener();
   }
 
+  /** A key combination for as long as dictation is on; false when it can't be had. */
+  private register(accelerator: string, run: () => void): boolean {
+    let registered = false;
+    try {
+      registered = this.deps.globalShortcut.register(accelerator, run);
+    } catch (caught) {
+      this.deps.log?.("dictation shortcut rejected", caught);
+    }
+    if (registered) this.accelerators.push(accelerator);
+    return registered;
+  }
+
   private teardown(): void {
     this.clearHoldTimer();
     this.stopWatching?.();
@@ -694,22 +898,23 @@ export class Dictation {
     const generation = ++this.generation;
     this.teardown();
     this.shortcutErrors = [];
+    this.actionShortcutErrors = [];
     const platform = this.deps.platform;
     if (!this.settings.enabled || !platform) return;
+    const actions: [DesktopDictationAction, string | undefined, () => void][] = [
+      ["retry", this.settings.retryShortcut?.accelerator, () => this.retryLast()],
+      ["cancel", this.settings.cancelShortcut?.accelerator, () => this.cancelFromKeys()],
+    ];
+    for (const [action, accelerator, run] of actions) {
+      if (!accelerator) continue;
+      if (this.register(accelerator, run)) continue;
+      this.actionShortcutErrors.push({ action, problem: "taken" });
+    }
     const watches: DictationModifierWatch[] = [];
     for (const profile of this.settings.profiles) {
       const shortcut = profile.shortcut;
       if (shortcut.kind === "accelerator") {
-        let registered = false;
-        try {
-          registered = this.deps.globalShortcut.register(shortcut.accelerator, () =>
-            this.press(profile.id),
-          );
-        } catch (caught) {
-          this.deps.log?.("dictation shortcut rejected", caught);
-        }
-        if (registered) this.accelerators.push(shortcut.accelerator);
-        else {
+        if (!this.register(shortcut.accelerator, () => this.press(profile.id))) {
           this.shortcutErrors.push({
             profileId: profile.id,
             problem: "taken",

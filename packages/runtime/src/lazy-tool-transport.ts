@@ -2,6 +2,7 @@ import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import {
   tool as agentTool,
   toolSearchTool,
+  Usage,
   type Model,
   type ModelProvider,
   type ModelRequest,
@@ -25,6 +26,7 @@ import {
   parseSearchArgs,
   toolsNamedInQuery,
   shortNameAlternatives,
+  toolsWithExactName,
   unresolvedToolNames,
 } from "./codex-tool-search";
 import { isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
@@ -78,6 +80,27 @@ const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 /** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
 const FAMILY_DISCLOSURE_MARKER_KEY = "opengeni.family_disclosure.v1";
 const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registration.v1";
+/**
+ * Marks the local response that loads a new session's opening tools (see
+ * LazyToolRuntime.openingToolLoad). No provider produced it, so it carries no
+ * usage, timing or billing.
+ */
+const OPENING_TOOL_LOAD_MARKER_KEY = "opengeni.opening_tool_load.v1";
+/** The one opening load a session can have, so its call ID is constant. */
+const OPENING_TOOL_LOAD_CALL_ID = "call_opening_tools";
+
+/** Whether a model stream event or response is the local opening tool load, not a provider response. */
+export function isOpeningToolLoadResponse(value: unknown): boolean {
+  const response =
+    isRecord(value) && value.type === "response_done" && isRecord(value.response)
+      ? value.response
+      : value;
+  return (
+    isRecord(response) &&
+    isRecord(response.providerData) &&
+    response.providerData[OPENING_TOOL_LOAD_MARKER_KEY] === true
+  );
+}
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
 const SEARCH_DESCRIPTION =
@@ -408,6 +431,9 @@ export class LazyToolRuntime {
   private searchIndex: ToolSearchIndex | undefined;
   /** Whether a search this turn already named the person's connected accounts. */
   private connectedAccountsNamed = false;
+  /** Tools a new session's opening context is for (see openingToolLoad). */
+  private openingToolNames: readonly string[] = [];
+  private openingToolLoadConsidered = false;
 
   constructor(
     readonly transport: LazyToolTransport,
@@ -675,6 +701,83 @@ export class LazyToolRuntime {
       this.toolPreparationReady !== undefined &&
       !this.preparationSettled
     );
+  }
+
+  /**
+   * Tools the turn's opening context is for, such as the tool that reaches the
+   * open document a new chat is bound to. They load as if the model's first
+   * step had searched for them by name (see openingToolLoad).
+   */
+  loadAtOpening(names: readonly string[]): void {
+    this.openingToolNames = [...new Set(names)];
+  }
+
+  /**
+   * The first model step of a turn that names opening tools is a tool_search
+   * by those names, answered here without a provider call. The ordinary search
+   * path then loads them, so the first provider request carries the search and
+   * its result after the person's message, and the model can call the tools
+   * directly. Instructions and the tool block stay byte-identical to every
+   * other chat. Considered once, only when the request starts the turn (no
+   * generated items after the last user message) and offers tool_search.
+   * Names that are unknown, unauthorized or already in the request are
+   * ignored; with none left this is null and the step goes to the provider.
+   */
+  hasOpeningToolLoad(): boolean {
+    return !this.openingToolLoadConsidered && this.openingToolNames.length > 0;
+  }
+
+  async openingToolLoad(request: ModelRequest): Promise<ModelResponse | null> {
+    if (!this.hasOpeningToolLoad()) return null;
+    this.openingToolLoadConsidered = true;
+    // A later attempt of the same turn (say, resumed with a newly delivered
+    // update after the person's message) replays the stored load; loading
+    // again would rewrite history that was already sent.
+    if (!startsTurn(request.input) || holdsOpeningToolLoad(request.input)) return null;
+    const offersSearch = request.tools.some((tool) =>
+      this.transport === "generic_dispatch"
+        ? tool.type === "function" && tool.name === TOOL_SEARCH_NAME
+        : tool.type === "hosted_tool" && tool.providerData?.type === "tool_search",
+    );
+    if (!offersSearch) return null;
+    request.signal?.throwIfAborted();
+    await this.ensurePrepared();
+    const pool = this.searchableTools(this.currentTools).filter(
+      (tool): tool is Tool & { name: string } => isFunctionTool(tool),
+    );
+    const offered = new Set(
+      request.tools.flatMap((tool) => (tool.type === "function" ? [tool.name] : [])),
+    );
+    const names = [
+      ...new Set(
+        this.openingToolNames.flatMap((name) =>
+          toolsWithExactName(pool, name).map((tool) => tool.name),
+        ),
+      ),
+    ].filter((name) => !offered.has(name));
+    if (names.length === 0) return null;
+    const args = { query: "", names };
+    const call =
+      this.transport === "generic_dispatch"
+        ? {
+            type: "function_call",
+            callId: OPENING_TOOL_LOAD_CALL_ID,
+            name: TOOL_SEARCH_NAME,
+            arguments: JSON.stringify(args),
+            status: "completed",
+          }
+        : {
+            type: "tool_search_call",
+            call_id: OPENING_TOOL_LOAD_CALL_ID,
+            execution: "client",
+            status: "completed",
+            arguments: args,
+          };
+    return {
+      usage: new Usage(),
+      output: [call] as ModelResponse["output"],
+      providerData: { [OPENING_TOOL_LOAD_MARKER_KEY]: true },
+    };
   }
 
   wrapModel(model: Model): Model {
@@ -1839,6 +1942,29 @@ function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime)
   };
 }
 
+/** Whether a request starts its turn: nothing but instructions after the last user message. */
+function startsTurn(input: ModelRequest["input"]): boolean {
+  if (typeof input === "string") return true;
+  const items: unknown[] = input;
+  let lastUser = -1;
+  items.forEach((item, index) => {
+    if (isRecord(item) && item.role === "user") lastUser = index;
+  });
+  return (
+    lastUser >= 0 &&
+    items
+      .slice(lastUser + 1)
+      .every((item) => isRecord(item) && (item.role === "developer" || item.role === "system"))
+  );
+}
+
+/** Whether the history already holds this session's opening tool load. */
+function holdsOpeningToolLoad(input: ModelRequest["input"]): boolean {
+  if (typeof input === "string") return false;
+  const items: unknown[] = input;
+  return items.some((item) => isRecord(item) && callId(item) === OPENING_TOOL_LOAD_CALL_ID);
+}
+
 class LazyToolModel implements Model {
   constructor(
     private readonly inner: Model,
@@ -1846,6 +1972,8 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    const opening = await this.openingToolLoad(request);
+    if (opening) return opening;
     await beforeModelRequest("model_entry");
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
@@ -1862,6 +1990,19 @@ class LazyToolModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    const opening = await this.openingToolLoad(request);
+    if (opening) {
+      yield {
+        type: "response_done",
+        response: {
+          id: "opening_tools",
+          usage: { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          output: opening.output,
+          providerData: opening.providerData,
+        },
+      } as StreamEvent;
+      return;
+    }
     await beforeModelRequest("model_entry");
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
@@ -1906,6 +2047,19 @@ class LazyToolModel implements Model {
       ...args,
       request: prepareLazyToolRequest(args.request, this.runtime),
     });
+  }
+
+  /** The local opening tool load, already through the ordinary search transform. */
+  private async openingToolLoad(request: ModelRequest): Promise<ModelResponse | null> {
+    if (!this.runtime.hasOpeningToolLoad()) return null;
+    const opening = await this.runtime.openingToolLoad(
+      prepareLazyToolRequest(request, this.runtime),
+    );
+    if (!opening) return null;
+    return {
+      ...opening,
+      output: await transformResponseOutput(opening.output, this.runtime, request.signal),
+    };
   }
 }
 

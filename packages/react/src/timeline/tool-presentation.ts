@@ -873,6 +873,7 @@ export function skillToolPreview(item: ToolCallItem): string | null {
 const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Chats, goals and notifications
   nameChat: "rename",
+  saveBotTemplate: "rename",
   notify: "bell",
   withdrawNotification: "bell",
   tidyInbox: "inbox",

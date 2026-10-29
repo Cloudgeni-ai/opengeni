@@ -3,6 +3,7 @@
 import { Link } from "@tanstack/react-router";
 import {
   AudioLinesIcon,
+  BotIcon,
   BoxIcon,
   BrainCircuitIcon,
   GaugeIcon,
@@ -31,6 +32,7 @@ const WORKSPACE_CONFIG_ICONS = {
   "brain-circuit": BrainCircuitIcon,
   plug: PlugIcon,
   zap: ZapIcon,
+  bot: BotIcon,
   "audio-lines": AudioLinesIcon,
   "panels-top-left": PanelsTopLeftIcon,
   settings: SettingsIcon,
