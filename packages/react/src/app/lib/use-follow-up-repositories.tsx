@@ -411,6 +411,7 @@ export function useFollowUpRepositories(
       org: context.githubOrg,
       pending: disabled || context.busy,
       repoBusy: context.repoBusy,
+      githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
       githubAppBusy: context.githubAppBusy,
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,

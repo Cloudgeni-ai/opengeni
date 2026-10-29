@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { GitHubRepository } from "@opengeni/contracts";
+import { GitHubAppApiError, GitHubAppConfigurationError } from "@opengeni/github";
+import { isTransientGitHubRepositoryListFailure } from "../src/github-access";
 import { createGitHubRepositoryCatalog } from "../src/github-repository-catalog";
 
 function repo(id: number, installationId = 1): GitHubRepository {
@@ -159,5 +161,113 @@ describe("GitHub repository catalog", () => {
     expect(calls).toBe(3);
     await catalog.read([1], load);
     expect(calls).toBe(4);
+  });
+
+  test("a list fetched before the binding last changed is not reused", async () => {
+    const time = clock();
+    const catalog = createGitHubRepositoryCatalog({ freshMs: 60_000, now: time.now });
+    let calls = 0;
+    const load = async () => [repo(++calls)];
+
+    expect(await catalog.read([1], load, { notBefore: time.now() - 1 })).toEqual([repo(1)]);
+    time.advance(10);
+    // Reconnected on another replica after this process fetched its list.
+    const reboundAt = time.now() - 5;
+    expect(await catalog.read([1], load, { notBefore: reboundAt })).toEqual([repo(2)]);
+    expect(await catalog.read([1], load, { notBefore: reboundAt })).toEqual([repo(2)]);
+    expect(calls).toBe(2);
+  });
+
+  test("a passive read does not join a fetch that began before the binding changed", async () => {
+    const time = clock();
+    const catalog = createGitHubRepositoryCatalog({ now: time.now });
+    const older = deferred<GitHubRepository[]>();
+    let calls = 0;
+    const first = catalog.read([1], () => {
+      calls += 1;
+      return older.promise;
+    });
+    time.advance(10);
+    const second = catalog.read(
+      [1],
+      async () => {
+        calls += 1;
+        return [repo(2)];
+      },
+      { notBefore: time.now() - 1 },
+    );
+    expect(await second).toEqual([repo(2)]);
+    older.resolve([repo(1)]);
+    expect(await first).toEqual([repo(1)]);
+    expect(calls).toBe(2);
+  });
+
+  test("only failures the caller calls transient get the last good list", async () => {
+    const time = clock();
+    const catalog = createGitHubRepositoryCatalog({
+      freshMs: 1_000,
+      now: time.now,
+      serveStaleOn: (error) => error instanceof Error && error.message === "GitHub 502",
+    });
+    await catalog.read([1], async () => [repo(1)]);
+    time.advance(1_000);
+    expect(
+      await catalog.read([1], async () => {
+        throw new Error("GitHub 502");
+      }),
+    ).toEqual([repo(1)]);
+    await expect(
+      catalog.read([1], async () => {
+        throw new Error("installation removed");
+      }),
+    ).rejects.toThrow("installation removed");
+  });
+
+  test("lists past the stale window are dropped", async () => {
+    const time = clock();
+    const catalog = createGitHubRepositoryCatalog({
+      freshMs: 1_000,
+      staleIfErrorMs: 10_000,
+      maxEntries: 10,
+      now: time.now,
+    });
+    await catalog.read([1], async () => [repo(1)]);
+    time.advance(10_000);
+    // Expired on read: GitHub's failure is reported, not hidden by an old list.
+    await expect(
+      catalog.read([1], async () => {
+        throw new Error("GitHub 502");
+      }),
+    ).rejects.toThrow("GitHub 502");
+    await catalog.read([2], async () => [repo(2)]);
+    time.advance(10_000);
+    // Expired entries are swept when another list is stored.
+    await catalog.read([3], async () => [repo(3)]);
+    await expect(
+      catalog.read([2], async () => {
+        throw new Error("GitHub 502");
+      }),
+    ).rejects.toThrow("GitHub 502");
+  });
+});
+
+describe("GitHub repository list failures served from the last good list", () => {
+  test("outages are; configuration and lost access are not", () => {
+    const transient = isTransientGitHubRepositoryListFailure;
+    expect(transient(new GitHubAppApiError("Bad Gateway", 502))).toBe(true);
+    expect(transient(new GitHubAppApiError("Too Many Requests", 429))).toBe(true);
+    expect(transient(new GitHubAppApiError("API rate limit exceeded for installation", 403))).toBe(
+      true,
+    );
+    expect(transient(new TypeError("fetch failed"))).toBe(true);
+    expect(
+      transient(new GitHubAppApiError("GitHub returned an invalid repositories payload")),
+    ).toBe(true);
+    expect(transient(new GitHubAppApiError("Not Found", 404))).toBe(false);
+    expect(transient(new GitHubAppApiError("Bad credentials", 401))).toBe(false);
+    expect(transient(new GitHubAppApiError("Resource not accessible by integration", 403))).toBe(
+      false,
+    );
+    expect(transient(new GitHubAppConfigurationError(["GITHUB_APP_ID"]))).toBe(false);
   });
 });

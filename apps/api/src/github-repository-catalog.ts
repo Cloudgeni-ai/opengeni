@@ -12,7 +12,8 @@ import type { GitHubRepository } from "@opengeni/contracts";
  * last `freshMs`, share one GitHub call while it is in flight, and keep
  * serving the last good list for up to `staleIfErrorMs` when GitHub fails.
  * An explicit sync (`fresh: true`) always goes to GitHub and reports its
- * failure.
+ * failure. A list fetched before the workspace's binding last changed
+ * (`notBefore`, e.g. a reconnect on any API replica) is never reused.
  *
  * Only GitHub's metadata is kept. The caller still decides, on every read,
  * which installations are active and which repositories the workspace may
@@ -22,8 +23,15 @@ export type GitHubRepositoryCatalog = {
   read(
     installationIds: readonly number[],
     load: () => Promise<GitHubRepository[]>,
-    options?: { fresh?: boolean },
+    options?: GitHubRepositoryCatalogReadOptions,
   ): Promise<GitHubRepository[]>;
+};
+
+export type GitHubRepositoryCatalogReadOptions = {
+  /** Ask GitHub now and report its failure (an explicit sync). */
+  fresh?: boolean;
+  /** Epoch ms: lists fetched before this are out of date for this read. */
+  notBefore?: number;
 };
 
 export type GitHubRepositoryCatalogOptions = {
@@ -33,6 +41,12 @@ export type GitHubRepositoryCatalogOptions = {
   staleIfErrorMs?: number;
   /** Installation sets kept per process; the oldest is dropped first. */
   maxEntries?: number;
+  /**
+   * Whether a failure may be answered with the last good list. Defaults to
+   * every failure; callers pass a transient-only check so a removed
+   * installation or broken configuration is reported, not hidden.
+   */
+  serveStaleOn?: (error: unknown) => boolean;
   now?: () => number;
 };
 
@@ -41,20 +55,39 @@ export const GITHUB_REPOSITORY_CATALOG_STALE_IF_ERROR_MS = 30 * 60_000;
 const GITHUB_REPOSITORY_CATALOG_MAX_ENTRIES = 500;
 
 type Entry = { repositories: GitHubRepository[]; fetchedAt: number };
+type Pending = { request: Promise<GitHubRepository[]>; startedAt: number };
 
 export function createGitHubRepositoryCatalog(
   options: GitHubRepositoryCatalogOptions = {},
 ): GitHubRepositoryCatalog {
   const freshMs = options.freshMs ?? GITHUB_REPOSITORY_CATALOG_FRESH_MS;
-  const staleIfErrorMs = options.staleIfErrorMs ?? GITHUB_REPOSITORY_CATALOG_STALE_IF_ERROR_MS;
+  const staleIfErrorMs = Math.max(
+    freshMs,
+    options.staleIfErrorMs ?? GITHUB_REPOSITORY_CATALOG_STALE_IF_ERROR_MS,
+  );
   const maxEntries = Math.max(1, options.maxEntries ?? GITHUB_REPOSITORY_CATALOG_MAX_ENTRIES);
+  const serveStaleOn = options.serveStaleOn ?? (() => true);
   const now = options.now ?? Date.now;
   const entries = new Map<string, Entry>();
-  const inFlight = new Map<string, Promise<GitHubRepository[]>>();
+  const inFlight = new Map<string, Pending>();
+
+  /** An entry past the stale window is of no use to any read. */
+  function usable(key: string): Entry | undefined {
+    const entry = entries.get(key);
+    if (entry && now() - entry.fetchedAt >= staleIfErrorMs) {
+      entries.delete(key);
+      return undefined;
+    }
+    return entry;
+  }
 
   function remember(key: string, repositories: GitHubRepository[], fetchedAt: number): void {
     entries.delete(key);
     entries.set(key, { repositories, fetchedAt });
+    const at = now();
+    for (const [candidate, entry] of entries) {
+      if (at - entry.fetchedAt >= staleIfErrorMs) entries.delete(candidate);
+    }
     while (entries.size > maxEntries) {
       const oldest = entries.keys().next().value;
       if (oldest === undefined) break;
@@ -65,8 +98,8 @@ export function createGitHubRepositoryCatalog(
   async function fetchAndRemember(
     key: string,
     load: () => Promise<GitHubRepository[]>,
+    startedAt: number,
   ): Promise<GitHubRepository[]> {
-    const startedAt = now();
     const repositories = await load();
     // A slower, older fetch never replaces a newer list.
     const current = entries.get(key);
@@ -74,17 +107,22 @@ export function createGitHubRepositoryCatalog(
     return repositories;
   }
 
-  /** Passive reads of one installation set share a single GitHub call. */
+  /**
+   * Passive reads of one installation set share a single GitHub call, unless
+   * it began before the binding the reader knows about.
+   */
   function fetchShared(
     key: string,
     load: () => Promise<GitHubRepository[]>,
+    notBefore: number,
   ): Promise<GitHubRepository[]> {
     const pending = inFlight.get(key);
-    if (pending) return pending;
-    const request = fetchAndRemember(key, load).finally(() => {
-      inFlight.delete(key);
+    if (pending && pending.startedAt >= notBefore) return pending.request;
+    const startedAt = now();
+    const request = fetchAndRemember(key, load, startedAt).finally(() => {
+      if (inFlight.get(key)?.request === request) inFlight.delete(key);
     });
-    inFlight.set(key, request);
+    inFlight.set(key, { request, startedAt });
     return request;
   }
 
@@ -92,14 +130,17 @@ export function createGitHubRepositoryCatalog(
     async read(installationIds, load, readOptions = {}) {
       const key = [...new Set(installationIds)].sort((left, right) => left - right).join(",");
       // A sync asks GitHub itself, never a fetch that began before it.
-      if (readOptions.fresh) return await fetchAndRemember(key, load);
-      const cached = entries.get(key);
-      if (cached && now() - cached.fetchedAt < freshMs) return cached.repositories;
+      if (readOptions.fresh) return await fetchAndRemember(key, load, now());
+      const notBefore = readOptions.notBefore ?? Number.NEGATIVE_INFINITY;
+      const cached = usable(key);
+      if (cached && cached.fetchedAt >= notBefore && now() - cached.fetchedAt < freshMs) {
+        return cached.repositories;
+      }
       try {
-        return await fetchShared(key, load);
+        return await fetchShared(key, load, notBefore);
       } catch (error) {
-        const fallback = entries.get(key);
-        if (fallback && now() - fallback.fetchedAt < staleIfErrorMs) return fallback.repositories;
+        const fallback = usable(key);
+        if (fallback && serveStaleOn(error)) return fallback.repositories;
         throw error;
       }
     },

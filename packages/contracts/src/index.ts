@@ -6491,6 +6491,12 @@ export type GitHubAppApiPort = {
   getInstallation?: (input: {
     installationId: number;
   }) => Promise<GitHubInstallationSummary | null>;
+  /**
+   * The repositories GitHub shows these installations. The result must depend
+   * only on `installationIds` (one GitHub instance per port): the API caches
+   * it briefly per installation set and shares it across workspaces, which
+   * apply their own bindings and allowlists to it on every read.
+   */
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
   /**
    * List one bounded page of branch suggestions for one exact repository.

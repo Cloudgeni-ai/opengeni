@@ -116,7 +116,11 @@ function repository(id: number, installationId: number): GitHubRepository {
 
 /** A host GitHub App whose repository listing can be made to fail. */
 function testApp(installationId: number, repositoryIds: number[]) {
-  const github = { failing: false, listCalls: 0 };
+  const github = {
+    failing: false,
+    listCalls: 0,
+    repositoryIds,
+  };
   const app = createApp({
     settings,
     db: client.db,
@@ -134,7 +138,7 @@ function testApp(installationId: number, repositoryIds: number[]) {
       listRepositories: async () => {
         github.listCalls += 1;
         if (github.failing) throw new Error("GitHub answered 502 Bad Gateway");
-        return repositoryIds.map((id) => repository(id, installationId));
+        return github.repositoryIds.map((id) => repository(id, installationId));
       },
     },
   } as never);
@@ -191,7 +195,7 @@ describe("workspace GitHub repositories", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     await bindRepositories(workspace, { installationId: 502, repositoryIds: [11] });
-    const { app, github } = testApp(502, [11, 12]);
+    const { app } = testApp(502, [11, 12]);
     const list = `/v1/workspaces/${workspace.workspaceId}/github/repositories`;
 
     expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
@@ -201,6 +205,29 @@ describe("workspace GitHub repositories", () => {
     expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
       [12],
     );
-    expect(github.listCalls).toBe(1);
+  }, 60_000);
+
+  test("a reconnect shows a repository just shared on GitHub, even from a cached process", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await bindRepositories(workspace, { installationId: 504, repositoryIds: [31] });
+    const { app, github } = testApp(504, [31]);
+    const list = `/v1/workspaces/${workspace.workspaceId}/github/repositories`;
+
+    expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
+      [31],
+    );
+    // The person shares repo 32 on GitHub and reconnects (possibly through
+    // another API replica); this process still holds the older list.
+    github.repositoryIds = [31, 32];
+    await Bun.sleep(5);
+    await bindRepositories(workspace, { installationId: 504, repositoryIds: [31, 32] });
+    expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
+      [31, 32],
+    );
+    expect(github.listCalls).toBe(2);
+    // Later passive reads use the new list.
+    await app.request(list, { headers: await headers(workspace) });
+    expect(github.listCalls).toBe(2);
   }, 60_000);
 });

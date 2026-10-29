@@ -2526,6 +2526,7 @@ function workspaceRepositoryPickerProps(
     org: context.githubOrg,
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
+    githubLoadFailed: context.githubStatusFailed && !context.githubCatalogReady,
     githubAppBusy: context.githubAppBusy,
     onRefresh: async () => {
       await Promise.all([

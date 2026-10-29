@@ -173,7 +173,8 @@ export function SessionGitHubCapabilityCard({
       if (!active.current || sequence !== requestSequence.current) return;
       if (next.status === "bound") {
         setObserved({ status: next, over: context.githubStatus });
-        void context.refreshGitHub(workspaceId);
+        // The person asked to connect: show GitHub's current list, not a cached one.
+        void context.refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
         return;
       }
       if (!next.linkUrl)
@@ -519,7 +520,7 @@ function useRepositoryChooser({
     loading: repositories.length === 0 && (!context.githubCatalogReady || context.repoBusy),
     loadFailed:
       context.githubStatusFailed && !context.githubCatalogReady && repositories.length === 0,
-    retry: () => void context.refreshGitHub(workspaceId),
+    retry: () => void context.refreshGitHub(workspaceId, undefined, { userInitiated: true }),
     installations: (status?.installations ?? []).filter(
       (installation) => installation.lifecycle === "active",
     ),

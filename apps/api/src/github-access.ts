@@ -18,6 +18,7 @@ import {
 } from "@opengeni/db";
 import {
   GitHubAppApiError,
+  GitHubAppConfigurationError,
   getGitHubAppWebhookSetup,
   listGitHubAppInstallationSummaries,
   listGitHubAppRepositories,
@@ -197,11 +198,27 @@ export function githubInstallationBindingLifecycle(
 /** One repository catalog per GitHub App source (host App or this deployment's). */
 const repositoryCatalogs = new WeakMap<object, GitHubRepositoryCatalog>();
 
+/**
+ * Only an outage-like failure (GitHub 5xx, rate limit, timeout, network) is
+ * answered with the last good list. Missing configuration or an installation
+ * GitHub no longer grants (401, 403, 404) is reported as it happens.
+ */
+export function isTransientGitHubRepositoryListFailure(error: unknown): boolean {
+  if (error instanceof GitHubAppConfigurationError) return false;
+  if (error instanceof GitHubAppApiError && error.status !== null) {
+    if (error.status === 403) return /rate limit/i.test(error.message);
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  return true;
+}
+
 function repositoryCatalogFor(deps: ApiRouteDeps): GitHubRepositoryCatalog {
   const source: object = deps.githubAppApi ?? deps.settings;
   let catalog = repositoryCatalogs.get(source);
   if (!catalog) {
-    catalog = createGitHubRepositoryCatalog();
+    catalog = createGitHubRepositoryCatalog({
+      serveStaleOn: isTransientGitHubRepositoryListFailure,
+    });
     repositoryCatalogs.set(source, catalog);
   }
   return catalog;
@@ -237,6 +254,11 @@ export async function listWorkspaceGitHubRepositories(
     return [];
   }
   const installationIds = authorizedAccess.map((installation) => installation.installationId);
+  // A (re)connect on any API replica rewrites the binding: a list fetched
+  // before that may miss repositories the person just shared.
+  const boundAt = Math.max(
+    ...authorizedAccess.map((installation) => Date.parse(installation.updatedAt) || 0),
+  );
   const host = deps.githubAppApi;
   const repositories = await repositoryCatalogFor(deps).read(
     installationIds,
@@ -244,7 +266,7 @@ export async function listWorkspaceGitHubRepositories(
       host?.listRepositories
         ? host.listRepositories({ installationIds })
         : listGitHubAppRepositories(deps.settings, { installationIds }),
-    options,
+    { ...options, notBefore: boundAt },
   );
   const accessByInstallation = new Map(
     authorizedAccess.map((installation) => [installation.installationId, installation]),
