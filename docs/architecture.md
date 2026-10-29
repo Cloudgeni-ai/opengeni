@@ -2619,6 +2619,17 @@ wait `stalled` after a minute, and the switch then shows that reason with
 **Try again**, which restarts an agent that is already running. A connection
 the agent has stopped retrying (`Reconnect required`) is
 `errorCode: "reconnect_required"` at once, and turning on enrolls it again.
+When the refused connection was made in another workspace and this one uses
+it (`alsoIn`) while the server still lists it there, turning on enrolls it
+again in the workspace where it was made (a personal computer has one live
+connection on a server) and lets this workspace, and every other one that used
+it, use the new connection. A computer removed where it was made is never
+enrolled there again: it is set up in this workspace instead, as it is when
+that workspace no longer allows it. A listing that can't be read asks to try
+again, and a grant refused here after enrolling there is reported as such.
+`summary()` reports such a connection as `needsReconnect`, and the menu bar
+says the computer needs reconnecting, with **Reconnect This Computer…**
+opening the app, instead of "connecting…".
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
