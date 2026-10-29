@@ -11,10 +11,16 @@ import {
   withPreparedCompactionRequest,
 } from "../../../packages/runtime/src/prepared-compaction-request";
 
-for (const maintenance of [false, true]) {
-  test(`remote compaction waits for real request preparation (maintenance=${maintenance})`, async () => {
+for (const [maintenance, requestTrigger] of [
+  [false, null],
+  [true, "operator"],
+  // The idle checkpoint: the queued error still means "consume the request";
+  // its event/metric label is re-read from the request when it runs.
+  [true, "proactive"],
+] as const) {
+  test(`remote compaction waits for real request preparation (maintenance=${maintenance}, request=${requestTrigger})`, async () => {
     const requested = spyOn(db, "sessionCompactionRequestTrigger").mockResolvedValue(
-      maintenance ? "operator" : null,
+      requestTrigger,
     );
     const settings = testSettings({ contextAutoCompactThresholdTokens: 100 });
     const agent = { instructions: "unprepared" };

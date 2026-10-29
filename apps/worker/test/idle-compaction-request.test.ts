@@ -3,22 +3,26 @@ import type { Database } from "@opengeni/db";
 import {
   idleCompactionEligibility,
   requestIdleCompactionAfterCompletedTurn,
+  resolveCompactionRequestLabel,
 } from "../src/activities/agent-turn/idle-compaction-request";
 
 const humanTurn = { source: "user", initiatorKind: "subject" };
 
 describe("idleCompactionEligibility", () => {
-  test("a human or API turn with a threshold is eligible", () => {
+  test("a person's own turn with a threshold is eligible", () => {
     expect(idleCompactionEligibility({ enabled: true, turn: humanTurn, thresholdTokens: 1 })).toBe(
       "eligible",
     );
+  });
+
+  test("an API turn is not: an embedding host's one-shot session must not pay a checkpoint", () => {
     expect(
       idleCompactionEligibility({
         enabled: true,
         turn: { source: "api", initiatorKind: "subject" },
         thresholdTokens: 244_800,
       }),
-    ).toBe("eligible");
+    ).toBe("not_human_turn");
   });
 
   test("the deployment setting turns it off", () => {
@@ -121,5 +125,21 @@ describe("requestIdleCompactionAfterCompletedTurn", () => {
         fields: { sessionId: "s", turnId: "t", error: "TypeError" },
       },
     ]);
+  });
+});
+
+describe("resolveCompactionRequestLabel", () => {
+  test("a consumed request is labeled by whoever asked", async () => {
+    expect(await resolveCompactionRequestLabel(async () => "proactive")).toBe("proactive");
+    expect(await resolveCompactionRequestLabel(async () => "operator")).toBe("operator");
+  });
+
+  test("a vanished request or a failed read keeps the operator label", async () => {
+    expect(await resolveCompactionRequestLabel(async () => null)).toBe("operator");
+    expect(
+      await resolveCompactionRequestLabel(async () => {
+        throw new Error("connection reset");
+      }),
+    ).toBe("operator");
   });
 });

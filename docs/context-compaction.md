@@ -692,36 +692,60 @@ the request as described above.
 
 ### Idle checkpoint after a turn at the threshold
 
-A human or API turn in a root session can end with its provider-reported
-`last_input_tokens` already at or above the automatic compaction limit. Left
-alone, that checkpoint would run in front of the person's next message, often
-days later with a cold provider prompt cache (a `remote_v2` checkpoint of about
-240,000 tokens measured 145 s on staging, and the median remote checkpoint took
-171 s). Instead, right after the turn's completion settlement commits, the
-worker calls `requestIdleSessionCompactionIfDue`. Under the session row lock it
-rechecks that the session is idle with no active turn, is a root session, has no
-pending request, and holds a provider-reported count at or above the resolved
-limit, then sets the same durable request as `/compact` and enqueues the same
-workflow wake. The workflow's next work peek claims the ordinary standalone
-maintenance execution described above while the prompt cache is still warm.
-Nothing else differs: it is never prompt-queue work, a later Send queues behind
-it, a Steer waits for it, Pause and Cancel fence it, and failures follow the
-same holds. The request is best effort: a failed write is logged and the next
-turn's ordinary pre-inference check compacts instead.
+A person's own turn (`source="user"`, subject initiator) in a root session can
+end with its provider-reported `last_input_tokens` already at or above the
+automatic compaction limit. Left alone, that checkpoint would run in front of
+the person's next message, often days later with a cold provider prompt cache (a
+`remote_v2` checkpoint of about 240,000 tokens measured 145 s on staging, and
+the median remote checkpoint took 171 s). Instead, right after the turn's
+completion settlement commits, the worker calls
+`requestIdleSessionCompactionIfDue`. Under the session row lock it rechecks that
+the session is idle with no active turn, is a root session, has no pending
+request, has no active goal, has no held or timed-out `wait_for_input`, has no
+undelivered future-dated workflow wake, and holds a provider-reported count at
+or above the resolved limit. It then sets the same durable request as
+`/compact` and enqueues the same workflow wake. The workflow's next work peek
+claims the ordinary standalone maintenance execution described above while the
+prompt cache is still warm. It is never prompt-queue work. The request is best
+effort: a failed write is logged and the next turn's ordinary pre-inference
+check compacts instead.
 
-Child, scheduled, goal-continuation and other service work is excluded,
-because nobody may come back to those sessions and a checkpoint costs a full
-provider call; they compact at their next model boundary if they continue. Set
+While that checkpoint runs (minutes for a large `remote_v2` history) the session
+counts as running, exactly as during a manual `/compact`:
+
+- a new Send queues behind it, a Steer waits for it, and Pause and Cancel fence
+  it immediately;
+- deleting the session returns 409 until it finishes;
+- a whole-session fork and an Only-me visibility transition wait for
+  quiescence;
+- a scheduled task with `overlapPolicy: "skip"` that continues this chat skips
+  an occurrence that fires during the checkpoint.
+
+When the subscription pool has no capacity for the checkpoint, the maintenance
+execution is cancelled without holding a capacity waiter (as for `/compact`).
+A `proactive` request is then dropped in the same attempt-fenced settlement and
+recorded as `session.context.compaction.skipped(reason="capacity_unavailable")`,
+so it cannot keep winning later claims ahead of pending machine input with
+nothing to wake it when capacity returns; the person's next turn compacts at its
+ordinary threshold check. An operator request is preserved, as before.
+
+API turns are excluded, so an embedding host running one-shot API sessions does
+not pay a checkpoint per session. Child, scheduled, goal-continuation and other
+service work is excluded too, because nobody may come back to those sessions and
+a checkpoint costs a full provider call; they compact at their next model
+boundary if they continue. Goal and `wait_for_input` sessions are left to their
+own next turn, so the request never pulls their future-dated wake forward. Set
 `OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED=false` (default `true`) to turn the
 idle request off for a deployment.
 
 `sessions.compact_request_trigger` (migration 1100) labels the pending request:
 `operator` for `/compact`, `proactive` for the idle request. An operator request
 always relabels a pending request as `operator`; an idle request never relabels
-a pending one. A request written by an older binary has no label and reads as
-`operator`. The label only feeds the `session.context.compaction.requested`,
-`started` and metric `trigger`, so the timeline shows an automatic idle
-checkpoint as Auto rather than Manual. It never changes what runs, and every
+a pending one. A request written by an older binary, or created by a model
+switch away from Codex remote compaction, has no label and reads as `operator`.
+The label feeds the `session.context.compaction.requested`, `started` and
+metric `trigger`, so the timeline shows an automatic idle checkpoint as Auto
+rather than Manual, and it decides the capacity-deferral drop above. Every
 transaction that clears the request clears the label.
 
 ### Portable Responses identity regression

@@ -13,9 +13,13 @@ import {
  * maintenance execution as soon as this turn's activity returns.
  *
  * Scope is deliberately narrow because nobody may come back to the session:
- * only human/API turns (a frozen subject initiator) in root sessions. Child,
+ * only a person's own turns (`source="user"` with a frozen subject initiator)
+ * in root sessions. API turns are excluded so an embedding host running
+ * one-shot API sessions does not pay a checkpoint per session. Child,
  * scheduled, goal-continuation and other service work keeps compacting at its
- * next model boundary, which it reaches only if it continues.
+ * next model boundary, which it reaches only if it continues. The database
+ * call additionally leaves sessions with an active goal or a held
+ * `wait_for_input` alone.
  */
 export type IdleCompactionTurn = {
   source: string;
@@ -36,10 +40,7 @@ export function idleCompactionEligibility(input: {
 }): IdleCompactionEligibility {
   if (!input.enabled) return "disabled";
   if (input.turn.source === "compaction") return "maintenance";
-  if (
-    (input.turn.source !== "user" && input.turn.source !== "api") ||
-    input.turn.initiatorKind !== "subject"
-  ) {
+  if (input.turn.source !== "user" || input.turn.initiatorKind !== "subject") {
     return "not_human_turn";
   }
   if (!Number.isFinite(input.thresholdTokens) || input.thresholdTokens <= 0) {
@@ -84,4 +85,16 @@ export async function requestIdleCompactionAfterCompletedTurn(input: {
     });
     return null;
   }
+}
+
+/**
+ * Event and metric label for a compaction that consumes the durable request:
+ * whoever asked (`/compact` = operator, the idle checkpoint = proactive). A
+ * request that vanished, or a failed read, keeps the operator label; the label
+ * is display truth only, so reading it never fails the compaction.
+ */
+export async function resolveCompactionRequestLabel(
+  read: () => Promise<"operator" | "proactive" | null>,
+): Promise<"operator" | "proactive"> {
+  return (await read().catch(() => null)) ?? "operator";
 }

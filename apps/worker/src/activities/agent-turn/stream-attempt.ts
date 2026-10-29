@@ -230,7 +230,10 @@ import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
 import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
-import { requestIdleCompactionAfterCompletedTurn } from "./idle-compaction-request";
+import {
+  requestIdleCompactionAfterCompletedTurn,
+  resolveCompactionRequestLabel,
+} from "./idle-compaction-request";
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
@@ -758,9 +761,9 @@ export async function runTurnStreamAttempt(
     // label is display truth only, so a failed read never fails compaction.
     const label =
       triggerLabel === "operator"
-        ? ((await sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId).catch(
-            () => null,
-          )) ?? "operator")
+        ? await resolveCompactionRequestLabel(() =>
+            sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId),
+          )
         : triggerLabel;
     const outcome = await waitForTurnOperation(
       maybeCompactContext(
