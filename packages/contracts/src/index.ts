@@ -6588,6 +6588,16 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
      * whole plan credit. Absent means none.
      */
     apiDebtMicros: primitives.nonnegativeInteger.optional(),
+    /**
+     * Paid credit the bring-your-own-key platform fee may draw: a paid
+     * plan's remaining credit (app use only) and credits that were paid
+     * for (top-ups and operator grants), never Free, signup or promotional
+     * credit.
+     */
+    paidPlanCreditMicros: primitives.nonnegativeInteger.optional(),
+    paidCreditsMicros: primitives.nonnegativeInteger.optional(),
+    /** Own-key platform fees charged this calendar month (UTC). Absent means none. */
+    byokPlatformFeeMonthMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),

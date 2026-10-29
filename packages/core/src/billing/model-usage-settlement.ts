@@ -7,6 +7,7 @@ import {
   configuredModelListPricingSchedules,
   configuredModelPricingSchedules,
   resolveModelProvider,
+  resolveModelProviderForTurn,
   OPENGENI_GATEWAY_PROVIDER_ID,
   OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
@@ -17,7 +18,9 @@ import {
 import { createHash } from "node:crypto";
 import type { BillingOrigin, LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
+import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import {
+  applyCreditDebitAfterUse,
   applyCreditDebitUpToBalance,
   isStoredVerbatimAsLosslessJsonString,
   recordUsageEvent,
@@ -28,6 +31,11 @@ import {
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
+import {
+  byokListEquivalent,
+  byokPlatformFeeActive,
+  byokPlatformFeeMicros,
+} from "./byok-platform-fee";
 import {
   recordSessionUsageLimitEvent,
   type SessionUsageLimitMetricsSink,
@@ -55,6 +63,8 @@ export type ModelUsageBillingRecord = {
   listByClassApprox?: boolean;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
+  /** Bring-your-own-key platform fee charged for this response (USD micros). */
+  byokPlatformFeeMicros?: number;
 };
 
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
@@ -95,6 +105,11 @@ export type ModelUsageSettlementInput = {
    * debit's turn or the request's origin (API work spends credits only).
    */
   billingOrigin?: BillingOrigin;
+  /**
+   * Served by the person's own provider key or subscription. While credit
+   * billing is active it pays the platform fee from paid credit.
+   */
+  byok?: boolean;
   /** Best-effort metrics hook after a committed debit. */
   onCreditsDebited?: (result: { debitedMicros: number; grantDebitedMicros: number }) => void;
   /** Content-free per-task usage limit diagnostics (closed-set labels only). */
@@ -166,6 +181,48 @@ export function sessionUsageReceiptSourceId(sourceId: string, turnId?: string | 
     return stored;
   }
   return `sha256:${createHash("sha256").update(stored, "utf8").digest("hex")}`;
+}
+
+/**
+ * Charge the bring-your-own-key platform fee for one settled response: the
+ * configured share of its list-price equivalent (the fallback rate when no
+ * list price is known), debited once per source from paid credit.
+ */
+async function chargeByokPlatformFee(
+  settings: Settings,
+  db: Database,
+  input: ModelUsageSettlementInput,
+  priced: {
+    estimatedProviderCostMicros: number | null;
+    pricingSource: ModelUsageBillingRecord["pricingSource"];
+    inputTokens: number | null;
+    outputTokens: number | null;
+  },
+): Promise<number> {
+  if (!byokPlatformFeeActive(settings)) return 0;
+  const list = byokListEquivalent(priced);
+  const feeMicros = byokPlatformFeeMicros(list.listMicros, settings.byokPlatformFeeBps);
+  if (feeMicros <= 0) return 0;
+  await applyCreditDebitAfterUse(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    type: BYOK_PLATFORM_FEE_TYPE,
+    amountMicros: feeMicros,
+    sourceType: "model_response",
+    sourceId: input.sourceId,
+    idempotencyKey: `credit:${BYOK_PLATFORM_FEE_TYPE}:${input.sourceId}`,
+    byokPlatformFee: true,
+    ...(input.billingOrigin ? { usageOrigin: input.billingOrigin } : {}),
+    metadata: {
+      ...input.debitMetadata,
+      model: input.model,
+      listEquivalentMicros: list.listMicros,
+      listEquivalentSource: list.source,
+      ...(priced.pricingSource ? { pricingSource: priced.pricingSource } : {}),
+      feeBps: settings.byokPlatformFeeBps,
+    },
+  });
+  return feeMicros;
 }
 
 export async function settleModelUsage(
@@ -366,9 +423,24 @@ export async function settleModelUsage(
       ...usageContext,
       idempotencyKey: `usage:model.cost:${input.sourceId}`,
     });
+    // Explicit from the caller, else the served route's payer: the person's
+    // own key or subscription, never a deployment-funded free model.
+    const byok =
+      input.byok ??
+      (resolveModelProviderForTurn(settings, input.model)?.model.billing.upstreamPayer ??
+        "deployment") !== "deployment";
+    const byokFee = byok
+      ? await chargeByokPlatformFee(settings, db, input, {
+          estimatedProviderCostMicros,
+          pricingSource,
+          inputTokens: sanitizedUsage.inputTokens ?? null,
+          outputTokens: sanitizedUsage.outputTokens ?? null,
+        })
+      : 0;
     return {
       billingPath: "external",
       pricedCostMicros: 0,
+      ...(byokFee > 0 ? { byokPlatformFeeMicros: byokFee } : {}),
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,

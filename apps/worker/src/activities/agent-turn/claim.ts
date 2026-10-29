@@ -549,6 +549,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
   billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.billingOrigin = turn.billingOrigin;
+  billingState.isByokTurn =
+    !billingState.chargesOpenGeniCredits &&
+    turnExecutionPolicy.billing.upstreamPayer !== "deployment";
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   billingState.isClaudeTurn =
@@ -609,6 +612,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         turnExecutionPolicy.productModelId,
         input.sessionId,
         turn.billingOrigin,
+        billingState.isByokTurn,
       ),
       cancellationSignal,
       undefined,

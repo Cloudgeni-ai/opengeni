@@ -203,6 +203,48 @@ either. A list is one switch rather than a code path per product, and another
 internal account is added the same way. Processes install it at boot
 (`configureBillingLegacyAccounts`).
 
+## Platform fee on your own keys
+
+A call served by the person's own provider key (workspace or organization
+keys, workspace Gateway, organization Azure OpenAI and similar) or their own
+Claude, Codex or SuperGrok subscription costs Opengeni nothing upstream. It
+pays a platform fee instead, in the app and over the API alike:
+`byokPlatformFeeBps` (`OPENGENI_BYOK_PLATFORM_FEE_BPS`, default 500 = 5%) of
+the call's list-price equivalent, rounded up to the micro-dollar. The fee is
+charged only while credit billing is active (`OPENGENI_BILLING_MODE=stripe` or
+`OPENGENI_USAGE_LIMITS_MODE=managed`); `0` turns it off.
+
+- **List-price equivalent:** the reviewed list price of the served model, or
+  the cost the provider or Gateway reported. A custom endpoint with no list
+  price uses the fallback rate `BYOK_FALLBACK_LIST_RATE`: $1.25 per million
+  input tokens (cached and cache-write tokens count as input) and $10 per
+  million output tokens, a mid-tier frontier rate, so an unpriced model is
+  never fee-free and never priced like the most expensive one.
+- **Charge:** settlement writes one `byok_platform_fee` ledger debit per
+  response (`credit:byok_platform_fee:<sourceId>`, idempotent), with
+  `listEquivalentMicros`, `listEquivalentSource`, `feeBps`, and how it was
+  funded (`planPaidMicros`, `creditPaidMicros`).
+- **Paid credit only:** the fee may draw on a paid plan's credit (Pro, Max)
+  for app use, then on credits up to what was paid for: top-ups and operator
+  credit grants, net of refunds and disputes and of what earlier fees took
+  (`BillingBalance.paidPlanCreditMicros`, `paidCreditsMicros`). The Free plan's
+  monthly credit, signup credit and promotional credit never pay it: the fee
+  is a general debit and never draws on model-scoped grants, and Free monthly
+  credit is always model-scoped. API-origin fees come from credits only, like
+  all API use.
+- **Refusal:** with no paid credit an own-key call is refused before it runs:
+  HTTP 402, code `byok_paid_credit_required`, "Add credits to use your own
+  key." and the Add credits action. The worker re-checks between model calls.
+
+The fee is not a model charge: it never consumes scoped promotional grants,
+and a deployment-funded free model (`cost: "free"`, Opengeni pays upstream)
+pays neither credits nor the fee. Paid tools (sandbox time, web search,
+voice, image and video) keep their own credit charges with or without an own
+key.
+
+CloudGeni accounts that run on their own provider keys pay the fee from their
+operator credit grants, which count as paid credit.
+
 ## Rollout
 
 Migration 1128 is rolling: four nullable columns with `NOT VALID` checks,
@@ -221,3 +263,7 @@ During the rolling deploy an old pod neither sets nor reads
 write handled by an old pod leaves the source unmarked, and an old pod's
 intake doesn't mark the automations a delivery fires. Such a source stays app
 until its next API secret or format write on a new pod.
+
+The platform fee needs no migration. Its default (500) turns it on wherever
+credit billing is active once deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0`
+to deploy it switched off.
