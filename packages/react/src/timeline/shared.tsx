@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
-import { redactSignedUrls } from "./credential-redaction";
+import { redactPayload } from "./credential-redaction";
 import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
@@ -534,7 +534,8 @@ export function PayloadBlock({
 }) {
   const plain = useToolDetails() === "plain";
   // Signed links never show their signature.
-  const text = redactSignedUrls(typeof value === "string" ? value : stringifyPayload(value));
+  const shown = redactPayload(value);
+  const text = typeof shown === "string" ? shown : stringifyPayload(shown);
   // Raw arguments and output are developer detail: plain tool details never show them.
   if (plain || !text || text.trim() === "") {
     return null;

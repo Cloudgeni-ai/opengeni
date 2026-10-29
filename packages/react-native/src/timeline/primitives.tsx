@@ -1,4 +1,4 @@
-import { redactSignedUrls, stringifyPayload } from "@opengeni/react/timeline-model";
+import { redactPayload, stringifyPayload } from "@opengeni/react/timeline-model";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Animated, {
@@ -518,7 +518,8 @@ export function PayloadBlock({
 }) {
   const theme = useNativeTimelineTheme();
   // Signed links never show their signature.
-  const text = redactSignedUrls(typeof value === "string" ? value : stringifyPayload(value));
+  const shown = redactPayload(value);
+  const text = typeof shown === "string" ? shown : stringifyPayload(shown);
   if (!text || text.trim() === "") return null;
   return (
     <RuledBlock tone={failed ? "failed" : "neutral"}>

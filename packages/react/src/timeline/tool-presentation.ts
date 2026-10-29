@@ -301,7 +301,13 @@ export function execPresentation(
       iconTone: "failed",
       failed: true,
       chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
-      body: { kind: "term", command, workdir, output: redactSignedUrls(out), failed: true },
+      body: {
+        kind: "term",
+        command,
+        workdir,
+        output: redactSignedUrls(out, undefined, "text"),
+        failed: true,
+      },
     };
   }
 
@@ -346,7 +352,8 @@ export function execPresentation(
   }
 
   if (item.status === "running") {
-    const streamed = typeof out === "string" ? redactSignedUrls(stripExecBanner(out)) : "";
+    const streamed =
+      typeof out === "string" ? redactSignedUrls(stripExecBanner(out), undefined, "text") : "";
     const runningPreview = streamed ? `${streamed.split("\n").length} lines` : "running…";
     return {
       ...base,
@@ -364,7 +371,7 @@ export function execPresentation(
   }
 
   const text = typeof out === "string" ? out : stringifyPayload(out);
-  const stripped = redactSignedUrls(stripExecBanner(text));
+  const stripped = redactSignedUrls(stripExecBanner(text), undefined, "text");
   const bgSession = parseExecBannerSessionId(text);
   const exitCode = sandboxCommandExitCode(text);
   const binary = looksBinary(stripped);
