@@ -537,6 +537,67 @@ describe("webhook adapters", () => {
       );
     });
 
+    test("an event id joined from parts (Alertmanager's alerts), and none when a part is missing", () => {
+      const adapter = custom({
+        signature: { scheme: "token", header: "Authorization", prefix: "Bearer " },
+        batch: { path: "alerts" },
+        type: { path: "status" },
+        eventId: {
+          parts: [{ path: "status" }, { path: "fingerprint" }, { path: "startsAt" }],
+          separator: "|",
+        },
+        subject: "labels.alertname",
+      });
+      const body = encoder.encode(
+        JSON.stringify({
+          status: "firing",
+          groupKey: '{}:{alertname="DiskFull"}',
+          alerts: [
+            {
+              status: "firing",
+              fingerprint: "a1b2c3",
+              startsAt: "2026-10-26T18:00:00.000Z",
+              labels: { alertname: "DiskFull" },
+            },
+            {
+              status: "firing",
+              startsAt: "2026-10-26T18:00:00.000Z",
+              labels: { alertname: "NoFingerprint" },
+            },
+          ],
+        }),
+      );
+      const reading = adapter.read({ headers: new Headers(), body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events.map((event) => [event.type, event.subject, event.externalId])).toEqual([
+        ["firing", "DiskFull", "firing|a1b2c3|2026-10-26T18:00:00.000Z"],
+        ["firing", "NoFingerprint", null],
+      ]);
+      expect(adapter.retainedHeaders).toEqual([]);
+      // A header can be a part too, kept for replay, and the separator
+      // defaults to a dot.
+      const byDelivery = custom({
+        signature: { scheme: "token", header: "X-Token" },
+        type: { value: "ping" },
+        eventId: { parts: [{ header: "X-Delivery" }, { path: "seq" }] },
+      });
+      expect(byDelivery.retainedHeaders).toEqual(["x-delivery"]);
+      const ping = byDelivery.read({
+        headers: headersOf({ "x-delivery": "d-9" }),
+        body: encoder.encode(JSON.stringify({ seq: 3 })),
+        receivedAt,
+      });
+      if (ping.kind !== "events") throw new Error("expected events");
+      expect(ping.events[0]?.externalId).toBe("d-9.3");
+      expect(
+        WebhookFormat.safeParse({
+          signature: { scheme: "token", header: "X-Token" },
+          type: { value: "ping" },
+          eventId: { parts: [{ path: "seq" }] },
+        }).success,
+      ).toBe(false);
+    });
+
     test("Standard Webhooks signatures from an app's own whsec_ secret (Svix)", () => {
       const adapter = custom({
         signature: { scheme: "standard_webhooks" },

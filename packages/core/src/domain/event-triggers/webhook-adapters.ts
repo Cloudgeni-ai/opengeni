@@ -284,7 +284,11 @@ function textAt(value: unknown, path: string | undefined): string | null {
  * list of events.
  */
 function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
-  const headerNames = [format.type, format.deliveryId].flatMap((source) =>
+  // Headers the events are read from are kept with the delivery, so a replay
+  // reads the same events.
+  const eventIdParts =
+    format.eventId !== undefined && typeof format.eventId !== "string" ? format.eventId.parts : [];
+  const headerNames = [format.type, format.deliveryId, ...eventIdParts].flatMap((source) =>
     source && "header" in source ? [source.header.toLowerCase()] : [],
   );
   return {
@@ -376,6 +380,23 @@ function parseJsonOrNull(body: Uint8Array): unknown {
   }
 }
 
+/**
+ * An event's own id: a path, or parts joined with the separator. An event
+ * missing a part has no id, so it is never taken for another event that
+ * shares the parts it has.
+ */
+function eventIdAt(rule: WebhookFormat["eventId"], item: unknown, headers: Headers): string | null {
+  if (rule === undefined || typeof rule === "string") return textAt(item, rule);
+  const parts: string[] = [];
+  for (const part of rule.parts) {
+    const text =
+      "header" in part ? headers.get(part.header)?.trim() || null : textAt(item, part.path);
+    if (!text) return null;
+    parts.push(text);
+  }
+  return parts.join(rule.separator);
+}
+
 function customEvent(
   format: WebhookFormat,
   item: unknown,
@@ -404,7 +425,7 @@ function customEvent(
   const type = eventType(typeText);
   const occurredAt = format.occurredAt ? readPath(item, format.occurredAt) : undefined;
   return {
-    externalId: textAt(item, format.eventId)?.slice(0, 200) ?? null,
+    externalId: eventIdAt(format.eventId, item, headers)?.slice(0, 200) ?? null,
     type,
     occurredAt: parseEventTime(occurredAt) ?? receivedAt,
     subject: textAt(item, format.subject),

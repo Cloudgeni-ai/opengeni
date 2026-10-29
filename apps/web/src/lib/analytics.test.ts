@@ -216,6 +216,78 @@ describe("analytics providers", () => {
     }
   });
 
+  test("a chat share page loads neither GA4 nor Reo, since its address is the key to the conversation", async () => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+    const shareId = "Zq3secretShareKey0000000";
+    const scripts: string[] = [];
+    const reoInits: unknown[] = [];
+    const fakeWindow: Record<string, unknown> & { localStorage: Storage } = {
+      localStorage: { getItem: () => "granted", setItem: () => undefined } as unknown as Storage,
+      location: { origin: "https://app.opengeni.ai", pathname: `/share/${shareId}` },
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    };
+    Object.defineProperty(globalThis, "window", { configurable: true, value: fakeWindow });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        getElementById: () => null,
+        createElement: () => {
+          const listeners = new Map<string, () => void>();
+          return {
+            id: "",
+            async: false,
+            src: "",
+            listeners,
+            addEventListener: (type: string, listener: () => void) => listeners.set(type, listener),
+            remove: () => undefined,
+          };
+        },
+        head: {
+          append: (script: { src: string; listeners: Map<string, () => void> }) => {
+            scripts.push(script.src);
+            if (script.src.includes("reo.dev")) {
+              fakeWindow.Reo = {
+                init: (config: unknown) => reoInits.push(config),
+                unload: () => undefined,
+              };
+              queueMicrotask(() => script.listeners.get("load")?.());
+            }
+          },
+        },
+      },
+    });
+
+    try {
+      const config = {
+        consentRequired: true,
+        providers: {
+          ga4: { measurementId: "G-TEST123" },
+          reo: { clientId: "reo_client-1" },
+        },
+      };
+      syncAnalytics(config, `/share/${shareId}`);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(scripts).toEqual([]);
+      expect(reoInits).toEqual([]);
+      expect(fakeWindow.gtag).toBeUndefined();
+
+      // Anywhere else in the app the same providers load as before.
+      syncAnalytics(config, "/workspaces");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(scripts.some((src) => src.includes("googletagmanager.com"))).toBe(true);
+      expect(reoInits).toHaveLength(1);
+      expect(JSON.stringify(fakeWindow.dataLayer ?? [])).not.toContain(shareId);
+
+      persistAnalyticsConsent("denied", fakeWindow.localStorage);
+      applyAnalyticsConsent("denied");
+    } finally {
+      restoreGlobal("window", originalWindow);
+      restoreGlobal("document", originalDocument);
+    }
+  });
+
   test("identifies only by internal IDs and delivers lifecycle events after PostHog loads", async () => {
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
     const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
@@ -353,6 +425,18 @@ describe("analytics providers", () => {
         },
       });
       expect(JSON.stringify(projected)).not.toMatch(/sensitive|private/);
+      // A chat share page's address never reaches PostHog either.
+      const sharePage = beforeSend?.({
+        uuid: "3",
+        event: "$pageview",
+        properties: {
+          $current_url: "https://app.opengeni.ai/share/Zq3secretShareKey0000000",
+          $pathname: "/share/Zq3secretShareKey0000000",
+          page: "other",
+        },
+      });
+      expect(JSON.stringify(sharePage)).not.toContain("Zq3secretShareKey");
+      expect(sharePage?.properties.page).toBe("other");
       expect(projected?.properties.token).toBe("project-key");
       // Consented campaign tokens and referring domains survive the projection.
       expect(projected?.properties).toMatchObject({
