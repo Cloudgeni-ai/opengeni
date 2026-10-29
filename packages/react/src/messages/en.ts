@@ -454,6 +454,9 @@ export const englishMessages = {
     "Linear then shows the webhook's signing secret. Copy it and paste it here.",
   "automations.paste.linear.urlStep":
     "In Linear, open Settings, then API, and add a webhook with this URL. Pick what it sends, such as issues and comments.",
+  "automations.paste.publicKey.secretName": "public key",
+  "automations.paste.publicKey.secretStep":
+    "Paste the public key the app shows for its webhooks. It checks that each delivery is signed by the app.",
   "automations.paste.sentry.secretName": "client secret",
   "automations.paste.sentry.secretStep":
     "Sentry then shows the integration's client secret. Copy it and paste it here.",
@@ -464,6 +467,11 @@ export const englishMessages = {
     "Tailscale then shows the webhook secret once. Copy it and paste it here.",
   "automations.paste.tailscale.urlStep":
     "In the Tailscale admin console, open Settings, then Webhooks, and add an endpoint with this URL. Pick the events you want, such as new devices and policy changes.",
+  "automations.paste.urlToken.secretName": "secret",
+  "automations.paste.urlToken.secretStep":
+    "This app can't sign its deliveries, so the URL carries a secret instead. Paste the secret you added to the URL, at least 24 letters and digits.",
+  "automations.paste.urlToken.urlStep":
+    "In the app's webhook settings, use this URL with ?{parameter}= and a long random secret added at the end.",
   "automations.picker.addEvent": "Add an event",
   "automations.picker.cantReceive": "{product} can't receive this one.",
   "automations.picker.choose": "Choose an event",
@@ -3131,6 +3139,8 @@ export const englishMessages = {
   "messageTimeline.toolCallNotReplayedAfterReconnecting":
     "This tool call wasn't replayed. After reconnecting, send a new message to try again.",
   "messageTimeline.videoGenerationFailed": "Video generation failed",
+  "messageTimeline.voiceHandoff": "Voice handoff",
+  "messageTimeline.voiceRequest": "Voice request",
   "messageTimeline.workerCompleted": "Worker completed",
   "messageTimeline.workerFailed": "Worker failed",
   "messageTimeline.workerPaused": "Worker paused",
@@ -3201,6 +3211,9 @@ export const englishMessages = {
   "modelPolicy.fast": "Fast",
   "modelPolicy.freeCredits": "Free credits",
   "modelPolicy.freeInThisDeployment": "Free in this deployment",
+  "modelPolicy.geographyEu": "EU",
+  "modelPolicy.geographyGlobal": "Global",
+  "modelPolicy.geographyUs": "US",
   "modelPolicy.models": "Models",
   "modelPolicy.needsCredits": "Not covered by your credits",
   "modelPolicy.notEntitled": "Not entitled",
@@ -5133,6 +5146,17 @@ export const englishMessages = {
   "timeline.noticePresentation.waitingForAgentsSince_other":
     "Waiting for {count} agents · since {since}",
   "timeline.noticePresentation.waitingSince": "Waiting · since {since}",
+  "timeline.noticePresentation.declinedAutomatically": "Declined automatically.",
+  "timeline.noticePresentation.youApprovedActions_one": "You approved {count} action.",
+  "timeline.noticePresentation.youApprovedActions_other": "You approved {count} actions.",
+  "timeline.noticePresentation.youApprovedAndRejected":
+    "You approved {approved} and rejected {rejected}.",
+  "timeline.noticePresentation.youApprovedThis": "You approved this.",
+  "timeline.noticePresentation.youApprovedTitle": "You approved “{title}”.",
+  "timeline.noticePresentation.youRejectedActions_one": "You rejected {count} action.",
+  "timeline.noticePresentation.youRejectedActions_other": "You rejected {count} actions.",
+  "timeline.noticePresentation.youRejectedThis": "You rejected this.",
+  "timeline.noticePresentation.youRejectedTitle": "You rejected “{title}”.",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
@@ -5267,6 +5291,8 @@ export const englishMessages = {
   "timeline.projection.tryAgainAfterYourQuota":
     "Try again after your quota resets, or switch to another model or provider.",
   "timeline.projection.usageLimitReached": "Usage limit reached",
+  "timeline.projection.voiceSessionEnded":
+    "Voice session ended. Remaining conversation context was sent to the agent.",
   "timeline.projection.waiting": "Waiting",
   "timeline.projection.waitingForAnAccount": "Waiting for an account.",
   "timeline.projection.waitingForYou": "Waiting for you",
@@ -5575,6 +5601,8 @@ export const englishMessages = {
   "timeline.toolRenderers.viewPathbasename": "View {pathBasename}",
   "timeline.toolRenderers.waited": "Waited",
   "timeline.toolRenderers.waitingForYourApproval": "Waiting for your approval",
+  "timeline.toolRenderers.declinedAutomatically": "Declined automatically",
+  "timeline.toolRenderers.youRejectedThis": "You rejected this",
   "timeline.toolRenderers.wasNotFound": "was not found",
   "timeline.toolStep.archiveDocument.done": "Archived a document",
   "timeline.toolStep.archiveDocument.running": "Archiving a document",
@@ -5584,6 +5612,8 @@ export const englishMessages = {
   "timeline.toolStep.askForHelp.running": "Asking you for help",
   "timeline.toolStep.askYou.done": "Asked you",
   "timeline.toolStep.askYou.running": "Asking you",
+  "timeline.toolStep.changeEventSource.done": "Changed an event source",
+  "timeline.toolStep.changeEventSource.running": "Changing an event source",
   "timeline.toolStep.changeModel.done": "Changed the model",
   "timeline.toolStep.changeModel.running": "Changing the model",
   "timeline.toolStep.checkAccounts.done": "Checked accounts",

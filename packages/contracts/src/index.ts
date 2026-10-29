@@ -1164,6 +1164,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
   "slack_bot_list_channels",
   "slack_bot_search",
   "slack_bot_channel_history",
@@ -11902,6 +11905,9 @@ export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Pure organizational metadata: filing a session into a
 // channel never affects execution, authority, memory, or history.
+// A project's description and avatar are its profile, the same display
+// metadata a chat carries (see ./bots): shown to people in the sidebar and
+// never part of an agent's context.
 export const Channel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -11909,6 +11915,8 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     workspaceId: primitives.uuid,
     name: primitives.string,
     description: primitives.nullableString,
+    /** Shown instead of the folder icon; absent from servers that predate it. */
+    avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
     createdBy: primitives.nullableString,
@@ -11922,6 +11930,7 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
+    avatar: SessionAvatar.nullable().optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -11930,6 +11939,8 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80).optional(),
     description: z.string().max(2000).nullable().optional(),
+    /** null clears it; omitted keeps it. */
+    avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
   }),
 );
@@ -16164,6 +16175,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     contentArchivedOnly: z.literal(true).optional(),
     /** Explicit receipt for the started-or-messaged-by-you filter. */
     mineOnly: z.literal(true).optional(),
+    /** Explicit receipt for the `sessionIds` selection; older servers ignore it. */
+    sessionIdsApplied: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -16188,6 +16201,20 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
+/**
+ * A listed session's newest turn in execution order: the last queued turn,
+ * else the turn currently executing, else the most recently finished turn.
+ */
+export const SessionListLatestTurn = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    status: SessionTurnStatus,
+    startedAt: z.string().datetime().nullable(),
+    finishedAt: z.string().datetime().nullable(),
+  }),
+);
+export type SessionListLatestTurn = z.infer<typeof SessionListLatestTurn>;
+
 /** Compact list-only records; full Session and SessionSummary contracts are unchanged. */
 export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
   Session.pick({
@@ -16195,6 +16222,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: true,
     accountId: true,
     status: true,
+    activeTurnId: true,
     backgroundCommandActivity: true,
     hasSchedules: true,
     hasUpcomingSchedules: true,
@@ -16242,6 +16270,11 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
      */
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
+    /**
+     * Null when the session has no turn. Absent from older servers and from
+     * rows the SDK projects from full sessions; read turns for those.
+     */
+    latestTurn: SessionListLatestTurn.nullable().optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;

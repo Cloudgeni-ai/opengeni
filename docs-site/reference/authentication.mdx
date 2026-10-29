@@ -135,6 +135,8 @@ When the organization key acts as one of your users (through the session proxy, 
 
 To choose permissions yourself, call `addExternalWorkspaceMember` before the user's first request, and `updateExternalWorkspaceMember` to change them later.
 
+If your app already decides each user's role, state it on every request instead of mirroring changes into Opengeni: `asUser(userId, { source, membership: { permissions: [...] } })`, or a `membership` field in the `x-opengeni-external-actor` value. Opengeni makes the user's grant in that workspace exactly those permissions before authorizing the request: it adds a missing member and writes only when the grant differs. The same limits as `updateExternalWorkspaceMember` apply, with the same errors: the key needs `members:manage`, may not hand out `secrets:read` or permissions it lacks, and may not remove the workspace's last administrator. Without `membership`, the stored grant applies, so scheduled work keeps the last stated permissions. To remove a user, revoke them and stop stating them; a revoke wins over requests that were already in flight.
+
 ## Rules that hold everywhere
 
 - Keep organization keys on your server. Never embed one in a client.

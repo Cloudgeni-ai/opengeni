@@ -23,6 +23,7 @@
 //!   that a restart, which ends every VM, is seen as one.
 
 mod boot;
+mod fence;
 mod gate;
 mod guard;
 mod kept;
@@ -50,10 +51,14 @@ use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 pub use boot::{METADATA, Telling, boot_id};
+pub use fence::{
+    HAND_OVER_WITHIN, ServiceWatchdog, StopHook, guard_stopped, hand_over_guard, hand_over_mark,
+    hands_over, mark_hand_over,
+};
 pub use gate::Admission;
 pub use gate::{LeaseGate, boot_now, slept};
 pub use guard::{
-    Freezes, GuardConfig, STEP as GUARD_STEP, Said, guard_ready, hold_lock, keep_resident,
+    Fence, Freezes, GuardConfig, STEP as GUARD_STEP, Said, guard_ready, hold_lock, keep_resident,
     ready_lock, run_guard,
 };
 pub use lease::{terms_of, wire_terms};

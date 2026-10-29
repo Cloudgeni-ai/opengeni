@@ -17,11 +17,14 @@ import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { parseRequestJson } from "../http/request-body";
+import { requireUsableSessionAvatar } from "./session-avatar";
 
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Deliberately session-permission-gated (not workspace:admin):
 // anyone who can read sessions can see how they are organized, and anyone who
-// can create sessions can organize them.
+// can create sessions can organize them. A project's profile (description
+// and avatar) changes under the same rule as its name; projects are shared
+// with the whole workspace, so an image avatar must be one everyone can open.
 // Reject malformed ids before they reach UUID-typed persistence queries,
 // preserving the non-enumerating 404 contract over a driver-level 500.
 function channelIdParam(value: string): string {
@@ -44,12 +47,14 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const payload = await parseRequestJson(c, CreateChannelRequest);
+    await requireUsableSessionAvatar(deps, grant, payload.avatar, { sharedWithWorkspace: true });
     try {
       const channel = await createChannel(db, {
         accountId: grant.accountId,
         workspaceId,
         name: payload.name,
         description: payload.description ?? null,
+        avatar: payload.avatar ?? null,
         createdBy: grant.subjectId,
       });
       return c.json(channel, 201);
@@ -63,8 +68,9 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/channels/:channelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const payload = await parseRequestJson(c, UpdateChannelRequest);
+    await requireUsableSessionAvatar(deps, grant, payload.avatar, { sharedWithWorkspace: true });
     try {
       const channel = await updateChannel(
         db,

@@ -1869,6 +1869,33 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("a voice handoff's fixed notice reads in the host's language", () => {
+    // The stored text is an English notice, not something the person said.
+    reset();
+    const context =
+      "<realtime_delegation>\n  <transcript_delta>user: sjekk timene</transcript_delta>\n</realtime_delegation>";
+    const norwegian = createOpenGeniText({
+      locale: "nb",
+      messages: {
+        "timeline.projection.voiceSessionEnded":
+          "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      },
+    });
+    const [message] = buildTimeline(norwegian, [
+      event("user.message", {
+        text: "Voice session ended. Remaining conversation context was sent to the agent.",
+        presentation: { kind: "realtime_voice_handoff", context },
+      }),
+    ]) as UserMessageItem[];
+    expect(message).toMatchObject({
+      text: "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      annotationSource: {
+        text: "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      },
+      presentation: { kind: "realtime_voice_handoff", context },
+    });
+  });
+
   test("a delta after a tool call starts a new message instead of appending", () => {
     reset();
     const items = buildTimeline(englishText, [

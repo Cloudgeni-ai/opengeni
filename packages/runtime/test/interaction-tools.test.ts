@@ -8873,6 +8873,246 @@ describe("open reuses only a session on the chat's current machine", () => {
     expect(again.content.map((part) => (part as { text?: string }).text)).not.toContain(movedNote);
   });
 
+  // A computer opened on the chat's own cloud computer while the person has a
+  // computer of their own online names theirs, so a request about "my
+  // computer" reaches it in one more open instead of working in the wrong place.
+  test("computer_open on the chat's own computer names the person's online computers once", async () => {
+    const personalPc = randomUUID();
+    const machine = (
+      name: string,
+      overrides: Partial<{ scope: string; state: string; hasDisplay: boolean; os: string }> = {},
+    ) => ({
+      sandboxId: name === "Windows PC" ? personalPc : randomUUID(),
+      enrollmentId: randomUUID(),
+      scope: "user",
+      name,
+      kind: "selfhosted",
+      state: "online",
+      active: false,
+      isSessionGroup: false,
+      os: "windows",
+      arch: "x86_64",
+      hasDisplay: true,
+      ...overrides,
+    });
+    let machines: unknown[] = [];
+    let machinesFail = false;
+    let machineReads = 0;
+    let activeSandboxId: string | null = null;
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const there = discoveredComputerSession(randomUUID(), sessionId);
+    there.placement = { kind: "connected_machine", sandboxId: oldMachine };
+    const definitions = () =>
+      createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [home, there] }),
+            getComputerSession: async () => home,
+            createComputerSession: async () => {
+              throw new Error("an existing session is reused");
+            },
+          }),
+          getSession: async () =>
+            ({ id: sessionId, sandboxGroupId: groupId, activeSandboxId }) as never,
+          listMachines: async () => {
+            machineReads += 1;
+            if (machinesFail) throw new OpenGeniApiError(503, "unavailable");
+            return { activeSandboxId, activeEpoch: 1, machines } as never;
+          },
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+    const texts = (result: { content: unknown[] }) =>
+      result.content.flatMap((part) => {
+        const text = (part as { text?: string }).text;
+        return text === undefined ? [] : [text];
+      });
+    const note = `This is this chat's own cloud computer, not the person's. Their online computer: "Windows PC" (windows), placement {"kind":"connected_machine","sandboxId":"${personalPc}"}. To use it, call computer_open with that placement; this chat then runs there.`;
+    machines = [
+      { ...machine("Session sandbox", { os: "linux" }), kind: "modal", isSessionGroup: true },
+      machine("Windows PC"),
+      // Shared with the workspace, offline, or without a screen: not named.
+      machine("Build server", { scope: "workspace", os: "linux" }),
+      machine("Old laptop", { state: "offline" }),
+      machine("Headless box", { hasDisplay: false, os: "linux" }),
+    ];
+
+    const attempt = definitions();
+    const first = await attempt[0]!.execute({}, context());
+    expect(first.isError).not.toBe(true);
+    expect((first.structuredContent as { session: ComputerSession }).session.id).toBe(home.id);
+    expect(texts(first)).toContain(note);
+    expect(new TextEncoder().encode(note).byteLength).toBe(273);
+    // Once per attempt: the next open of the same computer does not repeat it.
+    const second = await attempt[0]!.execute({}, context());
+    expect(texts(second)).not.toContain(note);
+
+    // Opening it by placement or session ID chose it already: no read, no note.
+    machineReads = 0;
+    for (const args of [
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
+      { computerSessionId: home.id },
+    ]) {
+      const chosen = await definitions()[0]!.execute(args, context());
+      expect(texts(chosen).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+    }
+    expect(machineReads).toBe(0);
+
+    // On one of the person's machines already: nothing to add.
+    activeSandboxId = oldMachine;
+    const onMachine = await definitions()[0]!.execute({}, context());
+    expect((onMachine.structuredContent as { session: ComputerSession }).session.id).toBe(there.id);
+    expect(texts(onMachine).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+    activeSandboxId = null;
+
+    // Several computers of theirs online: each is named, in name order.
+    const mac = machine("Studio Mac", { os: "macos" });
+    machines = [...machines, mac];
+    const both = await definitions()[0]!.execute({}, context());
+    expect(texts(both)).toContain(
+      `This is this chat's own cloud computer, not the person's. Their online computers: "Studio Mac" (macos), placement {"kind":"connected_machine","sandboxId":"${mac.sandboxId}"}; "Windows PC" (windows), placement {"kind":"connected_machine","sandboxId":"${personalPc}"}. To use one, call computer_open with its placement; this chat then runs there.`,
+    );
+    machines = machines.filter((entry) => (entry as { name: string }).name !== "Windows PC");
+    machines = machines.filter((entry) => entry !== mac);
+    // No computer of theirs online, or no machine list: the open is as before.
+    const none = await definitions()[0]!.execute({}, context());
+    expect(texts(none).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+    machinesFail = true;
+    const unlisted = await definitions()[0]!.execute({}, context());
+    expect(unlisted.isError).not.toBe(true);
+    expect(texts(unlisted).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+  });
+
+  // Naming the person's computers only helps: a slow or stuck read of them
+  // never holds up an open, parallel opens name them once, and an open that
+  // lands on one of their machines never waits for the read at all.
+  const personalComputersFixture = () => {
+    const personalPc = randomUUID();
+    const pc = {
+      sandboxId: personalPc,
+      enrollmentId: randomUUID(),
+      scope: "user",
+      name: "Line\u2028Para\u2029PC",
+      kind: "selfhosted",
+      state: "online",
+      active: false,
+      isSessionGroup: false,
+      os: "windows",
+      arch: "x86_64",
+      hasDisplay: true,
+    };
+    const state = {
+      pending: [] as Array<(value: unknown) => void>,
+      signals: [] as Array<AbortSignal | undefined>,
+      activeSandboxId: null as string | null,
+    };
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const there = discoveredComputerSession(randomUUID(), sessionId);
+    there.placement = { kind: "connected_machine", sandboxId: oldMachine };
+    const definitions = () =>
+      createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [home, there] }),
+            getComputerSession: async () => home,
+            createComputerSession: async () => {
+              throw new Error("an existing session is reused");
+            },
+          }),
+          getSession: async () =>
+            ({
+              id: sessionId,
+              sandboxGroupId: groupId,
+              activeSandboxId: state.activeSandboxId,
+            }) as never,
+          // Answers only when the test says so, or never.
+          listMachines: (_workspaceId: string, options?: { signal?: AbortSignal }) => {
+            state.signals.push(options?.signal);
+            return new Promise((resolve) => state.pending.push(resolve)) as never;
+          },
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+    return {
+      state,
+      there,
+      definitions,
+      note: `This is this chat's own cloud computer, not the person's. Their online computer: "Line\\u2028Para\\u2029PC" (windows), placement {"kind":"connected_machine","sandboxId":"${personalPc}"}. To use it, call computer_open with that placement; this chat then runs there.`,
+      named: (result: { content: unknown[] }) =>
+        result.content.flatMap((part) => {
+          const text = (part as { text?: string }).text;
+          return text?.startsWith("This is this chat's own") ? [text] : [];
+        }),
+      timed: async <T>(run: () => Promise<T>) => {
+        const started = performance.now();
+        const value = await run();
+        return { value, ms: performance.now() - started };
+      },
+      answer: () => {
+        for (const resolve of state.pending)
+          resolve({ activeSandboxId: state.activeSandboxId, activeEpoch: 1, machines: [pc] });
+        state.pending = [];
+      },
+    };
+  };
+
+  test("computer_open does not wait for a read of the person's computers that never answers", async () => {
+    const f = personalComputersFixture();
+    const stuck = await f.timed(() => f.definitions()[0]!.execute({}, context()));
+    expect(stuck.value.isError).not.toBe(true);
+    expect(stuck.ms).toBeLessThan(1_000);
+    expect(f.named(stuck.value)).toEqual([]);
+    // The read can be stopped.
+    expect(f.state.signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  test("computer_open does not wait for a slow read, and a later open names them from it", async () => {
+    const f = personalComputersFixture();
+    const attempt = f.definitions();
+    const slow = await f.timed(() => attempt[0]!.execute({}, context()));
+    expect(slow.ms).toBeLessThan(1_000);
+    expect(f.named(slow.value)).toEqual([]);
+    f.answer();
+    const later = await attempt[0]!.execute({}, context());
+    expect(f.named(later)).toEqual([f.note]);
+    expect(new TextEncoder().encode(f.note).byteLength).toBe(285);
+    // One read for the attempt.
+    expect(f.state.signals).toHaveLength(1);
+  });
+
+  test("parallel computer_open calls share one read and name the person's computers once", async () => {
+    const f = personalComputersFixture();
+    const attempt = f.definitions();
+    const both = Promise.all([
+      attempt[0]!.execute({}, context()),
+      attempt[0]!.execute({}, context()),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.answer();
+    const [left, right] = await both;
+    expect([...f.named(left), ...f.named(right)]).toEqual([f.note]);
+    expect(f.state.signals).toHaveLength(1);
+  });
+
+  test("computer_open on one of the person's machines never waits for the read", async () => {
+    const f = personalComputersFixture();
+    f.state.activeSandboxId = oldMachine;
+    const onMachine = await f.timed(() => f.definitions()[0]!.execute({}, context()));
+    expect(onMachine.ms).toBeLessThan(200);
+    expect((onMachine.value.structuredContent as { session: ComputerSession }).session.id).toBe(
+      f.there.id,
+    );
+    expect(f.named(onMachine.value)).toEqual([]);
+  });
+
   test("browser_open naming another machine moves the chat there before creating", async () => {
     const swaps: string[] = [];
     const createRequests: unknown[] = [];

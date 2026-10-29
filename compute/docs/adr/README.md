@@ -31,6 +31,7 @@ old one; old records stay as history.
 | 23 | [GitHub Actions runner pools: a fresh sandbox per job](0023-github-actions-runner-pools.md) | Accepted |
 | 24 | [Busy sandboxes are slowed, never frozen, and the host never runs out](0024-busy-sandboxes-are-slowed-never-frozen.md) | Accepted |
 | 25 | [Pointers live in the control service, and stored objects carry their day](0025-pointers-in-the-control-service-and-objects-by-day.md) | Accepted |
+| 26 | [A host that shares its machine](0026-a-host-that-shares-its-machine.md) | Accepted |
 
 ## Format
 
