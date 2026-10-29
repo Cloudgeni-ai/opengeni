@@ -4061,7 +4061,6 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-      "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",

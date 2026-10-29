@@ -7,6 +7,8 @@ import {
   type AppActionAuthorityKind,
 } from "../src/activities/agent-turn/app-action-confirmation";
 import { prefixedMcpToolName } from "@opengeni/runtime";
+import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
+import { testSettings } from "@opengeni/testing/settings";
 
 function recording() {
   const seen: { stage: string; call: ConnectorActionToolCall }[] = [];
@@ -141,4 +143,48 @@ test("the pending approval event carries the same plain question for every surfa
   // Another server's tool of the same name keeps its own presentation.
   const other = { ...approval, name: prefixedMcpToolName("pm", "admin_action_call") };
   expect(withAppActionApprovalTitle(other, chat)).toBe(other);
+});
+
+test("turning on video paid with credits asks once, with the price on the card and the event", async () => {
+  const settings = testSettings({
+    environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+    vercelAiGatewayApiKey: "gateway-key",
+    billingMode: "stripe",
+  });
+  const turnOn = {
+    id: "updateVideoGenerationPolicy",
+    pathParameters: { workspaceId: "ws-1" },
+    body: {
+      expectedRevision: 7,
+      fundingSource: "opengeni_credits",
+      enabledModelIds: [SEEDANCE_2_5_MODEL_ID],
+      defaultModelId: SEEDANCE_2_5_MODEL_ID,
+    },
+  };
+  const title =
+    "Let every chat in this workspace make videos? A 5-second 480p clip costs $0.78 (720p: $1.75) in Opengeni credits.";
+  const { seen, policy } = recording();
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    settings,
+    authority: async () => "confirm",
+  });
+  await hooks.prepare(appCall("call-video", turnOn));
+  expect(seen[0]!.call).toMatchObject({ defaultDecision: "ask", reviewContext: { title } });
+  const approval = {
+    id: "call-video",
+    name: prefixedMcpToolName("opengeni", "admin_action_call"),
+    rawItem: { arguments: JSON.stringify(turnOn) },
+    display: { toolName: "admin_action_call", title: "Run an app action" },
+  };
+  expect(
+    withAppActionApprovalTitle(approval, { workspaceId: "ws-1", sessionId: "chat-1", settings }),
+  ).toMatchObject({ display: { title } });
+  // Turning it off has nothing to pay for.
+  const off = { ...turnOn, body: { ...turnOn.body, enabledModelIds: [], defaultModelId: null } };
+  await hooks.prepare(appCall("call-off", off));
+  expect(seen[1]!.call).toMatchObject({
+    reviewContext: { title: "Turn off video for every chat in this workspace?" },
+  });
 });

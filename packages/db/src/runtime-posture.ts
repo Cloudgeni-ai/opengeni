@@ -84,8 +84,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * the recording retention inventory and 0950 granted it. 0978 withholds the
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
- * 0984 withholds the connected-command re-arm the same way; until it is
- * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
+ * 0984 withheld the connected-command re-arm the same way and 1101 granted
+ * it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withholds the EU-only change function; until it is granted the setting
@@ -95,7 +95,6 @@ export const RUNTIME_DEFINER_ROUTINES = [
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
