@@ -83,8 +83,8 @@ and the same instance as `runCodeSearch({decisionModel, ...})`.
   both Jev and Luna. Tool-discovery evals ran on returned versions
   `typesafe/jev-1.13-20260917` and `openai/gpt-6-luna-decisions-20261006`.
   Jev was the stronger and cheaper selector on these catalogs; it is the recommended
-  optional backend. No-model remains the free default. See the
-  [complete measurements and limitations](../scripts/tool-discovery-eval/README.md).
+  optional backend. No-model remains the free default. Measure a deployment's own
+  catalog with the [tool search evaluation harness](../scripts/tool-discovery-eval/README.md).
 - **Direct TypeSafe:** existing client is reused and mocked end to end; no direct
   key was available for this evaluation. OpenRouter Jev results are not a direct
   TypeSafe latency or billing measurement.
