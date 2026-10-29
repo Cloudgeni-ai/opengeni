@@ -141,6 +141,11 @@ class FakeChrome {
           if (!profile.tabs.has(id)) throw new Error(`No tab with id: ${id}.`);
           return tabOf(id);
         },
+        create: async () => {
+          const id = Math.max(...profile.tabs) + 1;
+          profile.tabs.add(id);
+          return tabOf(id);
+        },
       },
     };
     new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
@@ -314,5 +319,22 @@ describe("a restarted extension worker", () => {
     const after = (await reloaded.hello()).device;
     expect(after.stateGeneration).not.toBe(before.stateGeneration);
     expect(chrome.local.stateResumptions).toBeUndefined();
+  });
+
+  test("remembers the tabs an agent opened that are still open", async () => {
+    const chrome = new FakeChrome();
+    const first = chrome.startWorker();
+    const command = await first.ready();
+    for (let opened = 0; opened < 2; opened++) {
+      expect(await command({ type: "tabs.create", url: "https://example.com/new" })).toMatchObject({
+        ok: true,
+      });
+    }
+    expect((chrome.session.liveState as any).createdTabs).toEqual([10, 11]);
+    // The person closes one while no worker runs.
+    chrome.tabs.delete(11);
+    const second = chrome.restartWorker();
+    await second.ready();
+    expect((chrome.session.liveState as any).createdTabs).toEqual([10]);
   });
 });

@@ -47,7 +47,6 @@ import {
   EllipsisIcon,
   FolderIcon,
   FolderPlusIcon,
-  FolderOpenIcon,
   ListFilterIcon,
   MailIcon,
   MailOpenIcon,
@@ -61,6 +60,8 @@ import {
   LinkIcon,
 } from "lucide-react";
 import { SessionAvatar } from "../session/session-avatar";
+import { ProjectGlyph } from "./project-glyph";
+import { ProjectProfileDialog } from "./project-profile";
 import {
   SessionProfileEditorDialog,
   useCanEditSessionProfile,
@@ -270,6 +271,7 @@ import {
 } from "../../lib/session-branch-cache";
 import { cn } from "../../lib/utils";
 import type { Channel, Session as SessionDetails } from "../../types";
+import type { UpdateChannelRequest } from "@opengeni/sdk";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
@@ -529,8 +531,7 @@ export function SessionList() {
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
-  const [projectPendingRename, setProjectPendingRename] = useState<Channel | null>(null);
-  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const [projectPendingEdit, setProjectPendingEdit] = useState<Channel | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -1885,20 +1886,20 @@ export function SessionList() {
     },
     [context, refreshSessionPages, verifySessionChannelMove],
   );
-  const submitRenameProject = useCallback(async () => {
-    const name = projectRenameDraft.trim();
-    if (!projectPendingRename || !name || channelsQuery.mutating) return;
-    if (name === projectPendingRename.name) {
-      setProjectPendingRename(null);
-      return;
-    }
-    const updated = await updateProject(projectPendingRename.id, { name });
-    if (updated) {
-      setProjectPendingRename(null);
-    } else {
-      toast.error("Couldn't rename the project. The name may already be in use.");
-    }
-  }, [projectRenameDraft, projectPendingRename, channelsQuery.mutating, updateProject]);
+  const saveProjectProfile = useCallback(
+    async (project: Channel, change: UpdateChannelRequest): Promise<boolean> => {
+      const updated = await updateProject(project.id, change);
+      if (!updated) {
+        toast.error(
+          change.name !== undefined
+            ? "Couldn't save the project. The name may already be in use."
+            : "Couldn't save the project.",
+        );
+      }
+      return updated !== null;
+    },
+    [updateProject],
+  );
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {
       const updated = await updateProject(project.id, { pinned: !project.pinned });
@@ -4090,10 +4091,7 @@ export function SessionList() {
                           : undefined
                       }
                       onToggleProjectPin={onToggleProjectPin}
-                      onRenameProject={(project) => {
-                        setProjectRenameDraft(project.name);
-                        setProjectPendingRename(project);
-                      }}
+                      onEditProject={setProjectPendingEdit}
                       onDeleteProject={setProjectPendingDelete}
                       draggedProjectId={draggedProjectId}
                       dragOverProjectId={dragOverProjectId}
@@ -4294,18 +4292,17 @@ export function SessionList() {
               </>
             )}
           </div>
-          <ChannelCreateDialog
-            key={projectPendingRename?.id ?? "rename-project"}
-            mode="rename"
-            open={projectPendingRename !== null}
-            name={projectRenameDraft}
-            busy={channelsQuery.mutating}
-            onNameChange={setProjectRenameDraft}
-            onOpenChange={(open) => {
-              if (!open) setProjectPendingRename(null);
-            }}
-            onSubmit={() => void submitRenameProject()}
-          />
+          {projectPendingEdit ? (
+            <ProjectProfileDialog
+              key={projectPendingEdit.id}
+              project={projectPendingEdit}
+              open
+              onOpenChange={(open) => {
+                if (!open) setProjectPendingEdit(null);
+              }}
+              update={(change) => saveProjectProfile(projectPendingEdit, change)}
+            />
+          ) : null}
           <ChannelCreateDialog
             open={channelDialogOpen}
             name={channelNameDraft}
@@ -4538,7 +4535,7 @@ function SessionGroup(props: {
   allowNewSession?: boolean | undefined;
   project?: Channel | undefined;
   onToggleProjectPin?: ((project: Channel) => void) | undefined;
-  onRenameProject?: ((project: Channel) => void) | undefined;
+  onEditProject?: ((project: Channel) => void) | undefined;
   onDeleteProject?: ((project: Channel) => void) | undefined;
   draggedProjectId?: string | null | undefined;
   dragOverProjectId?: string | null | undefined;
@@ -4594,6 +4591,39 @@ function SessionGroup(props: {
       ? [collapsedSelection]
       : [];
   const treeExpanded = sectionExpanded ? props.expanded : EMPTY_SESSION_IDS;
+  const projectDescription = props.project?.description?.trim() || null;
+  const projectDescriptionId = useId();
+  const sectionToggle = (
+    <button
+      id={sectionId}
+      type="button"
+      aria-expanded={sectionExpanded}
+      aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
+      onClick={props.onToggleSection}
+      // A described project explains itself in a tooltip instead.
+      title={projectDescription ? undefined : `${summary.label} · ${summary.total} total`}
+      aria-describedby={projectDescription ? projectDescriptionId : undefined}
+      className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
+    >
+      <span className="flex w-4 shrink-0 items-center">
+        <ProjectGlyph project={props.project} open={sectionExpanded} />
+      </span>
+      <span className="min-w-0 flex-1 truncate">{props.label}</span>
+      {props.showSummary !== false ? (
+        // The row's actions sit where the summary is, on the translucent
+        // hover wash, so the summary steps aside while they show.
+        <span
+          className={cn(
+            "inline-flex shrink-0",
+            (props.project || props.allowNewSession !== false) &&
+              "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
+          )}
+        >
+          <RailTrailingMetadata summary={summary} />
+        </span>
+      ) : null}
+    </button>
+  );
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
       {props.channelHeader ? (
@@ -4667,37 +4697,21 @@ function SessionGroup(props: {
               "ring-1 ring-inset ring-accent",
           )}
         >
-          <button
-            id={sectionId}
-            type="button"
-            aria-expanded={sectionExpanded}
-            aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
-            onClick={props.onToggleSection}
-            title={`${summary.label} · ${summary.total} total`}
-            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
-          >
-            <span className="flex w-4 shrink-0 items-center">
-              {sectionExpanded ? (
-                <FolderOpenIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              ) : (
-                <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              )}
+          {projectDescription ? (
+            <Tooltip delayDuration={400}>
+              <TooltipTrigger asChild>{sectionToggle}</TooltipTrigger>
+              <TooltipContent side="right" className="max-w-72 whitespace-pre-line text-pretty">
+                {projectDescription}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            sectionToggle
+          )}
+          {projectDescription ? (
+            <span id={projectDescriptionId} hidden>
+              {projectDescription}
             </span>
-            <span className="min-w-0 flex-1 truncate">{props.label}</span>
-            {props.showSummary !== false ? (
-              // The row's actions sit where the summary is, on the translucent
-              // hover wash, so the summary steps aside while they show.
-              <span
-                className={cn(
-                  "inline-flex shrink-0",
-                  (props.project || props.allowNewSession !== false) &&
-                    "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
-                )}
-              >
-                <RailTrailingMetadata summary={summary} />
-              </span>
-            ) : null}
-          </button>
+          ) : null}
           {props.project ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -4713,9 +4727,9 @@ function SessionGroup(props: {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
-                <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
+                <DropdownMenuItem onSelect={() => props.onEditProject?.(props.project!)}>
                   <PencilIcon aria-hidden="true" />
-                  Rename project
+                  Edit project…
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
@@ -5510,7 +5524,11 @@ function SessionRow(props: {
                     void props.onMoveToChannel(props.session, channel.id, "row");
                   }}
                 >
-                  <FolderIcon aria-hidden="true" />
+                  {channel.id === null ? (
+                    <FolderIcon aria-hidden="true" />
+                  ) : (
+                    <ProjectGlyph project={channel} className="size-4" />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{channel.name}</span>
                   <DropdownMenuCheck checked={current} />
                 </ContextMenuItem>
@@ -5773,7 +5791,11 @@ function RowActionsMenu({
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >
-                  <FolderIcon aria-hidden="true" />
+                  {channel.id === null ? (
+                    <FolderIcon aria-hidden="true" />
+                  ) : (
+                    <ProjectGlyph project={channel} className="size-4" />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{channel.name}</span>
                   <DropdownMenuCheck checked={current} />
                 </DropdownMenuItem>

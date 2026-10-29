@@ -116,9 +116,13 @@ export type UseSessionEventsResult = {
   error: Error | null;
 };
 
-// Keep every browser history read inside one database batch, including the
-// server's one-row continuation lookahead. A large total session must never
-// turn one lazy page into dozens of sequential database round trips.
+// First paint stays inside the server's single-query page (255 rows plus its
+// one-row continuation lookahead). A larger request is read in sequential
+// 256-row database batches, and on a long conversation whose rows are no
+// longer cached that walk took tens of seconds before anything rendered.
+const SESSION_FIRST_WINDOW_PAGE_SIZE = 255;
+// Pages the reader asks for by scrolling or catching up are larger and may
+// span a few database batches; they never block the first paint.
 const SESSION_HISTORY_PAGE_SIZE = 1000;
 const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
@@ -952,7 +956,7 @@ export function useSessionEvents(
       // loadOlder); a turn's steps load when the reader opens it.
       const window = await loadEventWindow(t, client, workspaceId, sessionId, {
         before: Number.MAX_SAFE_INTEGER,
-        pageSize: SESSION_HISTORY_PAGE_SIZE,
+        pageSize: SESSION_FIRST_WINDOW_PAGE_SIZE,
         targetGroups: Number.POSITIVE_INFINITY,
         maxFetches: INITIAL_FETCH_CAP,
         boundaryPageCap: BOUNDARY_PAGE_CAP,

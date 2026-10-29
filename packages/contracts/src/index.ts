@@ -42,6 +42,7 @@ export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
+export * from "./session-share-links";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
 import {
@@ -1163,6 +1164,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
   "slack_bot_list_channels",
   "slack_bot_search",
   "slack_bot_channel_history",
@@ -6491,6 +6495,12 @@ export type GitHubAppApiPort = {
   getInstallation?: (input: {
     installationId: number;
   }) => Promise<GitHubInstallationSummary | null>;
+  /**
+   * The repositories GitHub shows these installations. The result must depend
+   * only on `installationIds` (one GitHub instance per port): the API caches
+   * it briefly per installation set and shares it across workspaces, which
+   * apply their own bindings and allowlists to it on every read.
+   */
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
   /**
    * List one bounded page of branch suggestions for one exact repository.
@@ -9411,6 +9421,8 @@ export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
     "session.visibility.write",
     "session.fork.create",
     "session.personal_resource.grant",
+    /** Create, refresh or stop a read-only share link anyone holding it can open. */
+    "session.share_link.write",
   ]),
 );
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
@@ -11893,6 +11905,9 @@ export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Pure organizational metadata: filing a session into a
 // channel never affects execution, authority, memory, or history.
+// A project's description and avatar are its profile, the same display
+// metadata a chat carries (see ./bots): shown to people in the sidebar and
+// never part of an agent's context.
 export const Channel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -11900,6 +11915,8 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     workspaceId: primitives.uuid,
     name: primitives.string,
     description: primitives.nullableString,
+    /** Shown instead of the folder icon; absent from servers that predate it. */
+    avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
     createdBy: primitives.nullableString,
@@ -11913,6 +11930,7 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
+    avatar: SessionAvatar.nullable().optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -11921,6 +11939,8 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80).optional(),
     description: z.string().max(2000).nullable().optional(),
+    /** null clears it; omitted keeps it. */
+    avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
   }),
 );
@@ -19347,12 +19367,14 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // Standard timeline rendering omits it, while full event/audit reads retain
         // it. This is ordinary user-role content, not secret or privileged input.
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
-        // First-party tools the opening context is for, such as the tool that
-        // reaches the open document or record it names. The first turn loads
-        // them before its first model request, as a search by name would, so it
-        // can use them without searching; the session's tool block is unchanged.
-        // Decided once at creation. Names outside the session's tool selection
-        // are ignored; this grants no tool or permission.
+        // Tools the opening context is for, such as the tool that reaches the
+        // open document or record it names: first-party names, or the names an
+        // application's MCP server publishes for its tools. The first turn
+        // loads them before its first model request, as a search by name
+        // would, so it can use them without searching; the session's tool
+        // block is unchanged. Decided once at creation. Names outside the
+        // session's tool selection are ignored; this grants no tool or
+        // permission.
         modelContextTools: z.array(z.string().min(1).max(200)).max(OPENING_TOOLS_MAX).optional(),
         // The IANA time zone of the person sending the initial message, so the
         // model sees its local time. Ignored without an initial message.
@@ -20347,6 +20369,14 @@ export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
  * Better Auth's `error=signup_disabled` instead.
  */
 export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as const;
+
+/**
+ * Error code returned (HTTP 403, `{ code, message }`) when a deployment that
+ * restricts accounts to listed email addresses (`allowedUserEmails`) refuses to
+ * create an account for an address that isn't on the list.
+ * OAuth sign-up refusals redirect with `error=signup_email_not_allowed` instead.
+ */
+export const MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE = "SIGNUP_EMAIL_NOT_ALLOWED" as const;
 
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always

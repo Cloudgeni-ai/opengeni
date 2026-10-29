@@ -10,6 +10,7 @@ import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
+import { useWindowLayerOpen } from "../../lib/window-layer";
 import { PortalContainerProvider, usePortalContainer } from "../../ui/portal-container";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
@@ -118,6 +119,8 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
     [ownsSiteLocation],
   );
   const focused = props.fullScreen ?? ownFocused;
+  // Full screen, the Site fills the window's content.
+  useWindowLayerOpen(focused);
   const setFocused = (next: boolean) => {
     if (props.fullScreen === undefined) setOwnFocused(next);
     props.onFullScreenChange?.(next);

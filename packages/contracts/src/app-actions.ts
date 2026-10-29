@@ -278,6 +278,10 @@ export function appActionConfirmationTitle(
         : body?.visibility === "private"
           ? `Make ${chat} visible only to you?`
           : `Change who can see ${chat}?`;
+    case "createSessionShareLink":
+      return `Create a link to ${chat}? Anyone with the link can read the conversation up to now.`;
+    case "revokeSessionShareLink":
+      return `Stop sharing ${chat}? Its link will stop working.`;
     case "updateWorkspaceSettings":
       return `Change ${workspace}'s settings?`;
     case "updateOrganizationModelDefaults":
@@ -289,6 +293,14 @@ export function appActionConfirmationTitle(
       return `${toolApprovalQuestion(body, "this integration's")} in ${workspace}?`;
     case "updateSessionMcpToolPermissions":
       return `${toolApprovalQuestion(body, "this MCP server's")} in ${workspace}?`;
+    case "updateVideoGenerationPolicy": {
+      // The policy is the whole setting: a default model and enabled models
+      // turn video on (or change how it's paid for); none turn it off.
+      const models = Array.isArray(body?.enabledModelIds) ? body.enabledModelIds : [];
+      return typeof body?.defaultModelId === "string" && models.length > 0
+        ? `Let every chat in ${workspace} make videos?`
+        : `Turn off video for every chat in ${workspace}?`;
+    }
     default: {
       // Name where it applies; the card's next line shows the key values.
       const target =

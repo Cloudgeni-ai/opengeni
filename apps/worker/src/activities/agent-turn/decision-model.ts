@@ -7,6 +7,7 @@ import {
 } from "@opengeni/config";
 import { createHttpDecisionModel, type DecisionModel } from "@opengeni/decisions";
 import { createJevDecisionModel, JevClient } from "@opengeni/jev";
+import { sharedAzureEntraAccessTokenSource } from "@opengeni/network/azure-entra";
 import { sideFeatureRouteFetch, sideFeatureRouteRunnable } from "@opengeni/runtime";
 
 export type WorkerDecisionSettings = DecisionModelSettings &
@@ -50,7 +51,11 @@ export function configuredDecisionModel(
       : createHttpDecisionModel({
           provider: config.provider,
           model: config.model,
-          apiKey: config.apiKey,
+          // A key, or a cached Entra token for the deployment's own identity (Azure OpenAI).
+          apiKey:
+            "apiKey" in config
+              ? config.apiKey
+              : sharedAzureEntraAccessTokenSource(config.azureEntra),
           ...(config.baseUrl ? { endpoint: `${config.baseUrl.replace(/\/$/, "")}/decisions` } : {}),
           fetch: routeFetch,
         });

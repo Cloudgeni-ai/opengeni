@@ -1,8 +1,15 @@
 // The rail's sections that surfaces fill in: the brand row with the workspace
 // switcher slot, and the primary navigation with "New session" plus the
 // surface's own entries. `SessionShell` composes them.
-import { ChevronsLeftIcon, ChevronsRightIcon, SquarePenIcon, XIcon } from "lucide-react";
+import {
+  ChevronsLeftIcon,
+  ChevronsRightIcon,
+  PanelLeftIcon,
+  SquarePenIcon,
+  XIcon,
+} from "lucide-react";
 import { createContext, useContext, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 import { BrandMark, Wordmark } from "../brand-mark";
 import { useRail } from "./rail-context";
@@ -11,6 +18,7 @@ import { Button } from "../../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
 import { TooltipWithKeys } from "../command-menu/keycaps";
+import { desktopPlatform } from "../../lib/desktop";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
@@ -52,12 +60,49 @@ export function SessionShellSlotsProvider({
 }
 
 /**
+ * In the macOS app the sidebar toggle sits in the window bar, just right of
+ * the traffic lights, as in native Mac apps. It starts clear of the wider
+ * badge macOS swaps in for the traffic lights while the window is shared or
+ * recorded (about 80px across), so it stays put in full screen too.
+ */
+const SIDEBAR_TOGGLE_IN_WINDOW_BAR = desktopPlatform === "macos";
+
+/**
+ * Controls drawn in the desktop window bar, above the page and its drag
+ * region (`z-[46]`, one above the bar's 45). Rendered into a host at the start
+ * of the body, so no rail or canvas stacking context can put them under the
+ * bar, and they come first in the tab order, as the bar comes first on screen.
+ */
+function WindowBarControls({ children }: { children: ReactNode }) {
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div
+      data-window-bar-controls
+      className="fixed left-[84px] top-0 z-[46] flex h-(--og-window-bar-height) items-center gap-1 [-webkit-app-region:no-drag] [app-region:no-drag]"
+    >
+      {children}
+    </div>,
+    windowBarHost(),
+  );
+}
+
+function windowBarHost(): HTMLElement {
+  let host = document.querySelector<HTMLElement>("body > [data-window-bar-host]");
+  if (!host) {
+    host = document.createElement("div");
+    host.setAttribute("data-window-bar-host", "");
+    document.body.prepend(host);
+  }
+  return host;
+}
+
+/**
  * The top of the main rail: a brand row (the mark and the "Opengeni" wordmark)
  * and, under it, the workspace picker at full rail width. Its spacing matches
  * the settings rail's top (12px, 32px brand row, 12px gap) so switching
  * between the two rails doesn't jump. The collapse toggle sits at the right end
  * of the brand row; collapsed, only the mark stays, with the expand toggle
- * under it.
+ * under it. In the macOS app the toggle is in the window bar instead.
  */
 export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
@@ -67,6 +112,8 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
   // its end.
   const brand = useSessionUiFeature("brand");
   const brandless = !brand;
+  const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !rail.isMobile;
+  const toggleLabel = rail.collapsed ? "Expand sidebar" : "Collapse sidebar";
   const collapseToggle = !rail.isMobile ? (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -74,28 +121,31 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={toggleLabel}
           aria-keyshortcuts={sidebarKeys?.ariaKeys}
           onClick={rail.toggleCollapsed}
           className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
         >
-          {rail.collapsed ? (
+          {toggleInWindowBar ? (
+            <PanelLeftIcon className="size-4" />
+          ) : rail.collapsed ? (
             <ChevronsRightIcon className="size-4" />
           ) : (
             <ChevronsLeftIcon className="size-4" />
           )}
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="right">
-        <TooltipWithKeys
-          label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          shortcut={sidebarKeys}
-        />
+      <TooltipContent side={toggleInWindowBar ? "bottom" : "right"}>
+        <TooltipWithKeys label={toggleLabel} shortcut={sidebarKeys} />
       </TooltipContent>
     </Tooltip>
   ) : null;
+  const rowToggle = toggleInWindowBar ? null : collapseToggle;
   return (
     <div data-rail-header className="flex shrink-0 flex-col gap-3 pt-3">
+      {toggleInWindowBar && collapseToggle ? (
+        <WindowBarControls>{collapseToggle}</WindowBarControls>
+      ) : null}
       <div
         data-rail-brand
         data-window-drag
@@ -115,7 +165,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}
           </Link>
         )}
-        {!rail.collapsed || brandless ? collapseToggle : null}
+        {!rail.collapsed || brandless ? rowToggle : null}
         {rail.isMobile ? (
           <Button
             type="button"
@@ -129,8 +179,8 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
           </Button>
         ) : null}
       </div>
-      {rail.collapsed && collapseToggle && !brandless ? (
-        <div className="-mt-1 grid justify-items-center">{collapseToggle}</div>
+      {rail.collapsed && rowToggle && !brandless ? (
+        <div className="-mt-1 grid justify-items-center">{rowToggle}</div>
       ) : null}
       {showSwitcher && !rail.collapsed ? switcher : null}
     </div>

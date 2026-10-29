@@ -186,6 +186,53 @@ describe.each(["openai", "openrouter"] as const)("%s typed decision backend", (p
     ).rejects.toThrow("stop-judging");
     expect(calls).toBe(1);
   });
+
+  test("an access token is fetched per request, and a rejected token is discarded", async () => {
+    const issued = ["token-1", "token-2"];
+    const discarded: string[] = [];
+    const accessToken = Object.assign(async () => issued.shift()!, {
+      discard: (token: string) => void discarded.push(token),
+    });
+    const sent: (string | null)[] = [];
+    const model = createHttpDecisionModel({
+      provider,
+      model: "test",
+      apiKey: accessToken,
+      fetch: (async (_, init) => {
+        sent.push(new Headers(init?.headers).get("authorization"));
+        return sent.length === 1
+          ? Response.json({ error: "expired" }, { status: 401 })
+          : Response.json(payload(provider));
+      }) as typeof fetch,
+    });
+    await expect(model.decide("input", mutableQuestions)).rejects.toBeInstanceOf(
+      DecisionUnavailableError,
+    );
+    expect(discarded).toEqual(["token-1"]);
+    expect((await model.decide("input", mutableQuestions)).answers.relevant).toMatchObject({
+      probability: 0.9,
+    });
+    expect(sent).toEqual(["Bearer token-1", "Bearer token-2"]);
+  });
+
+  test("a failing token source makes the model unavailable without calling the provider", async () => {
+    let calls = 0;
+    const model = createHttpDecisionModel({
+      provider,
+      model: "test",
+      apiKey: async () => {
+        throw new Error("private-sign-in-detail");
+      },
+      fetch: (async () => {
+        calls++;
+        return Response.json(payload(provider));
+      }) as typeof fetch,
+    });
+    const error = await model.decide("input", mutableQuestions).catch((caught) => caught);
+    expect(error).toBeInstanceOf(DecisionUnavailableError);
+    expect(String(error)).not.toContain("private-sign-in-detail");
+    expect(calls).toBe(0);
+  });
 });
 
 test("OpenAI named refusals are preserved; duplicate names are invalid", async () => {

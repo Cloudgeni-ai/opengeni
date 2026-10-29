@@ -4026,9 +4026,7 @@ async function createSessionForRequestInFileScope(
     });
   }
   const initialLearningScope =
-    effectiveVisibility === "user_private" ||
-    sessionScope.memoryScope === "user" ||
-    workspace.kind === "personal"
+    effectiveVisibility === "user_private" || sessionScope.memoryScope === "user"
       ? ("personal" as const)
       : ("workspace" as const);
   const initialLearningActor = initialLearningContext?.actor;

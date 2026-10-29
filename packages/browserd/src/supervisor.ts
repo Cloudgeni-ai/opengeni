@@ -229,6 +229,14 @@ export type BrowserSessionReference = {
   controllerGeneration: string;
 };
 
+/** About the caller of one createSession, not the session itself. */
+export type BrowserSupervisorCreation = {
+  /** The caller can take a session with no observation (null): one that
+   * continued in the person's own browser with no tab of its own. Callers
+   * from before such sessions omit it and get a new tab instead. */
+  acceptsNoObservation?: boolean;
+};
+
 export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
   initialUrl?: string;
   headed: boolean;
@@ -294,7 +302,9 @@ export type BrowserStateRestoreInput = {
 };
 
 export type BrowserSupervisorSession = BrowserSessionReference & {
-  observation: BrowserObservation;
+  /** Null only in the person's own browser, for a session that continued
+   * there with none of its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservation | null;
   /** Returned only by the create that launched the browser. */
   notice?: string;
   /** How this headed managed browser shows on the machine as launched: in a
@@ -312,6 +322,11 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
   upload: BrowserStateUploadAuthority;
 };
 
+/** Whether the caller asked for BrowserObservation.notice (see
+ * BROWSER_OBSERVATION_NOTICES_PARAMETER): the agent's own tools do, so a
+ * notice reaches the agent and nothing else uses it up. */
+export type BrowserObservationNoticeOptions = { notices?: boolean };
+
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
@@ -320,6 +335,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   /** The load error of the page start() kept on the browser's error page. */
   readonly startLoadError?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
+  /** Start a session continuing in the person's browser in a tab it left
+   * there; null when it has none left, so it starts with no tab. */
+  resume?(): Promise<BrowserObservation | null>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
@@ -376,6 +394,14 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * reopened tab keeps its earlier ID, and calls naming an earlier tab that
    * did not reopen say why it is gone. */
   noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
+  /** The plain notice that a relaunch reloaded this tab's page, for the
+   * first result about it that reaches the caller; null when there is none
+   * or it was already given. */
+  takeReloadedTabNotice?(tabId: string): string | null;
+  /** The http(s) URL a tab showing the browser's error page failed to load:
+   * the address the browser reopens it at after a relaunch. Null when it
+   * can't be read. */
+  errorPageUrl?(tabId: string): Promise<string | null>;
   /** Give open tabs the IDs callers already hold for them (an earlier
    * controller on the same browser gave them those IDs). */
   adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
@@ -497,6 +523,8 @@ type Runtime = {
    * returned once from createSession instead of immediately rebuilding the
    * same accessibility tree through a second controller round trip. */
   creationObservation: BrowserObservation | null;
+  /** The runtime continued a session that had no tab left, so it has none. */
+  startedWithoutTab: boolean;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
   /** Outstanding uses that keep the browser's windows presented. Each is
@@ -998,8 +1026,20 @@ export class BrowserSupervisor {
     return supervisor;
   }
 
+  /** A browser this controller launches always shows a tab. */
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions & {
+      transport?: Exclude<BrowserSupervisorTransport, { kind: "attached_chrome" }>;
+    },
+    creation?: BrowserSupervisorCreation,
+  ): Promise<BrowserSupervisorSession & { observation: BrowserObservation }>;
   async createSession(
     optionsInput: BrowserSupervisorSessionOptions,
+    creation?: BrowserSupervisorCreation,
+  ): Promise<BrowserSupervisorSession>;
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions,
+    creation: BrowserSupervisorCreation = {},
   ): Promise<BrowserSupervisorSession> {
     this.assertOpen();
     const options = validateSessionOptions(optionsInput);
@@ -1013,7 +1053,7 @@ export class BrowserSupervisor {
         "ephemeral browser contexts are disabled by the operator",
       );
     }
-    const request = this.createValidatedSession(options);
+    const request = this.createValidatedSession(options, creation.acceptsNoObservation === true);
     this.creationRequests.add(request);
     try {
       return await request;
@@ -1325,6 +1365,7 @@ export class BrowserSupervisor {
 
   private async createValidatedSession(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<BrowserSupervisorSession> {
     await this.retireTerminalSessions();
     // A handed-off browser being stopped for idleness is never adopted while
@@ -1345,7 +1386,7 @@ export class BrowserSupervisor {
       return {
         ...binding(active),
         ...displayOf(active),
-        observation: await this.currentObservation(active),
+        observation: await this.currentObservation(active, acceptsNoObservation),
       };
     }
     const pending = this.creating.get(options.browserSessionId);
@@ -1356,7 +1397,7 @@ export class BrowserSupervisor {
       return {
         ...binding(runtime),
         ...displayOf(runtime),
-        observation: await this.currentObservation(runtime),
+        observation: await this.currentObservation(runtime, acceptsNoObservation),
       };
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
@@ -1365,7 +1406,7 @@ export class BrowserSupervisor {
         `This machine is already running its limit of ${this.maxSessions} managed browsers. End browser sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
-    const creation = this.buildRuntime(options);
+    const creation = this.buildRuntime(options, acceptsNoObservation);
     this.creating.set(options.browserSessionId, creation);
     try {
       const runtime = await creation;
@@ -1392,8 +1433,13 @@ export class BrowserSupervisor {
         runtime.waitHoldUntil = detachedHold;
       }
       this.sessions.set(options.browserSessionId, runtime);
-      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+      const observation =
+        runtime.creationObservation ??
+        (runtime.startedWithoutTab
+          ? null
+          : await this.currentObservation(runtime, acceptsNoObservation));
       runtime.creationObservation = null;
+      runtime.startedWithoutTab = false;
       // The browser opened even if its first page did not load; say why in
       // plain words rather than leave the caller to infer it from the
       // browser's error page.
@@ -1538,6 +1584,7 @@ export class BrowserSupervisor {
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
+    options: BrowserObservationNoticeOptions = {},
   ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.mutateWithRecovery(runtime, async () => {
@@ -1547,7 +1594,7 @@ export class BrowserSupervisor {
     this.noteRecordingTarget(runtime, "select_tab", observation.target.id, {
       url: observation.target.url,
     });
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async closeTarget(
@@ -1562,13 +1609,17 @@ export class BrowserSupervisor {
     return targets;
   }
 
-  async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
+  async observe(
+    reference: BrowserSessionReference,
+    targetId: string,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.readWithRecovery(runtime, async () => {
       return await runtime.controller.observe(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async targetState(
@@ -1598,17 +1649,20 @@ export class BrowserSupervisor {
     return this.requireActive(reference).driver.readClipboard();
   }
 
-  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+  async action(
+    command: BrowserActionCommand,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
     });
     // Logged as the agent sent it: secret references are not resolved here.
     this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
-    const receipt = await this.presented(
-      runtime,
-      async () => await runtime.controller.run(command),
-    );
+    const ran = await this.presented(runtime, async () => await runtime.controller.run(command));
+    const receipt = ran.observation
+      ? { ...ran, observation: this.reported(runtime, ran.observation, options) }
+      : ran;
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
       await this.recoverIfUnavailable(runtime).catch(() => false);
@@ -2141,12 +2195,15 @@ export class BrowserSupervisor {
    * move the directory meanwhile. An adoption that owns the directory, and
    * is not one this launch's authority carries forward, refuses the launch;
    * the launch never falls back to anything else. */
-  private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
+  private async buildRuntime(
+    options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
+  ): Promise<Runtime> {
     try {
       return await this.withOwnedWorkingDirectory(
         "launch",
         options,
-        async () => await this.buildOwnedRuntime(options),
+        async () => await this.buildOwnedRuntime(options, acceptsNoObservation),
       );
     } catch (error) {
       throw browserLaunchFailure(error);
@@ -2155,6 +2212,7 @@ export class BrowserSupervisor {
 
   private async buildOwnedRuntime(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<Runtime> {
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const profileDirectory = join(sessionDirectory, "profile");
@@ -2497,6 +2555,7 @@ export class BrowserSupervisor {
         },
         lastTargets: [],
         creationObservation: null,
+        startedWithoutTab: false,
         recovery: null,
         presence: new Set(),
         recording: null,
@@ -2522,9 +2581,17 @@ export class BrowserSupervisor {
         } else {
           // The browser opens even when its first page fails to load: the tab
           // shows the browser's error page, which names the failure.
-          const observation = await driver.start(options.initialUrl, { keepTabOnLoadError: true });
+          // A session continuing in the person's browser carries on in a
+          // tab it left there, and opens none when it has none left. A
+          // caller that cannot take a session without an observation (one
+          // from before such sessions) gets a new tab, as before.
+          const observation =
+            options.initialUrl === undefined && driver.resume && acceptsNoObservation
+              ? await driver.resume()
+              : await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
-          runtime.lastTargets = [observation.target];
+          runtime.startedWithoutTab = observation === null;
+          runtime.lastTargets = observation ? [observation.target] : [];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         }
       } finally {
@@ -3097,6 +3164,20 @@ export class BrowserSupervisor {
     this.rememberTarget(runtime, observation.target);
   }
 
+  /** An observation for a caller that asked for notices says, once, that a
+   * relaunch reloaded its tab's page. Other callers (a person's viewer, auth
+   * checks, API clients) neither see the notice nor use it up. */
+  private reported(
+    runtime: Runtime,
+    observation: BrowserObservation,
+    options: BrowserObservationNoticeOptions,
+  ): BrowserObservation {
+    const notice = options.notices
+      ? runtime.driver.takeReloadedTabNotice?.(observation.target.id)
+      : null;
+    return notice ? { ...observation, notice } : observation;
+  }
+
   private rememberTarget(runtime: Runtime, target: BrowserTarget): void {
     const index = runtime.lastTargets.findIndex((entry) => entry.id === target.id);
     if (target.selected) {
@@ -3146,12 +3227,21 @@ export class BrowserSupervisor {
     );
   }
 
-  private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
+  /** The selected tab's observation. In the person's own browser, its other
+   * tabs are theirs, not this session's: with no tab selected the session
+   * has none, and it is given none when the caller can take that (null), or
+   * else a new tab of its own. */
+  private async currentObservation(
+    runtime: Runtime,
+    acceptsNoObservation: boolean,
+  ): Promise<BrowserObservation | null> {
     const targets = await this.readWithRecovery(runtime, async () => {
       return await runtime.driver.listTargets();
     });
     this.rememberTargets(runtime, targets);
-    const selected = targets.find((target) => target.selected) ?? targets[0];
+    const personsBrowser = runtime.options.transport.kind === "attached_chrome";
+    const selected =
+      targets.find((target) => target.selected) ?? (personsBrowser ? undefined : targets[0]);
     if (selected) {
       const observation = await this.readWithRecovery(runtime, async () => {
         return await runtime.controller.observe(selected.id);
@@ -3159,6 +3249,7 @@ export class BrowserSupervisor {
       this.rememberObservation(runtime, observation);
       return observation;
     }
+    if (personsBrowser && acceptsNoObservation) return null;
     const observation = await this.mutateWithRecovery(runtime, async () => {
       return await runtime.driver.openTarget();
     });
@@ -3502,7 +3593,7 @@ export class BrowserSupervisor {
     let targets: readonly BrowserTarget[] = runtime.lastTargets;
     if (driverAvailable) {
       try {
-        targets = await runtime.driver.listTargets();
+        targets = await restorableTargets(runtime.driver, await runtime.driver.listTargets());
       } catch {
         // The last tabs this controller saw.
       }
@@ -4952,6 +5043,24 @@ function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
     }));
 }
 
+/** Tabs as the browser reopens them after a relaunch: a tab showing the
+ * browser's error page is reopened at the address it failed to load, so it is
+ * recorded and matched under that address. Only for pairing tabs across a
+ * relaunch; what callers are shown keeps the browser's own URL. */
+async function restorableTargets(
+  driver: BrowserSupervisorDriver,
+  targets: readonly BrowserTarget[],
+): Promise<BrowserTarget[]> {
+  return await Promise.all(
+    targets.map(async (target) => {
+      if (!driver.errorPageUrl || !target.url.toLowerCase().startsWith("chrome-error:"))
+        return target;
+      const url = await driver.errorPageUrl(target.id).catch(() => null);
+      return url ? { ...target, url } : target;
+    }),
+  );
+}
+
 /** Tell a relaunched browser's driver which of its tabs reopened each tab of
  * the browser before it, so they keep their IDs. True when any did. Best
  * effort: a failure only leaves an old tab ID unexplained. */
@@ -4964,8 +5073,16 @@ async function noteRelaunchedTabs(
 ): Promise<boolean> {
   if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
   try {
-    const tabs = matchReopenedTabs(previous, current ?? (await driver.listTargets()));
-    if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
+    const reopened = await restorableTargets(driver, current ?? (await driver.listTargets()));
+    const tabs = matchReopenedTabs(previous, reopened);
+    if (tabs.length > 0) {
+      driver.noteRelaunchedTabs({
+        reason,
+        ...details,
+        tabs,
+        restoredTargetIds: reopened.map((target) => target.id),
+      });
+    }
     return tabs.some((tab) => tab.replacementId !== null);
   } catch {
     // Unexplained, not failed.
