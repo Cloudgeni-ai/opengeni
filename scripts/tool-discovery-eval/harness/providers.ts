@@ -20,19 +20,59 @@ export type Priced = { usage: Usage; costUsd: number; latencyMs: number; cached:
 
 /**
  * Time a search spent waiting out rate limits. It belongs to the eval's quota, not to
- * the strategy, so run.ts subtracts it from the search's measured latency.
+ * the strategy, so run.ts subtracts it from the search's measured latency. Waits are
+ * kept as time spans: a search's parallel requests can wait at the same time, and only
+ * the time some request was waiting counts.
  */
-export const rateLimitWait = new AsyncLocalStorage<{ ms: number }>();
+export const rateLimitWait = new AsyncLocalStorage<{ spans: [number, number][] }>();
+
+/** How long at least one of a search's requests was waiting. */
+export function waitedMs(store: { spans: [number, number][] }): number {
+  let total = 0;
+  let end = -Infinity;
+  for (const [start, stop] of [...store.spans].sort((a, b) => a[0] - b[0])) {
+    total += Math.max(0, stop - Math.max(start, end));
+    end = Math.max(end, stop);
+  }
+  return total;
+}
 
 async function waitOutRateLimit(ms: number) {
   const store = rateLimitWait.getStore();
-  if (store) store.ms += ms;
+  const start = performance.now();
+  if (store) store.spans.push([start, start + ms]);
   await Bun.sleep(ms);
 }
 
 function retryDelayMs(response: Response, attempt: number) {
   const retryAfter = Number(response.headers.get("retry-after"));
   return Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * 2 ** attempt;
+}
+
+/** A provider request that has not answered after this long is abandoned and retried. */
+const HUNG_REQUEST_MS = 30_000;
+
+/**
+ * One provider request with a hang deadline. A hung attempt is retried up to twice and its
+ * time is booked like a rate-limit wait: it measures the eval's connection, not the strategy.
+ * Production callers need their own deadline; this only keeps a long run from stalling.
+ */
+async function fetchUnlessHung(url: string | URL | Request, init: RequestInit | undefined) {
+  for (let attempt = 0; ; attempt++) {
+    const started = performance.now();
+    const deadline = AbortSignal.timeout(HUNG_REQUEST_MS);
+    try {
+      return await fetch(url, {
+        ...init,
+        signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+      });
+    } catch (error) {
+      if (!deadline.aborted || init?.signal?.aborted || attempt >= 2) throw error;
+      const store = rateLimitWait.getStore();
+      if (store) store.spans.push([started, performance.now()]);
+      console.error(`A provider request hung for ${HUNG_REQUEST_MS / 1000} s; retrying.`);
+    }
+  }
 }
 
 export class Budget {
@@ -133,7 +173,7 @@ function price(endpoint: Endpoint, usage: Usage) {
 
 async function post(endpoint: Endpoint, path: string, body: unknown, signal?: AbortSignal) {
   for (let attempt = 0; ; attempt++) {
-    const response = await fetch(`${endpoint.baseUrl}${path}`, {
+    const response = await fetchUnlessHung(`${endpoint.baseUrl}${path}`, {
       method: "POST",
       headers: headers(endpoint),
       body: JSON.stringify(body),
@@ -328,7 +368,7 @@ export async function decisionModelFromEnv(
       const signed = new Headers(init?.headers);
       signed.set("authorization", `Bearer ${credential()}`);
       started = performance.now();
-      response = await fetch(url, { ...init, headers: signed });
+      response = await fetchUnlessHung(url, { ...init, headers: signed });
       if (response.status !== 429 || attempt >= 8) break;
       await response.body?.cancel();
       await waitOutRateLimit(retryDelayMs(response, attempt));

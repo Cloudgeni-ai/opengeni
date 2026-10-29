@@ -48,6 +48,7 @@ Options:
 | `--cache-dir`, `--no-cache` | Successful model responses are cached by exact request; a rerun replays them, including their recorded latency, at no cost. |
 | `--skip-problems` | Run even when some scenarios reference tools missing from the catalog. |
 | `--with-task` | Give strategies that can use it the user's request as well as the query. |
+| `--selection-policy key=value,…` | Override the runtime's selection policy for this run, for example `candidates=25`. |
 
 ## Catalog
 
@@ -108,6 +109,7 @@ catalog hash from the report next to the labels.
 | `runtime-codex` | The same on the Codex route. |
 | `runtime-selector` | The generic route with a decision model selecting from the candidates, as a deployment configures it. One strategy per `--decision-models` entry. |
 | `runtime-selector-codex` | The same on the Codex route. |
+| `runtime-meaning-*` | Any `runtime-*` strategy above with the runtime's meaning ranking over the `TOOL_EVAL_EMBEDDING_*` model, as a deployment with a document embedding model gets it (for example `runtime-meaning-codex`, `runtime-meaning-selector-codex`). The catalog's vectors are computed once before the run, as a long-running worker keeps them. |
 | `keywords` | The runtime's keyword ranking alone, for recall at K. |
 | `card-keywords` | Keyword ranking over task cards (`--cards`). Experimental. |
 | `embeddings` | Embedding similarity over descriptions (and cards if given). Experimental. |
@@ -133,10 +135,13 @@ Decision model for `runtime-selector*`, the typed Decisions contract the runtime
 | `TOOL_EVAL_DECISION_API_KEY` or `_API_KEY_FILE` | Bearer credential. On Azure this can be an Entra access token for `https://cognitiveservices.azure.com`. |
 | `TOOL_EVAL_DECISION_USD_PER_MILLION` | Input price, for the cost columns. |
 
-Rate-limited calls (HTTP 429) are retried after the provider's `retry-after`, so a
-throttled run does not silently count as keyword fallbacks. Give the eval its own
-deployment or quota rather than sharing one that serves production traffic: a
-selector call with 40 candidates is roughly 10 to 16 thousand input tokens.
+Rate-limited calls (HTTP 429) are retried after the provider's `retry-after`, and the
+wait is subtracted from the reported latency. The runtime's own selector deadline
+still runs during the wait, so a heavily throttled run shows up in the **Fallbacks**
+column; rerun it with a lower `--concurrency` rather than reading those searches as
+the selector's choices. Give the eval its own deployment or quota rather than sharing
+one that serves production traffic: a selector call with 40 candidates is roughly 10
+to 16 thousand input tokens.
 
 Chat models for the experimental `two-stage`, `whole-catalog` and card writing use
 `TOOL_EVAL_SELECTOR_*`, `TOOL_EVAL_CARDS_*` (`BASE_URL`, `API_KEY`, `MODEL`,

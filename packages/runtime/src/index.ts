@@ -241,7 +241,10 @@ import {
   type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
+import { withAccountLine } from "./tool-discovery-ranking";
 import {
   HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   HARNESS_CONTROL_MCP_SERVER_ID,
@@ -2260,6 +2263,11 @@ const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
   toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
+  /**
+   * Ranks tools by meaning alongside keywords in tool search; the caller owns
+   * its route checks. Absent means keyword ranking alone.
+   */
+  toolSearchMeaningRanker?: import("./tool-discovery-meaning").ToolMeaningRanker | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -3764,6 +3772,7 @@ function maybeInstallLazyToolTransport(
       }
       return accounts;
     },
+    options.toolSearchMeaningRanker,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -8715,24 +8724,6 @@ function normalizeUrl(raw: string): string | null {
   }
 }
 
-export function prefixedMcpToolName(registryId: string, toolName: string): string {
-  const name = sharedPrefixedMcpToolName(registryId, toolName);
-  if (name.length <= 64 && /^[A-Za-z0-9_]+$/.test(name)) return name;
-  // This is a readable wire alias, never account or execution authority. The
-  // exact tuple stays in the catalog and duplicate aliases fail closed there.
-  // Hash the full tuple before bounding the leaf so long/punctuation-equivalent
-  // names cannot silently select a different tool.
-  const digest = legacyMcpToolDigest(registryId, toolName).slice(0, 24);
-  const leaf = toolName.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 34) || "tool";
-  return `mcp_${digest}__${leaf}`;
-}
-
-function legacyMcpToolDigest(registryId: string, toolName: string): string {
-  return createHash("sha256")
-    .update(JSON.stringify([registryId, toolName]))
-    .digest("hex");
-}
-
 /** A listed tool's person-facing title from `_meta` (API integrations set one), bounded. */
 function displayTitleFromMeta(tool: object): string | undefined {
   const meta = (tool as { _meta?: unknown })._meta;
@@ -9425,10 +9416,7 @@ export class PrefixedMcpServer implements MCPServer {
             // connector to tell apart. With one account the line adds nothing
             // the model can act on, and it would repeat on every tool.
             ...(this.accountLabel?.account
-              ? {
-                  description:
-                    `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
-                }
+              ? { description: withAccountLine(this.accountLabel.model, tool.description) }
               : {}),
           };
         });
@@ -10906,6 +10894,12 @@ export type {
   ToolDecisionInput,
   ToolDecisionCandidate,
 } from "./tool-discovery-decision";
+export { createEmbeddingToolRanker } from "./tool-discovery-meaning";
+export type {
+  EmbeddingToolRanker,
+  ToolMeaningRanker,
+  ToolTextEmbedder,
+} from "./tool-discovery-meaning";
 
 export { MaxTurnsExceededError, ToolCallError } from "@openai/agents";
 

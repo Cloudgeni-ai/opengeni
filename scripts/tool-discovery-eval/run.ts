@@ -14,6 +14,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { LazyToolRuntime } from "../../packages/runtime/src/lazy-tool-transport";
+import { TOOL_SELECTION_POLICY } from "../../packages/runtime/src/tool-discovery-decision";
 import { CARD_VERSION, toolContentHash, writeCards, type TaskCard } from "./harness/cards";
 import { loadCatalog } from "./harness/catalog";
 import { summarize } from "./harness/metrics";
@@ -24,6 +25,7 @@ import {
   EmbeddingClient,
   endpointFromEnv,
   rateLimitWait,
+  waitedMs,
   ResponseCache,
 } from "./harness/providers";
 import { markdownReport } from "./harness/report";
@@ -35,9 +37,11 @@ import {
   fusedRanker,
   lexicalRanker,
   rankOnlyStrategy,
+  runtimeMeaningRanker,
   runtimeStrategy,
   selectorStrategy,
   type Ranker,
+  type RuntimeMeaning,
 } from "./harness/strategies";
 import type { SearchRecord, Strategy } from "./harness/types";
 
@@ -69,6 +73,15 @@ const selectorEffort = option("selector-effort");
 const concurrency = Number(option("concurrency") ?? 4);
 const repeat = Number(option("repeat") ?? 1);
 const budget = new Budget(Number(option("budget-usd") ?? 2));
+// Experiment with the runtime's own selection policy, e.g. `candidates=20,unclearAbove=0.1`.
+// Policy values that do not change the selector's request replay from the cache for free.
+const policyOverrides = list(option("selection-policy"));
+for (const pair of policyOverrides) {
+  const [key, value] = pair.split("=");
+  if (!key || !(key in TOOL_SELECTION_POLICY) || !Number.isFinite(Number(value)))
+    throw new Error(`--selection-policy: unknown or non-numeric "${pair}"`);
+  (TOOL_SELECTION_POLICY as Record<string, number>)[key] = Number(value);
+}
 const cache = new ResponseCache(
   flag("no-cache")
     ? undefined
@@ -199,6 +212,15 @@ const need = (value: unknown, what: string) => {
   if (!value) throw new Error(`Strategy needs ${what}; see README.md`);
 };
 
+// The runtime's own meaning ranking, warmed as a long-running process would be.
+let meaning: RuntimeMeaning | undefined;
+if (strategyNames.some((name) => name.startsWith("runtime-meaning"))) {
+  need(embeddings, "TOOL_EVAL_EMBEDDING_* settings");
+  meaning = runtimeMeaningRanker(embeddings!);
+  if (!(await meaning.ranker.warm(deferredFunctions)))
+    throw new Error("Could not compute the catalog's meaning vectors");
+}
+
 const strategies: { strategy: Strategy; sequential: boolean }[] = [];
 for (const name of strategyNames) {
   const route = (suffix: string) =>
@@ -207,22 +229,36 @@ for (const name of strategyNames) {
       : suffix === "codex"
         ? "codex_native"
         : "generic_dispatch";
-  if (name === "runtime-generic" || name === "runtime-native" || name === "runtime-codex")
+  const withMeaning = name.startsWith("runtime-meaning");
+  const base = withMeaning ? name.replace("runtime-meaning", "runtime") : name;
+  const meaningFor = withMeaning ? meaning : undefined;
+  if (
+    base === "runtime" ||
+    base === "runtime-generic" ||
+    base === "runtime-native" ||
+    base === "runtime-codex"
+  )
     strategies.push({
-      strategy: runtimeStrategy(catalog, route(name.slice("runtime-".length))),
+      strategy: runtimeStrategy(
+        catalog,
+        route(base.slice("runtime-".length)),
+        undefined,
+        meaningFor,
+      ),
       sequential: false,
     });
-  else if (name === "runtime-selector" || name === "runtime-selector-codex") {
+  else if (base === "runtime-selector" || base === "runtime-selector-codex") {
     need(decisionModels.length, "TOOL_EVAL_DECISION_* settings");
     for (const decision of decisionModels)
       strategies.push({
         strategy: runtimeStrategy(
           catalog,
-          route(name === "runtime-selector" ? "generic" : "codex"),
+          route(base === "runtime-selector" ? "generic" : "codex"),
           {
             label: decision.label,
             create: () => decisionToolSelector(decision.model, decision.label),
           },
+          meaningFor,
         ),
         sequential: false,
       });
@@ -284,21 +320,24 @@ for (const { strategy, sequential } of strategies) {
           strategy: strategy.name,
         };
         try {
-          const waited = { ms: 0 };
-          record.trace = await rateLimitWait.run(waited, () =>
+          const waits = { spans: [] as [number, number][] };
+          record.trace = await rateLimitWait.run(waits, () =>
             turn.search({ query, ...(scenario.task ? { task: scenario.task } : {}) }),
           );
           // Waiting out the eval's own rate limits is not search latency.
-          record.trace.latencyMs -= waited.ms;
-          if (waited.ms)
+          const waited = waitedMs(waits);
+          record.trace.latencyMs -= waited;
+          if (waited)
             for (const stage of record.trace.stages)
-              if (stage.latencyMs !== undefined && stage.latencyMs >= waited.ms)
-                stage.latencyMs -= waited.ms;
+              if (stage.latencyMs !== undefined && stage.latencyMs >= waited)
+                stage.latencyMs -= waited;
         } catch (error) {
           record.error = (error as Error).message;
           if (record.error.includes("budget")) throw error;
         }
         records.push(record);
+        const done = records.filter((r) => r.strategy === strategy.name).length;
+        if (done % 100 === 0) console.error(`${strategy.name}: ${done} of ${searchCount} searches`);
       }
     }
   };
@@ -319,6 +358,7 @@ const meta = {
   ...(cards ? { cards: `${cards.size} task cards, version ${CARD_VERSION}` } : {}),
   ...(embeddings ? { embeddings: embeddings.label } : {}),
   ...(withTask ? { task: "the user's request is given to strategies that use it" } : {}),
+  ...(policyOverrides.length ? { selectionPolicy: policyOverrides.join(", ") } : {}),
   newSpendingUsd: Number(budget.spentUsd.toFixed(4)),
   ranAt: new Date().toISOString(),
 };
