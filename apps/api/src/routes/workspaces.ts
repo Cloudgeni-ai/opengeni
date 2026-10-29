@@ -11,7 +11,11 @@ import {
   MissingPermissionRefusal,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
-import { getWorkspaceSettings, listConnectionsMetadata } from "@opengeni/db";
+import {
+  getWorkspaceSettings,
+  listConnectionsMetadata,
+  PERSONAL_WORKSPACE_EXTERNAL_SOURCE,
+} from "@opengeni/db";
 import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
@@ -394,6 +398,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const accountId = externalWorkspaceAccountId(context, request.accountId);
     const payload = { ...request, accountId };
     requireAccountPermission(context, accountId, "workspace:create");
+    refusePersonalWorkspaceIdentity(payload.externalSource);
     try {
       const existing = await findWorkspaceByExternalIdentity(deps.db, {
         accountId: payload.accountId,
@@ -464,6 +469,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     requireAccountPermission(context, accountId, "workspace:create");
+    refusePersonalWorkspaceIdentity(payload.externalSource);
     await requireLimit(deps, {
       accountId,
       action: "workspace:create",
@@ -1849,6 +1855,19 @@ function workspaceLimit(deps: ApiRouteDeps): number | null {
     return null;
   }
   return configuredStaticUsageLimits(deps.settings).maxWorkspacesPerAccount ?? null;
+}
+
+/**
+ * Only Opengeni creates a Personal workspace, with its owner's membership. A
+ * workspace created here with that identity would claim someone's Personal
+ * workspace before they join.
+ */
+function refusePersonalWorkspaceIdentity(externalSource: string | null | undefined): void {
+  if (externalSource?.trim() === PERSONAL_WORKSPACE_EXTERNAL_SOURCE) {
+    throw new HTTPException(422, {
+      message: "This external source is reserved for Personal workspaces.",
+    });
+  }
 }
 
 async function listWorkspacePeople(

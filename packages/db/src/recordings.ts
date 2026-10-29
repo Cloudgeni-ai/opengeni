@@ -20,6 +20,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import { joinedWorkspaceIsNotPersonal } from "./personal-workspace-membership";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
@@ -572,6 +573,7 @@ export async function ownRecordingWorkspaces(
           eq(schema.workspaceMemberships.accountId, input.accountId),
           eq(schema.workspaces.accountId, input.accountId),
           ne(schema.workspaces.id, input.workspaceId),
+          joinedWorkspaceIsNotPersonal(),
         ),
       )
       .orderBy(asc(schema.workspaces.createdAt))
