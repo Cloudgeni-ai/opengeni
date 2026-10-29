@@ -35,6 +35,18 @@ export type SessionViewState = Readonly<{
   initialLoading: boolean;
 }>;
 
+/**
+ * One suggestion under the new-chat composer. Choosing it puts `prompt` in
+ * the text box for the person to change or send; nothing is sent by itself.
+ */
+export type SessionAppStarter = Readonly<{
+  /** Stable and unique among the host's starters. */
+  id: string;
+  title: string;
+  description?: string | undefined;
+  prompt: string;
+}>;
+
 export type AppHost = Readonly<{
   navigation: NavigationHost;
   api: AppApiHost;
@@ -47,6 +59,8 @@ export type AppHost = Readonly<{
    * instructions.
    */
   messageContext?: MessageContextStore | undefined;
+  /** The host's own new-chat suggestions, in place of Opengeni's. */
+  starters?: readonly SessionAppStarter[] | undefined;
   /**
    * Receives the open chat's state each time it changes, read from the
    * page's own event stream (no second connection).

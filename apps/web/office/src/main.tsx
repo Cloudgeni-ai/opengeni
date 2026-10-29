@@ -10,6 +10,7 @@ import "@opengeni/react/compiled.css";
 import {
   SessionApp,
   type MessageContextItem,
+  type SessionAppStarter,
   type SessionAppSurfaces,
 } from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
@@ -74,6 +75,51 @@ if (preloadRecoveryStorage) {
 const surfaces: SessionAppSurfaces = {
   pdfPreview: lazy(() => import("../../src/components/artifacts/pdf-file-preview")),
 };
+
+/** The new-chat suggestions in the pane: things to do with the open workbook. */
+const WORKBOOK_STARTERS: readonly SessionAppStarter[] = [
+  {
+    id: "summarize-sheet",
+    title: "Summarize this sheet",
+    description: "What's in it and what stands out.",
+    prompt:
+      "Summarize the sheet I have open: what it contains, the main numbers and anything that stands out.",
+  },
+  {
+    id: "make-chart",
+    title: "Make a chart",
+    description: "Show the numbers as a chart next to the data.",
+    prompt:
+      "Make a chart of the data in this sheet and put it next to the data. If it's not clear which numbers to show, ask me first.",
+  },
+  {
+    id: "clean-column",
+    title: "Clean up this column",
+    description: "Fix spacing, spelling and mixed formats.",
+    prompt:
+      "Clean up the column I have selected: trim extra spaces, make the formats consistent and point out duplicates or odd values. Tell me what you'll change before you change it.",
+  },
+  {
+    id: "explain-formula",
+    title: "Explain a formula",
+    description: "What the selected formula does, in plain words.",
+    prompt: "Explain the formula in the cell I have selected, step by step and in plain words.",
+  },
+  {
+    id: "total-average",
+    title: "Total and average a column",
+    description: "Add a total and an average under it.",
+    prompt:
+      "Add a total and an average under a column of numbers in this sheet. If it's not clear which column, ask me first.",
+  },
+  {
+    id: "summarize-by-category",
+    title: "Summarize by category",
+    description: "A small table of totals for each group.",
+    prompt:
+      "Summarize this data by category: make a small table on a new sheet with the count and total for each group.",
+  },
+];
 
 function remembered(key: string): string | null {
   try {
@@ -423,6 +469,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       preset="companion"
       theme={theme}
       surfaces={surfaces}
+      starters={WORKBOOK_STARTERS}
       messageContext={messageContext}
       onUnauthorized={onSignedOut}
       openUrl={openInBrowser}

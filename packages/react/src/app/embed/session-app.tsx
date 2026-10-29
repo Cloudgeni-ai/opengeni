@@ -34,7 +34,12 @@ import { CreditRequiredGate } from "../components/credit-required-gate";
 import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
-import { AppHostProvider, type AppHost, type SessionViewState } from "../lib/app-host";
+import {
+  AppHostProvider,
+  type AppHost,
+  type SessionAppStarter,
+  type SessionViewState,
+} from "../lib/app-host";
 import type { EditableArtifactSurfaceProps, PdfPreviewProps } from "../lib/app-surfaces";
 import { AppearanceProvider, useAppearance } from "../lib/appearance";
 import { parseComposerLaunchSearch } from "../lib/composer-launch";
@@ -51,6 +56,7 @@ import { SessionRoute } from "../routes/session";
 import { SessionsIndexRoute } from "../routes/sessions-index";
 import type { ClientConfig } from "../types";
 import {
+  featuresWithHostStarters,
   SessionUiFeaturesProvider,
   type SessionUiFeatures,
   type SessionUiPreset,
@@ -128,6 +134,14 @@ export type SessionAppProps = Readonly<{
    * and shows nothing. Context for the model, never instructions.
    */
   messageContext?: MessageContextInput;
+  /**
+   * Your own suggestions under the new-chat composer, in place of Opengeni's
+   * (such as tasks for the document the person has open). Choosing one fills
+   * the composer; the person sends it. Passing them turns the `starters`
+   * feature on unless `features.starters` says otherwise; an empty list
+   * shows no suggestions.
+   */
+  starters?: readonly SessionAppStarter[] | undefined;
   /**
    * Opens Opengeni object links in agent messages (files, Sites, editable
    * artifacts) the host's way, such as its own page for an artifact. Return
@@ -520,6 +534,10 @@ function SessionAppForWorkspace(props: SessionAppProps) {
   useEffect(() => messageContext.set(props.messageContext), [messageContext, props.messageContext]);
   const pdfPreview = props.surfaces?.pdfPreview;
   const editableArtifact = props.surfaces?.editableArtifact;
+  // Hosts often pass an inline list; compare by content.
+  const startersKey = props.starters ? JSON.stringify(props.starters) : undefined;
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- by content
+  const starters = useMemo(() => props.starters, [startersKey]);
   const host = useMemo<AppHost>(
     () => ({
       navigation,
@@ -529,15 +547,17 @@ function SessionAppForWorkspace(props: SessionAppProps) {
         ...(editableArtifact ? { editableArtifact } : {}),
       },
       messageContext,
+      starters,
       onSessionState: (state) => latest.current.onSessionState?.(state),
     }),
-    [api, editableArtifact, messageContext, navigation, pdfPreview],
+    [api, editableArtifact, messageContext, navigation, pdfPreview, starters],
   );
+  const features = featuresWithHostStarters(props.features, starters !== undefined);
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">
       <AppHostProvider host={host}>
         <OpenGeniLinkProvider resolveLink={props.resolveLink} renderLink={props.renderLink}>
-          <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
+          <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={features}>
             <SessionAppRoot className={props.className}>
               <SessionAppGates
                 stateHost={stateHost}

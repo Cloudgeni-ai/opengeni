@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
-import { newChatWording, rememberSignupUseCase, signupStarterSet } from "./signup-starter-set";
+import { NEW_CHAT_WORDING, rememberSignupUseCase, signupStarterSet } from "./signup-starter-set";
 
 beforeAll(() => GlobalRegistrator.register());
 afterAll(() => GlobalRegistrator.unregister());
@@ -61,19 +61,10 @@ test("the server's current answer wins on any device", () => {
   expect(signupStarterSet("ada@example.test", "org-a", undefined)).toBe("product");
 });
 
-test("everyday help gets a plain heading and placeholder; the other answers keep the agent wording", () => {
-  expect(newChatWording("everyday")).toEqual({
+test("every signup answer gets the same plain heading, placeholder and label", () => {
+  expect(NEW_CHAT_WORDING).toEqual({
     heading: "What can I help with?",
     placeholder: "Ask anything, or describe what you need…",
     composerMessages: { inputLabel: "Ask anything" },
   });
-  for (const set of ["general", "product"] as const) {
-    expect(newChatWording(set)).toEqual({
-      heading: "What should the agent do?",
-      placeholder: "Describe a task for the agent…",
-      composerMessages: undefined,
-    });
-  }
-  // The same objects every time, so the composer doesn't see new copy each render.
-  expect(newChatWording("everyday")).toBe(newChatWording("everyday"));
 });

@@ -875,7 +875,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       if (response.status() === 403) deniedReads.push(new URL(response.url()).pathname);
     });
     await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/sessions`);
-    await setupPage.getByRole("heading", { name: "What should the agent do?" }).waitFor();
+    await setupPage.getByRole("heading", { name: "What can I help with?" }).waitFor();
 
     expect(await setupPage.locator("body").textContent()).not.toContain(
       "GitHub account is unavailable",

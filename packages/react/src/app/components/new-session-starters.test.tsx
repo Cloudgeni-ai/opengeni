@@ -147,3 +147,46 @@ test("help with everyday things gets six plain everyday asks, with no services t
     container.remove();
   }
 });
+
+test("a host's own starters replace every set, and an empty list shows none", async () => {
+  const onSelect = mock((_prompt: string) => {});
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const host = [
+    { id: "summarize", title: "Summarize this sheet", description: "What's in it.", prompt: "P1" },
+    { id: "chart", title: "Make a chart", prompt: "P2" },
+  ];
+  try {
+    for (const set of ["general", "everyday", "product"] as const) {
+      await act(async () =>
+        root.render(
+          <NewSessionStarters set={set} host={host} workspaceId="ws-1" onSelect={onSelect} />,
+        ),
+      );
+      expect(container.querySelector("h2")?.textContent).toBe("Suggestions");
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.map((button) => button.textContent)).toEqual([
+        "Summarize this sheetWhat's in it.",
+        "Make a chart",
+      ]);
+      expect(buttons.map((button) => button.dataset.starter)).toEqual(["summarize", "chart"]);
+      expect(container.querySelector("a, img, svg")).toBeNull();
+    }
+    await act(async () => container.querySelectorAll("button")[1]!.click());
+    expect(onSelect.mock.calls).toEqual([["P2"]]);
+
+    await act(async () => root.render(<NewSessionStarters host={[]} onSelect={onSelect} />));
+    expect(container.innerHTML).toBe("");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the new-chat page passes the host's starters and uses one wording for everyone", () => {
+  const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
+  expect(route).toContain("const hostStarters = useAppHost().starters;");
+  expect(route).toContain("host={hostStarters}");
+  expect(route).toContain("const wording = NEW_CHAT_WORDING;");
+});

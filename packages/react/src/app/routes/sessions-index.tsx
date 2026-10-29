@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -158,7 +159,7 @@ import {
   relativeTimeLabel,
   sessionRepoLabel,
 } from "../../session-list-model";
-import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
+import { NEW_CHAT_WORDING, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -265,6 +266,7 @@ function SessionsIndexRouteContent({
   const api = useAppApi();
   const page = usePage();
   const starters = useSessionUiFeature("starters");
+  const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
@@ -1011,7 +1013,7 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
-  // The signup answer picks the starters, and with them the heading and placeholder.
+  // The signup answer picks the starters; the heading and placeholder are the same for everyone.
   const starterSet = signupStarterSet(
     context.authSession?.user.email,
     workspace?.accountId,
@@ -1019,7 +1021,7 @@ function SessionsIndexRouteContent({
       (membership) => membership.organizationId === workspace?.accountId,
     )?.signupUseCase,
   );
-  const wording = newChatWording(starterSet);
+  const wording = NEW_CHAT_WORDING;
   // A refused start names its model until the next start or a dismissal; before
   // any Send, an uncovered model with free credit left for others does the same.
   const refusedCreate =
@@ -2219,6 +2221,7 @@ function SessionsIndexRouteContent({
           <NewSessionStarters
             workspaceId={workspaceId}
             set={starterSet}
+            host={hostStarters}
             fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {

@@ -1,5 +1,4 @@
 import {
-  ActivityIcon,
   BoxesIcon,
   CloudIcon,
   EraserIcon,
@@ -27,22 +26,25 @@ type Pitch = {
 };
 
 /** Which audience the panel beside the sign-in form speaks to. */
-export type SignedOutPitch = "product" | "excel";
+export type SignedOutPitch = "general" | "excel";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
-  // Copy follows the public landing page (opengeni.ai): its headline, its lead
-  // sentence and the platform features it names.
-  product: {
-    headline: "Agents in your product.",
-    emphasis: "Infrastructure out of the box.",
-    lead: "Build AI products without building the infrastructure from scratch.",
+  // Everyone who signs in on the web sees this: people who want help with
+  // everyday things first, in plain words, and developers right after.
+  general: {
+    headline: "Help with everyday things,",
+    emphasis: "and agents for your product.",
+    lead: "Ask in plain words: plan a trip, write a letter, make sense of a bill. Developers can build agents into their own apps without building the infrastructure.",
     highlights: [
+      { icon: MessageSquareTextIcon, text: "Ask anything, on your computer or your phone" },
       {
         icon: CloudIcon,
-        text: "Durable sessions that keep working, even when you close your laptop",
+        text: "Keeps working on long tasks, even when you close your laptop",
       },
-      { icon: BoxesIcon, text: "Tools and sandboxes, with approvals and permissions" },
-      { icon: ActivityIcon, text: "Observability out of the box" },
+      {
+        icon: BoxesIcon,
+        text: "For developers: tools, sandboxes, approvals and observability, ready to use",
+      },
     ],
   },
   // The sign-in window the Excel add-in opens: the person is working in a
@@ -69,12 +71,12 @@ export type SignedOutLegalLinks = {
 export function SignedOutPage({
   children,
   legalLinks,
-  pitch = "product",
+  pitch = "general",
   supportEmail,
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
-  /** Defaults to the product pitch; "excel" when the Excel add-in opened sign-in. */
+  /** Defaults to the general pitch; "excel" when the Excel add-in opened sign-in. */
   pitch?: SignedOutPitch | undefined;
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;

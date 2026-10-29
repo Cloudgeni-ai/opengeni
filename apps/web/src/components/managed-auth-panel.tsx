@@ -517,7 +517,7 @@ export function ManagedAuthPanel(props: {
                           ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
                           : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
                         : mode === "signup"
-                          ? "Start free. Set up agents in your product in minutes."
+                          ? "Start free. Get everyday help, or add agents to your product."
                           : "Welcome back."}
             </p>
           </div>
