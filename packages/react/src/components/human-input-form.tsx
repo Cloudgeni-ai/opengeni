@@ -596,7 +596,7 @@ function HumanInputRequestForm({
         data-human-input-agent-deciding=""
       >
         <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
-        {messages.agentDeciding}
+        {messages.agentDeciding ?? t("humanInputModel.yourAgentIsDeciding")}
       </p>
     ) : (
       <DecisionButton
@@ -606,7 +606,7 @@ function HumanInputRequestForm({
         data-human-input-let-agent-decide=""
         onClick={() => void letAgentDecide()}
       >
-        {messages.letAgentDecide}
+        {messages.letAgentDecide ?? t("humanInputModel.letTheAgentDecide")}
       </DecisionButton>
     )
   ) : request.allowSkip ? (

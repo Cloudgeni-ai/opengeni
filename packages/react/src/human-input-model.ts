@@ -60,10 +60,14 @@ export type HumanInputFormMessages = {
   /** The submit label when the request asks one question; falls back to {@link submit}. */
   submitOne?: string;
   skip: string;
-  /** The one secondary action on an ordinary question: the agent chooses. */
-  letAgentDecide: string;
-  /** Shown in place of that action once an agent was asked to decide. */
-  agentDeciding: string;
+  /**
+   * The one secondary action on an ordinary question: the agent chooses.
+   * Optional so a host's complete message set from before it existed stays
+   * valid; unset, the card uses the default copy.
+   */
+  letAgentDecide?: string | undefined;
+  /** Shown in place of that action once an agent was asked to decide; optional like `letAgentDecide`. */
+  agentDeciding?: string | undefined;
   submitting: string;
   other: string;
   deadlineLabel: string;

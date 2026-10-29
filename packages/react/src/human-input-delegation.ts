@@ -1,5 +1,7 @@
 import type { HumanInputQuestion, SessionEvent } from "@opengeni/sdk";
 
+import type { OpenGeniText } from "./messages/runtime";
+
 /* "Let the agent decide" on a sub-session's question hands it to the agent of
    the chat the person is looking at: a user message whose model-only context
    names the exact request, so the agent answers it with
@@ -26,15 +28,21 @@ function questionTitle(question: HumanInputQuestion): string {
 }
 
 /** The message the person sends their agent: short visible text, exact model context. */
-export function humanInputDelegationMessage(input: {
-  sessionId: string;
-  sessionTitle: string;
-  request: { id: string; questions: readonly HumanInputQuestion[] };
-}): { text: string; modelContext: string } {
+export function humanInputDelegationMessage(
+  t: OpenGeniText,
+  input: {
+    sessionId: string;
+    sessionTitle: string;
+    request: { id: string; questions: readonly HumanInputQuestion[] };
+  },
+): { text: string; modelContext: string } {
   const first = input.request.questions[0];
   const more = input.request.questions.length - 1;
   const title = first ? questionTitle(first) : "";
-  const text = `Let the agent decide: ${title}${more > 0 ? ` (+${more} more)` : ""}`;
+  const text =
+    more > 0
+      ? t("humanInputDelegation.messageWithMore", { question: title, more })
+      : t("humanInputDelegation.message", { question: title });
   const questions = input.request.questions.map((question) => {
     const options = question.options.length
       ? ` Options: ${question.options.map((option) => `${option.id} (${oneLine(option.label, 120)})`).join(", ")}.`
@@ -48,6 +56,16 @@ export function humanInputDelegationMessage(input: {
     "Answer it now with session_human_input_respond using your best judgement and what you know from this task. If it asks for agent work you can do, such as starting a reviewer or worker, do that work and then answer. Then say in one short sentence what you chose. If it was already answered, say so briefly.",
   ].join("\n");
   return { text, modelContext };
+}
+
+/**
+ * The question part of a hand-off message's visible text, without the
+ * "Let the agent decide:" lead-in. Text in another form is returned as is.
+ */
+export function humanInputDelegationQuestionText(t: OpenGeniText, text: string): string {
+  const marker = "\u0000";
+  const [lead = ""] = t("humanInputDelegation.message", { question: marker }).split(marker);
+  return lead && text.startsWith(lead) ? text.slice(lead.length) : text;
 }
 
 /** The request a user message handed to its agent, or null for any other message. */
