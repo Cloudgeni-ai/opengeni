@@ -20,7 +20,7 @@ export type InboxItemRow = {
   link: { url: string; label: string } | null;
   eventSequence: number | null;
   choices: Array<{ id: string; label: string }>;
-  /** An approval its tool's MCP server asks a question about (1101); null otherwise. */
+  /** An approval its tool's MCP server asks a question about (1108); null otherwise. */
   serverQuestion: { server: string; kind: "confirm" | "form"; round: number } | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
@@ -77,7 +77,7 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
 
 /**
  * The server question an approval item carries as one `{serverQuestion}`
- * element of its choices (1101), so the list keeps its shipped signature.
+ * element of its choices (1108), so the list keeps its shipped signature.
  * choicesOf keeps only `{id, label}` entries and drops it.
  */
 function serverQuestionOf(choices: unknown): InboxItemRow["serverQuestion"] {

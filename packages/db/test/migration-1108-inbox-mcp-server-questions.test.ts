@@ -21,7 +21,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const MIGRATION = "1101_inbox_mcp_server_questions.sql";
+const MIGRATION = "1108_inbox_mcp_server_questions.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 setDefaultTimeout(60_000);
@@ -81,10 +81,10 @@ async function person(label: string) {
       ${binding.id}, ${binding.revision}
     )`;
   const access = await bootstrapWorkspace(db(), {
-    accountExternalSource: "migration-1101",
+    accountExternalSource: "migration-1108",
     accountExternalId: `account:${label}:${crypto.randomUUID()}`,
     accountName: `Questions ${label}`,
-    workspaceExternalSource: "migration-1101",
+    workspaceExternalSource: "migration-1108",
     workspaceExternalId: `workspace:${label}:${crypto.randomUUID()}`,
     workspaceName: `Questions ${label}`,
     subjectId,
@@ -174,7 +174,7 @@ async function pushes(owner: Person) {
     order by created_at`;
 }
 
-describe("1101 MCP server questions in the inbox and phone alerts", () => {
+describe("1108 MCP server questions in the inbox and phone alerts", () => {
   test("is a rolling, additive migration", async () => {
     if (!client) return;
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
