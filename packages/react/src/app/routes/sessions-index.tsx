@@ -1795,6 +1795,11 @@ function SessionsIndexRouteContent({
               <Suspense fallback={null}>
                 <CreditTopupPrompt
                   purpose="topup"
+                  refusalCode={
+                    refusedCreate?.code === "byok_paid_credit_required"
+                      ? "byok_paid_credit_required"
+                      : null
+                  }
                   open={creditTopupOpen}
                   workspaceId={workspaceId}
                   accountId={workspace.accountId}

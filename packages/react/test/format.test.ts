@@ -325,6 +325,35 @@ describe("composer own-key and API refusals", () => {
     );
     expect(api).not.toContain("another model");
   });
+
+  test("tell a member who can't buy credits to ask an organization owner", () => {
+    const member = (message: string, details: Record<string, unknown>) =>
+      composerSubmissionErrorMessage(englishText, refusal(message, details), false);
+    expect(
+      member("Add credits to use your own key.", {
+        code: "byok_paid_credit_required",
+        action: { type: "add_credits", href: "/billing" },
+      }),
+    ).toBe(
+      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+    );
+    expect(
+      member("Upgrade to Pro to use your own key.", {
+        code: "byok_paid_credit_required",
+        action: { type: "upgrade_plan", href: "/billing" },
+      }),
+    ).toBe(
+      "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
+    );
+    expect(
+      member("API usage uses credits, not your plan credit.", {
+        code: "api_credits_required",
+        action: { type: "add_credits", href: "/billing" },
+      }),
+    ).toBe(
+      "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
+    );
+  });
 });
 
 describe("composerSubmissionErrorMessage", () => {

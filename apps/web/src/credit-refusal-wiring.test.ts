@@ -17,6 +17,22 @@ describe("credit refusal wiring", () => {
     expect(index).toContain("refusalCode={refusedCreate?.code}");
   });
 
+  test("Add credits beside an own-key refusal opens a top-up that knows it", async () => {
+    const session = await source("routes/session.tsx");
+    expect(session).toContain("refusalCode={topupRefusal}");
+    expect(session).toMatch(/stopRefusal\) ===\s*"byok_paid_credit_required"/);
+    const index = await source("routes/sessions-index.tsx");
+    expect(index).toMatch(
+      /purpose="topup"\s*refusalCode=\{\s*refusedCreate\?\.code === "byok_paid_credit_required"/,
+    );
+  });
+
+  test("the composer and the plain failure line know who is viewing", async () => {
+    const session = await source("routes/session.tsx");
+    expect(session).toMatch(/useComposer\(props\.session\.id, \{\s*canBuyCredits,/);
+    expect(session).toMatch(/failureFallbackReason\([\s\S]*?stopRefusal,\s*\),\s*canBuyCredits,/);
+  });
+
   test("the fallback credits dialog keeps the refusal code", async () => {
     expect(await source("app-state.tsx")).toContain("code: paymentRefusalCode(problem),");
     expect(await source("components/credit-required-gate.tsx")).toContain(

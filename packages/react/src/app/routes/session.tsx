@@ -37,7 +37,11 @@ import {
 } from "../lib/failed-session-retry";
 import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
-import { chatComposerPlaceholder, failedSessionCopy } from "../lib/failed-session-copy";
+import {
+  chatComposerPlaceholder,
+  failedSessionCopy,
+  failureFallbackReason,
+} from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
@@ -2837,7 +2841,15 @@ function SessionChatPane(props: {
     loadFailed: connectionAccounts.error !== null,
   };
   const composerSendBlocker = () => sendGate.blocker(sendState);
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
+  const canBuyCredits =
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspaceAccountId) &&
+    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
   const composer = useComposer(props.session.id, {
+    canBuyCredits,
     events: props.events,
     sendExtras: () => ({
       ...withHostMessageContext(hostMessageContext, props.messageContext),
@@ -3022,15 +3034,17 @@ function SessionChatPane(props: {
   // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
-      {
+      {failureFallbackReason(
         failedSessionCopy(
           props.failure,
           props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
           canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
           creditGap,
-        ).reason
-      }
+          stopRefusal,
+        ),
+        canBuyCredits,
+      )}
     </div>
   ) : null;
   const model = composerPolicy?.model ?? props.session.model;
@@ -3553,9 +3567,6 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
-  const workspaceAccountId = context.workspaces.find(
-    (candidate) => candidate.id === props.session.workspaceId,
-  )?.accountId;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),
@@ -3744,18 +3755,22 @@ function SessionChatPane(props: {
     ],
   );
 
-  const canBuyCredits =
-    context.clientConfig.billingMode === "stripe" &&
-    Boolean(workspaceAccountId) &&
-    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  // Opened beside an own-key refusal, the top-up hides coupons: their credit
+  // can't pay the own-key fee.
+  const topupRefusal =
+    ((creditRefusal?.sessionId === props.session.id ? creditRefusal.code : null) ?? stopRefusal) ===
+    "byok_paid_credit_required"
+      ? "byok_paid_credit_required"
+      : null;
   const creditTopupPrompt =
     canBuyCredits && workspaceAccountId ? (
       <Suspense fallback={null}>
         {creditTopupOpen ? (
           <LazyCreditTopupPrompt
             purpose="topup"
+            refusalCode={topupRefusal}
             open
             workspaceId={props.session.workspaceId}
             accountId={workspaceAccountId}

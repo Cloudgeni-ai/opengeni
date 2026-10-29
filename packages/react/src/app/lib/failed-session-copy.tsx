@@ -407,3 +407,16 @@ export function chatComposerPlaceholder(input: {
   }
   return "Out of Opengeni credits — add credits to continue.";
 }
+
+/**
+ * The plain failure line shown while the banner loads or if it fails: the
+ * banner's headline, so a member is told to ask an owner there too.
+ */
+export function failureFallbackReason(
+  copy: { reason: string; creditRefusal?: CreditRefusalKind | null | undefined },
+  canBuyCredits: boolean,
+): string {
+  return copy.creditRefusal && !canBuyCredits
+    ? creditRefusalHeadline(t, copy.creditRefusal, false)
+    : copy.reason;
+}

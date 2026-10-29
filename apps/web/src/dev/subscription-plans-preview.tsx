@@ -181,6 +181,8 @@ export function SubscriptionPlansPreview() {
                     [
                       ["byok_upgrade_required", true],
                       ["byok_upgrade_required", false],
+                      ["byok_paid_credit_required", true],
+                      ["byok_paid_credit_required", false],
                       ["api_credits_required", true],
                       ["api_credits_required", false],
                     ] as const

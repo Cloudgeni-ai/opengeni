@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { chatComposerPlaceholder, failedSessionCopy } from "./failed-session-copy";
+import {
+  chatComposerPlaceholder,
+  failedSessionCopy,
+  failureFallbackReason,
+} from "./failed-session-copy";
 
 const summary = { failedAt: null, consecutiveRecoveryCount: null };
 test("only explicit model availability evidence suggests another model", () => {
@@ -558,4 +562,21 @@ test("a stopped chat's composer names the refusal's one fix, or who can fix it",
   expect(chatComposerPlaceholder({ ...member, stopRefusal: "api_credits_required" })).toBe(
     "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
   );
+});
+
+test("the plain failure line tells a member who can't fix a refusal to ask an owner", () => {
+  const copy = failedSessionCopy(
+    { ...summary, reason: null },
+    true,
+    false,
+    true,
+    null,
+    "byok_upgrade_required",
+  );
+  expect(failureFallbackReason(copy, true)).toBe("Upgrade to Pro to use your own key.");
+  expect(failureFallbackReason(copy, false)).toBe(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  const generic = failedSessionCopy({ ...summary, reason: null }, true, false, true, null, null);
+  expect(failureFallbackReason(generic, false)).toBe(generic.reason);
 });
