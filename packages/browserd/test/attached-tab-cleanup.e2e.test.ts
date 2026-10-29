@@ -272,11 +272,14 @@ e2e(
       const pagesBefore = (await bridge.pages()).map((page) => page.id).sort();
       expect(pagesBefore).toContain(work);
       const started = Date.now();
-      const recovered = await supervisor.createSession({
-        ...session,
-        headed: true,
-        transport: TRANSPORT,
-      });
+      const recovered = await supervisor.createSession(
+        {
+          ...session,
+          headed: true,
+          transport: TRANSPORT,
+        },
+        { acceptsNoObservation: true },
+      );
       expect(Date.now() - started).toBeLessThan(15_000);
       expect(recovered.observation).toBeNull();
       expect((await bridge.pages()).map((page) => page.id).sort()).toEqual(pagesBefore);
