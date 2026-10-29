@@ -96,8 +96,9 @@ provider adapter), and `packages/sdk/src/workspace-integrations.ts` (host
 helpers).
 
 Managing organization registrations requires a canonical managed-cookie human
-with `account:admin`, the canonical local administrator, that person's agent
-acting as them (a connected agent, or a chat they gave full access) whose
+who is the organization's owner or an admin (admin rights in one organization
+grant nothing in another), the canonical local administrator, that person's
+agent acting as them (a connected agent, or a chat they gave full access) whose
 access includes `account:admin`, or a verified organization-scoped
 **full-access API key**.
 Full keys hold `api_keys:manage` and `workspace:admin`, not `account:admin`;

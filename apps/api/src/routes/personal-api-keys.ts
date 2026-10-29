@@ -15,7 +15,7 @@ import {
   type PersonalApiKeyRecord,
 } from "@opengeni/db";
 import {
-  hasPermission,
+  holdsOrganizationAdministration,
   PERSONAL_API_KEY_TOKEN_PREFIX,
   requireAccessContext,
   type ApiRouteDeps,
@@ -135,7 +135,12 @@ async function requireOrganizationPerson(
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:") || !grant) {
     throw new HTTPException(404, { message: "organization not found" });
   }
-  return { context, organizationId, admin: hasPermission(grant.permissions, "account:admin") };
+  // Owners and admins of this organization see and revoke everyone's keys.
+  return {
+    context,
+    organizationId,
+    admin: holdsOrganizationAdministration(context, organizationId),
+  };
 }
 
 async function projectKeys(

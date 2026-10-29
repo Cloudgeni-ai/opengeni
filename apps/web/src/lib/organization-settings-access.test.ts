@@ -168,6 +168,37 @@ describe("organization settings access", () => {
     expect(owner).toMatchObject({ administrator: true, modelsAdministrator: true });
   });
 
+  test("owners and admins manage organization integrations; only the owner makes a service account an admin", () => {
+    const access = (
+      role: "owner" | "admin" | "member",
+      permissions: string[],
+      clientConfig: typeof managed | typeof local = managed,
+    ) =>
+      organizationSettingsAccess({
+        accessContext: context(role, permissions, []),
+        clientConfig: clientConfig as never,
+        accountId: "acme",
+      });
+    const admin = access("admin", ["account:read", "members:manage", "billing:read"]);
+    expect(admin.canManageOrganizationIntegrations).toBe(true);
+    expect(admin.canMakeServiceAccountAdmin).toBe(false);
+    expect(admin.visibleSections.has("developer")).toBe(true);
+    const owner = access("owner", ["account:read", "account:admin", "api_keys:manage"]);
+    expect(owner.canManageOrganizationIntegrations).toBe(true);
+    expect(owner.canMakeServiceAccountAdmin).toBe(true);
+    expect(access("owner", ["account:admin"], local).canManageOrganizationIntegrations).toBe(true);
+    const member = access("member", ["account:read"]);
+    expect(member.canManageOrganizationIntegrations).toBe(false);
+    expect(member.visibleSections.has("developer")).toBe(false);
+    // Without a signed-in session the admin role counts for nothing, as on the server.
+    const signedOut = access("admin", ["account:read"], {
+      productAccessMode: "managed",
+      auth: { mode: "none" },
+    } as never);
+    expect(signedOut.canManageOrganizationIntegrations).toBe(false);
+    expect(signedOut.visibleSections.has("developer")).toBe(false);
+  });
+
   test("a workspace admin also sees Models, for the workspaces they administer", () => {
     const grants = [
       { workspaceId: "ws-team", accountId: "acme", permissions: ["workspace:admin"] },
