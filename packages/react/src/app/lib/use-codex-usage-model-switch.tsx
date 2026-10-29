@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * While a chat is stopped or waiting on its Codex usage limit, picking
+ * While a chat is stopped by its Codex usage limit, or its turn is parked on
+ * any provider's capacity (a used-up plan, an account to reconnect), picking
  * another model in the composer picker continues the chat with that model:
  * once the composer shows the pick (with its effort and speed), once.
  * Picking the chat's own model continues nothing.
  */
 export function useCodexUsageModelSwitch(input: {
   sessionId: string;
-  /** The chat's current (Codex) model. */
+  /** The chat's current model. */
   sessionModel: string;
   /** The model the composer shows now. */
   composerModel: string;
-  /** The chat is blocked on its Codex usage and the person may continue it. */
+  /** The chat is blocked on a usage limit and the person may continue it. */
   enabled: boolean;
   closePicker: () => void;
   onContinue: (model: string) => void;

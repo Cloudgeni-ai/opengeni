@@ -11,6 +11,7 @@ import {
   latestCheckpointIsCompaction,
   modelSwitchHeadsUpText,
   needsModelSwitchHeadsUp,
+  pickedModelContinuesBlockedChat,
 } from "./codex-model-switch";
 
 const event = (type: string, sequence: number) => ({ type, sequence }) as unknown as SessionEvent;
@@ -180,5 +181,41 @@ describe("Continue at reset", () => {
     expect(codexUsageNoticeApplies({ status: "idle", resetsAt: null, usageWait: false })).toBe(
       true,
     );
+  });
+});
+
+describe("Picking another model on a blocked chat", () => {
+  test("a turn parked on any provider's usage limit continues on the picked model", () => {
+    // A Claude chat whose subscription ran out: switching to a Codex model
+    // must continue it now, not leave it waiting for the Claude reset.
+    expect(
+      pickedModelContinuesBlockedChat({
+        status: "waiting_capacity",
+        codexUsageBlocked: false,
+        canControl: true,
+      }),
+    ).toBe(true);
+    // A Codex chat its usage limit stopped keeps continuing too.
+    expect(
+      pickedModelContinuesBlockedChat({
+        status: "failed",
+        codexUsageBlocked: true,
+        canControl: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("a chat that is not blocked, or a person who cannot control it, continues nothing", () => {
+    for (const status of ["idle", "running", "failed", "requires_action"] as const)
+      expect(
+        pickedModelContinuesBlockedChat({ status, codexUsageBlocked: false, canControl: true }),
+      ).toBe(false);
+    expect(
+      pickedModelContinuesBlockedChat({
+        status: "waiting_capacity",
+        codexUsageBlocked: true,
+        canControl: false,
+      }),
+    ).toBe(false);
   });
 });

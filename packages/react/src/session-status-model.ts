@@ -32,6 +32,26 @@ export function sessionDisplayStatus(session: {
   return sessionAdmissionBlocked(session) ? "blocked" : session.status;
 }
 
+/**
+ * Where a person's ordinary Send shows before the server answers. While a
+ * turn is still current or prompts already wait, it joins the queue. A turn
+ * parked on provider capacity (a used-up plan, an account to reconnect) is
+ * not work the Send waits for: the server starts the new message right away
+ * in its place, so it shows in the chat.
+ */
+export function promptSendDestination(input: {
+  status: SessionStatus | null | undefined;
+  activeTurnId: string | null | undefined;
+  queuedPrompts: number;
+}): "chat" | "queue" {
+  if (input.status === "waiting_capacity") return "chat";
+  return input.queuedPrompts > 0 ||
+    input.status === "running" ||
+    (input.activeTurnId ?? null) !== null
+    ? "queue"
+    : "chat";
+}
+
 /** Renderer-neutral session status presentation: label, color family and liveness. */
 export const SESSION_STATUS_PRESENTATION = (
   t: OpenGeniText,

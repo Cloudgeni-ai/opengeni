@@ -645,7 +645,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // already-due waiter. Spread those reconciliations too. A later wake
         // does not cut the pause short (that would re-synchronize the herd); a
         // queued prompt stays behind the blocked turn either way, so only an
-        // interruption (Pause/Steer/Cancel) wins immediately.
+        // interruption (Pause/Steer/Cancel, including a person's Send, which
+        // admission turns into a Steer of the parked turn) wins immediately.
         const wakeJitterMs = capacityWakeJitterMs(
           "wake",
           Math.random(),

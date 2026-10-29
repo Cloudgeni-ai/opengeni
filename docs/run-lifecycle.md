@@ -1869,7 +1869,14 @@ another user's account. For SuperGrok, account reconnect,
 allocator/rotation changes, and exact lease release durably advance the same
 waiter plus workflow-wake outbox.
 
-Ordinary prompts queued during the wait remain behind the current turn. Pause
+A human or operator's ordinary Send during the wait takes it over with Steer
+semantics, exactly like a Send during `requires_action`
+(`sendTakesOverActiveWait` in `packages/db/src/session-queue-commands.ts`):
+the parked turn is superseded with its waiter and the new prompt runs next on
+its own accepted model, so a person who switched model or provider after a
+usage limit is never held until the reset. A queue-edit resubmission, agent
+or machine input, and a Send to a paused branch keep ordinary queue semantics
+and remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Session and workspace Resume, and a
 Steer that automatically resumes a paused branch, register that wake for

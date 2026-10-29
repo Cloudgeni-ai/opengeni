@@ -73,7 +73,11 @@ import {
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
-import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+} from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
@@ -266,6 +270,7 @@ import {
   latestCheckpointIsCompaction,
   modelSwitchHeadsUpText,
   needsModelSwitchHeadsUp,
+  pickedModelContinuesBlockedChat,
 } from "../lib/codex-model-switch";
 import {
   consumeSessionComposerFocusIntent,
@@ -2816,7 +2821,11 @@ function SessionChatPane(props: {
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
-      props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: props.session.status,
+        activeTurnId: props.session.activeTurnId,
+        queuedPrompts: props.queue.queue.length,
+      }),
     busySend: resolveWorkspaceBusySend(workspace?.settings),
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
@@ -3461,7 +3470,11 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     sessionModel: props.session.model,
     composerModel: model,
-    enabled: codexUsageChoices,
+    enabled: pickedModelContinuesBlockedChat({
+      status: props.session.status,
+      codexUsageBlocked,
+      canControl: workspacePermissions.includes("sessions:control"),
+    }),
     closePicker: () => setModelPickerSession(null),
     onContinue: (picked) =>
       void continueAfterUsageLimit(

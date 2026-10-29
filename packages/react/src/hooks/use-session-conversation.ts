@@ -5,6 +5,7 @@ import { conversationTimeline } from "../conversation-timeline";
 import { useSessionStartupTimeline, type PendingPrompt } from "../lib/session-startup-timeline";
 import { admissionRecheckControl } from "../session-admission-model";
 import { useOpenGeni, type ClientOverride } from "../session-context";
+import { promptSendDestination } from "../session-status-model";
 import { useWorkspaceModelCatalog } from "./use-available-models";
 import { useClientConfigFlags } from "./use-client-config-flags";
 import { useComposer, type UseComposerOptions } from "./use-composer";
@@ -123,13 +124,14 @@ export function useSessionConversation(
     offerQueue: host?.offerQueue,
     effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
     // As in the console and the native screen: a turn that is still current
-    // (running, recovering or waiting for capacity) means a Send waits.
+    // (running or recovering) means a Send waits. A turn parked on provider
+    // capacity does not: the Send replaces it and starts right away.
     sendDestination: () =>
-      queue.queue.length > 0 ||
-      status === "running" ||
-      (detail.session?.activeTurnId ?? null) !== null
-        ? "queue"
-        : "chat",
+      promptSendDestination({
+        status,
+        activeTurnId: detail.session?.activeTurnId,
+        queuedPrompts: queue.queue.length,
+      }),
     sendExtras: () => {
       const extras = resolveExtras();
       return {
