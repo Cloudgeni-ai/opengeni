@@ -30,7 +30,12 @@ import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
  * first message and gives it the template's name, description and avatar.
  */
 
-export type BotTemplateViewer = { subjectId: string | null; admin: boolean };
+/**
+ * Who reads a template: the person (null for a service), whether they
+ * administer the workspace, and whether they may start chats there, which is
+ * what saving and changing templates needs.
+ */
+export type BotTemplateViewer = { subjectId: string | null; admin: boolean; contributor: boolean };
 
 /** The person a grant reads templates as (or the person an agent acts for). */
 export async function botTemplateViewerForGrant(
@@ -40,14 +45,21 @@ export async function botTemplateViewerForGrant(
   return {
     subjectId: await scheduledTaskViewerSubjectForGrant(db, grant),
     admin: hasPermission(grant.permissions, "workspace:admin", grant.permissionMode),
+    contributor: hasPermission(grant.permissions, "sessions:create", grant.permissionMode),
   };
 }
 
+/**
+ * A workspace template is shared work, like a shared Skill or Site: everyone
+ * who may start chats can change or delete it. An Only me template stays with
+ * whoever saved it.
+ */
 export function botTemplateAccess(
   viewer: BotTemplateViewer,
-  template: Pick<BotTemplateRecord, "createdBySubjectId">,
+  template: Pick<BotTemplateRecord, "createdBySubjectId" | "visibility">,
 ): "manage" | "use" {
   if (viewer.admin || viewer.subjectId === null) return "manage";
+  if (template.visibility === "workspace" && viewer.contributor) return "manage";
   return template.createdBySubjectId !== null && template.createdBySubjectId === viewer.subjectId
     ? "manage"
     : "use";
@@ -107,7 +119,7 @@ function requireOwnerForPrivate(
 function requireManage(viewer: BotTemplateViewer, template: BotTemplateRecord): void {
   if (botTemplateAccess(viewer, template) !== "manage") {
     throw new HTTPException(403, {
-      message: "Only whoever saved this bot template, or a workspace admin, can change it",
+      message: "Only people who can start chats in this workspace can change its bot templates",
     });
   }
 }
@@ -176,6 +188,17 @@ export async function updateBotTemplateForViewer(input: {
     throw new HTTPException(422, {
       message:
         "This template was saved for the workspace, not by a person, so it can't become Only me.",
+    });
+  }
+  // ...so only they (or an admin) can take a shared template away from everyone.
+  if (
+    request.visibility === "private" &&
+    template.visibility === "workspace" &&
+    !viewer.admin &&
+    viewer.subjectId !== template.createdBySubjectId
+  ) {
+    throw new HTTPException(403, {
+      message: "Only whoever saved this bot template, or a workspace admin, can make it Only me.",
     });
   }
   const updated = await updateBotTemplate(db, {

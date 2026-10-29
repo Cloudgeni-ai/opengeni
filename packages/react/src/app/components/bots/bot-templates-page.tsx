@@ -5,7 +5,7 @@
  * read and change before sending; the agent then sets itself up with its
  * ordinary tools. Templates can be exported as a file and imported into
  * another workspace. A template is Only me or shared with the workspace, like
- * a chat; whoever saved one, or an admin, can change or delete it.
+ * a chat; anyone who starts chats here can change or delete a shared one.
  */
 import { useRef, useState } from "react";
 import { BotIcon, DownloadIcon, PlusIcon, UploadIcon } from "lucide-react";

@@ -6853,7 +6853,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CreateSocialPostRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/approvals",
