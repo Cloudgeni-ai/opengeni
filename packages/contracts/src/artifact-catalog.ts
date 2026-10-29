@@ -35,10 +35,21 @@ export const ArtifactCatalogItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type ArtifactCatalogItem = z.infer<typeof ArtifactCatalogItem>;
 
+const QueryBoolean = /* @__PURE__ */ defineSchema(() =>
+  z
+    .union([primitives.boolean, z.enum(["true", "false"])])
+    .transform((value) => value === true || value === "true"),
+);
+
 export const ArtifactCatalogListQuery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       sourceSessionId: primitives.optionalUuid,
+      /**
+       * With `sourceSessionId`: also list the artifacts of that chat's
+       * sub-sessions (the ones its lineage lists) in the same read.
+       */
+      includeSubSessions: QueryBoolean.optional(),
       q: primitives.string
         .trim()
         .max(200)

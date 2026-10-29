@@ -7,7 +7,7 @@ import {
   parseDiarization,
   recordingSpeakersConfig,
 } from "../src/activities/recording-speakers";
-import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
+import { ffmpegPath, gappedOpusWebm, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
 
 let directory = "";
 
@@ -86,5 +86,26 @@ describe("recording speaker models", () => {
     await expect(diarizer.diarize(audio, { maxSpeakers: 1 })).rejects.toThrow(
       "speaker models failed: no voices",
     );
+  });
+
+  test.skipIf(!hasFfmpeg)("hear holes in the track's timestamps as silence", async () => {
+    const diarizer = createLocalDiarizer({
+      binaryPath: join(directory, "speakers"),
+      modelsDir: directory,
+      ffmpegPath,
+    });
+    // Ten seconds on the timeline with three seconds of holes: the executable
+    // must get all ten, or its turns and words land early.
+    const audio = {
+      bytes: gappedOpusWebm(10, [
+        [2, 4],
+        [6, 7],
+      ]),
+      mimeType: "audio/webm",
+      fileName: "track-1.webm",
+    };
+    const result = await diarizer.diarize(audio, { maxSpeakers: 3 });
+    expect(result.turns[0]!.endMilliseconds).toBeGreaterThan(9_900);
+    expect(result.turns[0]!.endMilliseconds).toBeLessThan(10_100);
   });
 });

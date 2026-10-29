@@ -1,13 +1,13 @@
 /**
  * M4 C2b: the Claude routes on the shared subscription core as a person's
- * managed browser session, on real PostgreSQL as the application role. The
- * organization routes and OAuth complete fail closed in maintenance; an OAuth
+ * managed browser session, on real PostgreSQL as the application role. An OAuth
  * attempt completes only on the runtime it started on; the organization
  * routes (setup token, OAuth sign-in, list, rename, allocator, activate,
  * rotation, access, disconnect) answer from core connections, including by a
- * legacy id the cutover kept as an alias; and a private account is connected,
- * listed, renamed and reconnected only from its owner's own Personal
- * workspace (403 from a shared workspace, refused in another member's).
+ * legacy id the cutover kept as an alias; and a private account lives in its
+ * owner's own Personal workspace: connected there or in place from a shared
+ * workspace of the organization, listed, renamed and reconnected there, and
+ * refused in another member's.
  *
  * C3 ships Claude's registry entry; this process registers it (the module
  * binding below) and the test database gets its registry row. Run this file
@@ -265,43 +265,6 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
       .admin`update integration_oauth_pending_states set state_encrypted = ${opengeniDb.encryptEnvironmentValue(encryptionKey, JSON.stringify(oldAttempt))} where id = ${legacyAttempt!.attemptId}::uuid`;
   });
 
-  test("maintenance: the organization routes and OAuth complete fail closed", async () => {
-    await shared!
-      .admin`update subscription_provider_cutovers set enabled = false where provider = 'claude'`;
-    const id = crypto.randomUUID();
-    for (const [path, method, body] of [
-      [organization("/claude/accounts"), "GET", undefined],
-      [organization("/claude/settings"), "PATCH", { rotationEnabled: false }],
-      [organization(`/claude/accounts/${id}`), "PATCH", { label: "x" }],
-      [organization(`/claude/accounts/${id}/activate`), "POST", {}],
-      [
-        organization(`/claude/accounts/${id}/allocator`),
-        "PATCH",
-        { enabled: false, expectedVersion: 1 },
-      ],
-      [organization(`/claude/accounts/${id}`), "DELETE", undefined],
-      [
-        organization("/claude/accounts/setup-token"),
-        "POST",
-        { token: setupToken(), scope: "workspace" },
-      ],
-      [organization(`/model-connections/claude_subscription/${id}/access`), "GET", undefined],
-      [`${oauth(organization(""))}/start`, "POST", { scope: "workspace" }],
-      [`${oauth(organization(""))}/complete`, "POST", { attemptId: id, code: "a#b" }],
-      [`${oauth(workspace(sharedWorkspaceId, ""))}/complete`, "POST", legacyAttempt],
-      [`${oauth(workspace(personalWorkspaceId, ""))}/start`, "POST", { scope: "user" }],
-    ] as const) {
-      const response = await browser(path, method, body);
-      expect({ path, method, ...response }).toMatchObject({
-        path,
-        method,
-        status: 503,
-        body: { reason: "subscription_core_cutover_disabled" },
-      });
-    }
-    expect(exchanges).toBe(0);
-  });
-
   test("an OAuth attempt started on the legacy path never completes on the core", async () => {
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
@@ -471,26 +434,9 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     expect(listed.usage.credentialVersion).toBe(listed.version);
   });
 
-  test("a private account only from its owner's Personal workspace", async () => {
+  test("a private account lives only in its owner's Personal workspace", async () => {
     const before = exchanges;
     const rowsBefore = (await claudeRows()).length;
-    const refusal = {
-      status: 403,
-      body: {
-        code: null,
-        message: "Connect a private Claude account from your own Personal workspace.",
-      },
-    };
-    // From a shared workspace the person belongs to: refused before any sign-in.
-    expect(
-      await browser(workspace(sharedWorkspaceId, "/claude/accounts/setup-token"), "POST", {
-        token: setupToken(),
-        scope: "user",
-      }),
-    ).toEqual(refusal);
-    expect(
-      await browser(`${oauth(workspace(sharedWorkspaceId, ""))}/start`, "POST", { scope: "user" }),
-    ).toEqual(refusal);
     // Another member's Personal workspace is never the owner's: it is not
     // even visible to them (404, as for any workspace they cannot read).
     const elsewhere = await browser(
@@ -509,6 +455,15 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     expect(exchanges).toBe(before);
     expect((await claudeRows()).length).toBe(rowsBefore);
 
+    // From a shared workspace the person belongs to, connected in place: it
+    // is theirs, kept in their own Personal workspace.
+    const inPlace = await browser(
+      workspace(sharedWorkspaceId, "/claude/accounts/setup-token"),
+      "POST",
+      { token: setupToken(), scope: "user", label: "From the team" },
+    );
+    expect(inPlace).toMatchObject({ status: 200, body: { connected: true, scope: "user" } });
+
     // In the owner's Personal workspace: a pasted setup token...
     const pasted = await browser(
       workspace(personalWorkspaceId, "/claude/accounts/setup-token"),
@@ -526,7 +481,7 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     expect(signedIn).toMatchObject({ status: 200, body: { connected: true, scope: "user" } });
     const owned = (await claudeRows()).filter((row) => row.ownership === "personal");
     expect(owned.map((row) => row.id).sort()).toEqual(
-      [pasted.body.accountId, signedIn.body.accountId].sort(),
+      [inPlace.body.accountId, pasted.body.accountId, signedIn.body.accountId].sort(),
     );
 
     // Listed to their owner as private accounts, with one credential version.
@@ -536,12 +491,13 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
       (account: { scope: string }) => account.scope === "user",
     );
     expect(mine.map((account: { id: string }) => account.id).sort()).toEqual(
-      [pasted.body.accountId, signedIn.body.accountId].sort(),
+      [inPlace.body.accountId, pasted.body.accountId, signedIn.body.accountId].sort(),
     );
     for (const account of mine) expect(account.usage.credentialVersion).toBe(account.version);
     // Never listed in the shared workspace.
     const sharedListing = await browser(workspace(sharedWorkspaceId, "/claude/accounts"));
     expect(JSON.stringify(sharedListing.body)).not.toContain(pasted.body.accountId);
+    expect(JSON.stringify(sharedListing.body)).not.toContain(inPlace.body.accountId);
 
     // Renamed there: the plain legacy account shape (no usage reading).
     const renamed = await browser(

@@ -31,6 +31,7 @@ import {
   withEventArgument,
   type AutomationDraft,
 } from "../src/automations";
+import { sessionAutomationWaitLines } from "../src/components/automations/automation-model";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const t = createOpenGeniText();
@@ -160,6 +161,12 @@ describe("automation words", () => {
     expect(automationRunErrorText(t, " scheduled_session_not_idle ")).toBe(
       t("automations.run.error.chatBusy"),
     );
+    expect(automationRunErrorText(t, "scheduled_session_waiting_capacity")).toBe(
+      t("automations.run.error.chatWaitingForAccount"),
+    );
+    expect(t("automations.run.error.chatWaitingForAccount")).toContain(
+      "Pick another model in the chat",
+    );
     // Refusals before a run starts share the words of the codes they mean.
     expect(automationRunErrorText(t, "machine_enrollment_inactive")).toBe(
       automationRunErrorText(t, "scheduled_machine_unavailable"),
@@ -184,6 +191,7 @@ describe("automation words", () => {
       "scheduled_turn_withdrawn_for_edit",
       "scheduled_update_failed",
       "scheduled_session_not_idle",
+      "scheduled_session_waiting_capacity",
       "scheduled_session_paused",
       "session_cancelled",
       "scheduled_target_session_unavailable",
@@ -196,7 +204,6 @@ describe("automation words", () => {
       "connection_account_unavailable",
       "scheduled_model_unavailable",
       "machine_target_unavailable",
-      "variable_set_unavailable",
       "rig_version_unavailable",
       "insufficient_credits",
       "allowance_exhausted",
@@ -262,7 +269,6 @@ describe("automation drafts", () => {
       schedule: { type: "manual" },
       prompt: "Check the orders",
       targetSessionId: SESSION_ID,
-      overlapPolicy: "buffer_one",
       events: {
         triggers: [
           {
@@ -545,5 +551,83 @@ describe("sessionAutomationWaitWords", () => {
       label: "Waiting for every event from a source you can't see",
       short: "Waiting on an event",
     });
+  });
+});
+
+describe("sessionAutomationWaitLines", () => {
+  const at = { now: NOW, timeZone: "UTC" };
+
+  test("each event and the next run get a line of their own", () => {
+    const deploys = {
+      source: { kind: "mcp" as const, name: "Deploys" },
+      eventTypes: ["deploy.finished", "deploy.failed"],
+    };
+    const mail = { source: { kind: "gmail" as const, name: "Gmail" }, eventTypes: ["*"] };
+    expect(
+      sessionAutomationWaitLines(
+        t,
+        {
+          waitingForEvents: true,
+          hasUpcomingSchedules: true,
+          automationWait: {
+            nextRunAt: "2026-10-22T09:00:00.000Z",
+            event: deploys,
+            events: [deploys, mail],
+            automations: 3,
+          },
+        },
+        at,
+      ),
+    ).toEqual([
+      { kind: "event", text: "deploy.finished or deploy.failed from Deploys" },
+      { kind: "event", text: "every event from Gmail" },
+      { kind: "schedule", text: "Next run: Tomorrow, 09:00" },
+    ]);
+  });
+
+  test("a server naming only the first event counts the rest", () => {
+    expect(
+      sessionAutomationWaitLines(
+        t,
+        {
+          waitingForEvents: true,
+          automationWait: {
+            nextRunAt: null,
+            event: { source: { kind: "mcp", name: "Deploys" }, eventTypes: ["deploy.finished"] },
+            automations: 3,
+          },
+        },
+        at,
+      ),
+    ).toEqual([
+      { kind: "event", text: "deploy.finished from Deploys" },
+      { kind: "event", text: "2 more automations are waiting too" },
+    ]);
+  });
+
+  test("without the details, or with nothing upcoming, one plain line", () => {
+    expect(sessionAutomationWaitLines(t, { waitingForEvents: true }, at)).toEqual([
+      { kind: "event", text: "Waiting for an event" },
+    ]);
+    expect(
+      sessionAutomationWaitLines(t, { hasUpcomingSchedules: true, automationWait: null }, at),
+    ).toEqual([{ kind: "schedule", text: "On a schedule" }]);
+    expect(
+      sessionAutomationWaitLines(
+        t,
+        { hasSchedules: true, hasUpcomingSchedules: false, waitingForEvents: false },
+        at,
+      ),
+    ).toEqual([{ kind: "none", text: "Nothing upcoming" }]);
+    expect(
+      sessionAutomationWaitLines(
+        t,
+        {
+          hasUpcomingSchedules: true,
+          automationWait: { nextRunAt: null, event: null, events: [], automations: 1 },
+        },
+        at,
+      ),
+    ).toEqual([{ kind: "schedule", text: "On a schedule" }]);
   });
 });

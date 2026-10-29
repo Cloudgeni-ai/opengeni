@@ -8,6 +8,7 @@ import {
   replaceReferencesDeep,
   tokenizeSecretText,
 } from "./secret-references";
+import { maskSecretValues, type SecretValueMaskOptions } from "./secret-value-masking";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
@@ -268,6 +269,12 @@ export const BrowserSession = /* @__PURE__ */ defineSchema(() =>
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
       engineVersion: z.string().min(1).max(256).nullable(),
       headless: primitives.boolean,
+      /** How a headed managed browser shows on its machine, as its controller
+       * launched it: "window" is a native window on the machine's screen,
+       * "offscreen" is the same browser with no window (for example a managed
+       * browser on a person's Mac). Absent when unknown, headless, remote or
+       * the person's own Chrome. */
+      display: z.enum(["window", "offscreen"]).optional(),
       identityId: primitives.nullableUuid,
       baseRevisionId: primitives.nullableUuid,
       networkRouteId: primitives.nullableUuid,
@@ -1513,6 +1520,11 @@ export type InteractionInterventionMutationResponse = z.infer<
 /** Canonical model/Codemode input for one typed browser/computer human wait. */
 export const INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME = "interaction__interaction_request_human";
 
+/**
+ * A request may name the generations its caller observed. Omitted ones are
+ * read from the target as it is when the turn pauses (or from the auth run
+ * it names), so an agent that never saw them can still hand a target over.
+ */
 export const RequestHumanInteractionToolInput = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("operation", [
     z.object({ operation: z.literal("wait"), interventionId: primitives.uuid }).strict(),
@@ -1522,9 +1534,9 @@ export const RequestHumanInteractionToolInput = /* @__PURE__ */ defineSchema(() 
         resourceKind: z.enum(["browser_session", "computer_session"]),
         resourceId: primitives.uuid,
         targetId: boundedOpaqueId,
-        expectedControllerGeneration: opaqueGeneration,
-        expectedTargetGeneration: opaqueGeneration,
-        expectedDocumentGeneration: opaqueGeneration.nullable(),
+        expectedControllerGeneration: opaqueGeneration.optional(),
+        expectedTargetGeneration: opaqueGeneration.optional(),
+        expectedDocumentGeneration: opaqueGeneration.nullable().optional(),
         kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
         reason: primitives.string.trim().min(1).max(2_048),
         authRunId: primitives.optionalUuid,
@@ -2102,6 +2114,11 @@ export const BrowserObservation = /* @__PURE__ */ defineSchema(() =>
       diagnostics: InteractionDiagnosticSummary,
       dialog: BrowserDialog.nullable(),
       observedAt: primitives.string.datetime({ offset: true }),
+      /** A plain line about what happened to this tab that its page cannot
+       * show, for example that a browser relaunch reloaded it. Given once,
+       * and only to a caller that asked with
+       * BROWSER_OBSERVATION_NOTICES_PARAMETER. */
+      notice: z.string().min(1).max(1_024).optional(),
     })
     .strict(),
 );
@@ -2322,8 +2339,9 @@ export const ComputerLocator = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerLocator = z.infer<typeof ComputerLocator>;
 
-/** Web-platform permissions which a managed browser can set for the exact
- * top-level origin currently fenced by a BrowserActionCommand. Names remain
+/** Web-platform permissions which a browser can set for the exact top-level
+ * origin currently fenced by a BrowserActionCommand (attached Chrome: camera,
+ * microphone, geolocation and notifications only). Names remain
  * provider-neutral; drivers map them to their native permission descriptors. */
 export const BrowserPermission = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -2359,6 +2377,8 @@ const browserActionVariants = [
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
     })
     .strict(),
+  /** Ends viewport emulation: the tab returns to the window's own size and scale. */
+  z.object({ type: z.literal("viewport_reset") }).strict(),
   z
     .object({
       type: z.literal("click"),
@@ -3305,6 +3325,17 @@ export const BrowserSessionHeartbeatResponse = /* @__PURE__ */ defineSchema(() =
 );
 export type BrowserSessionHeartbeatResponse = z.infer<typeof BrowserSessionHeartbeatResponse>;
 
+/**
+ * The longest a browser is kept after its last use while an agent session
+ * using it is still working (a turn in progress) or deliberately waits (an
+ * armed input wait). A browser normally stops after a few unused minutes;
+ * such a session keeps it, page state and all, until it stops working and
+ * waiting (a wait ends at its deadline) or this long after the browser's last
+ * use, whichever comes first. Anchoring the cap on the last use means a long
+ * turn or repeated waits cannot keep a browser nobody uses.
+ */
+export const BROWSER_WAIT_HOLD_MAX_MS = 60 * 60_000;
+
 const resolvedTargetRole = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(64));
 const resolvedTargetText = /* @__PURE__ */ defineSchema(() =>
   primitives.nonEmptyString.max(INTERACTION_MAX_RESOLVED_TARGET_TEXT),
@@ -3340,6 +3371,12 @@ export type BrowserActionResolvedTarget = z.infer<typeof BrowserActionResolvedTa
  * `targets` in an action receipt. Controllers that predate the field ignore it,
  * and callers that do not send it receive receipts without the field. */
 export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
+
+/** Query parameter by which a caller tells a browser controller it can take
+ * a created session with no observation (`observation: null`): one that
+ * continued in the person's own browser with no tab of its own. Controllers
+ * that predate it ignore it; callers that do not send it get a new tab. */
+export const BROWSER_SESSION_NO_OBSERVATION_PARAMETER = "acceptsNoObservation";
 
 /** Something an action did that its completed state alone does not say. A
  * `network_busy` note is a network_idle wait on a page that loaded but whose
@@ -3383,6 +3420,15 @@ export const BROWSER_ACTION_NOTE_KIND_VERSIONS = {
 /** The newest receipt-notes version; callers send it as the value of
  * BROWSER_ACTION_RECEIPT_NOTES_PARAMETER. */
 export const BROWSER_ACTION_RECEIPT_NOTES_VERSION = 2;
+
+/** Query parameter (value "1") by which a caller asks a browser controller
+ * for BrowserObservation.notice on the observation it returns: from an
+ * observation, a tab selection, or an action's receipt. A notice is given
+ * once, to the first caller that asks, so only the agent's own tools ask; a
+ * person's viewer and other readers neither receive nor use one up.
+ * Controllers that predate the field ignore the parameter, and callers that
+ * do not send it never receive the field. */
+export const BROWSER_OBSERVATION_NOTICES_PARAMETER = "notices";
 
 export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
@@ -3456,6 +3502,9 @@ export const ComputerSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
       /** Accepts a ComputerActionBatch as one operation. */
       actionBatches: primitives.optionalBoolean,
       parallelApps: primitives.boolean,
+      /** A focus action brings a target's window to the front. Absent means
+       * not reported. */
+      targetFocus: primitives.optionalBoolean,
     })
     .strict(),
 );
@@ -3560,6 +3609,13 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       /** Present on the target this computer was last observed or acted on
        * in, which a call that omits targetId works in. */
       current: z.literal(true).optional(),
+      /** Present when someone other than Opengeni (a person, or other
+       * software) used this computer's keyboard, mouse or trackpad within the
+       * last minute, as of the listing or observation that carries it: how
+       * many whole seconds before it. Input Opengeni's computer sessions on
+       * this computer send does not count. A listing marks every target
+       * alike. */
+      personInputSecondsAgo: z.number().int().min(0).max(60).optional(),
     })
     .strict(),
 );
@@ -3661,7 +3717,8 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           context.addIssue({
             code: "custom",
             path: ["continuationOfOperationId"],
-            message: "clickCount 2 requires exactly one prior first-click operation",
+            message:
+              'clickCount 2 and continuationOfOperationId go together: continuationOfOperationId names the earlier click that clickCount 2 turns into a double-click; to double-click in one action, use action "double_click" instead',
           });
         }
         if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
@@ -3837,6 +3894,11 @@ export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn
  * ignore it, and callers that do not send it receive receipts without it. */
 export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
 
+/** Query parameter by which a caller asks a computer controller to include
+ * `unconfirmedInput` in an action receipt, on the same terms as
+ * {@link COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}. */
+export const COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER = "receiptUnconfirmedInput";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3858,6 +3920,11 @@ export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
         .array(ComputerActionRoleStandIn)
         .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
         .optional(),
+      /** The action sent raw input (a click or a key press) that its driver
+       * reported as delivered without any confirmation that the app acted on
+       * it. Present only when the controller supports it and the caller asked
+       * for it; never persisted in the controller's operation journal. */
+      unconfirmedInput: z.literal(true).optional(),
     })
     .strict()
     .superRefine((receipt, context) => {
@@ -4292,93 +4359,39 @@ export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
  * typed value into its address. */
 const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
 
-/** The forms a value takes in page text and addresses. */
-function secretNeedles(secretValues: InteractionSecretValues): string[] {
-  const needles = new Set<string>();
-  for (const value of Object.values(secretValues)) {
-    if (value.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) continue;
-    needles.add(value);
-    // Tools trim the text they report and keep its first line, so a value's
-    // trimmed form and each line of a multi-line value are searched too.
-    for (const part of [value.trim(), ...value.split(/\r?\n|\r/u).map((line) => line.trim())])
-      if (part.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS) needles.add(part);
-    try {
-      needles.add(encodeURIComponent(value));
-      needles.add(encodeURIComponent(value).replaceAll("%20", "+"));
-    } catch {
-      // A lone surrogate has no URI form; the raw value is still searched.
-    }
-    // Submitted forms and URLSearchParams encode more characters (for
-    // example "!" as "%21") than encodeURIComponent does.
-    needles.add(new URLSearchParams({ v: value }).toString().slice(2));
-  }
-  return [...needles].sort((left, right) => right.length - left.length);
-}
-
-/** Length of the longest start of `needle` that `text` ends with, when it is
- * long enough to matter: text clipped to a length can end partway through a
- * value, and that partial value is still the secret's start. */
-function clippedSecretTail(text: string, needle: string): number {
-  const probe = text.slice(-INTERACTION_MIN_REDACTED_SECRET_CHARS);
-  if (probe.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) return 0;
-  let best = 0;
-  for (let at = needle.indexOf(probe); at !== -1; at = needle.indexOf(probe, at + 1)) {
-    const length = at + probe.length;
-    if (length < needle.length && length > best && text.endsWith(needle.slice(0, length)))
-      best = length;
-  }
-  return best;
-}
-
-/** Where text may have been cut: its end, and each truncation mark a tool
- * leaves where it clipped a longer text before adding more after it. */
-const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
+/** How browser and desktop results are masked: the shared known-value engine
+ * with the `[secret]` marker, a four-character minimum (typed values are
+ * often short) for values, their lines and clipped starts (at the end of any
+ * text too), and identifier keys left alone. */
+export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
+  minChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
+  base64: false,
+  lines: "all",
+  // Typed values are short: every form (lines, percent-encoded) may be clipped.
+  clippedForms: "all",
+  clippedMinChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
+  clippedMinShare: 0,
+  // An observed field or label clipped to its width ends partway through.
+  clippedTextEndMinChars: 0,
+  skipKey: (key) => NON_TEXT_KEY.test(key),
+};
 
 /** Deep copy with every occurrence of a supplied secret value in a text
  * string (raw or percent-encoded) replaced by `[secret]`, including a value's
  * start left at the end of a clipped string or before a truncation mark.
  * Used on results a driver returns after dispatching materialized values (CUA
  * tools echo typed text; desktop accessibility trees and page fields expose
- * values). */
+ * values). One engine with agent tool-result masking: `maskSecretValues`. */
 export function redactInteractionSecretValues<T>(
   value: T,
   secretValues: InteractionSecretValues | undefined,
 ): T {
   if (secretValues === undefined) return value;
-  const needles = secretNeedles(secretValues);
-  if (needles.length === 0) return value;
-  const redactText = (text: string): string => {
-    let out = text;
-    for (const needle of needles) {
-      if (out.includes(needle)) out = out.split(needle).join(INTERACTION_REDACTED_SECRET);
-    }
-    const cuts = [...out.matchAll(TRUNCATION_MARK)].map((match) => match.index);
-    // From the last cut back, so the earlier positions stay valid.
-    for (const cut of [out.length, ...cuts.reverse()]) {
-      const before = out.slice(0, cut);
-      let tail = 0;
-      for (const needle of needles) tail = Math.max(tail, clippedSecretTail(before, needle));
-      if (tail > 0)
-        out = before.slice(0, cut - tail) + INTERACTION_REDACTED_SECRET + out.slice(cut);
-    }
-    return out;
-  };
-  const visit = (entry: unknown, key: string | null): unknown => {
-    if (typeof entry === "string") {
-      return key !== null && NON_TEXT_KEY.test(key) ? entry : redactText(entry);
-    }
-    if (Array.isArray(entry)) return entry.map((item) => visit(item, key));
-    if (entry !== null && typeof entry === "object") {
-      return Object.fromEntries(
-        Object.entries(entry as Record<string, unknown>).map(([childKey, child]) => [
-          childKey,
-          visit(child, childKey),
-        ]),
-      );
-    }
-    return entry;
-  };
-  return visit(value, null) as T;
+  const entries = Object.values(secretValues).map((secret) => ({
+    value: secret,
+    label: INTERACTION_REDACTED_SECRET,
+  }));
+  return maskSecretValues(value, entries, INTERACTION_SECRET_MASK_OPTIONS);
 }
 
 // ---------------------------------------------------------------------------
@@ -4408,6 +4421,8 @@ export const BrowserPasskeyCredentialMaterial = /* @__PURE__ */ defineSchema(() 
       userDisplayName: z.string().max(512).nullable(),
       privateKey: passkeyBinary,
       signCount: z.number().int().nonnegative().max(0xffff_ffff),
+      backupEligibility: z.boolean().optional(),
+      backupState: z.boolean().optional(),
     })
     .strict(),
 );
@@ -4480,6 +4495,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       /** Page targets that currently host a virtual authenticator. */
       authenticators: primitives.nonnegativeInteger,
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
+      /** Sent only when the caller opts into backup-flag negotiation. */
+      supportsBackupFlags: z.literal(true).optional(),
     })
     .strict(),
 );

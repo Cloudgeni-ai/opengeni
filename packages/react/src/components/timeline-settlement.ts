@@ -7,10 +7,11 @@ export type TimelineSettlement = { element: HTMLElement; top: number };
 export function captureTimelineSettlement(
   scroller: HTMLElement,
   groups: readonly { key: string; group: TimelineGroup }[],
+  answeredCard: HTMLElement | null = null,
 ): TimelineSettlement | null {
   // Selectionchange can arrive after this commit. Inspect ownership directly
   // as well as the caller's pin latch so that race cannot move selected text.
-  if (timelineHasReader(scroller)) return null;
+  if (timelineHasReader(scroller, answeredCard)) return null;
   const live = Array.from(
     scroller.querySelectorAll(
       '[data-og-exchange-status="working"], [data-og-exchange-status="waiting"]',

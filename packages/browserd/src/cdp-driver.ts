@@ -87,6 +87,7 @@ import {
   LatestBrowserFrameSubscription,
   assertImageDimensions,
   decodeBoundedBase64Image,
+  fitImageWithin,
   imageDimensions,
   normalizeFrameStreamOptions,
   normalizeScreenshotOptions,
@@ -120,6 +121,8 @@ import {
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
+import { nameContainsWords } from "./locator-name";
 
 /** The request deadline that carries an action is derived from this bound and
  * the other declared waits (see browserActionDeadlineMs). */
@@ -143,9 +146,12 @@ const TRANSFER_UPLOAD_FILES_FUNCTION = `function (parts, files) {
     transfer.items.add(new File(chunks, file.name, { type: file.type, lastModified: file.lastModified }));
   });
   this.files = transfer.files;
+  // What the page then does with them shows on the page, as with files a
+  // person picks: a change handler may read them and clear the input (so the
+  // same file can be picked again), or turn a file away.
   this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
   this.dispatchEvent(new Event('change', { bubbles: true }));
-  return this.files.length;
+  return 'selected';
 }`;
 // Chrome derives an uploaded file's type from its extension; mirror the
 // common ones so pages that check File.type accept the transferred file.
@@ -229,6 +235,16 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
  * even when the server used up most of NAVIGATION_COMMIT_TIMEOUT_MS. */
 const NAVIGATION_COMMIT_GRACE_MS = 2_000;
 const NAVIGATION_COMMIT_POLL_MS = 25;
+/** Back passes over at most this many history entries whose page navigates
+ * on by itself as soon as it opens (a redirect step of a sign-in flow, say). */
+const HISTORY_REDIRECT_SKIPS = 3;
+/** How many pages, one sending the tab on to the next by itself, a Back step
+ * follows to see where it ends. */
+const HISTORY_REDIRECT_HOPS = 4;
+/** The most a Back step waits for its page's own start-up code to run. It
+ * normally ends in a few milliseconds; this only bounds a page whose
+ * scripts keep its event loop busy. */
+const HISTORY_STARTUP_LIMIT_MS = 1_000;
 /** Chromium's load error for an HTTP error status whose response had no body. */
 const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 /** Recent main-frame loaders remembered per tab, to recognize a navigation's
@@ -236,6 +252,99 @@ const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 const COMMITTED_LOADER_HISTORY = 16;
 /** Captures of a tab that keeps committing new documents before giving up. */
 const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
+/** Bound for each step that keeps scrollbar gutters during a full-page capture. */
+const SCROLLBAR_STYLE_TIMEOUT_MS = 2_000;
+/** What a full-page capture changed to keep its scrollbar gutters, and how to undo it. */
+type ScrollbarLayout = {
+  viewportWidth: number | null;
+  inexact: boolean;
+  restore: () => Promise<void>;
+};
+/** Most scrollers whose gutter a full-page capture keeps by selector. */
+const MAX_PINNED_SCROLLERS = 256;
+/**
+ * Finds the classic (space-taking) scrollbars a full-page capture would hide.
+ * Vertical ones in the document tree are `pinned`: a selector keeps their
+ * gutter. Those whose gutter the page keeps stable itself need no rule; `own`
+ * holds the rule that re-evaluates their scrollbars afterwards. The rest (horizontal ones, those inside shadow trees, any past the
+ * limit) cannot be kept, which makes the capture inexact; `refresh` names the
+ * elements, or shadow hosts, whose style must change afterwards to bring
+ * them back. Overlay scrollbars take no space and are never found.
+ */
+const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
+  const root = document.documentElement;
+  if (!root) return null;
+  const limit = ${MAX_PINNED_SCROLLERS};
+  const pinned = [];
+  // A gutter the page keeps stable itself already holds its space, so it
+  // gets no rule. Its scrollbar, if it shows one, is brought back afterwards
+  // by flipping overflow-y between scroll and auto, which lays out an
+  // overflowing scroller the same way and keeps any custom scrollbar style.
+  const own = [];
+  const pin = (selector, element, style) => {
+    if (!String(style.scrollbarGutter).startsWith("stable")) return pinned.push(selector);
+    const scroll = style.overflowY === "scroll";
+    if (!scroll && element.scrollHeight <= element.clientHeight) return;
+    own.push(selector + "{overflow-y:" + (scroll ? "auto" : "scroll") + "!important}");
+  };
+  const refresh = new Set();
+  let overflow = false;
+  if (innerWidth - root.clientWidth >= 1) pin(":root", root, getComputedStyle(root));
+  if (innerHeight - root.clientHeight >= 1) refresh.add(":root");
+  // Changing a rule restyles every element its last compound could match, so
+  // that compound names the element's tag, id and first class as well.
+  const path = (element) => {
+    const parts = [];
+    for (let node = element; node && node !== root; node = node.parentElement) {
+      let index = 1;
+      for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) index += 1;
+      let part = ":nth-child(" + index + ")";
+      if (node === element) {
+        const name = CSS.escape(element.localName);
+        const id = element.id ? "#" + CSS.escape(element.id) : "";
+        const first = element.classList[0];
+        part = name + id + (first ? "." + CSS.escape(first) : "") + part;
+      }
+      parts.unshift(part);
+    }
+    return ":root>" + parts.join(">");
+  };
+  const visit = (scope, host) => {
+    for (const element of scope.querySelectorAll("*")) {
+      if (element.shadowRoot) visit(element.shadowRoot, host ?? element);
+      if (element === root || !(element instanceof HTMLElement)) continue;
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      // Inline boxes report no client size; a scroller always has one.
+      if (width === 0 && height === 0) continue;
+      const wide = element.offsetWidth - width;
+      const tall = element.offsetHeight - height;
+      // Equal borders and no overflow: skip the costly style read. (A
+      // "stable both-edges" scroller's gutters look like equal borders.)
+      if (
+        Math.abs(wide - 2 * element.clientLeft) < 1 &&
+        Math.abs(tall - 2 * element.clientTop) < 1 &&
+        element.scrollHeight <= height &&
+        element.scrollWidth <= width
+      ) continue;
+      const style = getComputedStyle(element);
+      const vertical = wide - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) >= 1;
+      const horizontal = tall - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth) >= 1;
+      if (!vertical && !horizontal) continue;
+      const kept = vertical && !host && pinned.length + own.length < limit;
+      if (kept) pin(path(element), element, style);
+      if (horizontal || !kept) {
+        if (refresh.size < limit) refresh.add(path(host ?? element));
+        else overflow = true;
+      }
+    }
+  };
+  visit(document, null);
+  return { viewportWidth: innerWidth, pinned, own, refresh: overflow ? [":root"] : [...refresh] };
+})()`;
+/** Lays the page out, which re-evaluates the scrollbars of restyled scrollers. */
+const LAYOUT_READ_EXPRESSION =
+  "document.documentElement ? document.documentElement.getBoundingClientRect().width : null";
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
@@ -296,6 +405,9 @@ export function accessibilityRebuildWanted(input: {
   );
 }
 type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
+/** Where a browser lets a session set permissions only in tabs it opened. */
+export const PERMISSION_OPENED_TABS_ONLY =
+  "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.";
 const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
   geolocation: "geolocation",
   notifications: "notifications",
@@ -324,6 +436,15 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 })()`;
 
 class DialogOpenedSignal extends Error {}
+
+/** A frame skipped because another capture of its tab, still within that
+ * capture's own deadline, had not been answered. Frames are latest-only, so
+ * the stream waits for its next round instead of counting a failure. */
+class CaptureBusyError extends Error {
+  constructor() {
+    super("browser frame skipped behind another capture of the tab");
+  }
+}
 
 /** Whether an error is about the browser's transport rather than the page:
  * the browser or the connection to it or to the tab is gone, or a command
@@ -362,17 +483,23 @@ function classifyActionFailure(error: unknown, command: BrowserActionCommandValu
  * render (hidden, or drawn by the browser rather than the page) has no box to
  * scroll to or point at. Null for any other reply. */
 export function scrollRefusal(message: string): InteractionDefiniteDriverError | null {
-  if (/no node with given id|node is detached/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "locator_not_found",
-      "browser element is no longer present",
-    );
-  if (/does not have a layout object/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "invalid_action",
-      "browser element has no box on the page to act on; it is hidden or not rendered",
-    );
+  if (/no node with given id|node is detached/iu.test(message)) return elementGone();
+  if (/does not have a layout object/iu.test(message)) return elementUnrendered();
   return null;
+}
+
+function elementGone(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "locator_not_found",
+    "browser element is no longer present",
+  );
+}
+
+function elementUnrendered(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "invalid_action",
+    "browser element has no box on the page to act on; it is hidden or not rendered",
+  );
 }
 
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
@@ -437,6 +564,9 @@ export type BrowserCommandRunner = {
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   /** A plain line for the agent about how this browser was launched. */
   readonly networkNotice?: string | null;
+  /** How a headed managed browser shows on its machine: in a native window or
+   * offscreen with none. Absent for headless, remote and attached browsers. */
+  readonly display?: "window" | "offscreen" | null;
   /** Credentials for the launch's proxy. They never reach the browser's
    * argv or environment; the driver answers the proxy's challenges. */
   readonly proxyCredentials?: { username: string; password: string } | null;
@@ -534,6 +664,9 @@ type TargetState = {
   sessionId: string;
   authorityGeneration: string;
   actionEffectCount: number;
+  /** This attachment started the page of a reopened tab Chrome had not
+   * loaded; tab details read before it describe the tab before its page. */
+  startedRestoredPage?: true;
   createdAt: string;
   frame: MainFrame;
   documentGeneration: string;
@@ -548,9 +681,15 @@ type TargetState = {
   /** Counts main-frame commits, cross- and same-document alike, so a history
    * traversal can wait for the entry it asked for to commit. */
   mainFrameCommits: number;
+  /** Counts the main-frame documents the tab switched to, so a Back step can
+   * tell the page it opened from one that page went on to by itself. */
+  documentCommits: number;
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
+  /** The document already known to draw, so input sent to it while its tab
+   * is hidden reaches the page (see drawHiddenTabForInput). */
+  inputDrawnDocument?: string;
   /** When set, the current action's locator waits end here instead of
    * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
   locatorDeadline?: number | null;
@@ -609,6 +748,28 @@ type TargetState = {
   /** Device size this controller emulates on the page, in CSS pixels. A
    * viewport screenshot of it is exactly this size times its scale factor. */
   emulatedViewport?: { width: number; height: number; deviceScaleFactor: number } | undefined;
+  /** How the tab measured before this controller first emulated a size on
+   * it, so a reset can check that it really returned there. */
+  ownViewport?: MeasuredViewport | undefined;
+  /** Set while a viewport change is applied. Frame captures wait for it: a
+   * clipped Page.captureScreenshot changes the page's emulation for the
+   * capture and puts back what it saw when it began, which would undo a
+   * change that landed in between. */
+  framesPaused?: Promise<void> | undefined;
+  /** Captures of this tab not answered yet, each with the time its caller
+   * stops waiting for it. At most one is sent at a time (see sendCapture). */
+  capturesRunning: Map<Promise<void>, number>;
+};
+
+/** The page's size, screen and scale as it reports them, in CSS pixels, and
+ * the browser window's bounds when the browser reports them. */
+type MeasuredViewport = {
+  width: number;
+  height: number;
+  screenWidth: number;
+  screenHeight: number;
+  deviceScaleFactor: number;
+  window: { width: number; height: number } | null;
 };
 
 /** A page size the agent set with the viewport action. */
@@ -628,6 +789,22 @@ type OopifSession = {
   frameIds: Set<string>;
   /** Stops this session's network and load listeners when it detaches. */
   unsubscribe: Array<() => void>;
+};
+
+/**
+ * Dialogs (alert, confirm, prompt) only the person sees: a page that opened
+ * one before the debugger attached waits on it, and no debugger can read or
+ * answer it. The browser closes such a dialog, as Cancel, when its tab is
+ * hidden while nothing debugs it.
+ */
+export type PersonDialogs = {
+  /** Whether the tab is the one shown in its window: only there can such a
+   * dialog stay open. */
+  inFront(browserTargetId: string): Promise<boolean>;
+  /** Hide the tab for a moment, with its debugger released, so the browser
+   * closes such a dialog. "not_front" when the tab is not shown (it has no
+   * such dialog), "unavailable" when it cannot be hidden from here. */
+  hideForAMoment(browserTargetId: string): Promise<"hidden" | "not_front" | "unavailable">;
 };
 
 export type AgentBrowserDriverOptions = {
@@ -684,9 +861,21 @@ export type AgentBrowserDriverOptions = {
   focusEmulation?: boolean;
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
-  permissionControl?: boolean;
+  /** Whether permission actions work. `"opened_tabs"`: only in a tab this
+   * session opened and no other session is using, and the command is sent on
+   * that tab's session so the browser knows the exact tab (a browser that is
+   * the person's own, where every other tab is theirs). */
+  permissionControl?: boolean | "opened_tabs";
   /** Experimental ephemeral context lease. Never a durable browser profile. */
   browserContextId?: string;
+  /** How long attaching to a tab waits for its page to answer before the tab
+   * counts as not responding. Unbounded beyond each command's own deadline
+   * when unset. */
+  attachTimeoutMs?: number;
+  /** A browser where a page can open a dialog (alert, confirm, prompt) that
+   * only the person sees: one it opened before the debugger attached, which
+   * no debugger can read or answer, and which holds every page command. */
+  personDialogs?: PersonDialogs;
   /** Headless shell has no chrome://version page. Read its real Client Hints
    * from a controller-intercepted secure-origin document instead. */
   userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
@@ -757,6 +946,32 @@ export type GoneBrowserTarget =
 
 const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
 
+/** Why a relaunched browser stopped, as a clause: "this browser was stopped
+ * after going unused for 10 minutes and relaunched on its next call". */
+function relaunchText(relaunch: { reason: BrowserRelaunchReason; idleReleaseMinutes?: number }) {
+  const minutes = relaunch.idleReleaseMinutes;
+  return relaunch.reason === "idle_release"
+    ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
+    : relaunch.reason === "controller_restart"
+      ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
+      : relaunch.reason === "browser_lost"
+        ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
+        : "this browser restarted to save its profile state";
+}
+
+/** A tab a relaunched browser reopened under its earlier ID: its page loaded
+ * again, so whatever the page held only in memory is gone. */
+export type ReloadedBrowserTab = { reason: BrowserRelaunchReason; idleReleaseMinutes?: number };
+
+const RELOADED_PAGE =
+  "so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone";
+
+/** The observation notice for a tab a relaunch reloaded. */
+export function reloadedTabNotice(reloaded: ReloadedBrowserTab): string {
+  const why = relaunchText(reloaded);
+  return `${why.charAt(0).toUpperCase()}${why.slice(1)}, ${RELOADED_PAGE}.`;
+}
+
 /** The answer for a tab ID that names no open tab: why it is gone when the
  * driver knows, and how to carry on. Always starts "browser target does not
  * exist", which callers match. */
@@ -770,16 +985,7 @@ export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string
       : "by its page, or by a person or agent using this browser";
     return `browser target does not exist: this tab was closed at ${gone.at} ${by}; ${LIST_CURRENT_TABS}`;
   }
-  const minutes = gone.idleReleaseMinutes;
-  const why =
-    gone.reason === "idle_release"
-      ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
-      : gone.reason === "controller_restart"
-        ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
-        : gone.reason === "browser_lost"
-          ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
-          : "this browser restarted to save its profile state";
-  return `browser target does not exist: ${why}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
+  return `browser target does not exist: ${relaunchText(gone)}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
 }
 
 function hasBrowserEmulation(
@@ -802,6 +1008,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
+  }
+  get display(): "window" | "offscreen" | null {
+    return this.runner.display ?? null;
   }
   /** The load error of the page start() opened and kept on the browser's
    * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */
@@ -826,11 +1035,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** Tabs that vanished while this driver knew them, or that a relaunch
    * replaced, most recent last: a later call naming one learns why. */
   private readonly goneTargets = new Map<string, GoneBrowserTarget>();
+  /** Tabs a relaunch reopened under their earlier IDs whose reload the agent
+   * has not been told of yet, by tab ID. The next observation the agent's
+   * tools receive for one says so. */
+  private readonly reloadedTabs = new Map<string, ReloadedBrowserTab>();
   /** Tabs a close-tab call of this driver is closing. */
   private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
    * in it rather than opening another. */
   private rebindTargetId: string | null = null;
+  /** The tabs an earlier runtime of this session opened, most recent first:
+   * start carries on in one of them when the selected one is gone. */
+  private rebindCandidates: string[] = [];
   private reportedOwnedTabs = "";
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
@@ -838,8 +1054,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private focusEmulation: boolean;
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
-  private readonly permissionControl: boolean;
+  private readonly permissionControl: boolean | "opened_tabs";
   private readonly browserContextId: string | undefined;
+  private readonly attachTimeoutMs: number | undefined;
+  private readonly personDialogs: PersonDialogs | undefined;
+  /** Tabs in front whose page did not answer, by the browser's own ID: a
+   * dialog only the person sees may hold them. Cleared once one answers. */
+  private readonly unansweredTabs = new Set<string>();
+  /** Tabs just hidden for a moment, whose page must answer right away to
+   * count as one a dialog held. */
+  private readonly justHiddenTabs = new Set<string>();
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
@@ -872,6 +1096,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly attachingSessions = new Map<string, string>();
   /** Tabs whose renderer process died. Cleared when the tab attaches healthily again. */
   private readonly crashedTargets = new Set<string>();
+  /** Tabs a relaunch reopened that have not attached since, by the browser's
+   * own ID. Chrome restores only the first few tabs' pages and leaves the
+   * rest without a renderer until they are used, which a first attachment
+   * would otherwise take for a crash. The value is when a load this driver
+   * started stops being waited for; null before one started. */
+  private readonly restoredTargets = new Map<string, number | null>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
@@ -950,6 +1180,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       for (const targetId of this.ownedTabs.previous.closedBlank)
         this.closedBlankTargetIds.add(targetId);
       this.rebindTargetId = this.ownedTabs.previous.selected;
+      this.rebindCandidates = [...this.ownedTabs.previous.created].reverse();
     }
     this.navigationCommitTimeoutMs =
       options.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
@@ -958,6 +1189,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
+    this.attachTimeoutMs = options.attachTimeoutMs;
+    this.personDialogs = options.personDialogs;
     this.targetAutoAttach = options.targetAutoAttach ?? this.engine === "chromium";
     this.passkeys = options.passkeys ?? null;
     this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
@@ -992,7 +1225,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                   event: "browser.window_parking.failed",
                   browserSessionId: this.browserSessionId,
                   phase,
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   at: new Date().toISOString(),
                 }),
               ),
@@ -1024,6 +1257,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         result.status === "rejected" && !(result.reason instanceof CdpProtocolError),
     );
     if (failure) throw failure.reason;
+  }
+
+  /**
+   * Start a session that continues in the person's browser, where an earlier
+   * runtime of it left its tabs (after an idle release or a controller
+   * restart): carry on in the tab it was using, or else in another tab it
+   * opened that is still open. With none of its tabs left it starts with
+   * none, as it ended, and returns null: opening a tab nobody asked for would
+   * put a stray blank tab in the person's window. A session with no earlier
+   * runtime starts as start does.
+   */
+  async resume(): Promise<BrowserObservationValue | null> {
+    if (this.targetLifecycle !== "cdp" || !this.ownedTabs?.previous) return await this.start();
+    this.started = true;
+    const connection = await this.ensureConnection();
+    await this.windowParking?.presentNow();
+    const rebound = await this.rebindPreviousTarget(connection);
+    if (rebound) return rebound;
+    this.windowParking?.arm();
+    return null;
   }
 
   async start(
@@ -1231,6 +1484,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw error;
       }
     }
+    await this.closeLeftBlankTarget(connection, previousSelection);
     return createdState;
   }
 
@@ -1295,9 +1549,61 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const targetId = this.browserTargetIdOf(tabId);
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
+    const previousSelection = this.selectedTargetId;
     this.selectedTargetId = targetId;
     this.ownedTabsChanged();
+    await this.closeLeftBlankTarget(connection, previousSelection);
     return await this.observe(tabId);
+  }
+
+  /** Close the tab this session just moved away from when the session opened
+   * it and it is still blank, such as the empty tab a new session starts in.
+   * The agent has moved on to another tab, and an empty tab would otherwise
+   * stay in the person's browser until the session is released or ends.
+   * Never touches a tab the session did not open, a tab showing a page, a tab
+   * on its way to one (Chrome still lists a blank address until a navigation
+   * commits), or a tab another session is using. A tab whose navigation this
+   * session cannot see, because it no longer follows that tab, is left too.
+   * Best effort: a tab that could not be closed stays recorded, so the
+   * session's cleanup closes it later. */
+  private async closeLeftBlankTarget(
+    connection: BrowserCdpConnection,
+    targetId: string | null,
+  ): Promise<void> {
+    if (!this.ownedTabs || targetId === null || targetId === this.selectedTargetId) return;
+    if (!this.createdTargetIds.has(targetId) || this.ownedTabs.inUseElsewhere?.(targetId)) return;
+    if (!this.leftWithoutNavigation(targetId)) return;
+    try {
+      const info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+      // Read again after listing: a navigation may have started meanwhile.
+      if (!info || !isBlankTabUrl(info.url) || !this.leftWithoutNavigation(targetId)) return;
+      await this.closeTargetAndSettle(connection, targetId);
+    } catch {
+      return;
+    }
+    this.recordClosedBlankTarget(targetId);
+    this.ownedTabsChanged();
+  }
+
+  /** Whether this session follows the tab and no navigation of its page has
+   * started without committing. */
+  private leftWithoutNavigation(targetId: string): boolean {
+    const state = this.states.get(targetId);
+    return state !== undefined && !state.navigationPending;
+  }
+
+  /** Forget a blank tab this session opened and has just closed, keeping its
+   * ID so a later call that names it learns why it is gone. */
+  private recordClosedBlankTarget(targetId: string): void {
+    this.removeState(targetId);
+    this.createdTargetIds.delete(targetId);
+    this.closedBlankTargetIds.delete(targetId);
+    this.closedBlankTargetIds.add(targetId);
+    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
+      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
+    }
   }
 
   async closeTarget(tabId: string): Promise<BrowserTargetValue[]> {
@@ -1370,17 +1676,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       try {
         await this.closeTargetAndSettle(connection, targetId);
-        this.removeState(targetId);
-        this.createdTargetIds.delete(targetId);
-        this.closedBlankTargetIds.delete(targetId);
-        this.closedBlankTargetIds.add(targetId);
+        this.recordClosedBlankTarget(targetId);
       } catch {
         // Kept, so a later cleanup closes it.
         settled = false;
       }
-    }
-    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
-      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
     }
     this.ownedTabsChanged();
     return settled;
@@ -1394,9 +1694,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async rebindPreviousTarget(
     connection: BrowserCdpConnection,
   ): Promise<BrowserObservationValue | null> {
-    const targetId = this.rebindTargetId;
+    const selected = this.rebindTargetId;
+    const candidates = [
+      ...new Set([...(selected ? [selected] : []), ...this.rebindCandidates]),
+    ].filter((targetId) => !this.closedBlankTargetIds.has(targetId));
     this.rebindTargetId = null;
-    if (!targetId || this.closedBlankTargetIds.has(targetId)) return null;
+    this.rebindCandidates = [];
+    if (candidates.length === 0) return null;
+    // Only tabs still open are worth trying; the selected one first.
+    const open = new Set(
+      (await this.targetInfos(connection).catch(() => []))
+        .filter(isVisibleTarget)
+        .map((info) => info.targetId),
+    );
+    for (const targetId of candidates) {
+      if (!open.has(targetId)) continue;
+      const rebound = await this.rebindTarget(connection, targetId);
+      if (rebound) return rebound;
+    }
+    return null;
+  }
+
+  private async rebindTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<BrowserObservationValue | null> {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<null>((resolve) => {
       deadline = setTimeout(
@@ -1426,8 +1748,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     // A tab that cannot be read now (it closed meanwhile, Chrome will no
     // longer let the extension control it, or its page is not answering) is
-    // not worth failing the session for: open a new one, as a new session
-    // would. A read still waiting on the tab ends by itself.
+    // not worth failing the session for: move on to the session's next tab,
+    // or none. A read still waiting on the tab ends by itself.
     abandoned = true;
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     if (!this.attaching.has(targetId)) {
@@ -1577,6 +1899,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** The http(s) URL an error page failed to load, read from its current
    * history entry. Null when it can't be read; the caller keeps the error URL. */
+  async errorPageUrl(tabId: string): Promise<string | null> {
+    return await this.errorPageDestination(this.browserTargetIdOf(tabId));
+  }
+
+  /** errorPageUrl by the browser's own target ID. */
   private async errorPageDestination(targetId: string): Promise<string | null> {
     try {
       const connection = await this.ensureConnection();
@@ -1662,52 +1989,88 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
-    return await this.withTarget(targetId, async (state, info) => {
-      if (state.dialog) return await this.observeUnlocked(state, info);
-      try {
-        return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
-      } catch (error) {
-        // A dialog opened while the page was being read: report it.
-        if (!(error instanceof DialogBlockedError)) throw error;
-        return await this.observeUnlocked(state, info);
-      }
-    });
+    return await this.withTarget(
+      targetId,
+      async (state, info) => {
+        if (state.dialog) return await this.observeUnlocked(state, info);
+        try {
+          return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
+        } catch (error) {
+          // A dialog opened while the page was being read: report it.
+          if (!(error instanceof DialogBlockedError)) throw error;
+          return await this.observeUnlocked(state, info);
+        }
+      },
+      { read: true },
+    );
   }
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(tabId: string): Promise<BrowserTargetStateValue> {
-    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
-      if (!state.dialog) {
-        try {
-          await this.untilDialog(state, async () => await this.refreshFrame(state));
-        } catch (error) {
-          if (!(error instanceof DialogBlockedError)) throw error;
+    const targetId = this.browserTargetIdOf(tabId);
+    try {
+      return await this.targetStateOf(targetId);
+    } catch (error) {
+      // A tab a dialog only the person sees may hold still has a state with no
+      // readable document, so that dialog can be cancelled by handle_dialog.
+      if (
+        !(error instanceof InteractionControllerError) ||
+        error.message !== PAGE_NOT_ANSWERING_MESSAGE ||
+        !this.unansweredTabs.has(targetId)
+      )
+        throw error;
+      return BrowserTargetState.parse({
+        browserSessionId: this.browserSessionId,
+        controllerGeneration: this.controllerGeneration,
+        targetId: this.tabIdOf(targetId),
+        targetGeneration: this.targetGeneration(targetId),
+        documentGeneration: null,
+        frameId: null,
+      });
+    }
+  }
+
+  private async targetStateOf(targetId: string): Promise<BrowserTargetStateValue> {
+    return await this.withTarget(
+      targetId,
+      async (state) => {
+        if (!state.dialog) {
+          try {
+            await this.untilDialog(state, async () => await this.refreshFrame(state));
+          } catch (error) {
+            if (!(error instanceof DialogBlockedError)) throw error;
+          }
         }
-      }
-      return this.targetStateFrom(state);
-    });
+        return this.targetStateFrom(state);
+      },
+      { read: true },
+    );
   }
 
   async readDom(
     tabId: string,
     request: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
-    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
-      if (request.kind === "count") {
-        assertSafeDomReadSelector(request.selector);
-      } else if (request.locator.kind === "css") {
-        assertSafeDomReadSelector(request.locator.selector);
-      }
-      if (state.dialog) {
-        throw new InteractionDefiniteDriverError(
-          "resource_unavailable",
-          `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+    return await this.withTarget(
+      this.browserTargetIdOf(tabId),
+      async (state) => {
+        if (request.kind === "count") {
+          assertSafeDomReadSelector(request.selector);
+        } else if (request.locator.kind === "css") {
+          assertSafeDomReadSelector(request.locator.selector);
+        }
+        if (state.dialog) {
+          throw new InteractionDefiniteDriverError(
+            "resource_unavailable",
+            `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+          );
+        }
+        return this.typedSecrets.redact(
+          await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
         );
-      }
-      return this.typedSecrets.redact(
-        await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
-      );
-    });
+      },
+      { read: true },
+    );
   }
 
   private async readDomUnlocked(
@@ -1864,137 +2227,313 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               deadline,
               async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
             );
-            const metrics = await this.screenshotRead(
-              "Page.getLayoutMetrics",
-              deadline,
-              async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-            );
-            const capture: Record<string, unknown> = {
-              format: normalized.format,
-              fromSurface: true,
-              captureBeyondViewport: normalized.fullPage,
-              ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-            };
-            let cssWidth = metrics.viewport.width;
-            let cssHeight = metrics.viewport.height;
-            let scrollX = metrics.viewport.x;
-            let scrollY = metrics.viewport.y;
-            if (normalized.fullPage) {
-              cssWidth = metrics.content.width;
-              cssHeight = metrics.content.height;
-              scrollX = 0;
-              scrollY = 0;
-              assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-              capture.clip = {
-                x: 0,
-                y: 0,
-                width: cssWidth,
-                height: cssHeight,
-                scale: 1,
-              };
-            }
-            const captureOnce = async () => {
-              const response = await this.screenshotRead(
-                "Page.captureScreenshot",
+            let layout: ScrollbarLayout | null = null;
+            try {
+              const metrics = await this.screenshotRead(
+                "Page.getLayoutMetrics",
                 deadline,
-                async (timeoutMs) => {
-                  const stallBound =
-                    this.engine === "chrome" && !normalized.fullPage
-                      ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
-                      : timeoutMs;
-                  try {
-                    return await this.sendTarget<{ data?: unknown }>(
-                      state,
-                      "Page.captureScreenshot",
-                      capture,
-                      { timeoutMs: stallBound },
-                    );
-                  } catch (error) {
-                    if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
-                      throw new InteractionControllerError(
-                        "timeout",
-                        CONNECTED_CHROME_CAPTURE_STALLED,
-                        true,
-                      );
-                    }
-                    throw error;
-                  }
-                },
+                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
               );
-              // An image above the media bound fails like a reply too large
-              // for the connection: the agent can ask for a smaller capture.
-              const encodedBound = Math.ceil((BROWSER_MEDIA_MAX_BYTES * 4) / 3) + 4;
-              if (typeof response.data === "string" && response.data.length > encodedBound)
-                throw new CdpResponseRefusedError(
-                  "Page.captureScreenshot",
-                  "too_large",
-                  response.data.length,
-                  encodedBound,
+              const capture: Record<string, unknown> = {
+                format: normalized.format,
+                fromSurface: true,
+                captureBeyondViewport: normalized.fullPage,
+                ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+              };
+              let cssWidth = metrics.viewport.width;
+              let cssHeight = metrics.viewport.height;
+              let scrollX = metrics.viewport.x;
+              let scrollY = metrics.viewport.y;
+              let pixelRatio = metrics.pixelRatio;
+              if (normalized.fullPage) {
+                // A page too large to capture fails before any style changes.
+                // Keeping the gutters changes no layout, so these metrics hold.
+                assertImageDimensions(
+                  Math.ceil(Math.max(metrics.content.width, metrics.viewport.width)),
+                  Math.ceil(metrics.content.height),
                 );
-              const data = decodeBoundedBase64Image(response.data);
-              return { data, dimensions: imageDimensions(data, normalized.format) };
-            };
-            let { data, dimensions } = await captureOnce();
-            // Chromium applies a new device-metrics override asynchronously, so a
-            // capture right after a viewport change can still return the previous
-            // surface. A viewport capture of an emulated device has an exact size;
-            // wait briefly for the compositor instead of publishing the stale frame.
-            const expected = normalized.fullPage ? undefined : state.emulatedViewport;
-            if (expected) {
-              const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
-              const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
-              const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
-              let pause = 16;
-              while (
-                (Math.abs(dimensions.width - expectedWidth) > 1 ||
-                  Math.abs(dimensions.height - expectedHeight) > 1) &&
-                Date.now() + pause < settleDeadline
-              ) {
-                await delay(pause);
-                pause = Math.min(pause * 2, 200);
-                const refreshed = await this.screenshotRead(
-                  "Page.getLayoutMetrics",
-                  deadline,
-                  async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-                );
-                cssWidth = refreshed.viewport.width;
-                cssHeight = refreshed.viewport.height;
-                scrollX = refreshed.viewport.x;
-                scrollY = refreshed.viewport.y;
-                ({ data, dimensions } = await captureOnce());
+                layout = await this.keepScrollbarLayout(state, deadline);
+                // The capture keeps the page's own layout width, scrollbar
+                // gutter included, so the image is as wide as the tab's viewport.
+                cssWidth = Math.max(metrics.content.width, layout?.viewportWidth ?? 0);
+                cssHeight = metrics.content.height;
+                scrollX = 0;
+                scrollY = 0;
+                pixelRatio = null;
+                assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+                capture.clip = {
+                  x: 0,
+                  y: 0,
+                  width: cssWidth,
+                  height: cssHeight,
+                  scale: 1,
+                };
               }
-            }
-            // The image is labeled with the document it shows. A commit while it
-            // was captured leaves the label unproven, so capture the new page.
-            const shown = state.documentGeneration;
-            await this.screenshotRead(
-              "Page.getFrameTree",
-              deadline,
-              async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
-            );
-            if (state.documentGeneration !== shown) {
-              if (attempt + 1 < SCREENSHOT_DOCUMENT_ATTEMPTS) continue;
-              throw new InteractionControllerError(
-                "resource_unavailable",
-                "browser page kept changing to new documents while its screenshot was captured",
-                true,
+              const captureOnce = async () => {
+                const response = await this.screenshotRead(
+                  "Page.captureScreenshot",
+                  deadline,
+                  async (timeoutMs) => {
+                    const stallBound =
+                      this.engine === "chrome" && !normalized.fullPage
+                        ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
+                        : timeoutMs;
+                    try {
+                      // Never overlaps a frame capture of the tab: a full-page
+                      // capture is clipped (see sendCapture).
+                      return await this.sendCapture<{ data?: unknown }>(state, capture, stallBound);
+                    } catch (error) {
+                      if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
+                        throw new InteractionControllerError(
+                          "timeout",
+                          CONNECTED_CHROME_CAPTURE_STALLED,
+                          true,
+                        );
+                      }
+                      throw error;
+                    }
+                  },
+                );
+                // An image above the media bound fails like a reply too large
+                // for the connection: the agent can ask for a smaller capture.
+                const encodedBound = Math.ceil((BROWSER_MEDIA_MAX_BYTES * 4) / 3) + 4;
+                if (typeof response.data === "string" && response.data.length > encodedBound)
+                  throw new CdpResponseRefusedError(
+                    "Page.captureScreenshot",
+                    "too_large",
+                    response.data.length,
+                    encodedBound,
+                  );
+                const data = decodeBoundedBase64Image(response.data);
+                return { data, dimensions: imageDimensions(data, normalized.format) };
+              };
+              let { data, dimensions } = await captureOnce();
+              // Chromium applies a new device-metrics override asynchronously, so a
+              // capture right after a viewport change can still return the previous
+              // surface. A viewport capture of an emulated device has an exact size;
+              // wait briefly for the compositor instead of publishing the stale frame.
+              const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+              if (expected) {
+                const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+                const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+                const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+                let pause = 16;
+                while (
+                  (Math.abs(dimensions.width - expectedWidth) > 1 ||
+                    Math.abs(dimensions.height - expectedHeight) > 1) &&
+                  Date.now() + pause < settleDeadline
+                ) {
+                  await delay(pause);
+                  pause = Math.min(pause * 2, 200);
+                  const refreshed = await this.screenshotRead(
+                    "Page.getLayoutMetrics",
+                    deadline,
+                    async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                  );
+                  cssWidth = refreshed.viewport.width;
+                  cssHeight = refreshed.viewport.height;
+                  scrollX = refreshed.viewport.x;
+                  scrollY = refreshed.viewport.y;
+                  pixelRatio = refreshed.pixelRatio;
+                  ({ data, dimensions } = await captureOnce());
+                }
+              }
+              await layout?.restore();
+              // The image is labeled with the document it shows. A commit while it
+              // was captured leaves the label unproven, so capture the new page.
+              const shown = state.documentGeneration;
+              await this.screenshotRead(
+                "Page.getFrameTree",
+                deadline,
+                async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
               );
+              if (state.documentGeneration !== shown) {
+                if (attempt + 1 < SCREENSHOT_DOCUMENT_ATTEMPTS) continue;
+                throw new InteractionControllerError(
+                  "resource_unavailable",
+                  "browser page kept changing to new documents while its screenshot was captured",
+                  true,
+                );
+              }
+              const frame = this.imageFrame({
+                state,
+                sequence: 0,
+                format: normalized.format,
+                data,
+                width: dimensions.width,
+                height: dimensions.height,
+                // A classic scrollbar is in the image but not in the CSS
+                // viewport size, so without a known emulated scale the axis
+                // with less scrollbar gives the closer ratio.
+                deviceScaleFactor: finiteScale(
+                  pixelRatio ??
+                    Math.min(dimensions.width / cssWidth, dimensions.height / cssHeight),
+                ),
+                scrollX,
+                scrollY,
+              });
+              return layout?.inexact ? { ...frame, inexactScrollbars: true as const } : frame;
+            } finally {
+              await layout?.restore();
             }
-            return this.imageFrame({
-              state,
-              sequence: 0,
-              format: normalized.format,
-              data,
-              width: dimensions.width,
-              height: dimensions.height,
-              deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-              scrollX,
-              scrollY,
-            });
           }
           throw new Error("unreachable screenshot attempt");
         }),
+      { read: true },
     );
+  }
+
+  /**
+   * Chromium hides every scrollbar for a capture beyond the viewport
+   * (Page.captureScreenshot captureBeyondViewport), so the page lays out
+   * without them while it is captured: content widens by the scrollbar width
+   * and right-aligned elements move. Restoring the setting afterwards does
+   * not lay the page out again, so the change also outlasted the capture.
+   * A temporary inspector stylesheet, which page scripts cannot see, keeps
+   * the gutter of each vertical scrollbar reserved during the capture.
+   * Changing that sheet afterwards re-evaluates the scrollbars.
+   */
+  private async keepScrollbarLayout(
+    state: TargetState,
+    deadline: number,
+  ): Promise<ScrollbarLayout> {
+    const unchanged = { viewportWidth: null, inexact: false, restore: async () => {} };
+    let found: unknown;
+    try {
+      found = await this.screenshotRead(
+        "Runtime.evaluate",
+        deadline,
+        async (timeoutMs) =>
+          await this.evaluateIsolated(state, SCROLLBAR_LAYOUT_EXPRESSION, timeoutMs),
+      );
+    } catch (error) {
+      if (error instanceof InteractionControllerError) throw error;
+      return unchanged;
+    }
+    if (
+      !isRecord(found) ||
+      typeof found.viewportWidth !== "number" ||
+      !Number.isFinite(found.viewportWidth) ||
+      found.viewportWidth <= 0 ||
+      !isSelectorList(found.pinned) ||
+      !isSelectorList(found.own) ||
+      !isSelectorList(found.refresh)
+    ) {
+      return unchanged;
+    }
+    const viewportWidth = found.viewportWidth;
+    const pinned = found.pinned;
+    const own = found.own;
+    const refresh = found.refresh;
+    const inexact = refresh.length > 0;
+    if (pinned.length + own.length === 0 && !inexact) {
+      return { viewportWidth, inexact, restore: async () => {} };
+    }
+    // Every step stays within the capture's own deadline.
+    const stepTimeout = () =>
+      Math.max(1, Math.min(SCROLLBAR_STYLE_TIMEOUT_MS, deadline - Date.now()));
+    let styleSheetId: string | null = null;
+    try {
+      await this.sendTarget(state, "CSS.enable", {}, { timeoutMs: stepTimeout() });
+      const created = await this.sendTarget<{ styleSheetId?: unknown }>(
+        state,
+        "CSS.createStyleSheet",
+        { frameId: state.frame.id },
+        { timeoutMs: stepTimeout() },
+      );
+      if (typeof created.styleSheetId !== "string") throw new Error("no inspector stylesheet");
+      styleSheetId = created.styleSheetId;
+      if (pinned.length > 0) {
+        await this.sendTarget(
+          state,
+          "CSS.setStyleSheetText",
+          { styleSheetId, text: `${pinned.join(",")}{scrollbar-gutter:stable!important}` },
+          { timeoutMs: stepTimeout() },
+        );
+      }
+    } catch {
+      // Keeping the layout only improves the capture; it never blocks it.
+      // Without a sheet, the restore below still re-evaluates scrollbars when
+      // it can.
+    }
+    let restored = false;
+    const restore = async () => {
+      if (restored) return;
+      restored = true;
+      // A JavaScript dialog can cut the capture short; the work it abandons
+      // may no longer reach the page. The restore only takes back this
+      // capture's own temporary style, so it runs outside that scope: its
+      // commands wait for the dialog to be answered and then apply.
+      await dialogWork.exit(async () => {
+        const sheet = styleSheetId;
+        try {
+          if (sheet === null) return;
+          const setText = async (text: string) =>
+            await this.sendTarget(
+              state,
+              "CSS.setStyleSheetText",
+              { styleSheetId: sheet, text },
+              { timeoutMs: stepTimeout() },
+            );
+          try {
+            // A style change on a scroller re-evaluates its scrollbars. The
+            // removed gutter rule does that for every pinned element. Gutters
+            // the page keeps stable itself get the overflow-y flip found above.
+            // Scrollbars the sheet could not pin (horizontal ones, those inside
+            // shadow trees) get scrollbar-color, which is inherited into shadow
+            // trees and changes no layout of a standard scrollbar. Either change
+            // needs a layout pass before the sheet is cleared, or the two would
+            // cancel out, so a layout read forces one.
+            if ((inexact || own.length > 0) && deadline > Date.now()) {
+              await setText(
+                (inexact ? `${refresh.join(",")}{scrollbar-color:GrayText Canvas!important}` : "") +
+                  own.join(""),
+              );
+              await this.evaluateIsolated(state, LAYOUT_READ_EXPRESSION, stepTimeout());
+            }
+          } finally {
+            // Always clear the sheet, whatever the step above did: nothing of
+            // the capture may stay on the page. A busy page that misses this
+            // bound still runs the queued clear once it answers. The clear needs
+            // no style pass: the page's next frame or layout read applies it,
+            // before anything can see layout.
+            await setText("");
+          }
+        } catch {
+          // The page may have moved to another document; its sheet went with it.
+        } finally {
+          await this.sendTarget(state, "CSS.disable", {}, { timeoutMs: stepTimeout() }).catch(
+            () => undefined,
+          );
+        }
+      });
+    };
+    return { viewportWidth, inexact, restore };
+  }
+
+  /** Evaluates a read-only expression where page scripts cannot see or replace it. */
+  private async evaluateIsolated(
+    state: TargetState,
+    expression: string,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    const world = await this.sendTarget<{ executionContextId?: unknown }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      { timeoutMs },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) {
+      throw new Error("CDP did not create an isolated read world");
+    }
+    const result = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+      state,
+      "Runtime.evaluate",
+      { expression, contextId: world.executionContextId, returnByValue: true },
+      { timeoutMs },
+    );
+    if (result.exceptionDetails) throw new Error("browser evaluation failed");
+    return isRecord(result.result) ? result.result.value : undefined;
   }
 
   /**
@@ -2167,6 +2706,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Chromium does not emit Page.screencastFrame for a background tab in a
       // headed browser. Seed every subscriber from the same target-scoped CDP
       // surface so attachment readiness never depends on focusing Chrome.
+      // A screenshot of the tab still within its deadline holds the first
+      // frame back for up to a screenshot's deadline, not a frame's.
+      const seedBusyUntil = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
       let seedFailure: unknown;
       for (let attempt = 0; attempt < FRAME_CAPTURE_FAILURE_LIMIT; attempt += 1) {
         try {
@@ -2175,6 +2717,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           break;
         } catch (error) {
           seedFailure = error;
+          if (error instanceof CaptureBusyError && Date.now() < seedBusyUntil) {
+            attempt -= 1;
+            continue;
+          }
           if (attempt + 1 < FRAME_CAPTURE_FAILURE_LIMIT) await delay(25 * (attempt + 1));
         }
       }
@@ -2227,6 +2773,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // unresponsive-tab deadline must keep the action's outcome uncertain.
     let effects: { state: TargetState; before: number } | undefined;
     const targetId = this.browserTargetIdOf(command.targetId);
+    // A tab in front whose page did not answer may wait on a dialog only the
+    // person sees, which no debugger can read: cancelling it hides the tab
+    // for a moment instead.
+    if (
+      command.action.type === "handle_dialog" &&
+      command.action.response === "dismiss" &&
+      this.personDialogs &&
+      this.unansweredTabs.has(targetId) &&
+      !this.states.has(targetId) &&
+      (await this.cancelPersonDialog(command, targetId))
+    ) {
+      if (command.observationMode === "none" || command.observationMode === "input") return null;
+      return await this.observe(this.tabIdOf(targetId));
+    }
     const observation = await this.withTarget(targetId, async (state, info) => {
       effects = { state, before: state.actionEffectCount };
       if (!state.dialog) await this.refreshFrame(state);
@@ -2479,25 +3039,87 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
         );
       }
-    }).catch((error: unknown) => {
-      if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
-        throw effects && effects.state.actionEffectCount !== effects.before
-          ? new InteractionOutcomeUnknownDriverError(
-              "tab_not_responding",
-              `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
-            )
-          : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
-      }
-      if (error instanceof CdpSessionDetachedError) {
-        throw new InteractionOutcomeUnknownDriverError(
-          "outcome_unknown",
-          "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
-        );
-      }
-      throw error;
+    }).catch(async (error: unknown) => {
+      const failure = await this.actionFailure(error, effects);
+      if (effects) await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+      throw failure;
     });
     this.refreshSubscribedFrame(targetId);
     return redactInteractionSecretValues(observation, secretValues);
+  }
+
+  /** What a failed action reports, given whether it already sent input. */
+  private async actionFailure(
+    error: unknown,
+    effects: { state: TargetState; before: number } | undefined,
+  ): Promise<unknown> {
+    const inputSent = effects !== undefined && effects.state.actionEffectCount !== effects.before;
+    if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
+      return inputSent
+        ? new InteractionOutcomeUnknownDriverError(
+            "tab_not_responding",
+            `${error.message} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
+          )
+        : new InteractionDefiniteDriverError("tab_not_responding", error.message);
+    }
+    // A tab the browser will not let us control (an attached tab Chrome
+    // refuses to debug) fails before any input when nothing was sent yet,
+    // so the action definitely did not run.
+    if (
+      error instanceof InteractionControllerError &&
+      (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
+      !inputSent
+    ) {
+      return new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
+    }
+    // The tab's debugging ended after input was sent, while a command was
+    // under way or before the next one could be: whether the rest ran is
+    // unknown.
+    if (
+      error instanceof CdpSessionDetachedError ||
+      (inputSent && effects && (await this.attachmentEndedUnder(effects.state, error)))
+    ) {
+      return new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+      );
+    }
+    return error;
+  }
+
+  /**
+   * After the tab's debugging ended under an action (Chrome ends it when
+   * another extension adds a frame to the page, as password managers do when
+   * a login field gets focus), attaches the tab again and reads it, so the
+   * receipt shows the page as the action left it and the caller can continue
+   * without another call. Best effort, like any failure observation.
+   */
+  private async observeOnNewAttachment(
+    failure: unknown,
+    state: TargetState,
+    command: BrowserActionCommandValue,
+    secretValues: BrowserActionCommandValue["secretValues"],
+  ): Promise<void> {
+    if (
+      !(
+        failure instanceof InteractionDefiniteDriverError ||
+        failure instanceof InteractionOutcomeUnknownDriverError
+      ) ||
+      failure.observation !== null ||
+      (command.observationMode !== undefined && command.observationMode !== "full")
+    )
+      return;
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+      if (this.states.get(state.targetId) === state || this.crashedTargets.has(state.targetId))
+        return;
+      failure.observation = redactInteractionSecretValues(
+        await this.observe(command.targetId),
+        secretValues,
+      );
+    } catch {
+      // Optional context only.
+    }
   }
 
   /**
@@ -3008,16 +3630,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * Present the completed User-Agent on an auto-attached page or frame
    * session, and on each cross-origin frame it hosts, nested ones included,
    * before that frame runs its first script. Same-origin frames and dedicated
-   * workers inherit it from their document. Never fails the attachment: a
-   * target that closed meanwhile simply needs nothing.
+   * workers inherit it from their document. A cross-origin frame shares its
+   * page's virtual authenticator, so with passkeys it also gets the page's
+   * passkey autofill withdrawal. Never fails the attachment: a target that
+   * closed meanwhile simply needs nothing.
    */
   private async presentUserAgent(
     connection: BrowserCdpConnection,
     sessionId: string,
     parent: string | null,
+    frame = false,
   ): Promise<void> {
     const presented = this.presentedUserAgentOverride();
-    if (!presented || this.presentationSessions.has(sessionId)) return;
+    if ((!presented && !this.passkeys) || this.presentationSessions.has(sessionId)) return;
     this.presentationSessions.set(sessionId, {
       parent,
       stop: [
@@ -3037,9 +3662,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ],
     });
     await Promise.all([
-      connection
-        .send("Emulation.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
-        .catch(() => undefined),
+      presented
+        ? connection
+            .send("Emulation.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
+            .catch(() => undefined)
+        : undefined,
+      frame ? this.passkeys?.withdrawAutofill(connection, sessionId) : undefined,
       connection
         .send(
           "Target.setAutoAttach",
@@ -3064,8 +3692,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const sessionId = params.sessionId;
     if (typeof sessionId !== "string") return;
+    const frame = (params.targetInfo as { type?: unknown } | undefined)?.type === "iframe";
     try {
-      await this.presentUserAgent(connection, sessionId, parentSessionId);
+      await this.presentUserAgent(connection, sessionId, parentSessionId, frame);
     } finally {
       if (params.waitingForDebugger === true)
         await connection
@@ -3135,10 +3764,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async withTarget<T>(
     targetId: string,
     operation: (state: TargetState, info: TargetInfo) => Promise<T>,
+    options: { read?: boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
-    const info = await this.requireTargetInfo(connection, targetId);
+    let info = await this.requireTargetInfo(connection, targetId);
+    const attached = this.states.get(targetId);
     const state = await this.ensureTargetState(info);
+    if (state !== attached && state.startedRestoredPage) {
+      info = await this.requireTargetInfo(connection, targetId);
+    }
     const result = state.tail.then(async () => {
       this.assertCurrentTargetState(state);
       state.nodeRoute = null;
@@ -3160,9 +3794,37 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // below; report the crash itself rather than the transport symptom.
       if (this.crashedTargets.has(targetId)) throw tabCrashedError();
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
-        throw tabNotRespondingError(error);
+        throw await this.notAnsweringError(targetId, error);
+      // A read changes nothing, so one whose tab debugging ended under it
+      // (Chrome detaches when another extension adds a frame to the page, as
+      // password managers do for their inline menu) reads again on a new
+      // attachment. A tab that closed meanwhile then says so.
+      if (options.read && (await this.attachmentEndedUnder(state, error)))
+        return await this.withTarget(targetId, operation);
       throw error;
     }
+  }
+
+  /** Whether an operation failed only because the debugging session of its
+   * tab ended while it ran. The session's end is applied once its detach
+   * event has arrived, which attached Chrome reports by polling. */
+  private async attachmentEndedUnder(state: TargetState, error: unknown): Promise<boolean> {
+    if (
+      !(
+        error instanceof CdpSessionDetachedError ||
+        error instanceof CdpProtocolError ||
+        (error instanceof InteractionControllerError &&
+          error.code === "resource_unavailable" &&
+          error.retryable)
+      )
+    )
+      return false;
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+    } catch {
+      return false;
+    }
+    return this.states.get(state.targetId) !== state && !this.crashedTargets.has(state.targetId);
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -3177,6 +3839,90 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } finally {
       this.attaching.delete(info.targetId);
     }
+  }
+
+  /**
+   * The error for a tab whose page did not answer in time. Where a dialog
+   * only the person sees may hold a tab in front, it says so and how to
+   * cancel it, and the tab is remembered until its page answers again.
+   */
+  private async notAnsweringError(
+    targetId: string,
+    cause: CdpCommandTimeoutError,
+  ): Promise<InteractionControllerError> {
+    if (!this.personDialogs || !(await this.personDialogs.inFront(targetId).catch(() => false)))
+      return tabNotRespondingError(cause);
+    this.unansweredTabs.add(targetId);
+    const failure = new InteractionControllerError(
+      "tab_not_responding",
+      PAGE_NOT_ANSWERING_MESSAGE,
+    );
+    failure.cause = cause;
+    return failure;
+  }
+
+  /**
+   * Cancel a dialog only the person sees in a tab whose page did not answer:
+   * hide the tab for a moment, which makes the browser close it as Cancel.
+   * True once the page answers again right after; false when it answered
+   * already, so there was no such dialog and the action runs as usual.
+   * Otherwise it fails without a claim of a cancelled dialog.
+   */
+  private async cancelPersonDialog(
+    command: BrowserActionCommandValue,
+    targetId: string,
+  ): Promise<boolean> {
+    const personDialogs = this.personDialogs!;
+    if (command.browserSessionId !== this.browserSessionId)
+      throw new InteractionDefiniteDriverError(
+        "resource_not_found",
+        "browser command targets another browser session",
+      );
+    if (command.controllerGeneration !== this.controllerGeneration)
+      throw new InteractionDefiniteDriverError(
+        "controller_stale",
+        "browser command targets an earlier controller",
+      );
+    // The page cannot be read, so only the tab itself is checked.
+    if (command.expectedTargetGeneration !== this.targetGeneration(targetId))
+      throw new InteractionDefiniteDriverError(
+        "target_stale",
+        "browser command targets an earlier target generation",
+      );
+    const connection = await this.ensureConnection();
+    const info = await this.requireTargetInfo(connection, targetId);
+    const answers = async () => {
+      try {
+        await this.ensureTargetState(info);
+        return true;
+      } catch (error) {
+        if (error instanceof InteractionControllerError && error.code === "tab_not_responding")
+          return false;
+        throw error;
+      }
+    };
+    // The person may have answered it meanwhile.
+    if (await answers()) return false;
+    const hidden = await personDialogs.hideForAMoment(targetId);
+    if (hidden === "unavailable")
+      throw new InteractionDefiniteDriverError(
+        "tab_not_responding",
+        DIALOG_NOT_CANCELLABLE_MESSAGE,
+      );
+    // A tab not in front holds no such dialog: the browser closes them itself
+    // there. A page such a dialog held answers right away once it closed; one
+    // that does not is busy (one whose work happens to end just then cannot
+    // be told apart).
+    if (hidden === "not_front")
+      throw new InteractionDefiniteDriverError("tab_not_responding", PAGE_STILL_BUSY_MESSAGE);
+    this.justHiddenTabs.add(targetId);
+    try {
+      if (!(await answers()))
+        throw new InteractionDefiniteDriverError("tab_not_responding", PAGE_STILL_BUSY_MESSAGE);
+    } finally {
+      this.justHiddenTabs.delete(targetId);
+    }
+    return true;
   }
 
   private async attachTarget(info: TargetInfo): Promise<TargetState> {
@@ -3201,7 +3947,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // replace the real initialization outcome.
     void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
+    let loadingRestored = false;
     const viewport = this.viewportFor(info.targetId);
+    let attachTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const initialized = (async () => {
         await Promise.all([
@@ -3225,10 +3973,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (viewport) await this.applyViewport(connection, sessionId, viewport);
         return await this.mainFrame(sessionId);
       })();
-      const outcome = await Promise.race([initialized, crashed]);
+      // A tab that did not answer before gets a shorter wait: the agent learns
+      // sooner that it still does not, and a page that a dialog only the
+      // person sees held answers within milliseconds once it closed.
+      const attachTimeoutMs =
+        this.attachTimeoutMs !== undefined && this.unansweredTabs.has(info.targetId)
+          ? Math.min(
+              this.attachTimeoutMs,
+              this.justHiddenTabs.has(info.targetId)
+                ? HIDDEN_TAB_ANSWER_TIMEOUT_MS
+                : UNANSWERED_ATTACH_TIMEOUT_MS,
+            )
+          : this.attachTimeoutMs;
+      const outcome = await Promise.race([
+        initialized,
+        crashed,
+        ...(attachTimeoutMs === undefined
+          ? []
+          : [
+              new Promise<never>((_resolve, reject) => {
+                attachTimer = setTimeout(() => {
+                  void initialized.catch(() => undefined);
+                  reject(new CdpCommandTimeoutError("Page.enable", sessionId));
+                }, attachTimeoutMs);
+                attachTimer.unref?.();
+              }),
+            ]),
+      ]);
       if (!outcome) {
         // Detaching below ends the enables still waiting on the dead renderer.
         void initialized.catch(() => undefined);
+        const loadUntil = this.restoredTargets.get(info.targetId);
+        if (loadUntil === null || (loadUntil !== undefined && Date.now() < loadUntil)) {
+          // A reopened tab Chrome has not loaded yet: load its page now, as
+          // switching to it would but without activating it, and attach
+          // again once it has a renderer.
+          if (loadUntil === null) {
+            this.restoredTargets.set(info.targetId, Date.now() + RESTORED_TAB_LOAD_TIMEOUT_MS);
+            await connection
+              .send("Page.reload", {}, { sessionId, timeoutMs: RESTORED_TAB_RELOAD_TIMEOUT_MS })
+              .catch(() => undefined);
+          }
+          loadingRestored = true;
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser tab is loading its page",
+            true,
+          );
+        }
+        this.restoredTargets.delete(info.targetId);
         this.crashedTargets.add(info.targetId);
         throw tabCrashedError();
       }
@@ -3249,20 +4042,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
         .catch(() => undefined);
+      if (loadingRestored) {
+        await delay(RESTORED_TAB_ATTACH_INTERVAL_MS);
+        return await this.attachTarget(info);
+      }
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
-        throw tabNotRespondingError(error);
+        throw await this.notAnsweringError(info.targetId, error);
       throw error;
     } finally {
+      if (attachTimer !== undefined) clearTimeout(attachTimer);
       stopCrashWatch();
       if (this.attachingSessions.get(info.targetId) === sessionId)
         this.attachingSessions.delete(info.targetId);
     }
     this.crashedTargets.delete(info.targetId);
+    this.unansweredTabs.delete(info.targetId);
+    // A reopened tab whose page this attachment started shows it once it
+    // has loaded, as a tab Chrome restored itself does.
+    const startedRestoredLoad = typeof this.restoredTargets.get(info.targetId) === "number";
+    this.restoredTargets.delete(info.targetId);
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
       authorityGeneration,
       actionEffectCount: 0,
+      ...(startedRestoredLoad ? { startedRestoredPage: true as const } : {}),
       unsettledHitTargetGuards: [],
       createdAt: this.firstSeen(info.targetId),
       frame,
@@ -3281,6 +4085,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       committedLoaders: [frame.loaderId],
       abandonedLoaders: [],
       mainFrameCommits: 0,
+      documentCommits: 0,
       inputFence: null,
       accessibility: null,
       accessibilityRebuiltAt: 0,
@@ -3306,6 +4111,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       navigationSequence: 0,
       navigationPending: false,
       screencasts: new Map(),
+      capturesRunning: new Map(),
       tail: Promise.resolve(),
       unsubscribe: [],
       oopifs: new Map(),
@@ -3389,6 +4195,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.javascriptDialogClosed",
         () => {
           state.dialog = null;
+          // A click the dialog interrupted left its guard armed; with the
+          // dialog gone, nothing is left for it to judge.
+          void this.settleUnsettledHitTargetGuards(state).catch(() => undefined);
         },
         sessionId,
       ),
@@ -3402,7 +4211,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (error instanceof CdpTransportError) throw error;
       }
     }
+    if (startedRestoredLoad) {
+      // Best effort: a page still loading after this is observed as it is.
+      await this.waitForRestoredPage(state, info.url).catch(() => undefined);
+    }
     return state;
+  }
+
+  /** Wait until a reopened tab whose page this driver started shows that
+   * page (not the empty document a new renderer starts with) and has parsed
+   * it, as long as RESTORED_TAB_LOAD_TIMEOUT_MS. */
+  private async waitForRestoredPage(state: TargetState, url: string): Promise<void> {
+    const blank = isBlankTabUrl(url);
+    const deadline = Date.now() + RESTORED_TAB_LOAD_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const value = await this.evaluate(
+          state,
+          `document.readyState !== "loading" && (${blank} || location.href !== "about:blank")`,
+        );
+        if (value === true) return;
+      } catch (error) {
+        if (!missingExecutionContext(error)) throw error;
+      }
+      await delay(25);
+    }
   }
 
   /**
@@ -4007,6 +4840,273 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       { enabled: viewport.mobile, ...(viewport.mobile ? { maxTouchPoints: 1 } : {}) },
       { sessionId },
     );
+  }
+
+  /** Viewport emulation needs a browser this driver controls: Lightpanda has
+   * none, and the person's own Chrome keeps its tabs at the window's size
+   * (the extension does not admit Emulation commands). */
+  private assertViewportEmulation(): void {
+    if (this.engine === "chromium") return;
+    throw new InteractionDefiniteDriverError(
+      "unsupported",
+      "this browser engine does not support viewport emulation",
+    );
+  }
+
+  /** Lets the page lay out and present one frame at its new size, so the next
+   * read or capture sees it. Bounded: a throttled page never blocks. */
+  private async presentFrame(state: TargetState): Promise<void> {
+    await this.sendTarget(
+      state,
+      "Runtime.evaluate",
+      {
+        expression: NEXT_PRESENTED_FRAME_EXPRESSION,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      { timeoutMs: 1_000 },
+    ).catch(() => undefined);
+  }
+
+  /** Applies a viewport change with this tab's frame sampling held off: it
+   * waits for a capture already running, and later captures wait for the
+   * change, so none can put the earlier emulation back over it. */
+  private async withFramesPaused<T>(state: TargetState, change: () => Promise<T>): Promise<T> {
+    let resume = () => {};
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    state.framesPaused = paused;
+    try {
+      await Promise.all(
+        [...state.screencasts.values()].map(
+          async (stream) => await stream.capturePromise?.catch(() => undefined),
+        ),
+      );
+      await this.capturesSettled(state);
+      for (const stream of state.screencasts.values()) stream.captureScale = null;
+      return await change();
+    } finally {
+      if (state.framesPaused === paused) state.framesPaused = undefined;
+      resume();
+    }
+  }
+
+  /** The page's size, screen and scale now, read where page scripts cannot
+   * change what it reports, or null when it cannot be read (between
+   * documents, or a window not laid out yet). */
+  private async measureViewport(state: TargetState): Promise<MeasuredViewport | null> {
+    const response = await (async () => {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+        { timeoutMs: 1_000 },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return null;
+      return await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          expression: MEASURE_VIEWPORT_EXPRESSION,
+          returnByValue: true,
+        },
+        { timeoutMs: 1_000 },
+      );
+    })().catch(() => null);
+    const value = response && isRecord(response.result) ? response.result.value : null;
+    if (!response || response.exceptionDetails || !isRecord(value)) return null;
+    const page: Partial<Record<Exclude<keyof MeasuredViewport, "window">, number>> = {};
+    for (const key of [
+      "width",
+      "height",
+      "screenWidth",
+      "screenHeight",
+      "deviceScaleFactor",
+    ] as const) {
+      const entry = value[key];
+      if (typeof entry !== "number" || !Number.isFinite(entry) || entry <= 0) return null;
+      page[key] = entry;
+    }
+    // A background tab reports no outer size of its own; the window it is in
+    // still has one.
+    const bounds = await (
+      await this.ensureConnection()
+    )
+      .send<{ bounds?: unknown }>("Browser.getWindowForTarget", { targetId: state.targetId })
+      .then((result) => (isRecord(result.bounds) ? result.bounds : null))
+      .catch(() => null);
+    const window =
+      bounds &&
+      typeof bounds.width === "number" &&
+      typeof bounds.height === "number" &&
+      bounds.width > 0 &&
+      bounds.height > 0
+        ? { width: bounds.width, height: bounds.height }
+        : null;
+    return { ...(page as Omit<MeasuredViewport, "window">), window };
+  }
+
+  /** Makes the tab draw itself at its current size. A background tab does not
+   * lay out again when its emulation is cleared until it is shown; a capture
+   * of it has it draw without showing it or taking focus. Reports whether
+   * the capture was made. */
+  private async redrawTab(state: TargetState): Promise<boolean> {
+    const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS).catch(() => null);
+    if (!metrics) return false;
+    return await this.sendCapture(
+      state,
+      {
+        format: "jpeg",
+        quality: 1,
+        fromSurface: true,
+        captureBeyondViewport: false,
+        clip: { x: metrics.viewport.x, y: metrics.viewport.y, width: 1, height: 1, scale: 1 },
+      },
+      FRAME_CAPTURE_TIMEOUT_MS,
+    ).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  /** Whether the tab is hidden behind another tab and nothing keeps it
+   * drawing (focus emulation), so Chrome holds the pointer's moves sent to
+   * it. A tab that cannot be read counts as shown. */
+  private async hiddenWithoutFocusEmulation(state: TargetState): Promise<boolean> {
+    if (this.engine === "lightpanda" || this.focusEmulation || state.dialog) return false;
+    return (
+      (await this.evaluateIsolated(
+        state,
+        "document.visibilityState",
+        FRAME_CAPTURE_TIMEOUT_MS,
+      ).catch(() => null)) === "hidden"
+    );
+  }
+
+  /** Has a hidden tab draw its document before input is sent to it. Chromium
+   * drops presses, releases and keys sent to a page that has never drawn, as
+   * a tab opened in the background has not, and still acknowledges them, so
+   * the action would look done while the page got nothing. A document that
+   * was ever shown has drawn and gets its input; one that never was is
+   * captured, which has it draw without showing it or taking focus. Runs
+   * before the action finds its element: a capture briefly changes the
+   * page's emulation. Focus emulation keeps hidden tabs drawing, so it needs
+   * none. */
+  private async drawHiddenTabForInput(state: TargetState): Promise<void> {
+    if (this.engine === "lightpanda" || this.focusEmulation || state.dialog) return;
+    const document = state.documentGeneration;
+    if (state.inputDrawnDocument === document) return;
+    const shown = await this.evaluateIsolated(
+      state,
+      DOCUMENT_SHOWN_EXPRESSION,
+      FRAME_CAPTURE_TIMEOUT_MS,
+    ).catch(() => null);
+    // A tab that cannot be read is left to the action itself to report.
+    if (shown !== false) {
+      if (shown === true) state.inputDrawnDocument = document;
+      return;
+    }
+    for (let attempt = 0; attempt < HIDDEN_TAB_DRAW_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await delay(HIDDEN_TAB_DRAW_RETRY_MS);
+      if (await this.redrawTab(state)) {
+        state.inputDrawnDocument = document;
+        return;
+      }
+    }
+    throw new InteractionDefiniteDriverError(
+      "resource_unavailable",
+      HIDDEN_TAB_NOT_DRAWN_MESSAGE,
+      true,
+    );
+  }
+
+  /** Sends a Page.captureScreenshot. Chromium serves a clipped capture, or
+   * any capture of an emulated device, by changing the page's emulation and
+   * drawing the tab at the capture's size, and puts back the size and
+   * emulation it saw when the capture began. A capture that began while
+   * another ran would take that temporary size for the tab's own and put it
+   * back last, leaving the tab drawn small for good. So a capture counts as
+   * running until the connection settles it (Chromium answers, or the
+   * connection gives up on it), even after the caller stops waiting or its
+   * frame stream closes, and the next capture of the tab is sent only after
+   * that, within its own deadline. A frame (`frame: true`) still behind a
+   * capture that is within its own deadline throws CaptureBusyError, so a
+   * slow screenshot is not counted against the live view. */
+  private async sendCapture<T>(
+    state: TargetState,
+    params: Readonly<Record<string, unknown>>,
+    timeoutMs: number,
+    options: { frame?: boolean } = {},
+  ): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    while (state.capturesRunning.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        if (options.frame && [...state.capturesRunning.values()].some((due) => due > Date.now()))
+          throw new CaptureBusyError();
+        throw new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId);
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(state.capturesRunning.keys()),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, remaining);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+    // Registered in the same step as the check above, so two waiting
+    // captures cannot both be sent.
+    const answered = this.sendTarget<T>(state, "Page.captureScreenshot", params, {
+      timeoutMs: Math.max(SCREENSHOT_CAPTURE_TIMEOUT_MS, timeoutMs),
+    });
+    const running = answered.then(
+      () => undefined,
+      () => undefined,
+    );
+    state.capturesRunning.set(running, deadline);
+    void running.then(() => state.capturesRunning.delete(running));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        answered,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId)),
+            Math.max(0, deadline - Date.now()),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Resolves once no capture of this tab is running in the browser. */
+  private async capturesSettled(state: TargetState): Promise<void> {
+    while (state.capturesRunning.size > 0) await Promise.all(state.capturesRunning.keys());
+  }
+
+  /** Sends a viewport change and checks that the page took it, sending it
+   * once more when it did not. The change is already sent when this fails,
+   * so the tab's size is then unknown rather than unchanged. */
+  private async applyViewportChange(
+    state: TargetState,
+    send: () => Promise<void>,
+    took: (measured: MeasuredViewport) => boolean,
+    failure: string,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await send();
+      await this.presentFrame(state);
+      // An unreadable page does not confirm the change either.
+      const measured = await this.measureViewport(state);
+      if (measured && took(measured)) return;
+      // A capture still running would put its emulation back over a resend.
+      await this.capturesSettled(state);
+    }
+    throw new InteractionOutcomeUnknownDriverError("outcome_unknown", failure);
   }
 
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
@@ -4934,6 +6034,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     state.frame = frame;
     state.mainFrameCommits += 1;
+    state.documentCommits += 1;
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
       state.authorityGeneration,
@@ -5010,7 +6111,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return await read(remaining);
     } catch (error) {
       const transport = error instanceof InteractionControllerError ? error.cause : error;
-      if (!(transport instanceof CdpTransportError)) throw error;
+      // The tab's debugging ending mid-capture is no page error either.
+      if (!(transport instanceof CdpTransportError || transport instanceof CdpSessionDetachedError))
+        throw error;
       const timeout = transport instanceof CdpCommandTimeoutError;
       const failure = new InteractionControllerError(
         timeout ? "timeout" : "resource_unavailable",
@@ -5028,6 +6131,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<{
     viewport: { x: number; y: number; width: number; height: number };
     content: { width: number; height: number };
+    pixelRatio: number | null;
   }> {
     const response = await this.sendTarget<{
       cssVisualViewport?: unknown;
@@ -5035,7 +6139,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }>(state, "Page.getLayoutMetrics", {}, timeoutMs ? { timeoutMs } : undefined);
     const viewport = dimensionsRecord(response.cssVisualViewport, true);
     const content = dimensionsRecord(response.cssContentSize, false);
-    return { viewport, content };
+    const zoom = isRecord(response.cssVisualViewport)
+      ? numberField(response.cssVisualViewport, "zoom")
+      : null;
+    const pixelRatio =
+      state.emulatedViewport && zoom !== null && zoom > 0
+        ? state.emulatedViewport.deviceScaleFactor * zoom
+        : null;
+    return { viewport, content, pixelRatio };
   }
 
   private async viewport(state: TargetState): Promise<BrowserObservationValue["viewport"]> {
@@ -5100,6 +6211,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async captureFallbackFrame(targetId: string, expected: TargetScreencast): Promise<void> {
+    // Waiting here, outside the shared capture, lets a viewport change wait
+    // for the capture already running without that capture waiting for it.
+    for (
+      let paused = this.states.get(targetId)?.framesPaused;
+      paused;
+      paused = this.states.get(targetId)?.framesPaused
+    ) {
+      await paused;
+    }
     if (expected.capturePromise) return await expected.capturePromise;
     const capture = (async () => {
       // Frame sampling is deliberately outside TargetState.tail. Media is
@@ -5110,68 +6230,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.screencasts.get(expected.key) !== expected) return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
-      // Reuse the accepted clip scale for this viewport. Inferring a new device
-      // scale from rounded image pixels feeds quantization back into every frame
-      // and makes an unchanged mobile viewport oscillate in size.
-      const previous = expected.captureScale;
-      let scale =
-        previous?.width === viewport.width && previous.height === viewport.height
-          ? previous.scale
-          : Math.min(
-              1,
-              expected.options.maxWidth / viewport.width,
-              expected.options.maxHeight / viewport.height,
-            );
-      let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
-      let dimensions = { width: 0, height: 0 };
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const response = await this.sendTarget<{ data?: unknown }>(
-          state,
-          "Page.captureScreenshot",
-          {
-            format: expected.options.format,
-            ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
-            fromSurface: true,
-            captureBeyondViewport: false,
-            clip: {
-              x: viewport.x,
-              y: viewport.y,
-              width: viewport.width,
-              height: viewport.height,
-              scale,
-            },
-          },
-          { timeoutMs: FRAME_CAPTURE_TIMEOUT_MS },
-        );
-        data = decodeBoundedBase64Image(response.data);
-        dimensions = imageDimensions(data, expected.options.format);
-        if (
-          dimensions.width <= expected.options.maxWidth &&
-          dimensions.height <= expected.options.maxHeight
-        ) {
-          break;
-        }
-        scale *= Math.min(
-          expected.options.maxWidth / dimensions.width,
-          expected.options.maxHeight / dimensions.height,
-        );
-      }
-      if (
-        dimensions.width > expected.options.maxWidth ||
-        dimensions.height > expected.options.maxHeight
-      ) {
-        throw new Error("browser screenshot could not honor the frame dimension bound");
-      }
+      const captured =
+        this.engine === "chrome"
+          ? await this.captureOwnChromeFrame(state, expected, viewport)
+          : await this.captureClippedFrame(state, expected, viewport);
+      if (!captured) return;
       if (state.screencasts.get(expected.key) !== expected) return;
-      expected.captureScale = { width: viewport.width, height: viewport.height, scale };
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,
         format: expected.options.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+        data: captured.data,
+        width: captured.width,
+        height: captured.height,
+        deviceScaleFactor: captured.deviceScaleFactor,
         scrollX: viewport.x,
         scrollY: viewport.y,
       });
@@ -5186,9 +6258,132 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
+  /**
+   * A frame of a tab in a person's own Chrome. Chromium serves a clipped
+   * capture by drawing the tab itself at the clip's scaled size until the
+   * capture is answered, which the person sees: their tab shrinks into a
+   * corner on every frame, and stays shrunk when a capture of a tab they
+   * are not looking at outlives the next one. A capture without a clip
+   * changes nothing on the tab (the driver never emulates a device there),
+   * so the frame is captured whole and scaled down here.
+   */
+  private async captureOwnChromeFrame(
+    state: TargetState,
+    expected: TargetScreencast,
+    viewport: { width: number; height: number },
+  ): Promise<{
+    data: Uint8Array;
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+  } | null> {
+    const response = await this.sendCapture<{ data?: unknown }>(
+      state,
+      {
+        format: expected.options.format,
+        ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+        fromSurface: true,
+        captureBeyondViewport: false,
+      },
+      FRAME_CAPTURE_TIMEOUT_MS,
+      { frame: true },
+    );
+    if (state.screencasts.get(expected.key) !== expected) return null;
+    const data = decodeBoundedBase64Image(response.data);
+    const dimensions = imageDimensions(data, expected.options.format);
+    const fitted = await fitImageWithin(data, dimensions, expected.options);
+    // A classic scrollbar is in the image but not in the CSS viewport, so the
+    // axis with less scrollbar gives the closer scale, as for screenshots.
+    const captureScale = Math.min(
+      dimensions.width / viewport.width,
+      dimensions.height / viewport.height,
+    );
+    return {
+      ...fitted,
+      deviceScaleFactor: finiteScale(captureScale * (fitted.width / dimensions.width)),
+    };
+  }
+
+  /** A frame captured with a clip that scales it to the stream's bound. */
+  private async captureClippedFrame(
+    state: TargetState,
+    expected: TargetScreencast,
+    viewport: { x: number; y: number; width: number; height: number },
+  ): Promise<{
+    data: Uint8Array;
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+  } | null> {
+    // Reuse the accepted clip scale for this viewport. Inferring a new device
+    // scale from rounded image pixels feeds quantization back into every frame
+    // and makes an unchanged mobile viewport oscillate in size.
+    const previous = expected.captureScale;
+    let scale =
+      previous?.width === viewport.width && previous.height === viewport.height
+        ? previous.scale
+        : Math.min(
+            1,
+            expected.options.maxWidth / viewport.width,
+            expected.options.maxHeight / viewport.height,
+          );
+    let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
+    let dimensions = { width: 0, height: 0 };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      // A stream closed meanwhile no longer holds off viewport changes.
+      if (state.screencasts.get(expected.key) !== expected) return null;
+      const response = await this.sendCapture<{ data?: unknown }>(
+        state,
+        {
+          format: expected.options.format,
+          ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+          fromSurface: true,
+          captureBeyondViewport: false,
+          clip: {
+            x: viewport.x,
+            y: viewport.y,
+            width: viewport.width,
+            height: viewport.height,
+            scale,
+          },
+        },
+        FRAME_CAPTURE_TIMEOUT_MS,
+        { frame: true },
+      );
+      data = decodeBoundedBase64Image(response.data);
+      dimensions = imageDimensions(data, expected.options.format);
+      if (
+        dimensions.width <= expected.options.maxWidth &&
+        dimensions.height <= expected.options.maxHeight
+      ) {
+        break;
+      }
+      scale *= Math.min(
+        expected.options.maxWidth / dimensions.width,
+        expected.options.maxHeight / dimensions.height,
+      );
+    }
+    if (
+      dimensions.width > expected.options.maxWidth ||
+      dimensions.height > expected.options.maxHeight
+    ) {
+      throw new Error("browser screenshot could not honor the frame dimension bound");
+    }
+    if (state.screencasts.get(expected.key) !== expected) return null;
+    expected.captureScale = { width: viewport.width, height: viewport.height, scale };
+    return {
+      data,
+      width: dimensions.width,
+      height: dimensions.height,
+      deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+    };
+  }
+
   private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {
     void (async () => {
       let consecutiveFailures = 0;
+      // Since when the page has not answered a frame's commands in time.
+      let unresponsiveSince: number | null = null;
       while (!expected.fallbackAbort.signal.aborted) {
         await delay(FRAME_FALLBACK_INTERVAL_MS * expected.options.everyNthFrame);
         if (expected.fallbackAbort.signal.aborted) return;
@@ -5198,7 +6393,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         try {
           await this.captureFallbackFrame(targetId, expected);
           consecutiveFailures = 0;
+          if (unresponsiveSince !== null) {
+            frameStreamDiagnostic("browser.frame.page_responsive", {
+              browserSessionId: this.browserSessionId,
+              targetId,
+              unresponsiveMs: Date.now() - unresponsiveSince,
+            });
+            unresponsiveSince = null;
+          }
         } catch (error) {
+          if (error instanceof CaptureBusyError) continue;
+          // A page whose main thread is busy, or a tab its browser is not
+          // drawing, answers none of a frame's commands in time. The stream
+          // keeps sampling and shows the page again once it answers; the tab
+          // closing or its browser going away still ends it (removeState).
+          if (error instanceof CdpCommandTimeoutError) {
+            if (unresponsiveSince === null) {
+              unresponsiveSince = Date.now();
+              frameStreamDiagnostic("browser.frame.page_unresponsive", {
+                browserSessionId: this.browserSessionId,
+                targetId,
+                method: error.method,
+              });
+            }
+            continue;
+          }
           consecutiveFailures += 1;
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);
@@ -5327,6 +6546,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     state.nodeRoute = null;
     state.inputFence = null;
+    if (PAGE_INPUT_ACTIONS.has(action.type)) await this.drawHiddenTabForInput(state);
     switch (action.type) {
       case "navigate":
         await this.navigate(state, action.url);
@@ -5335,6 +6555,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await this.navigateHistory(state, action.direction);
         return;
       case "activate":
+        // Bringing the tab to the front is the action's effect: once sent, a
+        // later failure (a refused reattach, an unresponsive tab) leaves its
+        // outcome unknown rather than definitely not run.
+        state.actionEffectCount += 1;
         await (
           await this.ensureConnection()
         ).send("Target.activateTarget", {
@@ -5342,52 +6566,95 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         this.frontTargetId = state.targetId;
         return;
-      case "viewport":
-        for (const stream of state.screencasts.values()) stream.captureScale = null;
-        if (this.engine === "lightpanda") {
-          throw new InteractionDefiniteDriverError(
-            "unsupported",
-            "this browser engine does not support viewport emulation",
-          );
-        }
-        await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
+      case "viewport": {
+        this.assertViewportEmulation();
+        const viewport = {
           width: action.width,
           height: action.height,
           deviceScaleFactor: action.deviceScaleFactor ?? 1,
           mobile: action.mobile,
-          screenWidth: action.width,
-          screenHeight: action.height,
-        });
-        await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
-          enabled: action.mobile,
-          ...(action.mobile ? { maxTouchPoints: 1 } : {}),
-        });
-        state.emulatedViewport = {
-          width: action.width,
-          height: action.height,
-          deviceScaleFactor: action.deviceScaleFactor ?? 1,
         };
-        {
-          const viewport = { ...state.emulatedViewport, mobile: action.mobile };
-          this.targetViewports.set(state.targetId, viewport);
-          this.sessionViewport = {
-            viewport,
-            preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
-          };
-        }
-        // Let the page lay out and present one frame at the new size, so the
-        // next read or capture sees it. Bounded: a throttled page never blocks.
-        await this.sendTarget(
-          state,
-          "Runtime.evaluate",
-          {
-            expression: NEXT_PRESENTED_FRAME_EXPRESSION,
-            awaitPromise: true,
-            returnByValue: true,
-          },
-          { timeoutMs: 1_000 },
-        ).catch(() => undefined);
+        await this.withFramesPaused(state, async () => {
+          if (!state.emulatedViewport) {
+            state.ownViewport = (await this.measureViewport(state)) ?? undefined;
+          }
+          await this.applyViewportChange(
+            state,
+            async () => {
+              await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
+                width: viewport.width,
+                height: viewport.height,
+                deviceScaleFactor: viewport.deviceScaleFactor,
+                mobile: viewport.mobile,
+                screenWidth: viewport.width,
+                screenHeight: viewport.height,
+              });
+              await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                enabled: viewport.mobile,
+                ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
+              });
+              state.emulatedViewport = {
+                width: viewport.width,
+                height: viewport.height,
+                deviceScaleFactor: viewport.deviceScaleFactor,
+              };
+              this.targetViewports.set(state.targetId, viewport);
+              this.sessionViewport = {
+                viewport,
+                preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
+              };
+            },
+            // The screen is exactly the size set. The layout size can be a
+            // pixel more under a fractional display scale, and the reported
+            // scale includes the browser's zoom, so neither is compared.
+            (measured) =>
+              measured.screenWidth === viewport.width && measured.screenHeight === viewport.height,
+            VIEWPORT_NOT_TAKEN_MESSAGE,
+          );
+        });
         return;
+      }
+      case "viewport_reset": {
+        this.assertViewportEmulation();
+        const emulated = state.emulatedViewport;
+        await this.withFramesPaused(state, async () => {
+          const own = state.ownViewport;
+          await this.applyViewportChange(
+            state,
+            async () => {
+              await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
+              await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                enabled: false,
+              });
+              await this.redrawTab(state);
+              state.emulatedViewport = undefined;
+              // Neither this tab, when attached again, nor tabs that open from
+              // now on get the size the agent set before.
+              this.targetViewports.delete(state.targetId);
+              this.sessionViewport = null;
+            },
+            (measured) =>
+              own
+                ? sameScale(measured, own) &&
+                  measured.screenWidth === own.screenWidth &&
+                  measured.screenHeight === own.screenHeight &&
+                  // A window resized since then has a new size of its own.
+                  ((measured.window !== null &&
+                    own.window !== null &&
+                    (measured.window.width !== own.window.width ||
+                      measured.window.height !== own.window.height)) ||
+                    (measured.width === own.width && measured.height === own.height))
+                : !emulated ||
+                  !(
+                    sameScale(measured, emulated) &&
+                    measured.screenWidth === emulated.width &&
+                    measured.screenHeight === emulated.height
+                  ),
+            VIEWPORT_RESET_NOT_TAKEN_MESSAGE,
+          );
+        });
+        return;
+      }
       case "click": {
         const node = await this.resolveActionLocator(state, action.locator);
         if ((action.button ?? "left") === "left" && (await this.chooseDropdownOption(state, node)))
@@ -5455,6 +6722,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "type":
         if (action.locator) {
           const node = await this.resolveActionLocator(state, action.locator);
+          // Check the target before focusing it: focus is an input effect,
+          // so a refusal after it would surface as an unknown outcome.
+          if (
+            action.text &&
+            action.mode !== "keys" &&
+            this.engine !== "lightpanda" &&
+            (await this.callOnNode(state, node.backendDOMNodeId, TEXT_INSERT_TARGET_FUNCTION, [
+              { value: false },
+            ])) === false
+          ) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+            );
+          }
           await this.focusNode(state, node.backendDOMNodeId);
         }
         if (
@@ -5469,17 +6751,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
           );
         }
+        if (
+          action.text &&
+          action.mode !== "keys" &&
+          this.engine !== "lightpanda" &&
+          (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+        ) {
+          // Chromium drops inserted text without any event when the focused
+          // element is not a text field (a canvas, a button, the page
+          // itself), so the action would report text that never arrived.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+          );
+        }
         if (action.text && action.mode === "keys") {
           // One key press per character for split one-time-code boxes and
           // pages that listen for keydown and move focus themselves.
           // Such pages usually move focus a frame after the key (React
           // effects), so the next key waits for that frame; sent at once,
           // keys land in the old box and overwrite or drop characters.
+          // A character with no US key goes as text only. A text field takes
+          // it; a page that reads physical keys (a remote desktop) gets
+          // nothing, so say which characters may not have arrived. Focus is
+          // checked as each one is sent: earlier keys may have opened an
+          // editor (a grid cell).
+          const mayBeLost = new Set<string>();
           let first = true;
           for (const character of action.text) {
             if (!first) await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
             first = false;
-            await this.pressKey(state, characterKey(character));
+            const key = characterKey(character);
+            if (
+              key.code === "" &&
+              this.engine !== "lightpanda" &&
+              !mayBeLost.has(key.text) &&
+              (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+            )
+              mayBeLost.add(key.text);
+            await this.pressKey(state, key);
+          }
+          if (mayBeLost.size > 0) {
+            const characters = [...mayBeLost];
+            throw new InteractionOutcomeUnknownDriverError(
+              "outcome_unknown",
+              `${TYPE_KEYS_TEXT_ONLY_MESSAGE}${characters
+                .slice(0, 20)
+                .map((character) => JSON.stringify(character))
+                .join(", ")}${characters.length > 20 ? ", …" : ""}`,
+            );
           }
           return;
         }
@@ -5529,23 +6849,58 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "check": {
+        const startedAt = Date.now();
         const node = await this.resolveActionLocator(state, action.locator);
         const current = await this.callOnNode(state, node.backendDOMNodeId, CHECKED_FUNCTION, []);
-        if (typeof current !== "boolean") {
+        if (!isRecord(current) || typeof current.checked !== "boolean") {
           throw new InteractionDefiniteDriverError(
             "invalid_action",
             "browser locator is not a checkable control",
           );
         }
-        if (current !== action.checked)
-          await this.clickNode(
-            state,
-            node.backendDOMNodeId,
-            "left",
-            1,
-            node.frameId ?? state.frame.id,
+        if (current.checked === action.checked) return;
+        if (current.radio === true && !action.checked) {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "a radio button turns off only when another option in its group is chosen; check that option instead",
           );
-        return;
+        }
+        await this.clickNode(
+          state,
+          node.backendDOMNodeId,
+          "left",
+          1,
+          node.frameId ?? state.frame.id,
+        );
+        // A page may show the new state a while after the click (a framework's
+        // next render, a switch that saves first), within the time the action
+        // has to find its element. A control the page replaced is found again
+        // by its locator; one that cannot be read is not counted as done.
+        const deadline = state.locatorDeadline ?? startedAt + LOCATOR_WAIT_MS;
+        const read = async (backendId: number | null) =>
+          await this.callOnNode(state, backendId, CHECKED_FUNCTION, []).catch(() => null);
+        let target = node.backendDOMNodeId;
+        let shown: unknown = null;
+        for (;;) {
+          shown = await read(target);
+          if (isRecord(shown) && shown.connected === false && action.locator.kind !== "ref") {
+            const replacement = await this.resolveLocator(state, action.locator).catch(() => null);
+            if (replacement && replacement.backendDOMNodeId !== null) {
+              target = replacement.backendDOMNodeId;
+              shown = await read(target);
+            }
+          }
+          const readable = isRecord(shown) && shown.connected === true;
+          if (isRecord(shown) && readable && shown.checked === action.checked) return;
+          if (Date.now() >= deadline) break;
+          await delay(readable ? 50 : 100);
+        }
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          isRecord(shown) && shown.connected === true
+            ? `the control was clicked but does not show ${action.checked ? "checked" : "unchecked"}; look at it before clicking it again`
+            : "the control was clicked but its state could not be read afterwards; look at it before clicking it again",
+        );
       }
       case "scroll": {
         // A located scroll moves the nearest box that can scroll that way, as a
@@ -5589,7 +6944,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser drag between different cross-origin frames is unsupported; use pointer drag coordinates",
           );
         }
-        await this.dragNodes(state, from.backendDOMNodeId, to.backendDOMNodeId);
+        await this.dragNodes(
+          state,
+          from.backendDOMNodeId,
+          to.backendDOMNodeId,
+          from.frameId ?? state.frame.id,
+          to.frameId ?? state.frame.id,
+        );
         return;
       }
       case "pointer":
@@ -5613,6 +6974,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           ...(action.promptText !== undefined ? { promptText: action.promptText } : {}),
         });
         state.dialog = null;
+        await this.settleUnsettledHitTargetGuards(state);
         return;
       case "upload": {
         if (!this.resolveWorkspaceFiles) {
@@ -5972,12 +7334,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "upload target is no longer an enabled file input",
         );
       }
-      if (selected !== files.length) {
-        throw new InteractionOutcomeUnknownDriverError(
-          "outcome_unknown",
-          "the file input did not keep every uploaded file; inspect it before continuing",
-        );
-      }
     } finally {
       for (const objectId of [partsId, inputId]) {
         if (objectId) {
@@ -6040,16 +7396,40 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const origin = webOrigin(state.frame.url);
+    const inOpenedTab = this.permissionControl === "opened_tabs";
+    if (
+      inOpenedTab &&
+      (!this.createdTargetIds.has(state.targetId) ||
+        this.ownedTabs?.inUseElsewhere?.(state.targetId) === true)
+    ) {
+      throw new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
+    }
+    let sent = false;
     try {
-      await (
-        await this.ensureConnection()
-      ).send("Browser.setPermission", {
-        ...this.contextScope(),
-        permission: { name: CDP_PERMISSION_NAMES[action.permission] },
-        setting: action.setting,
-        origin,
-      });
+      const connection = await this.ensureConnection();
+      // Setting the permission is the action's effect: once sent, a later
+      // failure (a lost connection, an unresponsive tab) leaves its outcome
+      // unknown rather than definitely not run. Only a definite refusal (the
+      // browser's own, or one its connection reports) proves it did not
+      // apply.
+      state.actionEffectCount += 1;
+      sent = true;
+      await connection.send(
+        "Browser.setPermission",
+        {
+          ...this.contextScope(),
+          permission: { name: CDP_PERMISSION_NAMES[action.permission] },
+          setting: action.setting,
+          origin,
+        },
+        inOpenedTab ? { sessionId: state.sessionId } : undefined,
+      );
     } catch (error) {
+      if (
+        sent &&
+        (error instanceof CdpProtocolError || error instanceof InteractionDefiniteDriverError)
+      )
+        state.actionEffectCount -= 1;
       if (error instanceof CdpProtocolError) {
         throw new InteractionDefiniteDriverError(
           error.code === -32_601 ? "unsupported" : "invalid_action",
@@ -6633,17 +8013,51 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     count: 1 | 2,
     frameId?: string,
   ): Promise<void> {
+    // A control the page draws through its label (a checkbox that takes no
+    // pointer input under a styled box) is clicked where a person clicks it:
+    // on the label's box or plain text, which activates the control. Never
+    // on a link or other control inside the label; without such a spot the
+    // control keeps its refusal.
+    if (
+      backendDOMNodeId !== null &&
+      (await this.callOnNode(state, backendDOMNodeId, POINTER_LABELLED_FUNCTION, []).catch(
+        () => false,
+      )) === true
+    ) {
+      // Where the label lands is read with the control in view.
+      await this.actionPoint(state, backendDOMNodeId, false, frameId);
+      backendDOMNodeId =
+        (await this.relatedNode(state, backendDOMNodeId, POINTER_LABEL_FUNCTION, [])) ??
+        backendDOMNodeId;
+    }
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
+    const hidden = await this.hiddenWithoutFocusEmulation(state);
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
     try {
-      await this.sendActionTarget(
+      let markSent: () => void = () => undefined;
+      const sent = new Promise<void>((resolve) => {
+        markSent = resolve;
+      });
+      const moved = this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
         { type: "mouseMoved", x, y },
-        input,
+        { ...input, onSent: markSent },
       );
+      // A hidden page holds the pointer's move until it draws a frame, which
+      // it does not, and Chrome acknowledges it only after about five
+      // seconds. The press is not held back that long: sent after the move,
+      // it has the page take the move first and run its handlers for it
+      // before the press. The guard stays armed until it has judged the
+      // press, however long those handlers take.
+      if (hidden) {
+        moved.catch(() => undefined);
+        await Promise.race([sent, moved]);
+      } else {
+        await moved;
+      }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
         await this.sendActionTarget(
           state,
@@ -6658,6 +8072,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           input,
         );
       }
+      if (hidden) await moved;
     } catch (error) {
       // The input already fails or pauses this action (a JavaScript dialog,
       // an unresponsive tab), and reading the guard back now could wait on
@@ -6673,10 +8088,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const blocked = await this.settleHitTargetGuard(state, guard, count);
     if (blocked !== null) {
       // The pointer did move there, so whatever its arrival did stands, and
-      // the refusal is reported as an unknown outcome.
+      // the refusal is reported as an unknown outcome. A press that fell
+      // outside the target's own box found it moved away (the page was still
+      // reacting to a scroll, or to the pointer's arrival), not covered.
       throw new InteractionDefiniteDriverError(
         "invalid_action",
-        `browser element is covered by ${blocked.slice(0, 160)} at its center; the click was not delivered`,
+        blocked.moved
+          ? `browser element moved as the click was sent, so the press fell on ${coverName(blocked.name)}; the click was not delivered; click it again`
+          : `browser element is covered by ${coverName(blocked.name)} at its center; the click was not delivered`,
         true,
       );
     }
@@ -6707,7 +8126,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     const reportSession = this.commandSession(state, "Runtime.addBinding");
     const token = randomUUID();
-    const verdicts: Array<string | null> = [];
+    const verdicts: Array<HitTargetVerdict | null> = [];
     let stopReports: () => void = () => undefined;
     let executionContextId: number | undefined;
     if (frameId !== undefined) {
@@ -6738,7 +8157,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             return;
           }
           if (!isRecord(report) || report.token !== token) return;
-          verdicts.push(typeof report.blocked === "string" ? report.blocked : null);
+          verdicts.push(hitTargetVerdict(report.blocked));
         },
         reportSession,
       );
@@ -6806,7 +8225,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     guard: HitTargetGuard,
     presses: number,
-  ): Promise<string | null> {
+  ): Promise<HitTargetVerdict | null> {
     const unknown = () =>
       new InteractionOutcomeUnknownDriverError(
         "outcome_unknown",
@@ -6847,10 +8266,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
-    if (settled.exceptionDetails || (value !== null && typeof value !== "string")) {
+    const verdict = hitTargetVerdict(value);
+    if (settled.exceptionDetails || (value !== null && verdict === null)) {
       throw unknown();
     }
-    return value === null || value === "" ? null : value;
+    return verdict === null || verdict.name === "" ? null : verdict;
   }
 
   /** Removes guards an interrupted click left armed, so they cannot hold back
@@ -6916,6 +8336,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     requireHit: boolean,
     frameId?: string,
+    /** The node's frame, for a caller that passes no frameId (a drag): only
+     * the wait after a scroll runs in that frame's isolated world. */
+    settleFrameId?: string,
   ): Promise<{ x: number; y: number }> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -6927,6 +8350,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    // Where scroll offsets cannot be read (a child frame), whether the
+    // target moved tells whether anything scrolled.
+    const boxBefore =
+      scrollBefore === null
+        ? await this.centerPoint(state, backendDOMNodeId).catch(() => null)
+        : null;
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
     const effectsBeforeElementScroll = state.actionEffectCount;
@@ -6941,29 +8370,114 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeElementScroll;
       throw scrollRefusal(error.message) ?? error;
     }
-    if (
-      scrollBefore !== null &&
-      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-    )
-      state.actionEffectCount = effectsBeforeScroll;
-    let point = await this.centerPoint(state, backendDOMNodeId);
+    const boxAfter =
+      boxBefore === null ? null : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
+    const unscrolled =
+      scrollBefore !== null
+        ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+        : boxBefore !== null &&
+          boxAfter !== null &&
+          Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
+    if (unscrolled && scrollBefore !== null) state.actionEffectCount = effectsBeforeScroll;
+    // The page reacts to a scroll on its next frames (a sticky header that
+    // shrinks once the page scrolls, and the content it moves), so after one
+    // the target is measured only once it has stopped moving.
+    if (!unscrolled)
+      await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    let point = await this.centerPoint(state, backendDOMNodeId).catch(async (error: unknown) => {
+      throw (
+        (await this.unmeasuredRefusal(state, backendDOMNodeId, frameId ?? settleFrameId, error)) ??
+        error
+      );
+    });
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
-      const revealed =
+      const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
-        (await this.revealByHover(state, backendDOMNodeId, frameId, point));
+        (await this.visiblePartPoint(state, backendDOMNodeId));
+      if (visible && "nested" in visible) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `browser element is out of view apart from ${visible.nested}, a separate control inside it, so a click would reach only that control; scroll the page or panel back to the element, or use another control`,
+          true,
+        );
+      }
+      const revealed =
+        visible ?? (await this.revealByHover(state, backendDOMNodeId, frameId, point));
       if (!revealed) {
         const cover = await this.coveringElement(state, backendDOMNodeId);
         throw new InteractionDefiniteDriverError(
           "invalid_action",
           cover
-            ? `browser element is covered by ${cover} at its center`
-            : "browser element is covered or not pointer-actionable",
+            ? cover.shown
+              ? `browser element is covered by ${cover.description} where it shows`
+              : `browser element is covered by ${cover.description} at its center`
+            : ((await this.unreachableReason(state, backendDOMNodeId)) ??
+                "browser element is covered or not pointer-actionable"),
           true,
         );
       }
       point = revealed;
     }
     return point;
+  }
+
+  /**
+   * The definite refusal for a target Chromium could not measure: the page
+   * removed or replaced it (a list that renders its rows anew as it scrolls,
+   * possibly while the driver waited for the scroll to settle), or it is no
+   * longer rendered. Null for any other failure, which stays as it is.
+   */
+  private async unmeasuredRefusal(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    error: unknown,
+  ): Promise<InteractionDefiniteDriverError | null> {
+    // -32001: the tab's session is gone, which is not about this element.
+    if (!(error instanceof CdpProtocolError) || error.code === -32_001) return null;
+    const known = scrollRefusal(error.message);
+    if (known || !/could not compute box model/iu.test(error.message)) return known;
+    // Read in an isolated world where there is one, out of reach of page
+    // scripts that redefine isConnected.
+    const connected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      "function () { return this.isConnected; }",
+      [],
+      frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+    ).catch(() => false);
+    return connected === true ? elementUnrendered() : elementGone();
+  }
+
+  /**
+   * Waits, briefly and best effort, for the target to stop moving after the
+   * driver scrolled it into view: until its box has not changed for
+   * SCROLL_QUIET_MS of drawn frames, SCROLL_SETTLE_LIMIT_MS while it keeps
+   * moving, or SCROLL_SETTLE_MAX_MS by the driver's own clock. It runs in an
+   * isolated world, out of reach of page scripts that replace their timers
+   * or frame callbacks; without a frame to hold that world, and in a hidden
+   * tab or an engine without frames, there is no wait.
+   */
+  private async settleAfterScroll(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<void> {
+    if (this.engine === "lightpanda" || frameId === undefined) return;
+    await Promise.race([
+      this.callOnNode(
+        state,
+        backendDOMNodeId,
+        STEADY_BOX_FUNCTION,
+        [
+          { value: SCROLL_QUIET_MS },
+          { value: SCROLL_SETTLE_LIMIT_MS },
+          { value: SCROLL_SETTLE_MAX_MS },
+        ],
+        { isolatedFrameId: frameId },
+      ).catch(() => undefined),
+      delay(SCROLL_SETTLE_MAX_MS + SCROLL_SETTLE_SLACK_MS),
+    ]);
   }
 
   private async centerPoint(
@@ -7006,15 +8520,123 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
   }
 
-  /** A short role-and-label description of what receives pointer input at the
-   * target's center instead of the target, or null when nothing else does. */
-  private async coveringElement(
+  /**
+   * A target whose center lies outside the window or outside a container's
+   * clip (a header the page slides up as its content scrolls, a row cut off
+   * at a panel's edge) can still show part of itself, which is where a person
+   * clicks. Only used when nothing else is at the center, or when the center
+   * is clipped away (the browser's hit stack there leaves the target out, so
+   * what is on top, such as the panel beside a tree's side panel, is not over
+   * it). A target covered by another element, at its center or at the middle
+   * of the part that shows, keeps that refusal. Returns a point on the
+   * visible part, nearest its middle, that reaches the target itself, not a
+   * separate control nested inside it; `nested` names that control when it
+   * is all that shows; null otherwise.
+   */
+  private async visiblePartPoint(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<{ x: number; y: number } | { nested: string } | null> {
+    const box = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
+      backendNodeId: backendDOMNodeId,
+    }).catch(() => null);
+    if (!box || !isRecord(box.model) || !Array.isArray(box.model.border)) return null;
+    const quad = box.model.border.filter(
+      (value): value is number => typeof value === "number" && Number.isFinite(value),
+    );
+    if (quad.length < 8) return null;
+    // Corners: top-left, top-right, bottom-right, bottom-left. The page
+    // samples its axis-aligned bounding box, which is the border box only
+    // when the element is not rotated or skewed; otherwise skip this path.
+    const [x1, y1, x2, y2, x4, y4] = [quad[0]!, quad[1]!, quad[2]!, quad[3]!, quad[6]!, quad[7]!];
+    // It must also keep its orientation: mirrored (scaleX(-1)) or turned
+    // (180°) boxes map the page's fractions onto the wrong side.
+    if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5 || x2 <= x1 || y4 <= y1) return null;
+    const { bounds, offset } = await this.pageWindowInFrame(state);
+    const found = await this.callOnNode(state, backendDOMNodeId, VISIBLE_PART_FUNCTION, [
+      { value: bounds },
+    ]).catch(() => null);
+    if (isRecord(found) && isRecord(found.nested)) {
+      return { nested: nestedControlName(found.nested) };
+    }
+    if (!Array.isArray(found) || found.length !== 2) return null;
+    const [fx, fy] = found;
+    if (typeof fx !== "number" || typeof fy !== "number") return null;
+    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return null;
+    return {
+      x: offset.x + x1 + fx * (x2 - x1),
+      y: offset.y + y1 + fy * (y4 - y1),
+    };
+  }
+
+  /** A cross-origin frame cannot see how much of its window the page shows:
+   * the page's window in the target frame's own coordinates (null bounds in
+   * the page's own frames), and that frame's offset in the page. */
+  private async pageWindowInFrame(state: TargetState): Promise<{
+    bounds: { left: number; top: number; right: number; bottom: number } | null;
+    offset: { x: number; y: number };
+  }> {
+    if (!state.nodeRoute) return { bounds: null, offset: { x: 0, y: 0 } };
+    const offset = await this.frameOffset(state, state.nodeRoute);
+    const { viewport } = await this.layoutMetrics(state);
+    return {
+      bounds: {
+        left: -offset.x,
+        top: -offset.y,
+        right: viewport.width - offset.x,
+        bottom: viewport.height - offset.y,
+      },
+      offset,
+    };
+  }
+
+  /** Why a target nothing else covers still cannot take the pointer, as a
+   * refusal that says what to do instead; null when no reason is known. */
+  private async unreachableReason(
     state: TargetState,
     backendDOMNodeId: number,
   ): Promise<string | null> {
+    const reason = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      UNREACHABLE_REASON_FUNCTION,
+      [],
+    ).catch(() => null);
+    switch (reason) {
+      case "pointer-events":
+        return "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control";
+      case "outside":
+        return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
+      case "clipped":
+        return "browser element is out of view: only its own container is at its center, where it is clipped or hidden; scroll the page or panel back to it, or use another control";
+      case "cut-off":
+        return "browser element is out of view: it lies past the clipped edge of a panel or container that holds it; scroll that panel to it, or use another control";
+      default:
+        return null;
+    }
+  }
+
+  /** A short role-and-label description of what receives pointer input
+   * instead of the target, or null when nothing else does. That is checked at
+   * the target's center, or (`shown`) at the middle of the part of it that
+   * shows when it does not show at its center (cut off at a panel's edge):
+   * an element beside that panel is not over the target there. */
+  private async coveringElement(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<{ description: string; shown: boolean } | null> {
     try {
-      const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, []);
-      return typeof value === "string" && value ? value.slice(0, 160) : null;
+      const { bounds } = await this.pageWindowInFrame(state);
+      const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, [
+        { value: bounds },
+      ]);
+      if (typeof value === "string" && value) {
+        return { description: coverName(value), shown: false };
+      }
+      if (isRecord(value) && typeof value.shown === "string" && value.shown) {
+        return { description: coverName(value.shown), shown: true };
+      }
+      return null;
     } catch {
       return null;
     }
@@ -7453,6 +9075,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     label: string,
   ): Promise<number | null> {
+    return await this.relatedNode(state, backendDOMNodeId, POPUP_OPTION_FUNCTION, [
+      { value: label },
+    ]);
+  }
+
+  /** The element a function run on a node returns, as a node ID, or null when
+   * it returns none. */
+  private async relatedNode(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    functionDeclaration: string,
+    args: Array<{ value: unknown }>,
+  ): Promise<number | null> {
     if (backendDOMNodeId === null) return null;
     const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
       backendNodeId: backendDOMNodeId,
@@ -7470,8 +9105,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Runtime.callFunctionOn",
         {
           objectId: resolved.object.objectId,
-          functionDeclaration: POPUP_OPTION_FUNCTION,
-          arguments: [{ value: label }],
+          functionDeclaration,
+          arguments: args,
           returnByValue: false,
         },
         { potentialEffect: false },
@@ -7553,36 +9188,85 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async pressKey(state: TargetState, key: ParsedKey): Promise<void> {
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-      ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
-      ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
-        ? { commands: ["selectAll"] }
-        : {}),
-    });
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-    });
+    // Each modifier goes down as its own key first and comes up last, as a
+    // person presses it: pages that track physical keys (remote-desktop
+    // viewers sending scancodes) only see a modifier that was pressed.
+    const modifiers = MODIFIER_KEYS.filter((modifier) => (key.modifiers & modifier.bit) !== 0);
+    const pressed: (typeof MODIFIER_KEYS)[number][] = [];
+    let held = 0;
+    const keyUp = { type: "keyUp", key: key.key, code: key.code, modifiers: key.modifiers };
+    const releaseModifier = (modifier: (typeof MODIFIER_KEYS)[number]) => {
+      held &= ~modifier.bit;
+      return this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: modifier.key,
+        code: modifier.code,
+        modifiers: held,
+        windowsVirtualKeyCode: modifier.keyCode,
+        location: 1,
+      });
+    };
+    let keyDown = false;
+    try {
+      for (const modifier of modifiers) {
+        // Counted as down before it is sent: a send that fails may still
+        // have reached the page.
+        pressed.push(modifier);
+        held |= modifier.bit;
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: modifier.key,
+          code: modifier.code,
+          modifiers: held,
+          windowsVirtualKeyCode: modifier.keyCode,
+          location: 1,
+        });
+      }
+      keyDown = true;
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: key.key,
+        code: key.code,
+        modifiers: key.modifiers,
+        windowsVirtualKeyCode: key.keyCode,
+        ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
+        ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
+          ? { commands: ["selectAll"] }
+          : {}),
+      });
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        ...keyUp,
+        windowsVirtualKeyCode: key.keyCode,
+      });
+      keyDown = false;
+      while (pressed.length) await releaseModifier(pressed.pop()!);
+    } catch (error) {
+      // Release whatever may be down, so no key stays held on the page (a
+      // remote desktop would keep Ctrl or Shift pressed), then report the
+      // original failure.
+      if (keyDown) {
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          ...keyUp,
+          windowsVirtualKeyCode: key.keyCode,
+        }).catch(() => undefined);
+      }
+      while (pressed.length) await releaseModifier(pressed.pop()!).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async dragNodes(
     state: TargetState,
     fromBackendNodeId: number | null,
     toBackendNodeId: number | null,
+    fromFrameId: string,
+    toFrameId: string,
   ): Promise<void> {
-    const from = await this.actionPoint(state, fromBackendNodeId, true);
+    const from = await this.actionPoint(state, fromBackendNodeId, true, undefined, fromFrameId);
     await this.dragPoints(
       state,
       from,
-      () => this.actionPoint(state, toBackendNodeId, false),
+      () => this.actionPoint(state, toBackendNodeId, false, undefined, toFrameId),
       "left",
     );
   }
@@ -7912,26 +9596,98 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Lightpanda does not support safe Back/Forward history; navigate to an explicit URL",
       );
     }
-    const history = await this.sendActionTarget<{
-      currentIndex?: unknown;
-      entries?: unknown;
-    }>(state, "Page.getNavigationHistory", {});
-    const nextIndex =
-      typeof history.currentIndex === "number"
-        ? history.currentIndex + (direction === "back" ? -1 : 1)
-        : -1;
-    const entries = Array.isArray(history.entries) ? history.entries : [];
-    const entry = entries[nextIndex];
-    if (!isRecord(entry) || typeof entry.id !== "number") {
+    const startedAt = Date.now();
+    const deadline = startedAt + DEFAULT_ACTION_TIMEOUT_MS;
+    const effectsBefore = state.actionEffectCount;
+    const history = await this.navigationHistory(state);
+    const start = history.entries[history.index];
+    let index = history.index + (direction === "back" ? -1 : 1);
+    // A page can add entries for the URL it already shows without the
+    // person's input, as some sign-in pages do as they open. Going back to
+    // one changes nothing visible, so Back passes over them, as Chromium's
+    // own Back button does. Entries made after input (a dialog that closes
+    // on Back) stay single steps.
+    if (
+      direction === "back" &&
+      start &&
+      history.entries[index]?.url === start.url &&
+      !(await this.documentActivated(state))
+    ) {
+      while (history.entries[index]?.url === start.url) index -= 1;
+    }
+    if (!Number.isFinite(history.entries[index]?.id)) {
       throw new InteractionDefiniteDriverError(
         "invalid_action",
         `browser target has no ${direction} history entry`,
       );
     }
+    for (let skipped = 0; ; skipped += 1) {
+      const entry = history.entries[index]!;
+      const documentsBefore = state.documentCommits;
+      await this.stepToHistoryEntry(state, entry.id, skipped === 0 ? startedAt : Date.now());
+      if (direction === "forward") return;
+      if (!(await this.returnedToStart(state, documentsBefore, index, entry, start))) return;
+      // The page sent the tab back to where Back started by itself as soon
+      // as it opened: it is a redirect step, so going back to it changes
+      // nothing. Go to the entry before it instead. A redirect only adds or
+      // replaces entries from this one on, so the earlier ones are unchanged.
+      // A page that sends the tab anywhere else is where Back goes, as in a
+      // person's browser.
+      const earlier = history.entries[index - 1];
+      if (!earlier || skipped + 1 >= HISTORY_REDIRECT_SKIPS || Date.now() >= deadline) {
+        // The outcome is known: the tab went on to a page by itself, and the
+        // failure's observation shows which. Nothing is left to replay.
+        state.actionEffectCount = effectsBefore;
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `going back opened ${entry.url}, which went on to ${state.frame.url} by itself; ${
+            earlier
+              ? `navigate to the page before it, ${earlier.url}, instead`
+              : "there is no earlier page in this tab's history, so navigate to a URL instead"
+          }`,
+        );
+      }
+      index -= 1;
+    }
+  }
+
+  /** The tab's history entries and the index of the one it shows. */
+  private async navigationHistory(
+    state: TargetState,
+  ): Promise<{ index: number; entries: { id: number; url: string }[] }> {
+    const history = await this.sendActionTarget<{
+      currentIndex?: unknown;
+      entries?: unknown;
+    }>(state, "Page.getNavigationHistory", {});
+    const entries = (Array.isArray(history.entries) ? history.entries : []).map((entry) =>
+      isRecord(entry) && typeof entry.id === "number"
+        ? { id: entry.id, url: typeof entry.url === "string" ? entry.url : "" }
+        : { id: Number.NaN, url: "" },
+    );
+    const index = typeof history.currentIndex === "number" ? history.currentIndex : -1;
+    return { index, entries };
+  }
+
+  /** Whether the page has had the person's (or the agent's) input since it
+   * loaded. Unknown counts as yes, so Back then takes a single step. */
+  private async documentActivated(state: TargetState): Promise<boolean> {
+    try {
+      return (
+        (await this.evaluate(state, "navigator.userActivation?.hasBeenActive ?? true")) !== false
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private async stepToHistoryEntry(
+    state: TargetState,
+    entryId: number,
+    startedAt: number,
+  ): Promise<void> {
     const commitsBefore = state.mainFrameCommits;
     const loaderBefore = state.frame.loaderId;
-    const startedAt = Date.now();
-    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId });
     // The entry commits after Chromium answered: a new document, a page the
     // back/forward cache restores, or a same-document entry (pushState).
     const committed = () => state.mainFrameCommits !== commitsBefore;
@@ -7945,6 +9701,54 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
+  }
+
+  /**
+   * Whether the page a Back step opened sent the tab on by itself, right away,
+   * to the page Back started from: the same origin and path (a sign-in page
+   * often gains new query parameters), in a document committed after the
+   * step's own, for a different entry or URL. A page that reloads itself as it
+   * is shown again stays where it is.
+   *
+   * A same-document step (pushState) loads nothing, so nothing is watched.
+   * Otherwise the page's start-up code is let run: what its scripts do as
+   * they load, on DOMContentLoaded and, when the page has already loaded, on
+   * load and pageshow (a page restored from the back/forward cache runs those
+   * again), each followed by their zero-delay timers. A page still loading
+   * images or other subresources is not waited for.
+   */
+  private async returnedToStart(
+    state: TargetState,
+    documentsBefore: number,
+    index: number,
+    entry: { id: number; url: string },
+    start: { url: string } | undefined,
+  ): Promise<boolean> {
+    if (!start || state.documentCommits === documentsBefore) return false;
+    for (let hop = 0; hop < HISTORY_REDIRECT_HOPS && !state.dialog; hop += 1) {
+      const documents = state.documentCommits;
+      if (!state.navigationPending) {
+        try {
+          await this.sendTarget(
+            state,
+            "Runtime.evaluate",
+            { expression: PAGE_STARTUP_SETTLED_EXPRESSION, awaitPromise: true },
+            { timeoutMs: HISTORY_STARTUP_LIMIT_MS },
+          );
+        } catch {
+          // A page that sends the tab on takes its context with it, and a
+          // busy one runs out the limit; the checks below see where it is.
+        }
+      }
+      if (state.dialog) return false;
+      if (state.navigationPending) await this.settleActionNavigation(state);
+      await this.refreshFrame(state);
+      if (state.documentCommits === documents) break;
+    }
+    if (state.dialog || state.documentCommits - documentsBefore < 2) return false;
+    if (!sameOriginAndPath(state.frame.url, start.url)) return false;
+    const now = await this.navigationHistory(state);
+    return now.index !== index || now.entries[now.index]?.url !== entry.url;
   }
 
   private async waitForCondition(
@@ -8374,7 +10178,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
-    options: { potentialEffect?: boolean; sessionId?: string; timeoutMs?: number } = {},
+    options: {
+      potentialEffect?: boolean;
+      sessionId?: string;
+      timeoutMs?: number;
+      /** Called once the command has gone out to the browser. */
+      onSent?: () => void;
+    } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
@@ -8407,6 +10217,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId: options.sessionId ?? this.commandSession(state, method),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
+    options.onSent?.();
     try {
       const result = await Promise.race([
         command.then((value) => ({ kind: "result" as const, value })),
@@ -8620,11 +10431,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private rememberGoneTarget(tabId: string, gone: GoneBrowserTarget): void {
+    this.reloadedTabs.delete(tabId);
     this.goneTargets.delete(tabId);
     this.goneTargets.set(tabId, gone);
     while (this.goneTargets.size > MAX_GONE_TARGETS) {
       this.goneTargets.delete(this.goneTargets.keys().next().value!);
     }
+  }
+
+  /** The notice for an observation of this tab the agent receives, when a
+   * relaunch reloaded its page and the agent was not told yet; said once. */
+  takeReloadedTabNotice(tabId: string): string | null {
+    const reloaded = this.reloadedTabs.get(tabId) ?? null;
+    this.reloadedTabs.delete(tabId);
+    return reloaded ? reloadedTabNotice(reloaded) : null;
   }
 
   /**
@@ -8658,15 +10478,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** The browser this driver runs replaced an earlier one and reopened its
    * tabs. Each reopened tab keeps its earlier ID; a call naming an earlier tab
-   * that no reopened tab shows learns why it is gone. */
+   * that no reopened tab shows learns why it is gone, and the first result
+   * about a reopened tab says that its page reloaded. */
   noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    this.restoredTargets.clear();
+    for (const targetId of relaunched.restoredTargetIds ??
+      relaunched.tabs.flatMap((tab) => (tab.replacementId ? [tab.replacementId] : []))) {
+      if (!this.states.has(targetId)) this.restoredTargets.set(targetId, null);
+    }
     this.adoptTabIds(
       relaunched.tabs.flatMap((tab) =>
         tab.replacementId ? [{ tabId: tab.targetId, browserTargetId: tab.replacementId }] : [],
       ),
     );
+    const reloaded: ReloadedBrowserTab = {
+      reason: relaunched.reason,
+      ...(relaunched.idleReleaseMinutes !== undefined
+        ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
+        : {}),
+    };
     for (const tab of relaunched.tabs) {
-      if (this.browserIdsByTabId.has(tab.targetId)) continue;
+      if (this.browserIdsByTabId.has(tab.targetId)) {
+        // Reopened under its earlier ID: the same page, loaded again.
+        if (this.browserIdsByTabId.get(tab.targetId) === tab.replacementId) {
+          this.reloadedTabs.set(tab.targetId, reloaded);
+        }
+        continue;
+      }
       this.rememberGoneTarget(tab.targetId, {
         kind: "relaunched",
         reason: relaunched.reason,
@@ -8683,7 +10521,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const current = this.selectedTargetId ? this.tabIdOf(this.selectedTargetId) : null;
     return new InteractionDefiniteDriverError(
       "target_not_found",
-      `browser target does not exist: this session closed this empty tab when it last released the browser${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
+      `browser target does not exist: this session closed this empty tab after it stopped using it${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
     );
   }
 
@@ -8933,6 +10771,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
       this.targetViewports.delete(targetId);
+      this.restoredTargets.delete(targetId);
     }
   }
 
@@ -8983,10 +10822,43 @@ function tabCrashedError(): InteractionDefiniteDriverError {
   );
 }
 
+/** How long a reopened tab Chrome had not loaded yet gets to start a
+ * renderer once its load was asked for, and how often attachment retries
+ * meanwhile. A tab still without one after that is reported as crashed. */
+const RESTORED_TAB_LOAD_TIMEOUT_MS = 10_000;
+const RESTORED_TAB_RELOAD_TIMEOUT_MS = 2_000;
+const RESTORED_TAB_ATTACH_INTERVAL_MS = 100;
+
 /** How long a runtime continuing a session in the person's own browser waits
  * for the tab the session was using before it opens a new one instead. A
  * live page answers in well under a second. */
 const REBIND_TIMEOUT_MS = 5_000;
+
+/** How long attaching waits on a tab whose page did not answer before, while
+ * a dialog only the person sees may hold it: a page that answers at all does
+ * so in well under this, and one held by such a dialog answers within a few
+ * milliseconds of the dialog closing. */
+const UNANSWERED_ATTACH_TIMEOUT_MS = 2_000;
+
+/** How soon a page must answer once its tab was hidden for a moment to count
+ * as one a dialog only the person sees held: such a page answers within tens
+ * of milliseconds of the dialog closing, while a busy one rarely finishes its
+ * work in exactly that moment. */
+const HIDDEN_TAB_ANSWER_TIMEOUT_MS = 500;
+
+/** What a tab in front whose page does not answer says, in a browser where a
+ * dialog only the person sees may be what holds it. */
+export const PAGE_NOT_ANSWERING_MESSAGE =
+  'This tab\'s page is not answering: it is busy, or a dialog (alert, confirm or prompt) only the person can see is open. Ask them to answer it, or cancel it with browser_act action {type:"handle_dialog",response:"dismiss"}.';
+
+/** The answer to cancelling such a dialog when the page still did not answer
+ * once its tab was hidden for a moment, which closes any such dialog. */
+export const PAGE_STILL_BUSY_MESSAGE =
+  "No dialog was found: the page still did not answer after its tab was hidden for a moment, so it is busy. Nothing else changed. Try again later, or ask the person to reload the tab.";
+
+/** The answer to cancelling such a dialog where its tab cannot be hidden. */
+export const DIALOG_NOT_CANCELLABLE_MESSAGE =
+  "This tab's page is still not answering, and a dialog in it cannot be cancelled from here. Ask the person to answer it in their browser.";
 
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";
@@ -9102,6 +10974,17 @@ function absoluteTargetUrl(value: unknown): string | null {
   }
 }
 
+/** Whether two URLs name the same page, ignoring query and fragment. */
+function sameOriginAndPath(left: string, right: string): boolean {
+  try {
+    const a = new URL(left);
+    const b = new URL(right);
+    return a.origin === b.origin && a.pathname === b.pathname;
+  } catch {
+    return left === right;
+  }
+}
+
 function visibleTargets(infos: readonly TargetInfo[]): TargetInfo[] {
   const targets = infos.filter(isVisibleTarget);
   const hasOrdinaryPage = targets.some(
@@ -9189,7 +11072,7 @@ function accessibilityLocatorMatches(
         (locator.name === undefined ||
           (locator.exact
             ? sameAccessibleName(entry.name, locator.name)
-            : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
+            : nameContainsWords(entry.name, locator.name))),
     );
   }
   if (locator.kind === "label") {
@@ -9206,7 +11089,7 @@ function accessibilityLocatorMatches(
       entry.role === "text" &&
       (locator.exact
         ? sameAccessibleName(entry.name, locator.text)
-        : (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase())),
+        : nameContainsWords(entry.name, locator.text)),
   );
 }
 
@@ -9331,7 +11214,49 @@ type ParsedKey = {
   text: string;
 };
 
-/** A literal character as one key press (typed with `type.mode: "keys"`). */
+// The keys of a US keyboard that give printable ASCII characters other than
+// letters and digits, as [unshifted, shifted, code, Windows virtual key code].
+const US_SYMBOL_KEYS: readonly (readonly [string, string, string, number])[] = [
+  ["1", "!", "Digit1", 49],
+  ["2", "@", "Digit2", 50],
+  ["3", "#", "Digit3", 51],
+  ["4", "$", "Digit4", 52],
+  ["5", "%", "Digit5", 53],
+  ["6", "^", "Digit6", 54],
+  ["7", "&", "Digit7", 55],
+  ["8", "*", "Digit8", 56],
+  ["9", "(", "Digit9", 57],
+  ["0", ")", "Digit0", 48],
+  ["`", "~", "Backquote", 192],
+  ["-", "_", "Minus", 189],
+  ["=", "+", "Equal", 187],
+  ["[", "{", "BracketLeft", 219],
+  ["]", "}", "BracketRight", 221],
+  ["\\", "|", "Backslash", 220],
+  [";", ":", "Semicolon", 186],
+  ["'", '"', "Quote", 222],
+  [",", "<", "Comma", 188],
+  [".", ">", "Period", 190],
+  ["/", "?", "Slash", 191],
+];
+
+const US_SYMBOL_KEY_BY_CHARACTER = new Map<
+  string,
+  { code: string; keyCode: number; shift: boolean }
+>(
+  US_SYMBOL_KEYS.flatMap(([plain, shifted, code, keyCode]) => [
+    [plain, { code, keyCode, shift: false }],
+    [shifted, { code, keyCode, shift: true }],
+  ]),
+);
+
+const SHIFT_MODIFIER = 8;
+
+/** A literal character as one key press (typed with `type.mode: "keys"`): the
+ * key a person presses for it on a US keyboard, with Shift held when that key
+ * needs it, so that pages reading physical keys and Shift (remote-desktop
+ * viewers) get the same character as pages reading the key's text. Other
+ * characters are sent as text with no physical key. */
 function characterKey(character: string): ParsedKey {
   if (character === "\n" || character === "\r") {
     return { key: "Enter", code: "Enter", keyCode: 13, modifiers: 0, text: "\r" };
@@ -9352,12 +11277,30 @@ function characterKey(character: string): ParsedKey {
       key: character,
       code: `Key${upper}`,
       keyCode: upper.charCodeAt(0),
-      modifiers: 0,
+      modifiers: character === upper ? SHIFT_MODIFIER : 0,
+      text: character,
+    };
+  }
+  const symbol = US_SYMBOL_KEY_BY_CHARACTER.get(character);
+  if (symbol) {
+    return {
+      key: character,
+      code: symbol.code,
+      keyCode: symbol.keyCode,
+      modifiers: symbol.shift ? SHIFT_MODIFIER : 0,
       text: character,
     };
   }
   return { key: character, code: "", keyCode: 0, modifiers: 0, text: character };
 }
+
+// The modifier keys behind the CDP modifier bits, in the order they go down.
+const MODIFIER_KEYS: readonly { bit: number; key: string; code: string; keyCode: number }[] = [
+  { bit: 2, key: "Control", code: "ControlLeft", keyCode: 17 },
+  { bit: 1, key: "Alt", code: "AltLeft", keyCode: 18 },
+  { bit: 4, key: "Meta", code: "MetaLeft", keyCode: 91 },
+  { bit: SHIFT_MODIFIER, key: "Shift", code: "ShiftLeft", keyCode: 16 },
+];
 
 /** Replace `{{secret:…}}` references with the controller-private values right
  * before dispatch. The returned command no longer carries the side map, so
@@ -9403,11 +11346,22 @@ function parseKey(input: string, mac: boolean): ParsedKey {
     throw new InteractionDefiniteDriverError("invalid_action", "browser key is unsupported");
   }
   const upper = rawKey.toUpperCase();
+  // A digit or symbol is the key that gives it on a US keyboard, with Shift
+  // held when that key needs it, as typed text is.
+  const symbol = /[a-z]/iu.test(rawKey) ? undefined : US_SYMBOL_KEY_BY_CHARACTER.get(rawKey);
+  // A letter in a key combination is the key a browser reports for it:
+  // lowercase unless Shift is held, whichever case was written.
+  const letterKey =
+    /^[a-z]$/iu.test(rawKey) && modifiers !== 0
+      ? (modifiers & SHIFT_MODIFIER) !== 0
+        ? upper
+        : rawKey.toLowerCase()
+      : rawKey;
   return {
-    key: rawKey,
-    code: /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
-    keyCode: upper.codePointAt(0) ?? 0,
-    modifiers,
+    key: letterKey,
+    code: symbol ? symbol.code : /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
+    keyCode: symbol ? symbol.keyCode : (upper.codePointAt(0) ?? 0),
+    modifiers: symbol?.shift ? modifiers | SHIFT_MODIFIER : modifiers,
     text: modifiers === 0 ? rawKey : "",
   };
 }
@@ -9508,6 +11462,19 @@ const LATE_REQUEST_FRAME_EXPRESSION = `new Promise((resolve) => {
 // The response handler runs after the network layer reports the load finished.
 const ACTION_RESPONSE_APPLY_MS = 50;
 
+/** Resolves once a page's start-up code has run: its scripts and
+ * DOMContentLoaded handlers, and, when the page has finished loading, its load
+ * and pageshow handlers, each followed by the zero-delay timers they set. A
+ * page still loading subresources resolves without waiting for its load. */
+const PAGE_STARTUP_SETTLED_EXPRESSION = `new Promise((resolve) => {
+  const after = (next) => setTimeout(next, 0);
+  const settle = () =>
+    after(() => (document.readyState === "complete" ? after(resolve) : resolve()));
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", settle, { once: true });
+  else settle();
+})`;
+
 // Waits until no finite animation is running, then lets animationend
 // handlers commit their DOM removal (which can chain another animation).
 const SETTLE_FINITE_ANIMATIONS_EXPRESSION = `(async () => {
@@ -9539,6 +11506,49 @@ const SETTLE_FINITE_ANIMATIONS_EXPRESSION = `(async () => {
   return true;
 })()`;
 
+/** What a page reports for its size, screen and scale, read to check that a
+ * viewport change took. */
+const MEASURE_VIEWPORT_EXPRESSION =
+  "({width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height,deviceScaleFactor:devicePixelRatio})";
+
+const VIEWPORT_NOT_TAKEN_MESSAGE =
+  "The viewport change was sent, but the tab did not take that size. Observe the tab to see its size now.";
+const VIEWPORT_RESET_NOT_TAKEN_MESSAGE =
+  "The viewport reset was sent, but the tab did not return to its own size and scale. Observe the tab to see its size now.";
+
+/** Captures tried, and the pause between them, to have a hidden tab draw
+ * before input is sent to it (see drawHiddenTabForInput). */
+const HIDDEN_TAB_DRAW_ATTEMPTS = 3;
+const HIDDEN_TAB_DRAW_RETRY_MS = 100;
+/** Whether the document is shown now or ever was (Chromium records each
+ * visibility change of a document in its performance timeline). */
+const DOCUMENT_SHOWN_EXPRESSION =
+  'document.visibilityState === "visible" || performance.getEntriesByType("visibility-state").some((entry) => entry.name === "visible")';
+/** Actions that send mouse, touch or key input to the page. */
+const PAGE_INPUT_ACTIONS: ReadonlySet<BrowserAction["type"]> = new Set([
+  "click",
+  "double_click",
+  "hover",
+  "fill",
+  "type",
+  "press",
+  "select",
+  "check",
+  "scroll",
+  "drag",
+  "pointer",
+  "clipboard",
+]);
+const HIDDEN_TAB_NOT_DRAWN_MESSAGE =
+  "This tab is hidden behind another tab and has not drawn its page, so the page would not receive the input. No input was sent. Activate the tab, then try again.";
+
+function sameScale(
+  measured: { deviceScaleFactor: number },
+  expected: { deviceScaleFactor: number },
+): boolean {
+  return Math.abs(measured.deviceScaleFactor - expected.deviceScaleFactor) < 0.01;
+}
+
 /** Resolves after the page has produced the next frame (two animation frames:
  * the first may already be in flight at the old size), or after 300 ms when
  * the page does not animate (hidden or throttled). */
@@ -9550,10 +11560,13 @@ const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
 
 /** Resolves once work a page scheduled in response to the last key (a task
  * queued in the next animation frame, such as a React effect moving focus)
- * has run, or after 50 ms in a tab that does not animate (background). */
-const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
+ * has run. A hidden tab produces no frames, so it is waited on for 50 ms only.
+ * A visible tab's next frame can come well after 50 ms on a busy machine, and
+ * giving up early sends the next key to the old field, so it gets a longer
+ * safety cap. */
+export const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
   const done = () => resolve(true);
-  setTimeout(done, 50);
+  setTimeout(done, document.visibilityState === "hidden" ? 50 : 1000);
   requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
@@ -9609,10 +11622,21 @@ const HIT_TEST_FUNCTION = `function() {
 
 // Describes an element by its nearest labelled ancestor: role (or tag) and
 // accessible label. Text content is read only from non-editable elements and
-// bounded; input values never are.
+// bounded by code points, so a cut never splits a character; input values
+// never are read. The driver bounds the whole by bytes (coverName).
 const DESCRIBE_HELPER = `
   const describe = (hit) => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const head = (value, count) => {
+      let kept = "";
+      let taken = 0;
+      for (const character of value) {
+        if (taken === count) break;
+        kept += character;
+        taken += 1;
+      }
+      return kept;
+    };
     let node = hit instanceof Element ? hit : hit && hit.parentElement;
     if (!(node instanceof Element)) return "another element";
     const start = node;
@@ -9621,26 +11645,359 @@ const DESCRIBE_HELPER = `
       const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
       if (role || label) {
         const kind = role || node.tagName.toLowerCase();
-        return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+        return label ? kind + " " + JSON.stringify(head(label, 80)) : kind;
       }
       node = node.parentElement;
     }
     const editable = start.closest("input, textarea, select, [contenteditable]");
-    const text = editable ? "" : clean(start.textContent).slice(0, 60);
+    const text = editable ? "" : head(clean(start.textContent), 60);
     return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
   };`;
 
-// Describes the element on top at the target's centre, or null when nothing
-// else is there.
-const COVER_DESCRIPTION_FUNCTION = `function() {
+// Page-side helpers, after HIT_HELPERS, that let the browser say where the
+// target shows. holds: the target (or something in it) is in the stack of
+// elements at a point. elementsFromPoint leaves an element out where it is
+// clipped away (a panel's overflow edge, clip-path, containment) or hidden,
+// and keeps it, under its cover, where something covers it; the top layer,
+// transforms and zoom are the browser's own. So a target missing from the
+// stack at its centre is cut off there, and whatever is on top there (the
+// panel beside the target's own panel) is not over it. visibleArea: the part
+// of the target's box inside its window, narrowed to what every same-origin
+// parent frame shows and to bounds (the page's window in this frame's
+// coordinates) when the driver passes them, one pixel in from every edge so
+// rounding cannot put a press beside it; null when empty. shownPoints: the
+// points of a grid over that area where the target shows, nearest the middle
+// of the part that shows first (that middle itself when it shows); null when
+// no part shows. shutOut: the page keeps the target from taking pointer input
+// from outside the target itself, so it is missing from every stack without
+// being cut off: it is inert or inside an inert element, an open modal (a
+// showModal() dialog, or a fullscreen element) does not hold it (including
+// the modal on top at its centre, stacked over its own or inside an open
+// shadow root), or its
+// pointer-events: none comes from a container (a modal library setting it on
+// the body). What is on top over it then covers it, as #6170 reported. A
+// target that sets pointer-events: none on itself is not shut out.
+const SHOWN_PART_HELPER = `
+  const holds = (target, x, y) => {
+    const root = target.getRootNode();
+    const scope = root && typeof root.elementsFromPoint === "function" ? root : document;
+    return scope.elementsFromPoint(x, y).some((node) => owns(target, node));
+  };
+  const shutOut = (target) => {
+    const flatParent = (node) => {
+      const next = node.assignedSlot ?? node.parentNode ?? null;
+      return next instanceof ShadowRoot ? next.host : next;
+    };
+    for (let node = target; node instanceof Element; node = flatParent(node)) {
+      if (node.hasAttribute("inert")) return true;
+    }
+    try {
+      const modals = Array.from(target.ownerDocument.querySelectorAll(":modal"));
+      if (modals.length && !modals.some((modal) => owns(modal, target))) return true;
+      // The modal on top, when it does not hold the target: one stacked over
+      // the target's own modal (a confirm opened from a dialog), or one in an
+      // open shadow root, which the document's query does not reach. The
+      // stack names only the outermost host, so first follow the hit down
+      // through open shadow roots (an app component wrapping a dialog
+      // component) to the element really on top.
+      const box = target.getBoundingClientRect();
+      const ox = box.left + box.width / 2;
+      const oy = box.top + box.height / 2;
+      let over = topHit(target, ox, oy);
+      for (let depth = 0; depth < 32 && over instanceof Element && over.shadowRoot; depth += 1) {
+        const inner = over.shadowRoot.elementsFromPoint(ox, oy)[0];
+        if (!inner || inner === over) break;
+        over = inner;
+      }
+      for (let node = over; node instanceof Element; node = flatParent(node)) {
+        const modal = node.matches(":modal") ? node : node.shadowRoot?.querySelector(":modal");
+        if (modal && !owns(modal, target)) return true;
+      }
+    } catch {}
+    const view = target.ownerDocument.defaultView || window;
+    if (view.getComputedStyle(target).pointerEvents !== "none") return false;
+    const parent = flatParent(target);
+    return parent instanceof Element && view.getComputedStyle(parent).pointerEvents === "none";
+  };
+  const visibleArea = (target, rect, bounds) => {
+    const viewport = target.ownerDocument.documentElement;
+    let left = 0;
+    let top = 0;
+    let right = viewport.clientWidth || innerWidth;
+    let bottom = viewport.clientHeight || innerHeight;
+    if (bounds) {
+      left = Math.max(left, bounds.left);
+      top = Math.max(top, bounds.top);
+      right = Math.min(right, bounds.right);
+      bottom = Math.min(bottom, bounds.bottom);
+    }
+    try {
+      let dx = 0;
+      let dy = 0;
+      for (let view = target.ownerDocument.defaultView; view && view.frameElement; ) {
+        const frame = view.frameElement;
+        const box = frame.getBoundingClientRect();
+        dx += box.left + frame.clientLeft;
+        dy += box.top + frame.clientTop;
+        const parent = frame.ownerDocument;
+        const shownRight = parent.documentElement.clientWidth || parent.defaultView.innerWidth;
+        const shownBottom = parent.documentElement.clientHeight || parent.defaultView.innerHeight;
+        left = Math.max(left, -dx);
+        top = Math.max(top, -dy);
+        right = Math.min(right, shownRight - dx);
+        bottom = Math.min(bottom, shownBottom - dy);
+        view = parent.defaultView;
+      }
+    } catch {}
+    left = Math.max(rect.left, left) + 1;
+    right = Math.min(rect.right, right) - 1;
+    top = Math.max(rect.top, top) + 1;
+    bottom = Math.min(rect.bottom, bottom) - 1;
+    return right > left && bottom > top ? { left, top, right, bottom } : null;
+  };
+  const shownPoints = (target, area) => {
+    const steps = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1];
+    const points = [];
+    let box = null;
+    for (const sy of steps) {
+      for (const sx of steps) {
+        const x = area.left + (area.right - area.left) * sx;
+        const y = area.top + (area.bottom - area.top) * sy;
+        if (!holds(target, x, y)) continue;
+        points.push({ x, y });
+        box = box
+          ? {
+              left: Math.min(box.left, x),
+              top: Math.min(box.top, y),
+              right: Math.max(box.right, x),
+              bottom: Math.max(box.bottom, y),
+            }
+          : { left: x, top: y, right: x, bottom: y };
+      }
+    }
+    if (!box) return null;
+    // The grid only brackets each edge of the part that shows (a long row
+    // cut off at a narrow panel can show in one column of it): bisect each
+    // edge along the middle line to within a fraction of a pixel.
+    const edge = (inside, outside, at) => {
+      for (let step = 0; step < 8; step += 1) {
+        const half = (inside + outside) / 2;
+        if (at(half)) inside = half;
+        else outside = half;
+      }
+      return inside;
+    };
+    const stepX = (area.right - area.left) / (steps.length - 1);
+    const stepY = (area.bottom - area.top) / (steps.length - 1);
+    const lineY = (box.top + box.bottom) / 2;
+    if (holds(target, box.left, lineY) && holds(target, box.right, lineY)) {
+      const across = (x) => holds(target, x, lineY);
+      if (box.left > area.left) box.left = edge(box.left, Math.max(area.left, box.left - stepX), across);
+      if (box.right < area.right) box.right = edge(box.right, Math.min(area.right, box.right + stepX), across);
+    }
+    const lineX = (box.left + box.right) / 2;
+    if (holds(target, lineX, box.top) && holds(target, lineX, box.bottom)) {
+      const down = (y) => holds(target, lineX, y);
+      if (box.top > area.top) box.top = edge(box.top, Math.max(area.top, box.top - stepY), down);
+      if (box.bottom < area.bottom) box.bottom = edge(box.bottom, Math.min(area.bottom, box.bottom + stepY), down);
+    }
+    const mx = (box.left + box.right) / 2;
+    const my = (box.top + box.bottom) / 2;
+    points.sort((a, b) => (a.x - mx) ** 2 + (a.y - my) ** 2 - ((b.x - mx) ** 2 + (b.y - my) ** 2));
+    if (holds(target, mx, my)) points.unshift({ x: mx, y: my });
+    return points;
+  };`;
+
+// Describes the element on top at the target's centre, over the target, or
+// null when nothing else is there. When the target does not show at its
+// centre (cut off at a panel's edge, or outside the window), describes what
+// is on top at the middle of the part that shows instead, as { shown }. bounds
+// as for VISIBLE_PART_FUNCTION.
+const COVER_DESCRIPTION_FUNCTION = `function(bounds) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
-  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  if (!hit || owns(element, hit) || owns(hit, element)) return null;
-  return describe(hit);
+  ${SHOWN_PART_HELPER}
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const hit = topHit(element, cx, cy);
+  if (hit && owns(element, hit)) return null;
+  if (hit && !owns(hit, element) && (holds(element, cx, cy) || shutOut(element))) {
+    return describe(hit);
+  }
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  const area = visibleArea(element, rect, bounds);
+  const points = area && shownPoints(element, area);
+  if (!points) return null;
+  const over = topHit(element, points[0].x, points[0].y);
+  if (!over || owns(element, over) || owns(over, element)) return null;
+  return { shown: describe(over) };
+}`;
+
+const NESTED_CONTROL_NAME_BYTES = 160;
+
+/** A cover's description as the page reported it (`kind "label"`), at most
+ * COVER_NAME_BYTES of UTF-8: cut on a code-point boundary and ending in an
+ * ellipsis when cut, inside the closing quote when the cut falls in the
+ * label. */
+const COVER_NAME_BYTES = 160;
+function coverName(value: string): string {
+  const bytes = (text: string) => Buffer.byteLength(text, "utf8");
+  if (bytes(value) <= COVER_NAME_BYTES) return value;
+  const quote = value.indexOf(' "');
+  const tail = (kept: string) => (quote >= 0 && kept.length > quote + 1 ? '…"' : "…");
+  let kept = "";
+  for (const character of value) {
+    const next = kept + character;
+    if (bytes(next + tail(next)) > COVER_NAME_BYTES) break;
+    kept = next;
+  }
+  // A cut between a backslash and the character it escapes drops the
+  // backslash, so the quote still closes.
+  const escapes = /\\+$/.exec(kept)?.[0].length ?? 0;
+  if (quote >= 0 && escapes % 2 === 1) kept = kept.slice(0, -1);
+  return kept + tail(kept);
+}
+
+/** `kind "label"` for a nested control the page reported, at most
+ * NESTED_CONTROL_NAME_BYTES of UTF-8: the label is cut on a code-point
+ * boundary and ends in an ellipsis when cut; the quote always closes. */
+function nestedControlName(reported: Record<string, unknown>): string {
+  const bytes = (value: string) => Buffer.byteLength(value, "utf8");
+  const kind =
+    typeof reported.kind === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(reported.kind)
+      ? reported.kind
+      : "control";
+  const label = typeof reported.label === "string" ? reported.label : "";
+  if (!label) return kind;
+  const quoted = (text: string) => `${kind} ${JSON.stringify(text)}`;
+  const whole = quoted(label);
+  if (reported.cut !== true && bytes(whole) <= NESTED_CONTROL_NAME_BYTES) return whole;
+  let kept = "";
+  for (const character of label) {
+    if (bytes(quoted(`${kept}${character}…`)) > NESTED_CONTROL_NAME_BYTES) break;
+    kept += character;
+  }
+  return quoted(`${kept}…`);
+}
+
+// A point on the part of the target that shows, as fractions of its border
+// box, that reaches the target itself, nearest the middle of that part. A
+// point whose hit lies in a separate control nested in the target (a card's
+// own Delete button) does not count: when only such controls show, returns
+// { nested } naming the first. Null when no point qualifies, or when the
+// target is covered: something else is on top over it at its centre, or,
+// when it does not show at its centre, at the middle of the part that shows.
+// The window is narrowed as visibleArea says.
+const VISIBLE_PART_FUNCTION = `function(bounds) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  ${HIT_HELPERS}
+  ${SHOWN_PART_HELPER}
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const centre = topHit(element, cx, cy);
+  // Something else on top at the centre, where the target shows under it or
+  // the page shuts it out (behind a modal), covers it. Where the target does
+  // not show at its centre (a row running past its side panel's edge, with
+  // the next panel on top there), what is on top there is not over it.
+  if (centre && !owns(centre, element) && (holds(element, cx, cy) || shutOut(element))) {
+    return null;
+  }
+  const area = visibleArea(element, rect, bounds);
+  const points = area && shownPoints(element, area);
+  if (!points) return null;
+  // What is on top at the middle of the part that shows covers the target
+  // there, as at its centre.
+  const middle = topHit(element, points[0].x, points[0].y);
+  if (middle && !owns(element, middle) && !owns(middle, element)) return null;
+  const controlRoles = new Set([
+    "button", "checkbox", "combobox", "link", "listbox", "menuitem", "menuitemcheckbox",
+    "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "tab",
+    "textbox", "treeitem",
+  ]);
+  const isControl = (node) => {
+    if (!(node instanceof Element)) return false;
+    const roles = String(node.getAttribute("role") || "").trim().split(/\\s+/);
+    if (roles.some((role) => controlRoles.has(role))) return true;
+    const tag = node.localName;
+    if (["button", "select", "textarea", "summary", "label"].includes(tag)) return true;
+    if (tag === "input") return node.type !== "hidden";
+    if ((tag === "a" || tag === "area") && node.hasAttribute("href")) return true;
+    if (node.hasAttribute("tabindex") && node.tabIndex >= 0) return true;
+    const editable = node.getAttribute("contenteditable");
+    return editable !== null && editable !== "false";
+  };
+  // The nearest control between the hit and the target, or null.
+  const nestedControl = (hit) => {
+    for (let node = hit; node && node !== element; ) {
+      if (isControl(node)) return node;
+      node = node.assignedSlot ?? node.parentNode ?? null;
+      if (node instanceof ShadowRoot) node = node.host;
+    }
+    return null;
+  };
+  // The control's matched role (or tag) and its label; the driver bounds
+  // and quotes them.
+  const name = (control) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const roles = String(control.getAttribute("role") || "").trim().split(/\\s+/);
+    const kind = roles.find((role) => controlRoles.has(role)) || control.localName;
+    const editable = control.matches("input, textarea, select, [contenteditable]");
+    const label = Array.from(
+      clean(
+        control.getAttribute("aria-label") ||
+          control.getAttribute("title") ||
+          (editable ? "" : control.textContent),
+      ),
+    );
+    return { kind, label: label.slice(0, 200).join(""), cut: label.length > 200 };
+  };
+  // Nearest the middle of the part that shows first: away from its edges,
+  // whose exact position hit testing and the box model can round apart.
+  let nested = null;
+  for (const point of points) {
+    const hit = topHit(element, point.x, point.y);
+    if (!hit || !owns(element, hit)) continue;
+    const control = nestedControl(hit);
+    if (control) {
+      nested = nested ?? control;
+      continue;
+    }
+    return [(point.x - rect.left) / rect.width, (point.y - rect.top) / rect.height];
+  }
+  return nested ? { nested: name(nested) } : null;
+}`;
+
+// Why a target that nothing else covers takes no pointer input:
+// "pointer-events" (pointer-events: none on it or inherited from a container),
+// "outside" (nothing is at its centre, which is outside the window),
+// "clipped" (its own container is on top at its centre: clipped by an
+// overflow edge or hidden there), "cut-off" (it does not show at its centre,
+// clipped away there by a panel or container that holds it, and something
+// beside that container is on top), or null.
+const UNREACHABLE_REASON_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  ${HIT_HELPERS}
+  ${SHOWN_PART_HELPER}
+  if (getComputedStyle(element).pointerEvents === "none") return "pointer-events";
+  const rect = element.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const hit = topHit(element, cx, cy);
+  if (!hit) return "outside";
+  if (!owns(element, hit) && owns(hit, element)) return "clipped";
+  if (owns(element, hit) || holds(element, cx, cy)) return null;
+  // Hidden (visibility: hidden) or shut out (behind a modal) is missing from
+  // the stack too, but not cut off.
+  if (shutOut(element)) return null;
+  if (typeof element.checkVisibility === "function" && !element.checkVisibility({ visibilityProperty: true })) return null;
+  return "cut-off";
 }`;
 
 // Guards one pointer click on the target. Hit-testing happens before input is
@@ -9654,19 +12011,47 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
 // label forwards its click to its control.
 // Returns the guard object; its settle() removes the listeners and
 // reports what was held back. A guard that is never settled (a JavaScript
-// dialog interrupted the click) disarms itself after a few seconds.
+// dialog interrupted the click) disarms itself a few seconds after the page
+// has handled the pointer's move, or after the press. However long the page
+// takes to handle that move (a page busy on the pointer's arrival) the guard
+// stays armed through it, and a press without a move waits up to a limit; one
+// that runs out before its press settles as "lapsed", and one that saw no
+// press at all (the browser dropped it, or it went to another document) as
+// "unpressed", so neither click is counted as delivered. A press the page
+// stopped before the guard saw it (a window listener added before the guard)
+// still counts as seen, and as reaching the target, once the click it makes
+// lands on the target.
 const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
+/** How long a click's guard waits for its press: longer than the input
+ * commands of one click can take (each is bounded at 30 s). */
+const HIT_TARGET_GUARD_UNPRESSED_LIMIT_MS = 60_000;
+/** How long a click's guard stays armed once the page has handled the
+ * pointer's move, or the press. */
+const HIT_TARGET_GUARD_ARMED_MS = 5_000;
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported
- * for each press as it happened (null: the press reached the target; text:
- * what it landed on instead). `reported` is false when the guard runs where
- * it cannot report (no isolated world), so only its readback counts. */
+ * for each press as it happened (null: the press reached the target; else
+ * what it landed on instead, and whether it fell outside the target's own
+ * box). `reported` is false when the guard runs where it cannot report (no
+ * isolated world), so only its readback counts. */
 interface HitTargetGuard {
   objectId: string;
   reported: boolean;
-  verdicts: Array<string | null>;
+  verdicts: Array<HitTargetVerdict | null>;
   stopReports: () => void;
+}
+
+/** A press the guard held back: what took it, and whether the target had
+ * moved away from the press point (rather than being covered there). */
+interface HitTargetVerdict {
+  name: string;
+  moved: boolean;
+}
+
+function hitTargetVerdict(value: unknown): HitTargetVerdict | null {
+  if (!isRecord(value) || typeof value.name !== "string") return null;
+  return { name: value.name, moved: value.moved === true };
 }
 
 const HIT_TARGET_GUARD_FUNCTION = `function(token) {
@@ -9710,24 +12095,63 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   };
   const presses = ["pointerdown", "mousedown"];
   const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
+  // Whether a press at the event's point fell outside every box of the
+  // target as laid out now. A target that is gone (re-rendered, removed or
+  // hidden) has no box to judge by, so it does not count as moved.
+  const movedAway = (event) => {
+    if (!element.isConnected) return false;
+    const rects = element.getClientRects();
+    if (rects.length === 0) return false;
+    const x = event.clientX;
+    const y = event.clientY;
+    for (const rect of rects) {
+      if (x >= rect.left - 1 && x <= rect.right + 1 && y >= rect.top - 1 && y <= rect.bottom + 1) return false;
+    }
+    return true;
+  };
   const types = [...presses, ...followers];
-  const guard = { blocked: null };
-  const expiresAt = Date.now() + 5000;
+  const guard = { blocked: null, lapsed: false };
+  let pressed = false;
+  let expiresAt = Date.now() + ${HIT_TARGET_GUARD_UNPRESSED_LIMIT_MS};
   let pointerDowns = 0;
+  let landedClicks = 0;
+  // Once the page has handled the pointer's move (its listeners for the
+  // move, and the tasks they queued right away), the press is due: from
+  // then on the guard waits only the usual few seconds, so a click a
+  // JavaScript dialog interrupted before its press does not hold back the
+  // person's own presses for long.
+  const moves = ["pointermove", "mousemove"];
+  let moveSeen = false;
+  const moveListener = (event) => {
+    if (!event.isTrusted || moveSeen || pressed) return;
+    moveSeen = true;
+    setTimeout(() => setTimeout(() => {
+      if (!pressed) expiresAt = Math.min(expiresAt, Date.now() + ${HIT_TARGET_GUARD_ARMED_MS});
+    }, 0), 0);
+  };
+  const press = () => {
+    if (pressed) return;
+    pressed = true;
+    expiresAt = Date.now() + ${HIT_TARGET_GUARD_ARMED_MS};
+  };
   const listener = (event) => {
     if (Date.now() > expiresAt) {
+      if (!pressed) guard.lapsed = true;
       guard.settle();
       return;
     }
     if (!event.isTrusted) return;
     if (presses.includes(event.type)) {
+      press();
       if (event.type === "pointerdown") pointerDowns += 1;
       const hit = event.composedPath()[0];
       // Only a click's first press is judged: a double-click's second press
       // lands where the first one's effect left the page (a row the first
       // click turned into an editor), as a person's does.
       const onTarget = pointerDowns > 1 || reaches(hit);
-      const verdict = onTarget ? null : describe(hit);
+      // A press outside the target's own box means the target moved away
+      // from the point it was aimed at; inside it, something covers it.
+      const verdict = onTarget ? null : { name: describe(hit), moved: movedAway(event) };
       // One report per physical press, before any page listener after this
       // one can replace the document.
       if (event.type === "pointerdown" && typeof report === "function") {
@@ -9735,14 +12159,33 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
       }
       if (onTarget && guard.blocked === null) return;
       if (guard.blocked === null) guard.blocked = verdict;
-    } else if (guard.blocked === null) return;
+    } else if (guard.blocked === null) {
+      // A click on the target shows that its press landed there, even when
+      // the page stopped that press before this guard could see it.
+      if (
+        (event.type === "click" || event.type === "auxclick") &&
+        reaches(event.composedPath()[0])
+      ) {
+        landedClicks += 1;
+        if (pointerDowns < landedClicks) {
+          press();
+          pointerDowns = landedClicks;
+          if (typeof report === "function") report(JSON.stringify({ token, blocked: null }));
+        }
+      }
+      return;
+    }
     event.preventDefault();
     event.stopImmediatePropagation();
   };
   for (const type of types) view.addEventListener(type, listener, true);
+  for (const type of moves) view.addEventListener(type, moveListener, true);
   guard.settle = () => {
     for (const type of types) view.removeEventListener(type, listener, true);
-    return guard.blocked;
+    for (const type of moves) view.removeEventListener(type, moveListener, true);
+    if (guard.blocked !== null) return guard.blocked;
+    if (guard.lapsed) return "lapsed";
+    return pressed ? null : "unpressed";
   };
   return guard;
 }`;
@@ -9762,6 +12205,59 @@ const SETTLE_FRAMES_FUNCTION = `function() {
       clearTimeout(timer);
       resolve(true);
     }));
+  });
+}`;
+
+/** After the driver's own scroll, a pointer action's target counts as
+ * settled once its box has not changed for this long: the page's scroll
+ * listeners, the frame callbacks and short timers they schedule (a header
+ * that shrinks once the page scrolls, often debounced), have run. */
+const SCROLL_QUIET_MS = 150;
+/** The longest that wait lasts while the page draws frames and the target
+ * keeps moving (an endless animation). */
+const SCROLL_SETTLE_LIMIT_MS = 600;
+/** The longest it lasts in all: a busy browser can take this long to draw
+ * the two frames after the scroll in which the page reacts to it. Both are
+ * within the action's dispatch allowance. */
+const SCROLL_SETTLE_MAX_MS = 1_500;
+/** How much longer the driver waits for the page's own answer at that limit
+ * before it goes on regardless. */
+const SCROLL_SETTLE_SLACK_MS = 100;
+
+// Resolves true once the target's box has stayed the same for quietMs over
+// at least two drawn frames, and false while it still moves at limitMs. The
+// quiet time counts from the first frame, which is when the page's scroll
+// listeners run, and the wait sees at least two frames (the listeners' own,
+// and the next, for what they deferred to it) unless maxMs passes first, so
+// a busy browser's slow frames do not count as quiet. A hidden page, which
+// draws no frames, resolves true at once.
+const STEADY_BOX_FUNCTION = `function(quietMs, limitMs, maxMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return true;
+  if (document.visibilityState === "hidden") return true;
+  const box = () => {
+    const rect = element.getBoundingClientRect();
+    return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 4)).join();
+  };
+  return new Promise((resolve) => {
+    const start = performance.now();
+    let last = box();
+    let changedAt = null;
+    let frames = 0;
+    setTimeout(() => frames >= 2 && resolve(false), limitMs);
+    setTimeout(() => resolve(false), maxMs);
+    const next = () =>
+      requestAnimationFrame(() => {
+        const now = performance.now();
+        const current = box();
+        if (changedAt === null || current !== last) changedAt = now;
+        last = current;
+        frames += 1;
+        if (frames >= 2 && now - changedAt >= quietMs) resolve(true);
+        else if ((frames >= 2 && now - start >= limitMs) || now - start >= maxMs) resolve(false);
+        else next();
+      });
+    next();
   });
 }`;
 
@@ -9821,8 +12317,72 @@ const VISIBLE_FUNCTION = `function() {
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }`;
 
+/** A checkable control's state, or null for anything else: a native
+ * checkbox or radio (or an element with a boolean checked property), a
+ * label's own control, or an element with an ARIA checkable role, whose
+ * "mixed" state counts as unchecked. `radio` marks a control that is turned
+ * off only by choosing another option, and `connected` whether the page
+ * still shows it rather than one it put in its place. */
 const CHECKED_FUNCTION = `function() {
-  return typeof this.checked === "boolean" ? this.checked : null;
+  const element = this instanceof HTMLLabelElement && this.control ? this.control : this;
+  if (!(element instanceof Element)) return null;
+  const connected = element.isConnected;
+  if (element instanceof HTMLInputElement) {
+    if (element.type !== "checkbox" && element.type !== "radio") return null;
+    return { checked: element.checked, radio: element.type === "radio", connected };
+  }
+  if (typeof element.checked === "boolean") {
+    return { checked: element.checked, radio: element.getAttribute("type") === "radio", connected };
+  }
+  const role = (element.getAttribute("role") || "").trim().split(/\\s+/)[0];
+  if (!["checkbox", "switch", "radio", "menuitemcheckbox", "menuitemradio"].includes(role)) return null;
+  return {
+    checked: element.getAttribute("aria-checked") === "true",
+    radio: role === "radio" || role === "menuitemradio",
+    connected,
+  };
+}`;
+
+/** Whether a form control takes no pointer input itself (pointer-events:
+ * none) but has a label that does. A disabled control keeps its refusal. */
+const POINTER_LABELLED_FUNCTION = `function() {
+  return this instanceof HTMLElement && !!this.labels && this.labels.length > 0 &&
+    !this.matches(":disabled") && getComputedStyle(this).pointerEvents === "none" &&
+    Array.from(this.labels).some((label) => label.getClientRects().length > 0 && getComputedStyle(label).pointerEvents !== "none");
+}`;
+
+/** For a control that takes no pointer input, the part of its label a person
+ * clicks instead, or null: the box the label draws over the control, else the
+ * label itself, and only when a click at its center lands on the label's own
+ * plain content. A link, button, field or other control inside the label
+ * would take that click instead, so then there is none. Run with the control
+ * in view. */
+const POINTER_LABEL_FUNCTION = `function() {
+  if (!(this instanceof HTMLElement) || !this.labels) return null;
+  const interactive = 'a[href], area[href], button, input, select, textarea, summary, iframe, object, embed, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), [role=link], [role=button], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=tab], [role=option], [role=combobox], [role=textbox], [role=slider]';
+  const center = (element) => {
+    const box = element.getBoundingClientRect();
+    return [box.left + box.width / 2, box.top + box.height / 2];
+  };
+  // What a click at the point reaches, when it is the label or plain content of it.
+  const plainAt = (label, [x, y]) => {
+    const root = label.getRootNode();
+    const hit = (typeof root.elementFromPoint === "function" ? root : document).elementFromPoint(x, y);
+    if (!hit || !label.contains(hit)) return null;
+    for (let node = hit; node && node !== label; node = node.parentElement) {
+      if (node.matches(interactive)) return null;
+    }
+    return hit;
+  };
+  for (const label of this.labels) {
+    if (label.getClientRects().length === 0 || getComputedStyle(label).pointerEvents === "none") continue;
+    const drawn = plainAt(label, center(this));
+    for (const candidate of [drawn, label]) {
+      const hit = candidate && plainAt(label, center(candidate));
+      if (hit && candidate.contains(hit)) return candidate;
+    }
+  }
+  return null;
 }`;
 
 /** Disabled natively (including inside a disabled fieldset) or with aria-disabled. */
@@ -10336,6 +12896,44 @@ const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
   }
   return (${COPY_BROWSER_TEXT_FUNCTION}).call(element, content);
 }`;
+
+const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
+  "the target is not a text field, so inserted text would not arrive and nothing was typed; type into a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
+
+const TYPE_KEYS_TEXT_ONLY_MESSAGE =
+  "keys were sent, but these characters have no US keyboard key, so a canvas or remote desktop reading key presses may not have received them: ";
+
+/** Whether inserted text can reach an element: true for a text field,
+ * editable content or an EditContext element (code editors), false for an
+ * element that takes no text (the page itself, a canvas, a button), null
+ * for a frame, a plugin or a shadow host whose focused part this document
+ * cannot see. With `focused`, `this` is a document's active element and the
+ * check follows focus into open shadow roots and same-origin frames. Without
+ * it, `this` is about to be focused, and an element holding a text field is
+ * null: focusing it may move focus into that field. */
+const TEXT_INSERT_TARGET_FUNCTION = `function (focused) { try {
+  let element = this;
+  while (focused && element) {
+    if (element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
+    else if ((element.localName === "iframe" || element.localName === "frame") && element.contentDocument && element.contentDocument.activeElement) element = element.contentDocument.activeElement;
+    else break;
+  }
+  if (!element || element.nodeType !== 1) return false;
+  const owner = element.ownerDocument;
+  const textField = (node) => node.isContentEditable || !!node.editContext || node.localName === "textarea" || (node.localName === "input" && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(node.type));
+  const holdsTextField = (root) => [...root.querySelectorAll("*")].some((node) => textField(node) || (node.shadowRoot && holdsTextField(node.shadowRoot)));
+  if (owner.designMode === "on" || textField(element)) return true;
+  if (element === owner.body || element === owner.documentElement) return false;
+  const tag = element.localName;
+  if (tag === "input") return false;
+  if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-") || element.shadowRoot) return null;
+  if (!focused && holdsTextField(element)) return null;
+  // An element focused in its own right takes no text. A shadow host focused
+  // for a field inside its closed shadow root is not focusable itself.
+  return element.tabIndex >= 0 || element.hasAttribute("tabindex") ? false : null;
+} catch { return null; } }`;
+
+const TEXT_INSERT_TARGET_EXPRESSION = `(${TEXT_INSERT_TARGET_FUNCTION}).call(document.activeElement, true)`;
 
 const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
   const element = document.activeElement;
@@ -10867,8 +13465,8 @@ function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isSelectorList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((selector) => typeof selector === "string");
 }
 
 /**

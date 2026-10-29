@@ -1,5 +1,6 @@
 import type { ModelEnv } from "./env";
 import type { JudgeResult, RunObservation, UsageTotals } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * LLM judge with a FIXED prompt. Changing JUDGE_SYSTEM_PROMPT or the transcript
@@ -159,7 +160,7 @@ export async function judgeRun(
       return { result: { score, rationale: String(parsed.rationale ?? "") }, usage };
     } catch (error) {
       if (attempt === 3) {
-        return { result: { error: error instanceof Error ? error.message : String(error) }, usage };
+        return { result: { error: errorMessage(error) }, usage };
       }
       await Bun.sleep(1_000 * attempt);
     }

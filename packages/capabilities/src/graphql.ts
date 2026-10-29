@@ -28,6 +28,7 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
+import { displayTitleMeta } from "./operation-titles";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -36,6 +37,7 @@ import type {
   JsonSchema,
 } from "./types";
 import { IntegrationInvocationError, IntegrationProtocolError } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export interface GraphqlOperationBinding {
   readonly kind: "query" | "mutation";
@@ -266,6 +268,7 @@ export class GraphqlMcpServer implements MCPServer {
           _meta: {
             "opengeni/approvalMode": tool.approvalMode,
             "opengeni/operationKey": tool.operationKey,
+            ...displayTitleMeta(tool.operationKey),
             "opengeni/revisionId": this.options.revision.id,
           },
         }) as LocalMcpTool,
@@ -634,8 +637,4 @@ function normalizeMcpSchema(schema: JsonSchema): LocalMcpTool["inputSchema"] {
       : [],
     additionalProperties: schema.additionalProperties === true,
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

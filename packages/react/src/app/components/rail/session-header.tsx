@@ -10,6 +10,7 @@ import { archiveActionLabel } from "../../lib/archive-session";
 // (and screenshotted) in isolation. `CanvasTopStrip` in session-shell owns the
 // data wiring and passes the real slots.
 import { t } from "../../lib/console-text";
+import { cn } from "../../lib/utils";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../../../workstream-control-event";
 import {
   SessionStatus as SessionStatusBadge,
@@ -21,12 +22,15 @@ import { ModelMark } from "../../../components/model-mark";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { SessionEventsConnectionState } from "../../../hooks/use-session-events";
 import type { SessionSummary } from "@opengeni/sdk";
-import { SiteOriginLink } from "../session/site-origin-link";
+import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
+import { sessionSiteOrigin } from "../../lib/session-site-origin";
+import type { CreateBotTemplateRequest, WorkspaceBotTemplate } from "@opengeni/contracts";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   BellIcon,
   BellOffIcon,
+  BotIcon,
   CalendarClockIcon,
   GaugeIcon,
   LinkIcon,
@@ -38,9 +42,11 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  Share2Icon,
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
+  UserRoundPenIcon,
   ZapIcon,
   ZapOffIcon,
 } from "lucide-react";
@@ -51,9 +57,17 @@ import { ConnectionPill } from "../common";
 import {
   GrantSessionAdminAccessDialog,
   SessionAdminAccessIndicator,
+  SessionAdminAccessMenuItems,
   type SessionAdminAccessControl,
 } from "../session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "../session/subagents";
+import { ShareChatDialog } from "../session/share-chat-dialog";
+import { useSessionUiFeature } from "../../lib/session-ui-features";
+import {
+  SESSION_HEADER_PARTS,
+  useSessionHeaderOverflow,
+  type SessionHeaderPart,
+} from "./session-header-overflow";
 import { Button } from "../../../ui/button";
 import {
   DropdownMenu,
@@ -71,7 +85,11 @@ import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
-import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
+import {
+  sessionAutomationWaitLines,
+  sessionAutomationWaitWords,
+} from "../../../components/automations/automation-model";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
 import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
@@ -85,6 +103,13 @@ import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
+import { toast } from "../../lib/toast";
+import { SessionAvatar } from "../session/session-avatar";
+import {
+  SessionProfileEditorDialog,
+  type UpdateSessionProfileFn,
+} from "../session/session-profile-editor";
+import { BotTemplateDialog } from "../bots/bot-template-dialog";
 import { useUiEventTarget } from "../../lib/ui-events";
 
 const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
@@ -107,6 +132,8 @@ export function SessionHeader({
   onToggleInspector,
   onRename,
   onPin,
+  onUpdateProfile,
+  onSaveBotTemplate,
   onArchive,
   repliesMute,
   adminAccess,
@@ -143,6 +170,13 @@ export function SessionHeader({
   onToggleInspector?: (() => void) | undefined;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
+  /** Saves the chat's name, description and avatar. Absent hides Edit profile. */
+  onUpdateProfile?: UpdateSessionProfileFn | null | undefined;
+  /** Saves a bot template in the workspace. Absent hides Save as bot template. */
+  onSaveBotTemplate?:
+    | ((request: CreateBotTemplateRequest) => Promise<WorkspaceBotTemplate>)
+    | null
+    | undefined;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: ((session: Session, archived: boolean) => Promise<void>) | undefined;
   /**
@@ -194,8 +228,6 @@ export function SessionHeader({
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
   const waiting = sessionInputWait({ ...session, status });
-  // A paused or finished automation still links to its settings, marked inactive.
-  const automationWait = sessionAutomationWaitWords(t, session, { now: new Date() });
   // A session the runtime could not start reads as stuck, not "Waiting on you".
   const displayStatus = sessionDisplayStatus({
     status,
@@ -234,6 +266,19 @@ export function SessionHeader({
   const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
+  const shareLinksFeature = useSessionUiFeature("shareLinks");
+  // Only the person who started a top-level chat can share it; the server
+  // decides whether links are on at all and says so in the dialog.
+  const canShare =
+    shareLinksFeature &&
+    context !== null &&
+    session.parentSessionId === null &&
+    session.createdBy?.kind === "subject" &&
+    session.createdBy.subjectId === context.accessContext.subjectId;
+  const [shareOpen, setShareOpen] = useState(false);
+  const canEditProfile = Boolean(onUpdateProfile);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -243,6 +288,36 @@ export function SessionHeader({
   const pinKeys = useActionShortcut("chat.pin");
   const archiveKeys = useActionShortcut("chat.archive");
   const panelKeys = useActionShortcut("view.workspacePanel");
+  const hasCrumb =
+    Boolean(session.parentSessionId) || ancestors.length > 0 || Boolean(lineageError);
+  const overflow = useSessionHeaderOverflow({
+    present: SESSION_HEADER_PARTS.filter((part) => {
+      switch (part) {
+        case "panel":
+          return Boolean(onToggleInspector);
+        case "access":
+          return Boolean(accessSlot);
+        case "fullAccess":
+          return Boolean(adminAccess?.state.active);
+        case "automations":
+          return Boolean(onOpenAutomations);
+        case "machine":
+          return Boolean(sandboxSlot);
+        case "site":
+          return sessionSiteOrigin(session) !== null;
+        case "accessKey":
+          return keyAuthRequired;
+        default:
+          return true;
+      }
+    }),
+    contentKey: sessionDisplayTitle(session),
+    resetKey: session.id,
+    frozen: rename.editing,
+  });
+  // In the "…" menu instead of the row (see SESSION_HEADER_PARTS).
+  const inMenu = (part: SessionHeaderPart) => overflow.collapsed.has(part);
+  const part = overflow.partRef;
   // "Rename" from the ⌘K menu or the desktop menu bar edits this title.
   const startRenaming = rename.startEditing;
   useEffect(() => {
@@ -274,145 +349,193 @@ export function SessionHeader({
     <header
       data-window-drag
       data-titlebar
-      className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
+      className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65"
     >
       {leading}
-      {/* The title takes every pixel the actions leave; it truncates last. */}
-      <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
-        {/* Child sessions link back to the manager that spawned them, and a
-            session links to the automations that post into it. */}
-        <div className="flex min-w-0 items-center gap-1.5">
-          <SessionAncestryBreadcrumb
-            workspaceId={session.workspaceId}
-            parentSessionId={session.parentSessionId}
-            ancestors={ancestors}
-            loading={lineageLoading}
-            error={lineageError}
-          />
-          <SiteOriginLink session={session} />
-          {onOpenAutomations ? (
-            <button
-              type="button"
-              onClick={onOpenAutomations}
-              data-automation-wait={automationWait?.kind ?? "none"}
-              className="inline-flex min-w-0 max-w-80 shrink items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title={t("automations.wait.openPanel", {
-                wait: automationWait?.label ?? t("automations.wait.none"),
-              })}
-            >
-              {automationWait?.kind === "event" ? (
-                <ZapIcon aria-hidden className="size-3 shrink-0" />
-              ) : automationWait?.kind === "schedule" ? (
-                <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
-              ) : (
-                <ZapOffIcon aria-hidden className="size-3 shrink-0" />
-              )}
-              <span className="truncate">
-                {automationWait?.short ?? t("sessionChrome.automation")}
-              </span>
-            </button>
-          ) : null}
-        </div>
-        <div className="flex min-w-0 items-center gap-1.5">
-          <SessionTitleEditor session={session} rename={rename} />
-          {/* Below lg the lifecycle is a dot beside the title; the full badge
-              and connection pill take over from lg. */}
+      {/* Every chat's header is one row of the same height. A child chat's
+          way back is a small line above its title, never beside it. The title
+          keeps a readable width: when the row is too narrow, the least
+          important parts move into the "…" menu (SESSION_HEADER_PARTS). */}
+      <div className="flex min-w-0 flex-1 flex-col justify-center">
+        <SessionAncestryBreadcrumb
+          workspaceId={session.workspaceId}
+          parentSessionId={session.parentSessionId}
+          ancestors={ancestors}
+          loading={lineageLoading}
+          error={lineageError}
+        />
+        <div
+          ref={overflow.rowRef}
+          data-session-title-row=""
+          className={cn("flex min-w-0 items-center gap-1", hasCrumb && "h-7")}
+        >
+          <div
+            ref={overflow.titleRef}
+            className={cn("flex min-w-0 items-center gap-1.5", rename.editing && "flex-1")}
+          >
+            {/* A bot's avatar travels with its title. */}
+            {session.avatar ? (
+              <button
+                type="button"
+                aria-label="Edit profile"
+                title="Edit profile"
+                disabled={!canEditProfile}
+                onClick={() => setProfileOpen(true)}
+                className="-mr-0.5 flex shrink-0 items-center justify-center rounded-[6px] outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 enabled:hover:opacity-85 pointer-coarse:size-11"
+              >
+                <SessionAvatar
+                  avatar={session.avatar}
+                  name={sessionDisplayTitle(session)}
+                  workspaceId={session.workspaceId}
+                  seed={session.id}
+                  size="sm"
+                />
+              </button>
+            ) : null}
+            <SessionTitleEditor session={session} rename={rename} />
+          </div>
+          {/* Below lg (or when the full badge has no room) the lifecycle is a
+              dot beside the title. */}
           <CompactSessionStatus
             paused={sessionControlPaused(session)}
             waiting={Boolean(waiting)}
             status={displayStatus}
             label={startupLabel}
+            always={inMenu("status")}
           />
-          {accessSlot}
-          {adminAccess ? (
-            <SessionAdminAccessIndicator
-              control={adminAccess}
-              onChangeTimeLimit={() => setGrantAdminOpen(true)}
-            />
+          {accessSlot && !inMenu("access") ? (
+            <span ref={part("access")} className="flex shrink-0 items-center">
+              {accessSlot}
+            </span>
+          ) : null}
+          {adminAccess?.state.active && !inMenu("fullAccess") ? (
+            <span ref={part("fullAccess")} className="flex shrink-0 items-center">
+              <SessionAdminAccessIndicator
+                control={adminAccess}
+                onChangeTimeLimit={() => setGrantAdminOpen(true)}
+              />
+            </span>
+          ) : null}
+          {sessionSiteOrigin(session) && !inMenu("site") ? (
+            <span ref={part("site")} className="flex shrink-0 items-center">
+              <SiteOriginLink session={session} />
+            </span>
+          ) : null}
+          {onOpenAutomations && !inMenu("automations") ? (
+            // The first to give way: its words shorten to its icon before
+            // anything moves into the menu. The weight is high enough that
+            // the title keeps every pixel until then (a sliver would already
+            // truncate it).
+            <span
+              ref={part("automations")}
+              className="flex min-w-6 shrink-[100000] items-center pointer-coarse:min-w-11"
+            >
+              <AutomationWaitChip session={session} onOpen={onOpenAutomations} />
+            </span>
           ) : null}
         </div>
       </div>
-      <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
+      <div ref={overflow.clusterRef} className="flex shrink-0 items-center gap-0.5 lg:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
-        <div className="hidden min-w-0 max-w-[min(100%,18rem)] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted lg:flex xl:max-w-[22rem]">
-          {policyLoading ? (
-            <span
-              className="inline-flex items-center gap-1.5"
-              aria-busy="true"
-              aria-label="Loading model"
-            >
-              <Skeleton className="h-6 w-11 shrink-0 rounded-full" />
-              <Skeleton className="h-3 w-36" />
-            </span>
-          ) : (
-            <span className="inline-flex min-w-0 items-center gap-1.5 truncate font-medium text-fg-muted">
-              {providerControl}
-              <span className="min-w-0 truncate font-normal">
-                {policyBits.map((bit, index) => (
-                  <span key={bit}>
-                    {index > 0 ? " · " : null}
-                    {bit}
-                  </span>
-                ))}
+        {inMenu("model") ? null : (
+          <div
+            ref={part("model")}
+            className="hidden max-w-[18rem] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted lg:flex xl:max-w-[22rem]"
+          >
+            {policyLoading ? (
+              <span
+                className="inline-flex items-center gap-1.5"
+                aria-busy="true"
+                aria-label="Loading model"
+              >
+                <Skeleton className="h-6 w-11 shrink-0 rounded-full" />
+                <Skeleton className="h-3 w-36" />
               </span>
-            </span>
-          )}
-        </div>
+            ) : (
+              <span className="inline-flex min-w-0 items-center gap-1.5 truncate font-medium text-fg-muted">
+                {providerControl}
+                <span className="min-w-0 truncate font-normal">
+                  {policyBits.map((bit, index) => (
+                    <span key={bit}>
+                      {index > 0 ? " · " : null}
+                      {bit}
+                    </span>
+                  ))}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
         {/* Below lg, machine, find and pin live in the "…" menu. */}
-        <span className="hidden min-w-0 lg:contents">{sandboxSlot}</span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => requestConversationFind(uiEvents)}
-          aria-label="Find in conversation"
-          data-conversation-find-trigger=""
-          title="Find in conversation (Ctrl/Cmd+F)"
-          className="hidden pointer-coarse:size-11 lg:inline-flex"
-        >
-          <SearchIcon className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant={session.pinned ? "secondary" : "ghost"}
-          size="icon-sm"
-          aria-label={session.pinned ? "Unpin session" : "Pin session"}
-          aria-pressed={Boolean(session.pinned)}
-          aria-busy={pin.busy}
-          disabled={pin.busy}
-          className="hidden pointer-coarse:size-11 lg:inline-flex"
-          onClick={pin.toggle}
-        >
-          <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
-        </Button>
+        {sandboxSlot && !inMenu("machine") ? (
+          <span ref={part("machine")} className="hidden items-center lg:flex">
+            {sandboxSlot}
+          </span>
+        ) : null}
+        {inMenu("find") ? null : (
+          <Button
+            ref={part("find")}
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => requestConversationFind(uiEvents)}
+            aria-label="Find in conversation"
+            data-conversation-find-trigger=""
+            title="Find in conversation (Ctrl/Cmd+F)"
+            className="hidden pointer-coarse:size-11 lg:inline-flex"
+          >
+            <SearchIcon className="size-4" />
+          </Button>
+        )}
+        {inMenu("pin") ? null : (
+          <Button
+            ref={part("pin")}
+            type="button"
+            variant={session.pinned ? "secondary" : "ghost"}
+            size="icon-sm"
+            aria-label={session.pinned ? "Unpin session" : "Pin session"}
+            aria-pressed={Boolean(session.pinned)}
+            aria-busy={pin.busy}
+            disabled={pin.busy}
+            className="hidden pointer-coarse:size-11 lg:inline-flex"
+            onClick={pin.toggle}
+          >
+            <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
+          </Button>
+        )}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {pin.announcement}
         </span>
-        <div className="hidden items-center gap-2 lg:flex">
-          <ConnectionPill state={connectionState} />
-          {/* Admission vs lifecycle are different axes, but showing both when
-              control is Active (Running + Active) is redundant noise. When
-              paused, admission is the headline — hide lifecycle so we don't
-              imply the session is still "Running"/"Idle" under a pause gate. */}
-          {!sessionControlPaused(session) ? (
-            waiting ? (
-              <span
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
-                data-session-wait-badge=""
-              >
-                <span aria-hidden className="size-1.5 rounded-full bg-current" />
-                Waiting
-              </span>
+        {inMenu("status") ? null : (
+          <div ref={part("status")} className="hidden items-center gap-2 lg:flex">
+            <ConnectionPill state={connectionState} />
+            {/* Admission vs lifecycle are different axes, but showing both when
+                control is Active (Running + Active) is redundant noise. When
+                paused, admission is the headline — hide lifecycle so we don't
+                imply the session is still "Running"/"Idle" under a pause gate. */}
+            {!sessionControlPaused(session) ? (
+              waiting ? (
+                <span
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
+                  data-session-wait-badge=""
+                >
+                  <span aria-hidden className="size-1.5 rounded-full bg-current" />
+                  Waiting
+                </span>
+              ) : (
+                <SessionStatusBadge status={displayStatus} label={startupLabel} />
+              )
             ) : (
-              <SessionStatusBadge status={displayStatus} label={startupLabel} />
-            )
-          ) : (
-            <WorkstreamControlIndicator session={session} />
-          )}
-        </div>
-        <span className="sr-only lg:hidden">Connection {connectionState}.</span>
-        {keyAuthRequired ? (
+              <WorkstreamControlIndicator session={session} />
+            )}
+          </div>
+        )}
+        <span className={cn("sr-only", !inMenu("status") && "lg:hidden")}>
+          Connection {connectionState}.
+        </span>
+        {keyAuthRequired && !inMenu("accessKey") ? (
           <Button
+            ref={part("accessKey")}
             type="button"
             variant="ghost"
             size="icon-sm"
@@ -423,8 +546,9 @@ export function SessionHeader({
             <LockIcon className="size-4" />
           </Button>
         ) : null}
-        {onToggleInspector ? (
+        {onToggleInspector && !inMenu("panel") ? (
           <Button
+            ref={part("panel")}
             type="button"
             variant={inspectorOpen ? "secondary" : "ghost"}
             size="icon-sm"
@@ -468,8 +592,20 @@ export function SessionHeader({
               action();
             }}
           >
+            {onToggleInspector && inMenu("panel") ? (
+              <DropdownMenuItem
+                aria-keyshortcuts={panelKeys?.ariaKeys}
+                onSelect={() => {
+                  afterMenuClose.current = onToggleInspector;
+                }}
+              >
+                {inspectorOpen ? <PanelRightCloseIcon /> : <PanelRightOpenIcon />}
+                {inspectorOpen ? "Hide workspace" : "Open workspace"}
+                {panelKeys ? <DropdownMenuShortcut>{panelKeys.label}</DropdownMenuShortcut> : null}
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
-              className="lg:hidden"
+              className={inMenu("find") ? undefined : "lg:hidden"}
               aria-keyshortcuts={findKeys?.ariaKeys}
               onSelect={() => {
                 afterMenuClose.current = () => requestConversationFind(uiEvents);
@@ -487,6 +623,26 @@ export function SessionHeader({
               <PencilIcon />
               Rename
             </DropdownMenuItem>
+            {canEditProfile ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setProfileOpen(true);
+                }}
+              >
+                <UserRoundPenIcon />
+                Edit profile…
+              </DropdownMenuItem>
+            ) : null}
+            {onSaveBotTemplate ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setSaveTemplateOpen(true);
+                }}
+              >
+                <BotIcon />
+                Save as bot template…
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               aria-keyshortcuts={copyLinkKeys?.ariaKeys}
               onSelect={() => void chatOps.copyLink(session)}
@@ -497,8 +653,18 @@ export function SessionHeader({
                 <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
               ) : null}
             </DropdownMenuItem>
+            {canShare ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setShareOpen(true);
+                }}
+              >
+                <Share2Icon />
+                Share…
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
-              className="lg:hidden"
+              className={inMenu("pin") ? undefined : "lg:hidden"}
               aria-keyshortcuts={pinKeys?.ariaKeys}
               disabled={pin.busy}
               onSelect={() => pin.toggle()}
@@ -518,9 +684,36 @@ export function SessionHeader({
               </DropdownMenuItem>
             ) : null}
             {sandboxSlot ? (
-              <div className="flex min-h-9 items-center px-2 empty:hidden lg:hidden">
+              <div
+                className={cn(
+                  "flex min-h-9 items-center px-2 empty:hidden",
+                  !inMenu("machine") && "lg:hidden",
+                )}
+              >
                 {sandboxSlot}
               </div>
+            ) : null}
+            {/* Parts with no room in the header row (SESSION_HEADER_PARTS). */}
+            {accessSlot && inMenu("access") ? (
+              <div className="flex min-h-9 items-center gap-2 px-2 text-sm text-fg-muted">
+                Access
+                {accessSlot}
+              </div>
+            ) : null}
+            {onOpenAutomations && inMenu("automations") ? (
+              <AutomationWaitMenuItem
+                session={session}
+                onOpen={() => {
+                  afterMenuClose.current = onOpenAutomations;
+                }}
+              />
+            ) : null}
+            {inMenu("site") ? <SiteOriginMenuItem session={session} /> : null}
+            {keyAuthRequired && inMenu("accessKey") ? (
+              <DropdownMenuItem onSelect={onForgetAccessKey}>
+                <LockIcon />
+                Clear access key
+              </DropdownMenuItem>
             ) : null}
             {repliesMute ? (
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
@@ -538,7 +731,18 @@ export function SessionHeader({
                 Usage limit
               </DropdownMenuItem>
             ) : null}
-            {adminAccess?.state.active && adminAccess.state.canRevoke ? (
+            {adminAccess?.state.active && inMenu("fullAccess") ? (
+              <>
+                <DropdownMenuSeparator />
+                <SessionAdminAccessMenuItems
+                  control={adminAccess}
+                  onChangeTimeLimit={() => setGrantAdminOpen(true)}
+                  runAfterClose={(action) => {
+                    afterMenuClose.current = action;
+                  }}
+                />
+              </>
+            ) : adminAccess?.state.active && adminAccess.state.canRevoke ? (
               <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
                 <ShieldOffIcon />
                 Turn off full access
@@ -577,6 +781,46 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {canShare && context ? (
+          <ShareChatDialog
+            client={context.client}
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            open={shareOpen}
+            onOpenChange={setShareOpen}
+          />
+        ) : null}
+        {onUpdateProfile && profileOpen ? (
+          <SessionProfileEditorDialog
+            session={session}
+            update={onUpdateProfile}
+            open={profileOpen}
+            onOpenChange={setProfileOpen}
+          />
+        ) : null}
+        {onSaveBotTemplate && saveTemplateOpen ? (
+          <BotTemplateDialog
+            open={saveTemplateOpen}
+            onOpenChange={setSaveTemplateOpen}
+            workspaceId={session.workspaceId}
+            seed={session.id}
+            mode="save"
+            initial={{
+              name: sessionDisplayTitle(session),
+              description: session.description ?? "",
+              avatar: session.avatar ?? null,
+              setupInstructions: "",
+              // Shared like the chat, so an Only me chat stays private by default.
+              visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
+            }}
+            onSubmit={async (values) => {
+              const created = await onSaveBotTemplate({ ...values, sourceSessionId: session.id });
+              toast.success("Bot template saved", {
+                description: created.name,
+              });
+            }}
+          />
+        ) : null}
         {adminAccess ? (
           <GrantSessionAdminAccessDialog
             control={adminAccess}
@@ -589,25 +833,110 @@ export function SessionHeader({
   );
 }
 
-/** Small-screen status: a dot beside the title, named for assistive tech. */
+/**
+ * The automations that post into this chat: what they wait for in a few
+ * words, every wait on hover, and their settings on click. A paused or
+ * finished automation still links to its settings, marked inactive. Narrow
+ * headers keep only the icon; its name always carries the whole wait.
+ */
+function AutomationWaitChip({ session, onOpen }: { session: Session; onOpen: () => void }) {
+  const now = new Date();
+  const wait = sessionAutomationWaitWords(t, session, { now });
+  const lines = sessionAutomationWaitLines(t, session, { now });
+  const kind = wait?.kind ?? "none";
+  return (
+    <HoverCard openDelay={150} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          data-automation-wait={kind}
+          aria-label={t("automations.wait.openPanel", {
+            wait: wait?.label ?? t("automations.wait.none"),
+          })}
+          className="inline-flex min-w-0 max-w-60 items-center justify-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+        >
+          <AutomationWaitIcon kind={kind} />
+          <span className="hidden min-w-0 truncate sm:block @max-[34rem]/titlebar:hidden!">
+            {wait?.short ?? t("sessionChrome.automation")}
+          </span>
+        </button>
+      </HoverCardTrigger>
+      <HoverCardContent
+        collisionPadding={8}
+        className="w-auto min-w-56 max-w-[min(22rem,calc(100vw-16px))] p-3"
+      >
+        <div data-automation-wait-details="" className="grid min-w-0 gap-2.5">
+          <p className="text-xs font-medium text-fg">{t("automations.wait.details.heading")}</p>
+          <ul className="grid min-w-0 gap-1.5">
+            {lines.map((line) => (
+              <li
+                key={line.text}
+                className="flex min-w-0 items-start gap-2 text-xs leading-4 text-fg-muted"
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center text-fg-subtle">
+                  <AutomationWaitIcon kind={line.kind} />
+                </span>
+                <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{line.text}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="border-t border-border pt-2 text-2xs text-fg-subtle">
+            {t("automations.wait.details.open")}
+          </p>
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+function AutomationWaitIcon({ kind }: { kind: "event" | "schedule" | "none" }) {
+  return kind === "event" ? (
+    <ZapIcon aria-hidden className="size-3 shrink-0" />
+  ) : kind === "schedule" ? (
+    <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
+  ) : (
+    <ZapOffIcon aria-hidden className="size-3 shrink-0" />
+  );
+}
+
+/** The automation chip as a "…" menu item, for a header with no room for it. */
+function AutomationWaitMenuItem({ session, onOpen }: { session: Session; onOpen: () => void }) {
+  const wait = sessionAutomationWaitWords(t, session, { now: new Date() });
+  return (
+    <DropdownMenuItem
+      onSelect={onOpen}
+      aria-label={t("automations.wait.openPanel", {
+        wait: wait?.label ?? t("automations.wait.none"),
+      })}
+    >
+      <AutomationWaitIcon kind={wait?.kind ?? "none"} />
+      <span className="min-w-0 truncate">{wait?.short ?? t("sessionChrome.automation")}</span>
+    </DropdownMenuItem>
+  );
+}
+
+/**
+ * Small-screen status: a dot beside the title, named for assistive tech.
+ * `always` keeps it on wide screens too, when the full badge has no room.
+ */
 function CompactSessionStatus({
   paused,
   waiting,
   status,
   label,
+  always = false,
 }: {
   paused: boolean;
   waiting: boolean;
   status: SessionDisplayStatus;
   label?: string | undefined;
+  always?: boolean | undefined;
 }) {
+  const className = cn("inline-flex shrink-0 items-center", !always && "lg:hidden");
   if (paused) {
     return (
-      <span
-        data-compact-session-status="paused"
-        title="Paused"
-        className="inline-flex shrink-0 items-center lg:hidden"
-      >
+      <span data-compact-session-status="paused" title="Paused" className={className}>
         <PauseIcon aria-hidden className="size-2.5 shrink-0 fill-current text-status-waiting" />
         <span className="sr-only">Paused</span>
       </span>
@@ -615,11 +944,7 @@ function CompactSessionStatus({
   }
   if (waiting) {
     return (
-      <span
-        data-compact-session-status="waiting"
-        title="Waiting"
-        className="inline-flex shrink-0 items-center lg:hidden"
-      >
+      <span data-compact-session-status="waiting" title="Waiting" className={className}>
         <span aria-hidden className="size-2 rounded-full bg-status-waiting" />
         <span className="sr-only">Waiting</span>
       </span>
@@ -631,7 +956,7 @@ function CompactSessionStatus({
       data-compact-session-status={status}
       data-status={status}
       title={name}
-      className="inline-flex shrink-0 items-center lg:hidden"
+      className={className}
     >
       <StatusDot status={status} className="size-2" />
       <span className="sr-only">{name}</span>
@@ -742,7 +1067,7 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
         dir="auto"
-        className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-hidden ring-1 ring-border-strong focus:outline-hidden focus-visible:outline-hidden"
+        className="-mx-1.5 w-full min-w-0 truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-hidden ring-1 ring-border-strong focus:outline-hidden focus-visible:outline-hidden"
         style={{ outline: "none" }}
       />
     );
@@ -755,6 +1080,7 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
         dir="auto"
+        data-session-title-text=""
         className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
       >
         {display}

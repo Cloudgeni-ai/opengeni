@@ -16,7 +16,6 @@ import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import { fromPostgresLosslessJson } from "./lossless-json";
-import { legacyToolActionReview } from "./legacy-tool-action-reviews";
 
 type ReviewScope = {
   accountId: string;
@@ -181,26 +180,13 @@ async function catalogReviewContext(
   }
 }
 
-/**
- * Older approvals have no saved review. Their presentation is best effort: any
- * failure to rebuild it answers "no saved review", and clients then fall back to
- * the approval's own arguments instead of hiding the decision.
- */
-async function presentableLegacyReview(db: Database, input: ReviewScope) {
-  try {
-    return await legacyToolActionReview(db, input);
-  } catch {
-    return null;
-  }
-}
-
 /** The HTTP/core caller must independently authorize this session. RLS remains active here. */
 export async function getToolActionReview(
   db: Database,
   input: ReviewScope,
 ): Promise<ToolActionReview | null> {
   const record = await reviewSnapshot(db, input);
-  if (!record) return (await presentableLegacyReview(db, input))?.review ?? null;
+  if (!record) return null;
   const { request, operation, turn } = record;
   let status: ToolReviewStatus =
     request.status === "uncertain"
@@ -277,20 +263,6 @@ export async function getToolReviewDetailsPage(
   input: ReviewScope & { actionDigest: string; path: string; offset: number },
 ) {
   const record = await reviewSnapshot(db, input);
-  if (!record) {
-    const legacy = await presentableLegacyReview(db, input);
-    if (!legacy?.proven || legacy.review.actionDigest !== input.actionDigest) return null;
-    try {
-      return {
-        version: 1 as const,
-        id: input.approvalId,
-        actionDigest: input.actionDigest,
-        ...toolReviewDetails(legacy.args, legacy.context, input.path, input.offset),
-      };
-    } catch {
-      return null;
-    }
-  }
   if (
     !record ||
     record.request.actionFingerprint !== input.actionDigest ||

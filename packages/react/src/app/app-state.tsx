@@ -9,10 +9,15 @@ import {
   createSessionEventFeedStore,
   useLatestCallback,
   type AppContextValue,
+  type GitHubRefreshOptions,
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
-import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
+import {
+  startWorkspaceClientConfigRefresh,
+  withWorkspaceClientConfig,
+  type WorkspaceClientConfig,
+} from "./lib/workspace-client-config";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
 import {
@@ -23,7 +28,8 @@ import {
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
-import { useEmbedded, useHostMessageContext } from "./lib/app-host";
+import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
+import { createWithOpeningContext } from "./lib/message-context";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
@@ -31,9 +37,12 @@ import {
 import type {
   McpConnectionAccountSelection,
   PersonalGitHubRepositorySelectionInput,
+  UpdateSessionRequest,
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import { isTransientServiceFailure } from "../lib/transient-retry";
+import { createQuietRetry } from "./lib/quiet-retry";
 import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
@@ -155,6 +164,7 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Transport and sign-in functions the app state calls. Pass one stable object
@@ -192,6 +202,13 @@ export type AppStateHost = Readonly<{
     provider: "google" | "github",
     signupChallengeToken?: string,
   ) => Promise<void>;
+  /**
+   * Passkey sign-in and passkey-only sign-up. Both run the browser's WebAuthn
+   * ceremony and leave the managed session cookie set; absent: the app offers
+   * no passkeys even where the server would.
+   */
+  signInPasskey?: () => Promise<unknown>;
+  signUpPasskey?: (input: { name: string; signupChallengeToken?: string }) => Promise<unknown>;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -209,6 +226,11 @@ export type AppStateOptions = Readonly<{
 export type AppState = ReturnType<typeof useAppState>;
 
 type StartSessionOptions = Parameters<AppContextValue["startSession"]>[2];
+
+/** The one "GitHub status unavailable" toast; a newer failure replaces it. */
+export const GITHUB_STATUS_TOAST_ID = "opengeni-github-status";
+/** The one "Your GitHub account is unavailable" toast. */
+export const PERSONAL_GITHUB_STATUS_TOAST_ID = "opengeni-personal-github-status";
 
 export type SlackLinkPrepareController<Request> = ReturnType<
   typeof createSlackLinkPrepareController<Request>
@@ -305,6 +327,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const embedded = useEmbedded();
   const hostMessageContext = useRef(messageContext);
   hostMessageContext.current = messageContext;
+  const messageContextTools = useHostMessageContextTools();
+  const hostMessageContextTools = useRef(messageContextTools);
+  hostMessageContextTools.current = messageContextTools;
   const {
     captureProductEvent,
     checkDeploymentRevision,
@@ -319,6 +344,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     signOutManaged,
     signUpEmail,
     startManagedSocialSignIn,
+    signInPasskey,
+    signUpPasskey,
     slackLink,
   } = host;
   const [session, setSessionState] = useState<Session | null>(null);
@@ -328,8 +355,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
-    useState<ClientConfig["voiceInput"]>(undefined);
+  const [workspaceConfig, setWorkspaceConfig] = useState<WorkspaceClientConfig | undefined>(
+    undefined,
+  );
+  const [workspaceConfigVersion, setWorkspaceConfigVersion] = useState(0);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -433,6 +462,19 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const seenCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const personalGitHubRefreshId = useRef(0);
+  // Background GitHub reads that fail while Opengeni is briefly unreachable
+  // (a deploy, a network drop) try again by themselves, quietly.
+  const githubQuietRetry = useRef(createQuietRetry());
+  const personalGitHubQuietRetry = useRef(createQuietRetry());
+  const refreshGitHubRef = useRef<AppContextValue["refreshGitHub"]>(async () => {});
+  const refreshPersonalGitHubRef = useRef<AppContextValue["refreshPersonalGitHub"]>(async () => {});
+  useEffect(
+    () => () => {
+      githubQuietRetry.current.reset();
+      personalGitHubQuietRetry.current.reset();
+    },
+    [],
+  );
   const mcpRefreshId = useRef(0);
   const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -465,6 +507,15 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       : true;
   const managedSocialProviders =
     clientConfig?.auth.mode === "managedSession" ? (clientConfig.auth.socialProviders ?? []) : [];
+  const managedPasskeySignIn =
+    clientConfig?.auth.mode === "managedSession" &&
+    clientConfig.auth.passkeySignIn === true &&
+    signInPasskey !== undefined;
+  const managedPasskeySignUp =
+    managedPasskeySignIn &&
+    clientConfig?.auth.mode === "managedSession" &&
+    clientConfig.auth.passkeySignUp === true &&
+    signUpPasskey !== undefined;
   // An older API omits the field; only an explicit false pauses account creation.
   const managedNewSignupsEnabled =
     clientConfig?.auth.mode === "managedSession"
@@ -591,7 +642,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
-      setWorkspaceVoiceInput(undefined);
+      setWorkspaceConfig(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -622,10 +673,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     const workspaceId = workspaceStateOwnerId;
     const accepted = captureWorkspaceInvocation(workspaceId);
     if (!accepted) return;
-    return startWorkspaceVoiceCapabilityRefresh({
+    return startWorkspaceClientConfigRefresh({
       read: (signal) => fetchClientConfig(signal, workspaceId),
       ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
-      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      apply: setWorkspaceConfig,
       subscribeFocus: (refresh) => {
         window.addEventListener("focus", refresh);
         return () => window.removeEventListener("focus", refresh);
@@ -636,11 +687,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clientConfigurationReady,
     authReady,
     workspaceStateOwnerId,
+    workspaceConfigVersion,
     accessContext?.subjectId,
     accessKeyVersion,
     captureWorkspaceInvocation,
     ownsWorkspaceInvocation,
   ]);
+  const refreshWorkspaceConfig = useCallback(
+    () => setWorkspaceConfigVersion((version) => version + 1),
+    [],
+  );
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -1012,7 +1068,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     } catch (error) {
       return {
         resources: lastValidResources.current,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       };
     }
   }, [
@@ -1260,6 +1316,37 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  // Name, description and avatar from the profile dialog: one PATCH as the
+  // person, then the open session shows it at once (the rail and other
+  // clients follow through session.title_set / session.profile_set).
+  async function updateSessionProfile(
+    workspaceId: string,
+    sessionId: string,
+    change: UpdateSessionRequest,
+  ): Promise<Session | null> {
+    // Failures reach the dialog, which shows them inside the form.
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
+    const update = await runCurrentTransitionInvocation({
+      isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+      request: async () => await client.updateSession(workspaceId, sessionId, change),
+    });
+    if (update.status === "stale") return null;
+    const updated = update.value;
+    setSession((current) =>
+      current && current.id === updated.id
+        ? {
+            ...current,
+            title: updated.title,
+            titleSource: updated.titleSource,
+            description: updated.description ?? null,
+            avatar: updated.avatar ?? null,
+          }
+        : current,
+    );
+    return updated;
+  }
+
   // Personal session pinning never changes shared session activity. Keep the
   // header immediate on this device, use its known revision when available, and
   // restore the authoritative prior state if the request (including a stale-tab
@@ -1389,7 +1476,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   const refreshGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean | undefined }) => {
+    async (workspaceId: string, signal?: AbortSignal, options?: GitHubRefreshOptions) => {
       const acceptedTransition = workspaceTransitionIdentity.current;
       if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) {
         return;
@@ -1402,8 +1489,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
+      // This read replaces any quiet retry still waiting.
+      githubQuietRetry.current.cancel();
       // A member whose loaded grant lacks GitHub has no GitHub state to read.
       if (lacksWorkspacePermission(accessContextRef.current, workspaceId, "github:use")) {
+        githubQuietRetry.current.reset();
         setGithubStatus(null);
         setGithubStatusFailed(false);
         setGithubAppOpen(false);
@@ -1423,8 +1513,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setGithubAppOpen(status.status !== "bound");
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
-          // so installations changed after connect show up; passive loads read
-          // Opengeni's cached rows.
+          // so installations changed after connect show up; passive loads may
+          // get the API's briefly cached GitHub list.
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);
@@ -1437,6 +1527,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setGithubRepos([]);
           setGithubCatalogReady(true);
         }
+        githubQuietRetry.current.reset();
       } catch (error) {
         if (
           isAbortError(error) ||
@@ -1452,9 +1543,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         // first-load failure must not look like an empty catalog, or draft
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
-        // Someone without GitHub access in this workspace has nothing to fix.
-        if (isWorkspacePermissionDenied(error)) return;
+        // Opengeni briefly unreachable (a deploy, a network drop): read again
+        // by itself, with a growing pause, until it answers.
+        if (isTransientServiceFailure(error)) {
+          githubQuietRetry.current.schedule(() => {
+            if (!ownsRefresh() || githubRefreshId.current !== refreshId) return;
+            void refreshGitHubRef.current(workspaceId);
+          }, workspaceId);
+        }
+        // Load and focus refreshes run in the background: a failure there is
+        // shown where GitHub is used (the repository picker, the GitHub card and
+        // the GitHub integration), not as a toast for something the person
+        // didn't do. Someone without GitHub access has nothing to fix.
+        if (!options?.userInitiated || isWorkspacePermissionDenied(error)) return;
+        // One toast for the GitHub status, replaced rather than stacked when
+        // refreshes fail again.
         toast.error("GitHub status unavailable", {
+          id: GITHUB_STATUS_TOAST_ID,
           description: userErrorText(error),
         });
       } finally {
@@ -1466,12 +1571,21 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     [client],
   );
 
+  useInsertionEffect(() => {
+    refreshGitHubRef.current = refreshGitHub;
+  }, [refreshGitHub]);
+
   const refreshPersonalGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal): Promise<void> => {
+    async (
+      workspaceId: string,
+      signal?: AbortSignal,
+      options?: Pick<GitHubRefreshOptions, "userInitiated">,
+    ): Promise<void> => {
       const acceptedTransition = workspaceTransitionIdentity.current;
       if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) return;
       const refreshId = personalGitHubRefreshId.current + 1;
       personalGitHubRefreshId.current = refreshId;
+      personalGitHubQuietRetry.current.cancel();
       const ownsRefresh = () =>
         ownsWorkspaceTransition(
           workspaceTransitionIdentity.current,
@@ -1487,6 +1601,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setSelectedPersonalGitHubRepoRefs({});
         setPersonalGitHubCatalogReady(true);
         setPersonalGitHubBusy(false);
+        personalGitHubQuietRetry.current.reset();
         return;
       }
       setPersonalGitHubBusy(true);
@@ -1510,6 +1625,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setSelectedPersonalGitHubRepoIds(new Set());
           setSelectedPersonalGitHubRepoRefs({});
           setPersonalGitHubCatalogReady(true);
+          personalGitHubQuietRetry.current.reset();
           return;
         }
         const repositories: PersonalGitHubRepositoryCatalogItem[] = [];
@@ -1545,10 +1661,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             ),
         );
         setPersonalGitHubCatalogReady(true);
+        // Only a whole read counts: a status that answers while the repository
+        // listing keeps failing (a GitHub rate limit) must keep backing off.
+        personalGitHubQuietRetry.current.reset();
       } catch (error) {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
+        if (isTransientServiceFailure(error)) {
+          // Opengeni is briefly unreachable: read again by itself, quietly,
+          // unless the person asked for this refresh.
+          personalGitHubQuietRetry.current.schedule(() => {
+            if (!ownsRefresh()) return;
+            void refreshPersonalGitHubRef.current(workspaceId);
+          }, workspaceId);
+          if (!options?.userInitiated) return;
+        }
         toast.error("Your GitHub account is unavailable", {
+          id: PERSONAL_GITHUB_STATUS_TOAST_ID,
           description: userErrorText(error),
         });
       } finally {
@@ -1557,6 +1686,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     },
     [client],
   );
+
+  useInsertionEffect(() => {
+    refreshPersonalGitHubRef.current = refreshPersonalGitHub;
+  }, [refreshPersonalGitHub]);
 
   async function beginPersonalGitHubOAuth(workspaceId: string, reconnect: boolean): Promise<void> {
     const connection = personalGitHubStatus?.connection;
@@ -1589,7 +1722,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         expectedVersion: connection.version,
         idempotencyKey: crypto.randomUUID(),
       });
-      await refreshPersonalGitHub(workspaceId);
+      await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("Your GitHub account was disconnected");
       return true;
     } catch (error) {
@@ -1617,7 +1750,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         idempotencyKey: crypto.randomUUID(),
         repositories,
       });
-      await refreshPersonalGitHub(workspaceId);
+      await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("GitHub repository access updated");
       return true;
     } catch (error) {
@@ -1781,6 +1914,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           submission: effectiveSubmission,
           instructions: options?.instructions,
           installedSkillIds: options?.installedSkillIds,
+          bot: options?.bot,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           newSessionDraftToolPolicy: options?.newSessionDraftToolPolicy,
@@ -1807,9 +1941,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // spoken turn does.
       const hostContext =
         attempt.request.startMode === "realtime" ? undefined : hostMessageContext.current?.();
-      const created = await client.createSession(
-        workspaceId,
-        hostContext ? { ...attempt.request, modelContext: hostContext } : attempt.request,
+      const created = await createWithOpeningContext(
+        (request) => client.createSession(workspaceId, request),
+        attempt.request,
+        hostContext,
+        hostContext ? hostMessageContextTools.current?.() : undefined,
       );
       // Do not clear a newer concurrent attempt that replaced this one.
       if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
@@ -2022,7 +2158,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       ) {
         return false;
       }
-      await refreshGitHub(workspaceId, undefined, { sync: true });
+      await refreshGitHub(workspaceId, undefined, { sync: true, userInitiated: true });
       if (
         !ownsWorkspaceOperation(
           activeGitHubDisconnectOperation.current,
@@ -2212,6 +2348,42 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     await startManagedSocialSignIn(provider, signupChallengeToken);
   }
 
+  async function handleManagedPasskeyAuth(
+    mode: "signin" | "signup",
+    input?: { name: string; signupChallengeToken?: string },
+  ) {
+    if (!signInPasskey || (mode === "signup" && (!signUpPasskey || !input))) {
+      throw new Error("Passkeys aren't available here");
+    }
+    invalidatePrincipalWorkspaceState({
+      preservePendingSlackLink: preserveSlackLinkForManagedAuth(mode, slackLink.phase()),
+    });
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    const ownsInvocation = () =>
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
+    const ceremony = await runCurrentTransitionInvocation({
+      isCurrent: ownsInvocation,
+      request: async () =>
+        mode === "signup" ? await signUpPasskey!(input!) : await signInPasskey(),
+    });
+    if (ceremony.status === "stale") return;
+    if (mode === "signup") {
+      captureProductEvent("signup_submitted", { method: "passkey", verification_required: false });
+    }
+    const sessionRead = await runCurrentTransitionInvocation({
+      isCurrent: ownsInvocation,
+      request: fetchAuthSession,
+    });
+    if (sessionRead.status === "stale") return;
+    const nextSession = sessionRead.value;
+    if (!nextSession) throw new ManagedAuthSessionUnavailableError(mode);
+    authPrincipalIdRef.current = nextSession.user.id;
+    if (mode === "signin") noteSuccessfulLogin(nextSession.user.id, "passkey");
+    else captureProductEvent("signup_completed", { method: "passkey", is_new_user: true });
+    setAuthSession(nextSession);
+    setAccessKeyVersion((version) => version + 1);
+  }
+
   async function handleManagedSignOut() {
     // Unmount authenticated readers before sign-out can invalidate their
     // cookie. Keep the neutral surface until an ambiguous response is
@@ -2396,6 +2568,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
   const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
+  const contextUpdateSessionProfile = useLatestCallback(updateSessionProfile);
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
@@ -2432,14 +2605,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig: {
-            ...clientConfig,
-            voiceInput:
-              workspaceVoiceInput ??
-              (clientConfig.voiceInput
-                ? { ...clientConfig.voiceInput, available: false, providers: [] }
-                : undefined),
-          },
+          clientConfig: withWorkspaceClientConfig(clientConfig, workspaceConfig),
+          refreshWorkspaceConfig,
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2521,6 +2688,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           updateWorkspaceSettings: contextUpdateWorkspaceSettings,
           setWorkspaceDefaultRig: contextSetWorkspaceDefaultRig,
           updateSessionTitle: contextUpdateSessionTitle,
+          updateSessionProfile: contextUpdateSessionProfile,
           updateSessionPin: contextUpdateSessionPin,
           deleteWorkspace: contextDeleteWorkspace,
           refreshGitHub,
@@ -2549,7 +2717,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clearSlackLinkContinuation,
     client,
     clientConfig,
-    workspaceVoiceInput,
+    workspaceConfig,
+    refreshWorkspaceConfig,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,
@@ -2563,6 +2732,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextReconnectPersonalGitHub,
     contextSavePersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
+    contextUpdateSessionProfile,
     contextSetWorkspaceDefaultRig,
     contextDisconnectGitHubInstallation,
     contextStartGitHubAppManifestFlow,
@@ -2655,11 +2825,14 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     managedEmailVerificationRequired,
     managedNewSignupsEnabled,
     managedSocialProviders,
+    managedPasskeySignIn,
+    managedPasskeySignUp,
     browserAccountsConfigured,
     browserAccountsEnabled,
     handleManagedAuth,
     handleManagedSessionSetSignup,
     handleManagedSocialAuth,
+    handleManagedPasskeyAuth,
     handleManagedSignOut: contextHandleManagedSignOut,
     handleBrowserActorTransition: contextHandleBrowserActorTransition,
     completeOrganizationOnboarding,

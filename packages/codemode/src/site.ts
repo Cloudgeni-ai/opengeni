@@ -14,6 +14,7 @@ import { SITE_BROWSER_RUNTIME, SITE_CLIENT_SCRIPT_PATH } from "@opengeni/sdk/sit
 
 import { CodemodeClient, CodemodeTransportError } from "./index";
 import { environmentCodemodeClient, type CodemodeClientProvider } from "./environment";
+import { isRecord } from "@opengeni/contracts/values";
 
 export const CODEMODE_SITE_LOCAL_PATH = "/__opengeni/site-tools" as const;
 
@@ -245,8 +246,4 @@ function siteError(
     },
     { status },
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -23,7 +23,11 @@ import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -43,6 +47,7 @@ import {
 } from "./knowledge-learning";
 import {
   initialLibraryView,
+  libraryFilesView,
   LibraryTab,
   type EntryRowActions,
   type LibraryView,
@@ -90,10 +95,10 @@ export function KnowledgePage({
     workspace?.accountId &&
     hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
   );
-  const canEditInstructions = hasWorkspacePermission(
+  const canEditInstructions = canManageWorkspaceSettings(
     context.accessContext,
-    workspaceId,
-    "workspace:admin",
+    workspace,
+    context.managedSelfContext,
   );
   const canUpload =
     context.clientConfig.fileUploads.enabled &&
@@ -102,7 +107,7 @@ export function KnowledgePage({
 
   const nav = useKnowledgeNavigation(workspaceId);
   const navigate = useNavigate();
-  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView(personal));
+  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView());
   const [refresh, setRefresh] = useState(0);
   const changed = useCallback(() => setRefresh((value) => value + 1), []);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -116,7 +121,7 @@ export function KnowledgePage({
   const scopeLink = search.scope;
   useEffect(() => {
     if (legacyFiles) {
-      setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
+      setLibrary(libraryFilesView);
       nav.replace(search.file ? { file: search.file } : {});
     } else if (legacyReview) {
       nav.replace({ view: "review" });
@@ -143,18 +148,14 @@ export function KnowledgePage({
       key ? nav.openProposal(key, { replace }) : nav.showTab("review", { replace }),
     onChanged: changed,
   });
-  const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
+  const shared = useLearningDefaults(workspaceId, "workspace");
   const instructions = useWorkspaceInstructions(workspaceId);
   const archive = useArchiveKnowledge(workspaceId, changed);
 
   const createScope: KnowledgeEntryScope =
-    library.scope !== "all" &&
-    (library.scope !== "organization" || canWriteOrganization) &&
-    !(personal && library.scope !== "personal")
+    library.scope !== "all" && (library.scope !== "organization" || canWriteOrganization)
       ? library.scope
-      : personal
-        ? "personal"
-        : "workspace";
+      : "workspace";
 
   const entryLink = useCallback(
     (id: string) => `/workspaces/${workspaceId}/state?entry=${encodeURIComponent(id)}`,
@@ -328,7 +329,6 @@ export function KnowledgePage({
         <AddKnowledgePage
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           {...(search.collection ? { collectionId: search.collection } : {})}
@@ -493,8 +493,8 @@ export function KnowledgePage({
             canUpload={canUpload}
             onAdd={withScroll(() => nav.openPage("add"))}
             onUpload={() => setUploadOpen(true)}
+            {...(canEdit ? { onNewCollection: () => setCollectionOpen(true) } : {})}
             onEmptyChange={setLibraryEmpty}
-            personal={personal}
           />
         </LineTabsContent>
         <LineTabsContent value="instructions">
@@ -531,11 +531,10 @@ export function KnowledgePage({
           onOpenChange={setUploadOpen}
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           onUploaded={() => {
-            setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
+            setLibrary(libraryFilesView);
             changed();
           }}
         />

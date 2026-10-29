@@ -19,10 +19,15 @@ import {
   meetingPhase,
   meetingStatusLabel,
   meetingTitle,
+  meetingUploadFailure,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  transcribingText,
   transcriptErrorText,
+  transcriptFixModel,
+  transcriptNeedsCredits,
 } from "../src/recordings-model";
 import { createOpenGeniText } from "../src/messages/runtime";
 
@@ -213,6 +218,120 @@ describe("meeting status", () => {
     ).toBeNull();
     expect(meetingHereStatus({ state: "idle", recordingId: "r1", upload: null }, "r1")).toBeNull();
   });
+
+  test("a meeting recorded here earlier is finished from the audio kept here, and says so", () => {
+    const finishing = (overrides: Record<string, unknown> = {}, online = true) =>
+      meetingHereStatus(
+        {
+          state: "idle",
+          recordingId: null,
+          upload: null,
+          uploads: { r1: { ...upload(overrides) } },
+        },
+        "r1",
+        online,
+      );
+    expect(finishing()).toBe("uploading");
+    expect(finishing({}, false)).toBe("waiting_for_connection");
+    expect(finishing({ finalized: true, pendingChunks: 0 })).toBe("transcribing");
+    const failed = { code: "insufficient_credits", message: "No credits." };
+    expect(finishing({ failed })).toBe("upload_failed");
+    expect(finishing({ discarded: true })).toBeNull();
+    expect(
+      meetingUploadFailure(
+        { recordingId: "r2", upload: upload(), uploads: { r1: { ...upload({ failed }) } } },
+        "r1",
+      ),
+    ).toEqual(failed);
+    // Another meeting this device knows nothing about stays the server's.
+    expect(
+      meetingHereStatus({ state: "idle", recordingId: null, upload: null, uploads: {} }, "r1"),
+    ).toBeNull();
+  });
+});
+
+test("a long meeting's transcribing line says how much audio, not a minute or two", () => {
+  expect(transcribingText(90_000)).toBe("Transcribing. This usually takes a minute or two.");
+  const long = transcribingText(51 * 60_000 + 44_000);
+  expect(long).toContain("52\u00a0min");
+  expect(long).not.toContain("minute or two");
+});
+
+describe("fixing a failed transcript", () => {
+  const model = (
+    providerId: string,
+    funding: "deployment" | "workspace_key" | "workspace_subscription",
+    overrides: Record<string, unknown> = {},
+  ) =>
+    ({
+      providerId,
+      providerName: providerId,
+      model: `${providerId}-model`,
+      name: `${providerId} model`,
+      available: true,
+      funding,
+      usdPerHour: funding === "workspace_subscription" ? null : 0.36,
+      capabilities: { batch: true, live: false },
+      ...overrides,
+    }) as never;
+  const mai = model("azure-speech", "deployment");
+  const chatgpt = model("codex-subscription", "workspace_subscription");
+  const eleven = model("elevenlabs", "workspace_key");
+  const failedOn = { providerId: "azure-speech", model: "azure-speech-model" };
+
+  test("a credit refusal offers a model that uses no credits, a subscription first", () => {
+    expect(transcriptNeedsCredits("insufficient_credits")).toBe(true);
+    expect(transcriptNeedsCredits("allowance_exhausted")).toBe(true);
+    expect(transcriptNeedsCredits("provider_unauthorized")).toBe(false);
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, eleven, chatgpt])).toBe(
+      chatgpt,
+    );
+    expect(transcriptFixModel("allowance_exhausted", failedOn, [mai, eleven])).toBe(eleven);
+    // Another credit-charged model isn't a fix, nor is one that isn't connected.
+    const otherCharged = model("openai", "deployment");
+    const unconnected = model("codex-subscription", "workspace_subscription", {
+      available: false,
+    });
+    expect(
+      transcriptFixModel("insufficient_credits", failedOn, [mai, otherCharged, unconnected]),
+    ).toBeNull();
+    // A deployment's model it doesn't charge for is free here too.
+    const covered = model("openai", "deployment", { usdPerHour: null });
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, covered])).toBe(covered);
+    // The server's word wins: charged in credits without a known price is still charged.
+    const unpriced = model("openai", "deployment", { usdPerHour: null, chargedInCredits: true });
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, unpriced])).toBeNull();
+    // For a provider's failure, a model that costs no credits comes first.
+    const charged = model("openai", "deployment", { chargedInCredits: true });
+    const ownKey = model("elevenlabs", "workspace_key", { chargedInCredits: false });
+    expect(
+      transcriptFixModel("provider_unauthorized", { providerId: "azure-speech", model: "x" }, [
+        charged,
+        ownKey,
+      ]),
+    ).toBe(ownKey);
+  });
+
+  test("a provider's failure offers another provider; other failures offer none", () => {
+    expect(transcriptFixModel("missing_provider_key", failedOn, [mai, eleven])).toBe(eleven);
+    expect(transcriptFixModel("missing_provider_key", failedOn, [mai])).toBeNull();
+    expect(transcriptFixModel("timed_out", failedOn, [mai, eleven, chatgpt])).toBeNull();
+    expect(transcriptFixModel(null, failedOn, [chatgpt])).toBeNull();
+  });
+
+  test("the refusals say what to fix", () => {
+    expect(transcriptErrorText("insufficient_credits")).toContain("Add credits");
+    expect(
+      transcriptErrorText("insufficient_credits", undefined, {
+        modelName: "MAI-Transcribe-2",
+        providerName: "Azure Speech",
+      }),
+    ).toContain("MAI-Transcribe-2 uses credits");
+    expect(transcriptErrorText("allowance_exhausted")).toContain("allowance");
+    expect(transcriptErrorText("monthly_model_cost_limit")).toContain("monthly spending limit");
+    expect(transcriptErrorText("timed_out")).toContain("took too long");
+    expect(transcriptErrorText("policy_blocked")).toContain("policy");
+  });
 });
 
 describe("speakers", () => {
@@ -281,6 +400,14 @@ describe("speakers", () => {
     expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
   });
 
+  test("beside computer audio the live microphone is the person recording, the rest is Others", () => {
+    expect(ownerLiveLaneName(tracks, 0, "Maja Berg")).toBe("Maja Berg");
+    expect(ownerLiveLaneName(tracks, 1, "Maja Berg")).toBe("Others");
+    // A microphone alone is named by its source as before.
+    const micOnly = tracks.filter((track) => track.source === "microphone");
+    expect(ownerLiveLaneName(micOnly, 0, "Maja Berg")).toBeNull();
+  });
+
   test("a label is named only by a person or a name someone gave it", () => {
     expect(speakerIsNamed("speaker_0", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_1", speakers)).toBe(false);
@@ -328,6 +455,41 @@ describe("transcript turns", () => {
 
 test("error codes from the worker and providers read as plain advice", () => {
   expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
+  // A missing key is one provider's, not proof that none is connected.
+  expect(transcriptErrorText("missing_provider_key")).not.toContain("No transcription provider");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      modelName: "Scribe v2",
+      providerName: "ElevenLabs",
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which isn't connected. Try another model, or an admin can connect ElevenLabs in Organization settings, under Models.",
+  );
+  const scribe = { modelName: "Scribe v2", providerName: "ElevenLabs" };
+  // A deployment with one model has no other to try.
+  const pinned = transcriptErrorText("missing_provider_key", undefined, {
+    ...scribe,
+    pinned: true,
+  });
+  expect(pinned).not.toContain("another model");
+  expect(pinned).toContain("Organization settings");
+  // The deployment's own key is for whoever runs it, not an organization admin.
+  const deployment = transcriptErrorText("missing_provider_key", undefined, {
+    ...scribe,
+    funding: "deployment",
+  });
+  expect(deployment).toContain("another model");
+  expect(deployment).toContain("whoever runs this deployment");
+  expect(deployment).not.toContain("Organization settings");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      ...scribe,
+      funding: "deployment",
+      pinned: true,
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which this deployment hasn't set up. Ask whoever runs this deployment to set up ElevenLabs.",
+  );
   expect(transcriptErrorText("provider_quota_exceeded")).toContain("out of credit");
   expect(transcriptErrorText("something_new")).toContain("Try again");
 });

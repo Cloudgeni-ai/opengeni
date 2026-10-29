@@ -10,6 +10,7 @@ import {
   appendSessionHistoryItems,
   getActiveSessionHistoryItems,
   interruptedToolCallResult,
+  listRecordedInteractionToolCallIds,
   listTurnOpenSuffixToolCalls,
   nextSessionHistoryPosition,
   recordPendingSessionToolCallResult,
@@ -21,6 +22,12 @@ import {
   invokePreparedAgentTool,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
+import {
+  interactionPauseCallFromItem,
+  type InteractionPauseCall,
+  type InteractionPauseRequest,
+} from "./agent-turn/interaction-pause";
 
 export type OpenSuffixResumeOutcome =
   | { action: "continue" }
@@ -38,8 +45,21 @@ type OpenSuffixSettle = (input: {
   runState: {
     serializedRunState: string;
     pendingApprovals: unknown[];
+    interactionInterventionRequests?: InteractionPauseRequest[];
   };
 }) => Promise<boolean>;
+
+/**
+ * How a re-freeze records interaction_request_human calls of the same pause
+ * that hold no intervention yet: a call refused while another refusal
+ * resumed the turn (one decision resumes a pause) is passed to the
+ * settlement again, so it is recorded or refused as its own result.
+ */
+export type OpenSuffixInteractionRequests = {
+  build: (calls: InteractionPauseCall[]) => Promise<InteractionPauseRequest[]>;
+  /** Called after the re-freeze committed, with the calls it passed. */
+  recorded?: (calls: InteractionPauseCall[]) => Promise<void>;
+};
 
 function argumentsJsonFromCallItem(callItem: Record<string, unknown>): string {
   const raw = callItem.arguments;
@@ -177,7 +197,21 @@ export async function resultItemForOpenSuffixMember(input: {
 }): Promise<{ resultItem: Record<string, unknown>; eventOutput: unknown }> {
   const name = toolNameFromCallItem(input.row.callItem);
   const rejected = (): { resultItem: Record<string, unknown>; eventOutput: unknown } => {
-    const payload = input.trigger.payload as { message?: unknown; decision?: unknown };
+    const payload = input.trigger.payload as {
+      message?: unknown;
+      decision?: unknown;
+      refusal?: unknown;
+    };
+    if (
+      input.row.interruptionKind === "interaction_intervention" &&
+      payload.decision === "reject" &&
+      typeof payload.refusal === "string" &&
+      payload.refusal.trim().length > 0
+    ) {
+      // Refused at the pause itself (a person-handoff request whose target
+      // changed): nothing ran, and the refusal says what to do next.
+      return memberResult({ callId: input.row.callId, name, output: payload.refusal });
+    }
     if (
       input.row.interruptionKind === "approval" &&
       payload.decision === "reject" &&
@@ -238,7 +272,7 @@ export async function resultItemForOpenSuffixMember(input: {
       output,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return memberResult({
       callId: input.row.callId,
       name,
@@ -269,6 +303,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   publish?: (
     events: Array<{ type: "agent.toolCall.output"; payload: { id: string; output: unknown } }>,
   ) => Promise<unknown>;
+  interactionRequests?: OpenSuffixInteractionRequests;
 }): Promise<OpenSuffixResumeOutcome> {
   if (
     input.trigger.type !== "user.approvalDecision" &&
@@ -408,6 +443,11 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     ...remainingRunStatePendingApprovalsFromSuffix(remaining),
     ...(input.additionalApprovals ?? []),
   ];
+  const unrecordedInteractionCalls = await unrecordedInteractionCallsOf(input, remaining);
+  const interactionInterventionRequests =
+    unrecordedInteractionCalls.length > 0 && input.interactionRequests
+      ? await input.interactionRequests.build(unrecordedInteractionCalls)
+      : [];
   const settled = await input.settle({
     events: [
       ...(requiresActionApprovals.length > 0
@@ -429,9 +469,39 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     runState: {
       serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
       pendingApprovals,
+      ...(interactionInterventionRequests.length > 0 ? { interactionInterventionRequests } : {}),
     },
   });
+  if (settled && interactionInterventionRequests.length > 0) {
+    await input.interactionRequests?.recorded?.(unrecordedInteractionCalls);
+  }
   return settled ? { action: "requires_action" } : { action: "cancelled" };
+}
+
+async function unrecordedInteractionCallsOf(
+  input: {
+    db: Database;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    interactionRequests?: OpenSuffixInteractionRequests;
+  },
+  remaining: readonly OpenSuffixPendingToolCall[],
+): Promise<InteractionPauseCall[]> {
+  if (!input.interactionRequests) return [];
+  const interactionRows = remaining.filter(
+    (row) => row.interruptionKind === "interaction_intervention",
+  );
+  if (interactionRows.length === 0) return [];
+  const recorded = await listRecordedInteractionToolCallIds(input.db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    toolCallIds: interactionRows.map((row) => row.callId),
+  });
+  return interactionRows
+    .filter((row) => !recorded.has(row.callId))
+    .map((row) => interactionPauseCallFromItem(row.callId, row.callItem));
 }
 
 export function interruptionCallIdsFromPause(input: {

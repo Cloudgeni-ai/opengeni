@@ -49,8 +49,12 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * (0929), the recording recovery sweep's stalled-work inventory (0930), the
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
  * due inventory (0935), the recording retention sweep's due inventory (0946),
- * the lookup of whose personal machine a chat runs on (0978) and the re-arm of
- * the running commands a returning runner did not answer for (0984). Each is
+ * the lookup of whose personal machine a chat runs on (0978), the re-arm of
+ * the running commands a returning runner did not answer for (0984), the
+ * control worker's content-free queued-turn hold summary (0988), the API's
+ * inventory of browsers an agent session holds (1002), the only writer of
+ * the EU-only inference setting and its history (1060) and the secret history
+ * scrub's reader and cell writer (1091). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -64,6 +68,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_recording_retention_v1(integer)",
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
+  "list_agent_held_browser_sessions(integer, bigint)",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+  "redact_session_secret_cells_v1(uuid, text, jsonb)",
 ] as const;
 
 /**
@@ -75,13 +84,42 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * the recording retention inventory and 0950 granted it. 0978 withholds the
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
- * 0984 withholds the connected-command re-arm the same way; until it is
- * granted, a runner's inventory report skips it.
+ * 0984 withheld the connected-command re-arm the same way and 1101 granted
+ * it. 0988 withholds the queued-turn
+ * hold summary; until it is granted, the control worker does not publish it.
+ * 1002 withheld the held-browser inventory and 1093 granted it.
+ * 1060 withholds the EU-only change function; until it is granted the setting
+ * cannot be changed and stays off. 1091 withholds the secret history scrub's
+ * reader and cell writer; until they are granted, a scrub reports the cells
+ * only they reach as pending.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+  "redact_session_secret_cells_v1(uuid, text, jsonb)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+
+/**
+ * Target-schema runtime capabilities whose EXECUTE is withheld for one
+ * release, for the same reason as DEFERRED_RUNTIME_PRIVATE_ROUTINES: until a
+ * binary that knows them is the previous release, readiness accepts each with
+ * or without runtime EXECUTE (never PUBLIC). 0998 withholds the passkey
+ * mutation; until a later migration grants it, passkeys stay off.
+ */
+export const DEFERRED_RUNTIME_TARGET_ROUTINES = [
+  "mutate_managed_passkey(text, text, jsonb)",
+] as const;
+
+/**
+ * Non-RLS tables whose runtime DML is withheld for the same reason: the
+ * previous release rejects DML on an unknown non-RLS table. Each is known here
+ * with no required privileges; readiness accepts either no direct DML or
+ * exactly SELECT, INSERT, UPDATE and DELETE (never a partial grant). 0998
+ * withholds the passkey credentials table.
+ */
+export const RUNTIME_DEFERRED_FULL_DML_TABLES = ["auth_passkeys"] as const;
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
@@ -107,6 +145,43 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
+  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "list_agent_held_browser_sessions(integer, bigint)": [
+    "browser_sessions",
+    "browser_session_associations",
+    "sessions",
+    "session_turns",
+  ],
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)": [
+    "organization_inference_residency",
+    "organization_inference_residency_events",
+    "organization_memberships",
+    "api_keys",
+  ],
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)": [
+    "task_notes",
+    "task_note_write_capabilities",
+    "host_export_outbox",
+    "mcp_operations",
+    "session_history_items_repair_audit",
+  ],
+  "redact_session_secret_cells_v1(uuid, text, jsonb)": [
+    "sessions",
+    "session_turns",
+    "session_goals",
+    "session_goal_revisions",
+    "session_events",
+    "session_message_search_texts",
+    "session_content_blobs",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_system_updates",
+    "task_notes",
+    "task_note_write_capabilities",
+    "host_export_outbox",
+    "mcp_operations",
+    "session_history_items_repair_audit",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -770,6 +845,7 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "mutate_managed_sign_in_method(text, text, jsonb)",
+  "mutate_managed_passkey(text, text, jsonb)",
   "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
   "replay_managed_sign_in_method(text, text, jsonb)",
   "claim_managed_sign_in_notification(uuid, text, text, integer)",
@@ -1716,6 +1792,7 @@ export const FORCE_RLS_TABLES = [
   "automation_triggers",
   "billing_customers",
   "billing_subscription_operations",
+  "bot_templates",
   "browser_identities",
   "browser_revision_components",
   "browser_revisions",
@@ -1776,6 +1853,7 @@ export const FORCE_RLS_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credential_profiles",
   "credit_debit_allocations",
   "credit_ledger_entries",
   "device_enrollment_requests",
@@ -1853,6 +1931,8 @@ export const FORCE_RLS_TABLES = [
   "knowledge_claim_relations",
   "knowledge_claim_reviews",
   "knowledge_claims",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_document_versions",
   "knowledge_entities",
   "knowledge_entity_aliases",
@@ -1909,6 +1989,8 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_credential_providers",
+  "organization_inference_residency",
+  "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
@@ -2045,6 +2127,7 @@ export const FORCE_RLS_TABLES = [
   "session_realtime_entries",
   "session_realtime_modes",
   "session_recordings",
+  "session_share_links",
   "session_spawn_denials",
   "session_stream_acknowledgments",
   "session_system_update_outbox",
@@ -2084,6 +2167,7 @@ export const FORCE_RLS_TABLES = [
   "site_platform_storage",
   "site_platform_totals",
   "site_platform_usage",
+  "site_project_placements",
   "site_publications",
   "site_runtime_conversations",
   "site_runtime_rate_windows",
@@ -2095,6 +2179,7 @@ export const FORCE_RLS_TABLES = [
   "site_sql_queries",
   "site_sql_rate_windows",
   "site_sql_usage",
+  "site_tool_allowances",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
@@ -2191,6 +2276,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_learning_policy_heads",
   "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
+  "workspace_member_execution_defaults",
   "workspace_model_policies",
   "workspace_screenshot_quotas",
   "workspace_session_activity_revisions",
@@ -2214,6 +2300,7 @@ export const FORCE_RLS_TABLES = [
  */
 export const NON_RLS_RUNTIME_TABLES = [
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
@@ -2259,6 +2346,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_triggers",
   "automation_webhook_endpoints",
   "billing_customers",
+  "bot_templates",
   "browser_session_associations",
   "capability_catalog_items",
   "capability_component_owners",
@@ -2280,6 +2368,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credential_profiles",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_bases",
@@ -2396,6 +2485,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_realtime_entries",
   "session_realtime_modes",
   "session_recordings",
+  "session_share_links",
   "session_stream_acknowledgments",
   "session_system_update_outbox",
   "session_system_updates",
@@ -2422,6 +2512,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_platform_storage",
   "site_platform_totals",
   "site_platform_usage",
+  "site_project_placements",
   "site_publications",
   "site_runtime_conversations",
   "site_runtime_rate_windows",
@@ -2433,6 +2524,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_queries",
   "site_sql_rate_windows",
   "site_sql_usage",
+  "site_tool_allowances",
   "site_viewer_sessions",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
@@ -2490,6 +2582,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_gateway_custom_models",
   "workspace_inference_controls",
   "workspace_instruction_policy_heads",
+  "workspace_member_execution_defaults",
   "workspace_memberships",
   "workspace_model_policies",
   "workspace_screenshot_quotas",
@@ -2540,6 +2633,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_inference_residency",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_plans",
@@ -2709,6 +2803,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_entries",
   "knowledge_entry_decisions",
   "knowledge_entry_links",
@@ -2730,6 +2826,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_inference_residency_events",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -2882,6 +2979,8 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
+const DEFERRED_TARGET_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_TARGET_ROUTINES);
+const DEFERRED_FULL_DML_TABLE_NAMES = new Set<string>(RUNTIME_DEFERRED_FULL_DML_TABLES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -3447,6 +3546,9 @@ export async function inspectRuntimeDatabasePosture(
           hasInheritance: row.has_inheritance,
         }));
 
+      // A lateral ACL probe lets PostgreSQL memoize equal (ACL, owner) pairs
+      // within this statement. Read the catalog tuple, not a privilege helper:
+      // those helpers can observe newer grants than our repeatable-read snapshot.
       const routineRows = resultRows<{
         private_schema: boolean;
         name: string;
@@ -3464,11 +3566,7 @@ export async function inspectRuntimeDatabasePosture(
             (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            ) as public_execute,
+            coalesce(public_acl.public_execute, false) as public_execute,
             p.prosecdef as security_definer,
             (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
               or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
@@ -3476,6 +3574,12 @@ export async function inspectRuntimeDatabasePosture(
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and p.prokind in ('f', 'p')
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
@@ -3515,10 +3619,15 @@ export async function inspectRuntimeDatabasePosture(
             (has_function_privilege(current_user, p.oid, 'EXECUTE')
               or has_schema_privilege(current_user, n.oid, 'USAGE')
               or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
-            exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute",
+            coalesce(public_acl.public_execute, false) as "publicExecute",
             p.prosecdef as "securityDefiner", p.proconfig as configuration
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
           where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
         `),
       );
@@ -4019,6 +4128,27 @@ export function evaluateRuntimeDatabasePosture(
     if (toleratedUnknownTables.has(table.name)) {
       // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+    }
+    if (!options.tablePrivileges && DEFERRED_FULL_DML_TABLE_NAMES.has(table.name)) {
+      // Withheld runtime DML (see RUNTIME_DEFERRED_FULL_DML_TABLES): none or all four.
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+      const tableGranted = new Set(
+        FULL_DML_PRIVILEGES.filter(
+          (privilege) => privileges.find(([name]) => name === privilege)?.[1] === true,
+        ),
+      );
+      // has_any_column_privilege is also true for a table-level grant, so only
+      // column privileges the table grant doesn't cover are column-only.
+      const columnOnly = (table.columnPrivileges ?? []).filter(
+        (privilege) => !tableGranted.has(privilege as (typeof FULL_DML_PRIVILEGES)[number]),
+      );
+      if (
+        (tableGranted.size > 0 && tableGranted.size < FULL_DML_PRIVILEGES.length) ||
+        columnOnly.length > 0
+      ) {
+        const partial = [...new Set([...tableGranted, ...columnOnly])];
+        violations.push(`table ${table.name} grants partial runtime DML: ${partial.join(", ")}`);
+      }
     }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
@@ -4690,7 +4820,7 @@ export function evaluateRuntimeDatabasePosture(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
       );
     }
-    if (!routine.execute) {
+    if (!routine.execute && !DEFERRED_TARGET_ROUTINE_NAMES.has(routine.name)) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
     const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(

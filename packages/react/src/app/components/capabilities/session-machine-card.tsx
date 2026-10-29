@@ -233,14 +233,13 @@ export function SessionMachineCapabilityCard({
     [canMessage, context.client, fleet, onConfigured, sendContext, sessionId, using, workspaceId],
   );
 
-  // Chrome belongs to a machine with a screen: the one this chat runs on if it
-  // has one, otherwise the first reachable one.
+  // Screen control and Chrome belong to the machine this chat runs on. Before
+  // the person picks one, rows about some other machine would compete with
+  // choosing or connecting the right one.
   const chromeMachine =
-    (activeMachine?.hasDisplay && isMachineComputeSelectable(activeMachine.state)
+    activeMachine?.hasDisplay && isMachineComputeSelectable(activeMachine.state)
       ? activeMachine
-      : null) ??
-    reachable.find((machine) => machine.hasDisplay) ??
-    null;
+      : null;
   const chrome = useAttachedChrome(
     workspaceId,
     fleet.canRead && chromeMachine?.enrollmentId
@@ -252,8 +251,10 @@ export function SessionMachineCapabilityCard({
     : null;
   const origin = apiBaseUrl || (typeof window !== "undefined" ? window.location.origin : "");
 
-  // One clear action per state. With a reachable machine, the list's "Use in
-  // this chat" is primary and connecting another is a quiet secondary action.
+  // One clear action per state. With a reachable machine, using one of them
+  // and connecting another computer are peers in the list below: the card
+  // doesn't guess which machine the person means.
+  const connectAnother = fleet.canConnect && (reachable.length > 0 || activeMachine !== null);
   const actionUnavailable = unavailableOnDeployment
     ? "Connected Machines aren't available on this deployment."
     : asking && !isMachineComputeSelectable(requested.state)
@@ -263,10 +264,12 @@ export function SessionMachineCapabilityCard({
         : fresh && fleet.canAttach && !fresh.active
           ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
           : reachable.length > 0 && fleet.canAttach
-            ? "Choose where this chat runs."
+            ? connectAnother
+              ? "Choose where this chat runs, or connect another computer."
+              : "Choose where this chat runs."
             : reachable.length > 0
               ? "You can't change where this chat runs."
-              : fleet.canManage
+              : fleet.canConnect
                 ? null
                 : machines.length > 0
                   ? "Turn on one of the machines below to use it here."
@@ -282,7 +285,6 @@ export function SessionMachineCapabilityCard({
     !thisComputerReady(desktop.computer.status) &&
     !unavailableOnDeployment &&
     fleet.canRead;
-  const connectAnother = fleet.canManage && (reachable.length > 0 || activeMachine !== null);
   const visibleDetails =
     useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
   // While the agent's request can be allowed here, everything else is one
@@ -342,7 +344,7 @@ export function SessionMachineCapabilityCard({
             ? ""
             : offerThisComputer
               ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
-              : fleet.canManage
+              : fleet.canConnect
                 ? "You can remove a connected machine anytime from Machines."
                 : ""
         }
@@ -411,7 +413,7 @@ export function SessionMachineCapabilityCard({
                         <MachineRow
                           key={machine.sandboxId}
                           machine={machine}
-                          primary={machine.sandboxId === justConnected || reachable.length === 1}
+                          primary={machine.sandboxId === justConnected}
                           canUse={fleet.canAttach}
                           busy={using === machine.sandboxId}
                           locked={using !== null || fleet.attaching}
@@ -425,7 +427,7 @@ export function SessionMachineCapabilityCard({
                       key={chromeMachine.sandboxId}
                       machine={chromeMachine}
                       workspaceId={workspaceId}
-                      canManage={fleet.canManage}
+                      canManage={fleet.canManageMachine(chromeMachine)}
                       refresh={fleet.refresh}
                       onReconnect={() => openSetup(chromeMachine)}
                     />
@@ -437,16 +439,25 @@ export function SessionMachineCapabilityCard({
                     />
                   ) : null}
                   {!folded && connectAnother ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="-ml-2 text-fg-muted"
-                      onClick={() => openSetup()}
-                    >
-                      <PlusIcon aria-hidden />
-                      Connect another machine
-                    </Button>
+                    // Its own list after the machines and their steps: it is
+                    // not a connected machine, and it shouldn't split the chat
+                    // machine from its screen control and Chrome rows.
+                    <RowList label="Connect another computer" flush>
+                      <ListRow
+                        leading={<LogoTile icon={<PlusIcon />} />}
+                        title="Another computer"
+                        description="Not connected yet"
+                        control={
+                          <RowButton
+                            aria-label="Connect another computer"
+                            aria-haspopup="dialog"
+                            onClick={() => openSetup()}
+                          >
+                            Connect
+                          </RowButton>
+                        }
+                      />
+                    </RowList>
                   ) : null}
                 </div>
               ) : null}
@@ -454,7 +465,7 @@ export function SessionMachineCapabilityCard({
           )
         }
       />
-      {fleet.canManage && !unavailableOnDeployment ? (
+      {fleet.canConnect && !unavailableOnDeployment ? (
         <ConnectMachineDialog
           open={setupOpen}
           onOpenChange={(open) => {
@@ -467,6 +478,7 @@ export function SessionMachineCapabilityCard({
           machinesLoading={fleet.loading}
           machinesError={fleet.error}
           personalWorkspace={personalWorkspace}
+          canShareWithWorkspace={fleet.canManage}
           defaultScope={setupScope}
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {

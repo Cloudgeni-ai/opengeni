@@ -61,6 +61,7 @@ import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
 import { rigProviderImageSourceImage } from "@opengeni/core";
 import { currentActivityContext } from "./streaming";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
 let rigSetupHookPromise: Promise<RigSetupHook> | null = null;
@@ -511,7 +512,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderId,
       instanceId,
       operation,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   };
 
@@ -651,7 +652,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
                   {
                     holderId,
                     instanceId: created.instanceId,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: errorMessage(error),
                   },
                 );
               }
@@ -865,7 +866,6 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
     setupScript?: unknown;
     checks?: unknown;
     credentialHooks?: unknown;
-    defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
   return {
@@ -881,9 +881,6 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
     credentialHooks: Array.isArray(payload.credentialHooks)
       ? (payload.credentialHooks as string[])
       : baseVersion.credentialHooks,
-    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
-      ? (payload.defaultVariableSetIds as string[])
-      : baseVersion.defaultVariableSetIds,
     changelog: typeof payload.changelog === "string" ? payload.changelog : baseVersion.changelog,
     providerImages: {},
   };
@@ -902,7 +899,6 @@ function providerImageDefinitionForChange(
       : baseVersion.setupScript,
     checks: baseVersion.checks,
     credentialHooks: baseVersion.credentialHooks,
-    defaultVariableSetIds: baseVersion.defaultVariableSetIds,
   };
 }
 
@@ -1269,7 +1265,7 @@ export async function buildVerifiedRigProviderImage(input: {
         builtIdentity.imageId,
       ).catch(() => "not_found" as const);
     }
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    const message = errorMessage(error).slice(0, 2000);
     return await finalize({
       ...building,
       status: "failed",
@@ -1538,7 +1534,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
         } catch (error) {
           verification.finishedAt = new Date().toISOString();
           verification.passed = false;
-          verification.error = error instanceof Error ? error.message : String(error);
+          verification.error = errorMessage(error);
           const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
             status: "failed",
             verification,
@@ -1678,7 +1674,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           // rig.verification.failed so activeVersionHealth reflects the failed
           // re-run instead of staying stale, symmetric to verifyRigChange. Then
           // rethrow so the Temporal activity still surfaces the failure.
-          const detail = error instanceof Error ? error.message : String(error);
+          const detail = errorMessage(error);
           await recordRigAuditEvent(db, {
             grant,
             action: "rig.verification.failed",

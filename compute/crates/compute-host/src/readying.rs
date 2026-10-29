@@ -4,7 +4,7 @@
 use anyhow::{Context as _, bail};
 use compute_engine::MemoryProfile;
 
-use crate::meminfo_field;
+use crate::policy::meminfo_field;
 
 /// Everything here, in order: the host's checks, then the process's own
 /// settings. `compress` is whether the agent compresses paused VMs.
@@ -39,8 +39,9 @@ fn raise_open_file_limit() {
 
 /// What the out-of-memory killer adds to the agent's badness, in
 /// thousandths of the memory it weighs: the agent outlasts every VM
-/// process (VMMs and pagers raise theirs to -900) and nearly anything
-/// else on a short host. Not -1000: that makes a process unkillable even
+/// process (VMMs and pagers lower theirs by their request, at most to
+/// -999, ADR 24) and nearly anything else on a short host. Not -1000:
+/// that makes a process unkillable even
 /// inside its own service unit, so an agent that leaked up to the unit's
 /// `MemoryMax` would hang in reclaim instead of being killed and restarted.
 /// Its helpers inherit it.

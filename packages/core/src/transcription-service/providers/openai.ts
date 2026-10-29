@@ -7,10 +7,16 @@ import type { RecordingTranscriptionProvider } from "../../recording-transcripti
 import { TranscriptionServiceError } from "../../transcription";
 import {
   deploymentTextModel,
+  keytermsPrompt,
   requestIdOf,
   textRequestAudio,
   textTranscriptionResult,
 } from "../text-models";
+import {
+  createOpenAiRealtimeLiveSession,
+  openAiLanguage,
+  openAiRealtimeTranscribes,
+} from "./openai-realtime";
 
 /** OpenAI's file transcription API: about 25 minutes or 25 MB per request. */
 export const OPENAI_TRANSCRIPTION_LIMITS = {
@@ -36,8 +42,19 @@ export function createOpenAiTranscriptionProvider(input: {
         name: input.model,
         pricing: input.pricing ?? null,
         ...OPENAI_TRANSCRIPTION_LIMITS,
+        live: openAiRealtimeTranscribes(input.model),
       }),
     ],
+    async createLiveSession(request) {
+      return await createOpenAiRealtimeLiveSession({
+        providerName: "OpenAI",
+        baseUrl: input.baseUrl,
+        headers: { Authorization: `Bearer ${input.apiKey}` },
+        model: input.model,
+        request,
+        fetch: fetchImpl,
+      });
+    },
     async transcribe(request) {
       const { audio, mimeType, filename } = textRequestAudio(request);
       const requestId = requestIdOf(request);
@@ -45,9 +62,10 @@ export function createOpenAiTranscriptionProvider(input: {
       const form = new FormData();
       form.append("file", audioBlob(audio, mimeType), filename);
       form.append("model", input.model);
-      if (request.language && /^[a-z]{2}$/u.test(request.language)) {
-        form.append("language", request.language);
-      }
+      const language = openAiLanguage(request.language);
+      if (language) form.append("language", language);
+      const prompt = keytermsPrompt(request);
+      if (prompt) form.append("prompt", prompt);
       // Whisper reports its billed audio duration only in verbose_json.
       if (voiceInputModelReportsDurationOnly(input.model)) {
         form.append("response_format", "verbose_json");

@@ -16,10 +16,16 @@
 //! A request outlives nothing: once its VM is stopped or dropped, a
 //! request still on its way does nothing and fails, so it never reaches a
 //! later VM behind the same API socket, and is never taken for done.
+//!
+//! Nor does it outlive a later one: requests take effect in the order they
+//! were made. One that reaches its VM after a later request, or a pause's
+//! or resume's let-go, was made does nothing and fails, so an older
+//! setting never lands over a newer one, and a balloon confirmed let go
+//! stays let go until it is asked otherwise.
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -53,6 +59,10 @@ struct Inner {
     state: Mutex<State>,
     /// Set once its VM is stopped or dropped; read under `state`.
     ended: AtomicBool,
+    /// The number of the request made last, a setting or a pause's or
+    /// resume's let-go. A setting takes its number as it is asked and
+    /// does nothing once, under `state`, it finds a later one made.
+    latest: AtomicU64,
     /// [`EMPTYING_LIMIT`], shorter in tests.
     limit: Duration,
 }
@@ -85,6 +95,7 @@ impl Balloon {
                         paused: false,
                     }),
                     ended: AtomicBool::new(false),
+                    latest: AtomicU64::new(0),
                     limit,
                 })
             }),
@@ -93,13 +104,15 @@ impl Balloon {
 
     /// Sets it to take `bytes`, rounded down to MiB. For 0, resolves only
     /// once the guest has taken back every page it gave. Fails if the VM
-    /// is paused or has ended, so nothing was asked. Does not borrow the
-    /// VM.
+    /// is paused or has ended, or a later request was made before this one
+    /// reached it, so nothing was asked. Its place in that order is taken
+    /// now, not when the future first runs. Does not borrow the VM.
     pub(super) fn set(
         &self,
         bytes: u64,
     ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
         let inner = self.inner.clone();
+        let number = inner.as_ref().map_or(0, |inner| inner.made());
         async move {
             let Some(inner) = inner else {
                 return Ok(());
@@ -108,6 +121,7 @@ impl Balloon {
             {
                 let mut state = inner.state.lock().await;
                 inner.running(&state)?;
+                inner.latest_is(number)?;
                 if state.mib != Some(mib) {
                     patch(&inner.api, mib).await?;
                     state.mib = Some(mib);
@@ -142,6 +156,7 @@ impl Balloon {
             return pause.await;
         };
         let mut state = inner.state.lock().await;
+        inner.made();
         let_go(&inner.api, &mut state).await;
         pause.await?;
         state.paused = true;
@@ -159,6 +174,7 @@ impl Balloon {
         };
         let mut state = inner.state.lock().await;
         resume.await?;
+        inner.made();
         state.paused = false;
         let_go(&inner.api, &mut state).await;
         Ok(())
@@ -175,6 +191,25 @@ impl Drop for Balloon {
 }
 
 impl Inner {
+    /// Takes the next request's number.
+    fn made(&self) -> u64 {
+        self.latest.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Fails if a request was made after the one numbered `number`, read
+    /// under `state`.
+    fn latest_is(&self, number: u64) -> Result<(), EngineError> {
+        if self.latest.load(Ordering::Acquire) == number {
+            Ok(())
+        } else {
+            Err(EngineError::new(
+                ErrorKind::Transient,
+                "balloon",
+                "a later request was made before this one reached the VM",
+            ))
+        }
+    }
+
     /// Fails unless its VM runs, read under `state`.
     fn running(&self, state: &State) -> Result<(), EngineError> {
         if self.ended.load(Ordering::Acquire) {
@@ -407,6 +442,28 @@ mod tests {
         balloon.set(0).await.unwrap_err();
         balloon.set(1 << 30).await.unwrap_err();
         assert_eq!(seen.lock().unwrap().len(), asked);
+    }
+
+    #[tokio::test]
+    async fn an_older_request_never_lands_over_a_later_one() {
+        let (_dir, api, seen) = api();
+        let balloon = Balloon::unknown(&api, true);
+        // Asked to take memory, then to let it go, the later reaching the
+        // VM first: the older does nothing and fails.
+        let older = balloon.set(1 << 30);
+        balloon.set(0).await.unwrap();
+        older.await.unwrap_err();
+        // Nor does one made before a pause and a resume let it go.
+        let older = balloon.set(1 << 30);
+        balloon.pausing(async { Ok(()) }).await.unwrap();
+        balloon.resuming(async { Ok(()) }).await.unwrap();
+        older.await.unwrap_err();
+        // The latest still takes effect.
+        balloon.set(1 << 30).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].contains("\"amount_mib\":0"), "{seen:?}");
+        assert!(seen[1].contains("\"amount_mib\":1024"), "{seen:?}");
     }
 
     #[tokio::test]

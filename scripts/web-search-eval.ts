@@ -45,6 +45,7 @@ import {
   webFetchInputSchema,
   webSearchInputSchema,
 } from "@opengeni/runtime/web-search";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type Case = {
   id: string;
@@ -429,7 +430,7 @@ async function main() {
           usage: { input_tokens: 0, output_tokens: 0, cached: 0 },
           modelUsd: 0,
           searchUsd: 0,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         };
       }
       const grade = result.error

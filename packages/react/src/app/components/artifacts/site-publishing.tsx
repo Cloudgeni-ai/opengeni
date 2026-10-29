@@ -246,11 +246,6 @@ export type SitePublishPageProps = {
   isAdmin: boolean;
   /** Offered while the Site is Only me and the viewer owns it. */
   onShareWithWorkspace?: (() => void) | undefined;
-  /**
-   * The Site is in a Personal workspace, where Only me and the workspace are
-   * the same one person: publishing an Only me Site shares it as it publishes.
-   */
-  personalWorkspace?: boolean | undefined;
   sites: SitesClientConfig;
   /** Fixed suffix for the suggested label, for previews and tests. */
   labelSuffix?: string | undefined;
@@ -259,6 +254,8 @@ export type SitePublishPageProps = {
    * inline, in the Site's Settings, with no back link.
    */
   layout?: "page" | "panel" | undefined;
+  /** After Publish or Save changes succeeds, for a page that then goes back. */
+  onSubmitted?: (() => void) | undefined;
 };
 
 /** The publish form's frame: its own page, or a panel in the Site's Settings. */
@@ -301,7 +298,7 @@ export function SitePublishPage(props: SitePublishPageProps) {
       "Publishing isn't set up on this server",
       "An administrator sets a Sites domain to turn it on.",
     );
-  if (site.visibility === "private" && load.state !== "ready" && !props.personalWorkspace)
+  if (site.visibility === "private" && load.state !== "ready")
     return blocked(
       "Share this Site with the workspace first",
       "A Site that only you can see can't be published.",
@@ -353,6 +350,7 @@ function SitePublishForm({
   labelSuffix,
   isAdmin,
   layout = "page",
+  onSubmitted,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -503,15 +501,16 @@ function SitePublishForm({
       <PublishFrame
         layout={layout}
         back={{ label: site.title, onClick: onBack }}
-        title={layout === "panel" && !publishing ? "Web address" : "Publish to web"}
+        title={publishing ? "Publish to web" : "Web address"}
         description={
-          layout === "panel" && !publishing
-            ? "Its address, who can open it and its agent."
-            : `Give “${site.title}” its own address on the web.`
+          publishing
+            ? `Give “${site.title}” its own address on the web.`
+            : "Its address, who can open it and its agent."
         }
         submitLabel={publishing ? "Publish" : "Save changes"}
         pendingLabel={publishing ? "Publishing…" : "Saving…"}
         onSubmit={submit}
+        {...(onSubmitted ? { onSubmitted } : {})}
         // In Settings there is nowhere to go back to: Discard puts the saved
         // values back, so it shows only once a saved publication has changes.
         {...(layout === "panel"

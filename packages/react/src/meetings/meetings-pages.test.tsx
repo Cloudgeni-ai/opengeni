@@ -1,27 +1,26 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-  window.matchMedia = ((query: string) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener() {},
-    removeListener() {},
-    addEventListener() {},
-    removeEventListener() {},
-    dispatchEvent: () => false,
-  })) as typeof window.matchMedia;
-});
+// The DOM comes first: dialogs and menus portal only where a document existed at load.
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+window.matchMedia = ((query: string) => ({
+  matches: false,
+  media: query,
+  onchange: null,
+  addListener() {},
+  removeListener() {},
+  addEventListener() {},
+  removeEventListener() {},
+  dispatchEvent: () => false,
+})) as typeof window.matchMedia;
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
 
 afterAll(() => {
-  GlobalRegistrator.unregister();
+  if (ownsDom) GlobalRegistrator.unregister();
 });
 
 const { MeetingsListPage } = await import("./meetings-list-page");
@@ -31,11 +30,14 @@ const {
   MeetingRecorderProvider,
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
+  useMeetingRecorderControls,
 } = await import("./recorder-context");
-const { createMeetingsFixture, FAILED_RECORDING_ID } = await import("../testing/meetings-fixture");
+const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
+  await import("../testing/meetings-fixture");
 
-async function render(node: React.ReactNode) {
+async function render(node: React.ReactNode, host?: (container: HTMLElement) => void) {
   const container = document.createElement("div");
+  host?.(container);
   document.body.append(container);
   const root = createRoot(container);
   const store = createMeetingRecorderStore();
@@ -45,6 +47,13 @@ async function render(node: React.ReactNode) {
   return {
     container,
     store,
+    rerender: async (next: React.ReactNode) => {
+      await act(async () => {
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>{next}</MeetingRecorderStoreProvider>,
+        );
+      });
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -75,7 +84,77 @@ async function waitFor(check: () => boolean, timeout = 3_000) {
   }
 }
 
+/** Picks Summary, Transcript or Notepad under the meeting's title. */
+async function openTab(container: HTMLElement, name: "Summary" | "Transcript" | "Notepad") {
+  const tab = [
+    ...container.querySelectorAll<HTMLButtonElement>('[data-slot="segmented-control-item"]'),
+  ].find((item) => item.textContent?.trim() === name);
+  if (!tab) throw new Error(`No ${name} tab`);
+  await act(async () => tab.click());
+}
+
+function checkedTab(container: HTMLElement): string | null {
+  return (
+    container
+      .querySelector('[data-slot="segmented-control-item"][aria-checked="true"]')
+      ?.textContent?.trim() ?? null
+  );
+}
+
+/** Types into a field the way react-dom notices. */
+async function typeInto(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  await act(async () => {
+    // react-dom watches the focused field for typing.
+    field.focus();
+    const prototype =
+      field instanceof window.HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(field, value);
+    field.dispatchEvent(new window.Event("input", { bubbles: true }));
+  });
+}
+
 describe("Meetings list", () => {
+  test("takes its surfaces from the host page, as the embedded chat does", async () => {
+    const fixture = createMeetingsFixture();
+    const page = (
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />
+    );
+    // A dark host page darker than Opengeni's own page grey: the sticky bars
+    // and the page background become the host's color, not grey boxes.
+    const hosted = await render(page, (container) => {
+      container.setAttribute("data-og-theme", "dark");
+      container.style.backgroundColor = "rgb(26, 26, 25)";
+    });
+    // Inside Opengeni's own content pane, whose page background is already
+    // its own canvas, nothing is restyled.
+    const inApp = await render(page, (container) => {
+      container.setAttribute("data-og-theme", "dark");
+      container.style.backgroundColor = "rgb(32, 32, 32)";
+      container.style.setProperty("--og-color-bg", "#202020");
+    });
+    try {
+      await settle();
+      const hostedRoot = hosted.container.querySelector<HTMLElement>("[data-og-host-theme]");
+      expect(hostedRoot?.classList.contains("og-root")).toBe(true);
+      expect(hostedRoot?.style.getPropertyValue("--og-color-bg")).toBe("rgb(26 26 25)");
+      expect(hostedRoot?.style.getPropertyValue("--og-color-canvas")).toBe("rgb(26 26 25)");
+      expect(hostedRoot?.querySelectorAll("[data-og-host-theme]")).toHaveLength(0);
+      const inAppRoot = inApp.container.querySelector<HTMLElement>("[data-og-host-theme]");
+      expect(inAppRoot?.style.getPropertyValue("--og-color-bg")).toBe("");
+      expect(inAppRoot?.getAttribute("data-og-theme")).toBeNull();
+    } finally {
+      await hosted.unmount();
+      await inApp.unmount();
+    }
+  });
+
   test("lists meetings with their state and opens one", async () => {
     const fixture = createMeetingsFixture();
     const opened: string[] = [];
@@ -104,6 +183,57 @@ describe("Meetings list", () => {
         row!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
       expect(opened).toEqual([fixture.readyId]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the person's own Only me meetings from other workspaces are listed here and open in place", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const opened: string[] = [];
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={(id) => opened.push(id)}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Pipeline review");
+      const text = view.container.textContent ?? "";
+      // In the normal list, not a separate section, labelled with where they are stored.
+      expect(text).not.toContain("From other workspaces");
+      expect(text).toContain("Only me, recorded in Sales");
+      const row = [...view.container.querySelectorAll<HTMLAnchorElement>("a[href]")].find(
+        (element) => element.textContent?.includes("Pipeline review"),
+      )!;
+      expect(row.getAttribute("href")).toBe(`/meetings/${ELSEWHERE_RECORDING_ID}`);
+      await act(async () => {
+        row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      expect(opened).toEqual([ELSEWHERE_RECORDING_ID]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an Only me meeting from another workspace opens here, says where it lives and can't be shared here", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={ELSEWHERE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "recorded in Sales");
+      expect(view.container.textContent).toContain("Only me · recorded in Sales");
+      // Sharing it with a workspace happens where it is stored.
+      expect(view.container.querySelector('[aria-label^="Who can see this"]')).toBeNull();
     } finally {
       await view.unmount();
     }
@@ -169,6 +299,28 @@ describe("Meetings list", () => {
     try {
       await settle();
       expect(view.container.textContent).toContain("No meetings yet");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an EU-only workspace without an EU route says Not supported in EU instead of recording", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        recordingOff="Not supported in EU"
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const notice = view.container.querySelector('[data-tone="info"]');
+      expect(notice?.textContent).toBe("Not supported in EU");
+      const buttons = [...view.container.querySelectorAll("button")];
+      expect(buttons.some((button) => button.textContent?.includes("Start recording"))).toBe(false);
     } finally {
       await view.unmount();
     }
@@ -263,6 +415,354 @@ describe("Recorder provider", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  test("Stop on a recording made in another workspace opens it in that workspace", async () => {
+    const fixture = createMeetingsFixture();
+    const openedElsewhere: string[] = [];
+    const openedHere: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        openedElsewhere.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let state: "recording" | "stopped" = "recording";
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-elsewhere",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 61_000,
+      systemAudioKind: null,
+      upload: { created: true },
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      stop: async () => {
+        state = "stopped";
+      },
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-elsewhere");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MeetingRecorderStoreProvider value={store}>
+          <MeetingsListPage
+            workspaceId={fixture.workspaceId}
+            recordings={fixture.client}
+            meetingHref={(id) => `/meetings/${id}`}
+            onOpen={(id) => openedHere.push(id)}
+          />
+        </MeetingRecorderStoreProvider>,
+      );
+    });
+    try {
+      const stop = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Stop",
+      );
+      expect(stop).toBeDefined();
+      await act(async () => {
+        stop!.click();
+      });
+      await settle(50);
+      expect(openedElsewhere).toEqual(["workspace-elsewhere/recording-elsewhere"]);
+      expect(openedHere).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Start recording from the app's actions starts what the button starts, after a stopped recording too", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "stopped" | "recording" = "stopped";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-earlier",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const page = (
+      <MeetingRecorderStoreProvider value={store}>
+        <Controls />
+        <MeetingsListPage
+          workspaceId={fixture.workspaceId}
+          recordings={fixture.client}
+          meetingHref={(id) => `/meetings/${id}`}
+          onOpen={() => {}}
+        />
+      </MeetingRecorderStoreProvider>
+    );
+    try {
+      await act(async () => root.render(page));
+      await waitForText(container, "Start recording");
+      expect(controls).not.toBeNull();
+      expect(controls!.state).toBe("stopped");
+      expect(controls!.supported).toBe(true);
+
+      // The button's start...
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      await waitFor(() => starts.length === 1);
+
+      // ...and the action's, through the same panel, with the same options.
+      await act(async () => controls!.requestStart());
+      await waitFor(() => starts.length === 2);
+      expect(store.pendingStart()).toBeNull();
+      const { title: buttonTitle, ...buttonOptions } = starts[0]!;
+      const { title: actionTitle, ...actionOptions } = starts[1]!;
+      expect(actionOptions).toEqual(buttonOptions);
+      // Both are named after when they start.
+      expect(typeof buttonTitle).toBe("string");
+      expect(typeof actionTitle).toBe("string");
+      expect((actionTitle as string).length).toBeGreaterThan(0);
+
+      // While one records, the action asks for no second start.
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await act(async () => controls!.requestStart());
+      expect(store.pendingStart()).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Stop recording from the app's actions stops and opens the meeting in its workspace", async () => {
+    const opened: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        opened.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let stops = 0;
+    const recorder = {
+      state: "paused",
+      recordingId: "recording-now",
+      supported: true,
+      stop: async () => {
+        stops += 1;
+      },
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-recorded");
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      // Without a recorder provider there is nothing to control.
+      await act(async () => root.render(<Controls />));
+      expect(controls).toBeNull();
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      await act(async () => controls!.stop());
+      expect(stops).toBe(1);
+      expect(opened).toEqual(["workspace-recorded/recording-now"]);
+
+      // A host without a way to open meetings hears which one to open itself.
+      const bare = createMeetingRecorderStore();
+      bare.set({ ...recorder!, state: "recording" } as typeof recorder, "workspace-bare");
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={bare}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      const result: { stopped: unknown } = { stopped: undefined };
+      await act(async () => {
+        result.stopped = await controls!.stop();
+      });
+      expect(result.stopped).toEqual({
+        recordingId: "recording-now",
+        workspaceId: "workspace-bare",
+        opened: false,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a start that is still waiting never begins a second recording after the button's recording stops", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "idle" | "recording" | "stopped" = "idle";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-now",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <MeetingsListPage
+              workspaceId={fixture.workspaceId}
+              recordings={fixture.client}
+              meetingHref={(id) => `/meetings/${id}`}
+              onOpen={() => {}}
+            />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      // The key asks for a start while the page still loads its models...
+      act(() => store.requestStart({ title: "" }));
+      // ...and the person clicks Start before it happens.
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      expect(starts).toHaveLength(1);
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      expect(store.pendingStart()).toBeNull();
+      state = "stopped";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await settle(500);
+      expect(starts).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the key's start keeps a title already typed, as the button does", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      state: "idle",
+      recordingId: null,
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    const view = await (async () => {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <MeetingsListPage
+              workspaceId={fixture.workspaceId}
+              recordings={fixture.client}
+              meetingHref={(id) => `/meetings/${id}`}
+              onOpen={() => {}}
+            />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      return { container, root };
+    })();
+    try {
+      await waitForText(view.container, "Start recording");
+      const field = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="Name this meeting (optional)"]',
+      );
+      expect(field).not.toBeNull();
+      await typeInto(field!, "Design review");
+      await act(async () => store.requestStart({ title: "" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]!.title).toBe("Design review");
+    } finally {
+      await act(async () => view.root.unmount());
+      view.container.remove();
+    }
+  });
 });
 
 describe("Meeting page", () => {
@@ -300,7 +800,9 @@ describe("Meeting page", () => {
       />,
     );
     try {
-      await waitForText(view.container, "Tomas Eriksen");
+      // The transcript has loaded once the header counts its speakers.
+      await waitForText(view.container, "4 speakers");
+      await openTab(view.container, "Transcript");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Weekly product sync");
       expect(text).toContain("Ingrid Solberg");
@@ -324,7 +826,7 @@ describe("Meeting page", () => {
     }
   });
 
-  test("notes an agent wrote show above the transcript, and the notepad saves as you type", async () => {
+  test("opens on the Summary an agent wrote, and the notepad saves as you type", async () => {
     const fixture = createMeetingsFixture();
     const opened: string[] = [];
     const view = await render(
@@ -338,37 +840,334 @@ describe("Meeting page", () => {
       />,
     );
     try {
-      await waitForText(view.container, "Tomas reviews the schema change today");
+      await waitForText(view.container, "mocks both pricing tables");
+      expect(checkedTab(view.container)).toBe("Summary");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Written by an agent");
-      expect(text.indexOf("Action items")).toBeLessThan(text.indexOf("Tomas Eriksen"));
+      expect(text).toContain("Action items");
+      // The transcript and the notepad wait in their own tabs.
+      expect(view.container.querySelector('ol[aria-label="Transcript"]')).toBeNull();
+      expect(view.container.querySelector('textarea[placeholder^="Jot down"]')).toBeNull();
       const openChat = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent === "Open the chat",
       )!;
       await act(async () => openChat.click());
       expect(opened).toEqual(["7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"]);
 
+      await openTab(view.container, "Notepad");
       const notepad = view.container.querySelector<HTMLTextAreaElement>(
         'textarea[placeholder^="Jot down"]',
       )!;
       expect(notepad.value).toContain("Tomas: schema review");
-      await act(async () => {
-        // react-dom watches the focused field for typing.
-        notepad.focus();
-        const setValue = Object.getOwnPropertyDescriptor(
-          window.HTMLTextAreaElement.prototype,
-          "value",
-        )!.set!;
-        setValue.call(notepad, `${notepad.value}\n- follow up on onboarding`);
-        notepad.dispatchEvent(new window.Event("input", { bubbles: true }));
-        // react-dom loads before the DOM here, so it reads typing from key events.
-        notepad.dispatchEvent(new window.KeyboardEvent("keyup", { bubbles: true }));
-      });
+      await typeInto(notepad, `${notepad.value}\n- follow up on onboarding`);
       await waitForText(view.container, "Saved");
       const saved = await fixture.client.listRecordingNotes(fixture.workspaceId, fixture.readyId);
       expect(saved.notes.find((note) => note.kind === "notepad")?.body).toContain(
         "follow up on onboarding",
       );
+      await openTab(view.container, "Transcript");
+      expect(view.container.querySelector('ol[aria-label="Transcript"]')).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("opens on the Transcript when there are no written notes, still offering Write notes", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId="7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c"
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "The audio was deleted on");
+      await settle(300);
+      expect(checkedTab(view.container)).toBe("Transcript");
+      expect(view.container.querySelector('ol[aria-label="Transcript"]')).not.toBeNull();
+      await openTab(view.container, "Summary");
+      expect(view.container.textContent).toContain("No notes yet.");
+      const write = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Write notes",
+      );
+      expect(write).toBeDefined();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the Summary shows mentions as chips with current names, and copies them as plain names", async () => {
+    const fixture = createMeetingsFixture();
+    await fixture.client.saveRecordingNote(fixture.workspaceId, fixture.readyId, "notes", {
+      body: [
+        "[Tomas](speaker:speaker_0) asked [Someone](speaker:speaker_1) for a draft.",
+        "",
+        "- [ ] [T.](person:1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e) sends the numbers",
+        "- [ ] [Ghost](speaker:speaker_9) and [Nobody](person:00000000-0000-4000-8000-000000000000) stay plain",
+      ].join("\n"),
+    });
+    const copied: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(window.navigator, "clipboard");
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void copied.push(text) },
+    });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "stay plain");
+      // Chips need the speakers, which load with the transcript.
+      const chips = async () => {
+        const deadline = Date.now() + 3_000;
+        while (view.container.querySelectorAll("[data-mention]").length < 3) {
+          if (Date.now() > deadline) throw new Error("No mention chips");
+          await settle(50);
+        }
+        return [...view.container.querySelectorAll("[data-mention]")].map((chip) => [
+          chip.getAttribute("data-mention"),
+          chip.textContent,
+        ]);
+      };
+      // Current names, not the names written into the links.
+      expect(await chips()).toEqual([
+        ["speaker", "Tomas Eriksen"],
+        ["speaker", "Speaker 2"],
+        ["person", "Tomas Eriksen"],
+      ]);
+      const summary = view.container.textContent ?? "";
+      expect(summary).toContain("Ghost and Nobody stay plain");
+      // Never a broken link.
+      expect(view.container.querySelector('a[href^="speaker:"], a[href^="person:"]')).toBeNull();
+      expect(summary).not.toContain("unavailable");
+
+      const copy = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Copy",
+      )!;
+      await act(async () => copy.click());
+      await settle(50);
+      expect(copied).toEqual([
+        [
+          "Tomas Eriksen asked Speaker 2 for a draft.",
+          "",
+          "- [ ] Tomas Eriksen sends the numbers",
+          "- [ ] Ghost and Nobody stay plain",
+        ].join("\n"),
+      ]);
+      expect(view.container.textContent).toContain("Copied");
+    } finally {
+      await view.unmount();
+      if (clipboard) Object.defineProperty(window.navigator, "clipboard", clipboard);
+      else delete (window.navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
+
+  test("transcript turns read as bubbles under the speaker's name, and the pencil corrects the words", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      // The transcript has loaded once the header counts its speakers.
+      await waitForText(view.container, "4 speakers");
+      await openTab(view.container, "Transcript");
+      const turns = [...view.container.querySelectorAll('ol[aria-label="Transcript"] > li')];
+      expect(turns.length).toBeGreaterThan(3);
+      for (const turn of turns) {
+        // The name once per turn, in the speaker's colour, above one bubble.
+        expect(turn.querySelectorAll("[data-speaker-name]").length).toBe(1);
+        const name = turn.querySelector<HTMLElement>("[data-speaker-name]");
+        expect(name?.style.getPropertyValue("--speaker-hue")).toStartWith("var(--color-chart-");
+        expect(name?.className).toContain("var(--speaker-hue)");
+        expect(turn.querySelectorAll("[data-turn-bubble]").length).toBe(1);
+      }
+      const tomas = turns.find((turn) =>
+        turn.querySelector("[data-speaker-name]")?.textContent?.includes("Tomas Eriksen"),
+      )!;
+      const pencil = tomas.querySelector<HTMLButtonElement>(
+        '[aria-label^="Correct the words of Tomas Eriksen at"]',
+      );
+      // Next to the turn's ⋯ menu.
+      expect(pencil?.nextElementSibling?.getAttribute("aria-label")).toStartWith(
+        "More actions for Tomas Eriksen",
+      );
+      await act(async () => pencil!.click());
+      await waitForText(document.body, "Fix what the transcript got wrong");
+      const dialog = document.body.querySelector('[role="dialog"]');
+      expect(dialog?.textContent).toContain("Correct the words");
+      // One field per line of that turn.
+      const lines = [...(dialog?.querySelectorAll("textarea") ?? [])].map((field) => field.value);
+      expect(lines.join(" ")).toBe(tomas.querySelector("[data-turn-bubble]")?.textContent ?? "");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("Ask about this meeting hands the host the meeting and the question", async () => {
+    const fixture = createMeetingsFixture();
+    const asked: Array<[string, string]> = [];
+    const without = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(without.container, "mocks both pricing tables");
+      // Only a host that answers it shows the input.
+      expect(
+        without.container.querySelector('input[placeholder="Ask about this meeting"]'),
+      ).toBeNull();
+    } finally {
+      await without.unmount();
+    }
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+        onAsk={async (recordingId, question) => {
+          asked.push([recordingId, question]);
+        }}
+      />,
+    );
+    try {
+      await waitForText(view.container, "mocks both pricing tables");
+      const input = () =>
+        view.container.querySelector<HTMLInputElement>(
+          'input[placeholder="Ask about this meeting"]',
+        );
+      expect(input()).not.toBeNull();
+      await openTab(view.container, "Notepad");
+      expect(input()).toBeNull();
+      await openTab(view.container, "Transcript");
+      expect(input()).not.toBeNull();
+      await typeInto(input()!, "  What did we decide on pricing?  ");
+      const send = view.container.querySelector<HTMLButtonElement>('button[aria-label="Ask"]')!;
+      expect(send.disabled).toBe(false);
+      await act(async () => send.click());
+      await settle(50);
+      expect(asked).toEqual([[fixture.readyId, "What did we decide on pricing?"]]);
+      // Taken: the input is ready for the next question.
+      expect(input()?.value).toBe("");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("Ask keeps the question when the host can't take it", async () => {
+    const fixture = createMeetingsFixture();
+    let answer: "decline" | "fail" = "decline";
+    let calls = 0;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+        onAsk={async () => {
+          calls += 1;
+          // Declining means the host has already said why, such as no chat.
+          if (answer === "decline") return false;
+          throw new Error("offline");
+        }}
+      />,
+    );
+    try {
+      await waitForText(view.container, "mocks both pricing tables");
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="Ask about this meeting"]',
+      )!;
+      await typeInto(input, "Who owns the pricing table?");
+      const send = () =>
+        view.container.querySelector<HTMLButtonElement>('button[aria-label="Ask"]')!;
+      await act(async () => send().click());
+      await settle(50);
+      expect(calls).toBe(1);
+      expect(input.value).toBe("Who owns the pricing table?");
+      answer = "fail";
+      await act(async () => send().click());
+      await settle(50);
+      expect(calls).toBe(2);
+      expect(input.value).toBe("Who owns the pricing table?");
+      expect(input.disabled).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an unsaved Summary edit survives a look at the Transcript", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "mocks both pricing tables");
+      await waitForText(view.container, "4 speakers");
+      const summary = () => view.container.querySelector('[data-meeting-tab="summary"]')!;
+      const edit = [...summary().querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Edit",
+      )!;
+      await act(async () => edit.click());
+      await settle(50);
+      await typeInto(summary().querySelector("textarea")!, "A draft in progress");
+      await openTab(view.container, "Transcript");
+      expect(view.container.querySelector('ol[aria-label="Transcript"]')).not.toBeNull();
+      await openTab(view.container, "Summary");
+      expect(summary().querySelector("textarea")?.value).toBe("A draft in progress");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("going straight to another meeting opens on that meeting's own tab", async () => {
+    const fixture = createMeetingsFixture();
+    const page = (recordingId: string) => (
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={recordingId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />
+    );
+    const view = await render(page(fixture.readyId));
+    try {
+      await waitForText(view.container, "mocks both pricing tables");
+      expect(checkedTab(view.container)).toBe("Summary");
+      await openTab(view.container, "Notepad");
+      // A meeting without written notes, in the same mounted page.
+      await view.rerender(page("7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c"));
+      await waitForText(view.container, "The audio was deleted on");
+      await settle(300);
+      expect(checkedTab(view.container)).toBe("Transcript");
     } finally {
       await view.unmount();
     }
@@ -388,6 +1187,11 @@ describe("Meeting page", () => {
     );
     try {
       await waitForText(view.container, "Lea Haugen");
+      const leaChip = () =>
+        [...view.container.querySelectorAll("[data-mention]")].map((chip) => chip.textContent);
+      await waitForText(view.container, "mocks both pricing tables");
+      await waitForText(view.container, "4 speakers");
+      expect(leaChip()).toContain("Lea Haugen");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Suggested by voice");
       const notThem = view.container.querySelector<HTMLButtonElement>(
@@ -396,6 +1200,10 @@ describe("Meeting page", () => {
       expect(notThem).not.toBeNull();
       await act(async () => notThem!.click());
       await settle(400);
+      // The summary follows the speaker's name without being rewritten.
+      expect(leaChip()).not.toContain("Lea Haugen");
+      expect(leaChip()).toContain("Speaker 3");
+      await openTab(view.container, "Transcript");
       const after = view.container.textContent ?? "";
       expect(after).not.toContain("Suggested by voice");
       expect(after).toContain("Speaker 3");
@@ -448,6 +1256,40 @@ describe("Meeting page", () => {
     }
   });
 
+  test("a missing provider key names the model and the provider that isn't connected", async () => {
+    const fixture = createMeetingsFixture();
+    const missingKey = <T extends { transcript?: unknown }>(recording: T): T => ({
+      ...recording,
+      transcript: {
+        ...(recording.transcript as object),
+        errorCode: "missing_provider_key",
+      },
+    });
+    const client = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) =>
+        missingKey(await fixture.client.getRecording(workspaceId, id)),
+    } as typeof fixture.client;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "needs ElevenLabs");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Scribe v2 needs ElevenLabs, which isn't connected.");
+      expect(text).toContain("Try another model");
+      expect(text).not.toContain("No transcription provider is connected");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a transcript that failed before the audio was prepared can be made again", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -468,6 +1310,208 @@ describe("Meeting page", () => {
       );
       expect(again.length).toBeGreaterThan(0);
       for (const button of again) expect(button.disabled).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  /** The fixture's failed meeting, refused for credits on the deployment's model. */
+  async function creditRefusal(withSubscription: boolean) {
+    const fixture = createMeetingsFixture();
+    const base = await fixture.client.listRecordingModels(fixture.workspaceId);
+    const scribe = base.models.find((model) => model.model === "scribe_v2")!;
+    const mai = {
+      ...scribe,
+      providerId: "azure-speech",
+      providerName: "Azure Speech",
+      model: "MAI-Transcribe-2",
+      name: "MAI-Transcribe-2",
+      funding: "deployment" as const,
+      usdPerHour: 0.36,
+    };
+    const chatgpt = {
+      ...scribe,
+      providerId: "codex-subscription",
+      providerName: "ChatGPT",
+      model: "chatgpt-dictation",
+      name: "ChatGPT dictation",
+      funding: "workspace_subscription" as const,
+      usdPerHour: null,
+    };
+    const asked: unknown[] = [];
+    const client = {
+      ...fixture.client,
+      listRecordingModels: async () => ({
+        ...base,
+        models: withSubscription ? [mai, chatgpt] : [mai],
+        default: { providerId: "azure-speech", model: "MAI-Transcribe-2" },
+      }),
+      getRecording: async (workspaceId: string, id: string) => {
+        const recording = await fixture.client.getRecording(workspaceId, id);
+        return {
+          ...recording,
+          transcript: {
+            ...recording.transcript!,
+            providerId: "azure-speech",
+            model: "MAI-Transcribe-2",
+            errorCode: "insufficient_credits",
+          },
+        };
+      },
+      createRecordingTranscript: async (
+        workspaceId: string,
+        id: string,
+        request: Parameters<typeof fixture.client.createRecordingTranscript>[2],
+      ) => {
+        asked.push(request);
+        return await fixture.client.createRecordingTranscript(workspaceId, id, request);
+      },
+    } as typeof fixture.client;
+    return { fixture, client, asked };
+  }
+
+  test("a transcript refused for credits says so and transcribes with a model that needs none", async () => {
+    const { fixture, client, asked } = await creditRefusal(true);
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+        onOpenBilling={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Transcribe with ChatGPT dictation");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "MAI-Transcribe-2 uses credits, and this organization is out of them.",
+      );
+      // One direct fix: the free model, not a purchase as well.
+      const labels = [...view.container.querySelectorAll("button")].map((button) =>
+        button.textContent?.trim(),
+      );
+      expect(labels).not.toContain("Add credits");
+      const fix = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Transcribe with ChatGPT dictation",
+      )!;
+      await act(async () => fix.click());
+      await waitFor(() => asked.length === 1);
+      expect(asked[0]).toMatchObject({
+        transcription: { providerId: "codex-subscription", model: "chatgpt-dictation" },
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("with no model that needs no credits, the fix is adding them", async () => {
+    const { fixture, client } = await creditRefusal(false);
+    let opened = 0;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+        onOpenBilling={() => {
+          opened += 1;
+        }}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Add credits");
+      const add = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Add credits",
+      )!;
+      await act(async () => add.click());
+      expect(opened).toBe(1);
+      expect(view.container.textContent).toContain("Transcribe again");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a refused upload this device finished in the background says why and tries again", async () => {
+    const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
+    const fixture = createMeetingsFixture();
+    const retried: string[] = [];
+    const failedUpload = {
+      recordingId: LIVE_RECORDING_ID,
+      created: true,
+      pendingChunks: 0,
+      pendingBytes: 0,
+      uploading: false,
+      retryingAfterError: null,
+      failed: { code: "insufficient_credits", message: "No credits." },
+      finalized: false,
+      discarded: false,
+    };
+    // The recorder is idle: the meeting was recorded before a reload, and the
+    // upload that finishes it in the background was refused.
+    const recorder = {
+      state: "idle",
+      recordingId: null,
+      title: null,
+      elapsedMilliseconds: 0,
+      tracks: [],
+      upload: null,
+      error: null,
+      live: null,
+      supported: true,
+      systemAudioSupported: false,
+      systemAudioKind: null,
+      recovered: [],
+      uploads: { [LIVE_RECORDING_ID]: failedUpload },
+      retryUpload: (id: string) => {
+        retried.push(id);
+        return true;
+      },
+      start: async () => {},
+      pause: () => {},
+      resume: () => {},
+      stop: async () => {},
+      discard: async () => {},
+      rename: async () => {},
+      levels: () => ({}),
+    } as unknown as NonNullable<ReturnType<typeof useMeetingRecorder>["recorder"]>;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={LIVE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "The upload didn't finish");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("out of credits");
+      expect(text).toContain("The audio is kept on this device");
+      const again = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Try again",
+      )!;
+      await act(async () => again.click());
+      expect(retried).toEqual([LIVE_RECORDING_ID]);
+      // Finishing it in the background reads Uploading from this device, with no action.
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          uploads: {
+            [LIVE_RECORDING_ID]: {
+              ...failedUpload,
+              failed: null,
+              uploading: true,
+              pendingChunks: 3,
+            },
+          },
+        }),
+      );
+      expect(view.container.textContent).toContain("Uploading the audio from this device.");
     } finally {
       await view.unmount();
     }
@@ -542,13 +1586,38 @@ describe("Recorder errors", () => {
     >[0];
     expect(recorderErrorText(denied, "desktop").body).toContain("your computer's privacy settings");
     expect(recorderErrorText(denied, "display").body).toContain("browser");
-    const helper = {
-      code: "system_audio_unavailable",
-      message: "Turn on System Audio Recording for Opengeni in System Settings.",
-    } as Parameters<typeof recorderErrorText>[0];
-    expect(recorderErrorText(helper, "desktop")).toEqual({
-      title: "Can't record computer audio",
-      body: "Turn on System Audio Recording for Opengeni in System Settings.",
+  });
+
+  test("the desktop app's reason for no computer audio is said in the viewer's words", async () => {
+    const { recorderErrorText } = await import("./recorder-panel");
+    const failure = (reason?: string) =>
+      ({
+        code: "system_audio_unavailable",
+        message: "The desktop app's own English sentence.",
+        ...(reason ? { reason } : {}),
+      }) as Parameters<typeof recorderErrorText>[0];
+    expect(recorderErrorText(failure("permission_denied"), "desktop")).toEqual({
+      title: "Computer audio isn't allowed",
+      body: "Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then start again.",
+    });
+    expect(recorderErrorText(failure("sound_server_unavailable"), "desktop").body).toBe(
+      "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
+    );
+    expect(recorderErrorText(failure("unavailable"), "desktop").body).toBe(
+      "This computer can't record its own audio. Record without computer audio instead.",
+    );
+    for (const reason of ["capture_failed", undefined]) {
+      expect(recorderErrorText(failure(reason), "desktop")).toEqual({
+        title: "Can't record computer audio",
+        body: "Computer audio didn't start. Start again, or record without computer audio.",
+      });
+    }
+    const translated = (key: string) => `nb:${key}`;
+    expect(
+      recorderErrorText(failure("sound_server_unavailable"), "desktop", translated as never),
+    ).toEqual({
+      title: "nb:meetings.recorderPanel.canTRecordComputerAudio",
+      body: "nb:meetings.recorderPanel.noSoundServerIsRunning",
     });
   });
 
@@ -591,6 +1660,8 @@ describe("Live transcript", () => {
       systemAudioSupported: false,
       systemAudioKind: null,
       recovered: [],
+      uploads: {},
+      retryUpload: () => false,
       start: async () => {},
       pause: () => calls.push("pause"),
       resume: () => calls.push("resume"),
@@ -632,6 +1703,9 @@ describe("Live transcript", () => {
       expect(calls).toEqual(["stop"]);
       // Said once, by the bar, not again beside the title.
       expect(text.split("Recording").length - 1).toBe(1);
+      // Recording here keeps one page: no tabs, the notepad and the live preview.
+      expect(view.container.querySelector('[data-slot="segmented-control"]')).toBeNull();
+      expect(view.container.querySelector('textarea[placeholder^="Jot down"]')).not.toBeNull();
 
       await act(async () => view.store.set({ ...recorder, state: "paused" }));
       expect(view.container.textContent).toContain("Paused");
@@ -669,6 +1743,34 @@ describe("Live transcript", () => {
         }),
       );
       expect(view.container.textContent).toContain("Transcribing");
+      // Stopped, it is a meeting like any other, with its tabs, even while
+      // this recorder still holds the live text it heard.
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          state: "stopped",
+          upload: { ...recorder.upload!, pendingChunks: 0, finalized: true },
+          live: [
+            {
+              trackNumber: 0,
+              state: "closed",
+              partial: "",
+              segments: [
+                {
+                  trackNumber: 0,
+                  segmentNumber: 0,
+                  startMilliseconds: 1_000,
+                  endMilliseconds: 3_000,
+                  text: "Morning, everyone.",
+                },
+              ],
+              error: null,
+            },
+          ],
+        }),
+      );
+      expect(view.container.querySelector('[data-slot="segmented-control"]')).not.toBeNull();
+      expect(view.container.querySelector('section[aria-label="Recording"]')).toBeNull();
 
       // Only a lost connection keeps it from transcribing, and it says so.
       await act(async () =>
@@ -730,6 +1832,8 @@ describe("Live transcript", () => {
       systemAudioSupported: false,
       systemAudioKind: null,
       recovered: [],
+      uploads: {},
+      retryUpload: () => false,
       start: async () => {},
       pause: () => {},
       resume: () => {},
@@ -785,13 +1889,35 @@ describe("Live transcript", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
       expect(text).toContain("still being recorded on another device");
-      // Someone else's microphone isn't "You".
-      expect(text).toContain("Microphone");
+      // Beside tab audio the microphone is the person recording, by name, and
+      // the tab audio is everyone else.
+      expect(text).toContain("Ingrid Solberg");
+      expect(text).toContain("Others");
+      expect(text).not.toContain("Microphone");
       expect(text).not.toContain("You0:04");
       expect(view.container.querySelector('[role="log"]')).not.toBeNull();
     } finally {
       await view.unmount();
     }
+  });
+
+  test("the person recording reads their own name on the microphone's live text", async () => {
+    const { liveSpeakerName } = await import("./recorder-panel");
+    const withTab = {
+      tracks: [
+        { trackNumber: 0, source: "microphone" as const },
+        { trackNumber: 1, source: "system" as const },
+      ],
+      systemAudioKind: "tab" as const,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(withTab, 0, undefined, "Ingrid Solberg")).toBe("Ingrid Solberg");
+    expect(liveSpeakerName(withTab, 1, undefined, "Ingrid Solberg")).toBe("Others");
+    expect(liveSpeakerName(withTab, 0)).toBe("You");
+    const micOnly = {
+      tracks: [{ trackNumber: 0, source: "microphone" as const }],
+      systemAudioKind: null,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(micOnly, 0, undefined, "Ingrid Solberg")).toBe("Microphone");
   });
 
   test("the recorder bar keeps live text and its cost in its options menu", async () => {
@@ -858,6 +1984,39 @@ describe("Live transcript", () => {
     }
   });
 
+  test("without a live default from the host, the recorder follows the workspace's setting", async () => {
+    const liveChecked = async (hostDefault: boolean | undefined) => {
+      const fixture = createMeetingsFixture({ liveTranscript: true });
+      const view = await render(
+        <MeetingsListPage
+          workspaceId={fixture.workspaceId}
+          recordings={fixture.client}
+          {...(hostDefault === undefined ? {} : { liveTranscriptDefault: hostDefault })}
+          meetingHref={(id) => `/meetings/${id}`}
+          onOpen={() => {}}
+        />,
+      );
+      try {
+        await waitForText(view.container, "Start recording");
+        const trigger = view.container.querySelector<HTMLButtonElement>(
+          'button[aria-label^="Recording options"]',
+        );
+        await act(async () => {
+          trigger!.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+          );
+        });
+        await waitFor(() => document.querySelector('[role="menuitemcheckbox"]') !== null);
+        return document.querySelector('[role="menuitemcheckbox"]')!.getAttribute("aria-checked");
+      } finally {
+        await view.unmount();
+      }
+    };
+    expect(await liveChecked(undefined)).toBe("true");
+    // A host that decides for itself still wins.
+    expect(await liveChecked(false)).toBe("false");
+  });
+
   test("streamed pieces are joined without doubled or stray punctuation", async () => {
     const { tidyLiveText, tidyPartialText } = await import("./live-transcript");
     expect(tidyLiveText(["It's between you…", ". And the dog ."])).toBe(
@@ -899,5 +2058,51 @@ describe("Live transcript", () => {
       [0, "Hi all."],
       [1, "Morning. Release went out."],
     ]);
+  });
+
+  test("the microphone's echo of the call is left out; what the person says stays", async () => {
+    const { withoutLiveMicrophoneEchoes } = await import("../recordings");
+    const tracks = [
+      { trackNumber: 0, source: "microphone" as const },
+      { trackNumber: 1, source: "system" as const },
+    ];
+    const lines = [
+      // Kari, in the call, heard from the speakers too.
+      {
+        trackNumber: 1,
+        startMilliseconds: 4_000,
+        endMilliseconds: 9_000,
+        text: "Elektrikerne kommer mandag klokken åtte.",
+      },
+      {
+        trackNumber: 0,
+        startMilliseconds: 4_300,
+        endMilliseconds: 9_200,
+        text: "Elektrikerne kommer mandag, klokka åtte.",
+      },
+      // The person recording answers.
+      {
+        trackNumber: 0,
+        startMilliseconds: 10_000,
+        endMilliseconds: 13_000,
+        text: "Da må gipsen vente til tirsdag.",
+      },
+      // A word of their own while Kari speaks stays, as does an echo-like line much later.
+      { trackNumber: 0, startMilliseconds: 5_000, endMilliseconds: 5_400, text: "Mandag?" },
+      {
+        trackNumber: 0,
+        startMilliseconds: 40_000,
+        endMilliseconds: 43_000,
+        text: "Elektrikerne kommer mandag klokken åtte.",
+      },
+    ];
+    expect(withoutLiveMicrophoneEchoes(lines, tracks).map((line) => line.text)).toEqual([
+      "Elektrikerne kommer mandag klokken åtte.",
+      "Da må gipsen vente til tirsdag.",
+      "Mandag?",
+      "Elektrikerne kommer mandag klokken åtte.",
+    ]);
+    // A microphone alone is a room: nothing is an echo.
+    expect(withoutLiveMicrophoneEchoes(lines, [tracks[0]!])).toHaveLength(lines.length);
   });
 });

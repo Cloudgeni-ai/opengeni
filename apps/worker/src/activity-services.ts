@@ -10,7 +10,9 @@ import {
   configureChildLifecycleNotices,
   configureCodeSearchDeploymentPolicy,
   createDb,
+  databasePasswordFileOptions,
   databasePoolOptions,
+  observeDatabaseCredentialEvents,
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -23,7 +25,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
-import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
+import { createStandaloneConnectionCredentialsPort } from "./standalone-git-credentials";
 import { loadOnePasswordVaultProvider } from "./onepassword-vault-provider";
 import { createNativeExternalVaultFactories } from "./external-vault-providers";
 
@@ -52,6 +54,9 @@ export function createSharedActivityServices(
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
             ...databasePoolOptions(settings),
+            // Runtime login only: the files rotate this URL's password in place.
+            ...databasePasswordFileOptions(settings),
+            onCredentialEvent: observeDatabaseCredentialEvents("worker-activities", observability),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;
@@ -99,8 +104,7 @@ export function createSharedActivityServices(
           : null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials:
-          dependencies.connectionCredentials ??
-          createStandaloneConnectionCredentialsPort(settings, db),
+          dependencies.connectionCredentials ?? createStandaloneConnectionCredentialsPort(settings),
         personalGitHubCredentials:
           dependencies.personalGitHubCredentials ?? buildPersonalGitHubGitCredentials(db, settings),
         onePasswordVaultProvider:

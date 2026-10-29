@@ -25,7 +25,11 @@ import {
   type TimelineGroup,
   type TimelineItem,
 } from "@opengeni/react/session";
-import { sessionAdmissionBlocked, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import {
   nativeComposerAttachmentCallbacks,
   useNativeFileAttachments,
@@ -49,6 +53,12 @@ export type OpenGeniNativeSessionClient = SessionClientLike &
 export interface OpenGeniNativeSessionController {
   sessionId: string;
   workspaceId: string;
+  /**
+   * The client this controller reads and writes through. Surfaces drawn from
+   * the controller pass it to shared hooks explicitly: the native screens do
+   * not require an `OpenGeniProvider` above them.
+   */
+  client: OpenGeniNativeSessionClient;
   session: ReturnType<typeof useSession>;
   events: SessionEvent[];
   timeline: TimelineItem[];
@@ -157,9 +167,15 @@ export function useOpenGeniNativeSession(input: {
     events: events.events,
     effectiveControl: queue.effectiveControl,
     // As on web: while a turn runs or prompts wait, a Send shows in the queue
-    // at once instead of flashing as a chat bubble before it is queued.
+    // at once instead of flashing as a chat bubble before it is queued. A turn
+    // parked on a usage limit is replaced by the Send, which starts at once.
     sendDestination: () =>
-      (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: session.session?.status,
+        activeTurnId: session.session?.activeTurnId,
+        queuedPrompts: queue.queue.length,
+        admissionBlock: session.session?.admissionBlock,
+      }),
     busySend: input.busySend,
     offerQueue: input.offerQueue,
     sendExtras: () => ({ resources: attachments.readyResources }),
@@ -243,6 +259,7 @@ export function useOpenGeniNativeSession(input: {
   return {
     sessionId: input.sessionId,
     workspaceId: input.workspaceId,
+    client: input.client,
     session,
     events: events.events,
     timeline: events.timeline,

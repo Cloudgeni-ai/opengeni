@@ -5,6 +5,7 @@ import {
   cancelExternalWorkspaceMemberGrantForRequest,
   updateExternalWorkspaceMemberForRequest,
   getOrganizationPrivacySettings,
+  MissingPermissionRefusal,
   OrganizationPrivacyLockedError,
   privacyDeploymentLimits,
   updateOrganizationPrivacySettings,
@@ -23,6 +24,7 @@ import {
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
   OrganizationAdministrationOverview,
+  OrganizationInferenceResidency,
   OrganizationInvitation,
   OrganizationUserSetupDelivery,
   OrganizationMember,
@@ -37,6 +39,7 @@ import {
   RetryOrganizationUserSetupDeliveryRequest,
   RevokeOrganizationWorkspaceMemberRequest,
   RevokeOrganizationWorkspaceMemberResponse,
+  UpdateOrganizationInferenceResidencyRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
   UpdateOrganizationPrivacySettingsRequest,
@@ -67,8 +70,13 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getOrganizationAdministrationOverview,
+  getOrganizationInferenceResidency,
+  InferenceResidencyChangeRefusedError,
+  type InferenceResidencyActorKind,
+  updateOrganizationInferenceResidency,
   getOrganizationInvitationForAdministration,
   getOrganizationPrivacyPreferences,
+  readOrganizationSignupUseCase,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -76,6 +84,7 @@ import {
   listOrganizationAdministrationMembers,
   listOrganizationInvitations,
   listSelfOrganizationInvitations,
+  listSelfOrganizationMemberships,
   nestedPostgresSqlState,
   prepareOrganizationUserSetupDelivery,
   revokeOrganizationInvitation,
@@ -93,7 +102,14 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
-import { agentActingAsPerson, organizationSettingsPermission } from "../http/acting-person";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import {
+  agentActingAsPerson,
+  isAgentActingAsPerson,
+  organizationSettingsPermission,
+} from "../http/acting-person";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { hasRecentManagedSignIn } from "./managed-sign-in-methods";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
@@ -133,7 +149,7 @@ async function requirePrivateSessionAdministrator(
       (grant) => grant.accountId === organizationId && grant.permissions.includes("account:admin"),
     )
   ) {
-    throw new HTTPException(403, { message: "organization administration requires account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   return { subjectId: access.subjectId };
 }
@@ -231,6 +247,118 @@ async function requireOrganizationAdministrator(
   });
 }
 
+/** A member of the organization, a key for it, or an agent with the person's account:read. */
+async function requireOrganizationReader(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+): Promise<{ subjectId: string }> {
+  const agent = agentActingAsPerson(context, organizationId, "account:read");
+  if (agent) return agent;
+  const access = await requireAccessContext(context, deps);
+  if (!access.accountGrants.some((grant) => grant.accountId === organizationId)) {
+    throw new HTTPException(404, { message: "organization not found" });
+  }
+  return { subjectId: access.subjectId };
+}
+
+/**
+ * Who is making an EU-only request: an API key whenever an Authorization
+ * header is present (personal keys included, which act as their owner),
+ * otherwise an agent acting as a person, otherwise a person in the app in a
+ * browser.
+ */
+function inferenceResidencyActorKind(context: Context): InferenceResidencyActorKind {
+  if (context.req.header("authorization") !== undefined) return "api_key";
+  if (isAgentActingAsPerson(context)) return "agent";
+  return "browser_person";
+}
+
+/**
+ * Whether this request could turn EU-only off: it is on, this is a person in
+ * a browser with Opengeni sign-in, and they are an active owner or admin.
+ * GET and PATCH both answer with this. The database checks again on change.
+ */
+async function canTurnInferenceResidencyOff(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+  subjectId: string,
+  euOnly: boolean,
+): Promise<boolean> {
+  if (
+    !euOnly ||
+    deps.settings.productAccessMode !== "managed" ||
+    inferenceResidencyActorKind(context) !== "browser_person" ||
+    !subjectId.startsWith("user:")
+  ) {
+    return false;
+  }
+  const memberships = await listSelfOrganizationMemberships(deps.db, subjectId);
+  return memberships.some(
+    (membership) =>
+      membership.organizationId === organizationId &&
+      membership.status === "active" &&
+      (membership.role === "owner" || membership.role === "admin"),
+  );
+}
+
+/**
+ * Who may change EU-only. Only Opengeni sign-in (managed access) has people
+ * in browsers who can turn it off, so in local and configured modes it can't
+ * be changed at all: turning it on there could never be undone. Turning it on
+ * takes the privacy-settings administrators (an owner or admin in a browser,
+ * an agent with their account:admin, or an administering organization key);
+ * turning it off takes an owner or admin in a browser, never an agent or key.
+ */
+async function requireInferenceResidencyChanger(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+  euOnly: boolean,
+): Promise<{ subjectId: string; kind: InferenceResidencyActorKind }> {
+  if (deps.settings.productAccessMode !== "managed") {
+    throw new HTTPException(409, {
+      message: "EU-only can only be changed when people sign in to Opengeni.",
+    });
+  }
+  const kind = inferenceResidencyActorKind(context);
+  if (kind === "browser_person") requireSameOriginBrowserMutation(context, deps);
+  if (euOnly) {
+    const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
+    return { subjectId, kind };
+  }
+  if (kind !== "browser_person") {
+    throw new HTTPException(403, {
+      message: "Only an owner or admin can turn EU-only off, in the app in a browser.",
+    });
+  }
+  const { session, subjectId } = await requireManagedHuman(context, deps);
+  // A sign-in from the last five minutes, as for changing sign-in methods: an
+  // agent driving the person's already signed-in browser has to sign in again.
+  const authSessionId = session.session?.id;
+  if (
+    typeof authSessionId !== "string" ||
+    !(await hasRecentManagedSignIn(deps, { authSessionId, authUserId: session.user.id }))
+  ) {
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: "Sign in again to turn EU-only off.",
+      details: { code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" },
+      retryable: false,
+    });
+  }
+  return { subjectId, kind };
+}
+
+const INFERENCE_RESIDENCY_REFUSAL_STATUS = {
+  forbidden: 403,
+  version_conflict: 409,
+  operation_reused: 409,
+  invalid: 422,
+  unavailable: 503,
+} as const;
+
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
   const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
     status: 422,
@@ -324,7 +452,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateOrganizationResponse.parse(
           await createManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
             trialCreditModelIds: signupCreditModelIds(deps.settings),
             trialCreditsEnabled:
@@ -347,7 +475,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateAdditionalOrganizationResponse.parse(
           await createAdditionalManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
           }),
         ),
@@ -359,7 +487,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organization-memberships", async (context) => {
-    const { session } = await requireManagedHuman(context, deps);
+    const { session, subjectId } = await requireManagedHuman(context, deps);
     try {
       const result = await ensureManagedAccessForUserWithOrganizationMemberships(deps.db, {
         userId: session.user.id,
@@ -371,14 +499,30 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
           // Each organization says whether its people keep a Personal
-          // workspace to see and work in, so the app can hide it when off.
+          // workspace to see and work in, so the app can hide it when off,
+          // and how this person said they want to use Opengeni there, so
+          // the new-chat page leads with matching suggestions on any device.
           memberships: await Promise.all(
-            result.organizationMemberships.map(async (membership) => ({
-              ...membership,
-              personalWorkspacesEnabled: (
-                await getOrganizationPrivacyPreferences(deps.db, membership.organizationId)
-              ).personalWorkspacesEnabled,
-            })),
+            result.organizationMemberships.map(async (membership) => {
+              const [privacy, signupUseCase] = await Promise.all([
+                getOrganizationPrivacyPreferences(deps.db, membership.organizationId),
+                readOrganizationSignupUseCase(deps.db, {
+                  organizationId: membership.organizationId,
+                  subjectId,
+                }).catch((error: unknown) => {
+                  // Only suggestions depend on it: the general ones show instead.
+                  console.warn("[api] could not read the signup use case", {
+                    sqlState: nestedPostgresSqlState(error) ?? null,
+                  });
+                  return undefined;
+                }),
+              ]);
+              return {
+                ...membership,
+                personalWorkspacesEnabled: privacy.personalWorkspacesEnabled,
+                ...(signupUseCase ? { signupUseCase } : {}),
+              };
+            }),
           ),
         }),
       );
@@ -777,6 +921,76 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     }
   });
 
+  // EU-only inference. Any member can read it, since it decides which models
+  // and features they can use. See requireInferenceResidencyChanger for who
+  // can change it.
+  app.get("/v1/organizations/:organizationId/inference-residency", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requireOrganizationReader(context, deps, organizationId);
+    const state = await getOrganizationInferenceResidency(deps.db, organizationId);
+    return context.json(
+      OrganizationInferenceResidency.parse({
+        ...state,
+        canTurnOff: await canTurnInferenceResidencyOff(
+          context,
+          deps,
+          organizationId,
+          subjectId,
+          state.euOnly,
+        ),
+      }),
+    );
+  });
+
+  app.patch("/v1/organizations/:organizationId/inference-residency", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const request = await parseBody(context, UpdateOrganizationInferenceResidencyRequest);
+    const actor = await requireInferenceResidencyChanger(
+      context,
+      deps,
+      organizationId,
+      request.euOnly,
+    );
+    let state: Awaited<ReturnType<typeof updateOrganizationInferenceResidency>>;
+    try {
+      state = await updateOrganizationInferenceResidency(deps.db, {
+        organizationId,
+        actorSubjectId: actor.subjectId,
+        actorKind: actor.kind,
+        euOnly: request.euOnly,
+        expectedVersion: request.expectedVersion,
+        operationId: request.operationId,
+      });
+    } catch (error) {
+      if (error instanceof InferenceResidencyChangeRefusedError) {
+        throw new HTTPException(INFERENCE_RESIDENCY_REFUSAL_STATUS[error.reason], {
+          message: error.message,
+        });
+      }
+      rethrowMembershipError(error);
+    }
+    return context.json(
+      OrganizationInferenceResidency.parse({
+        ...state,
+        canTurnOff: await canTurnInferenceResidencyOff(
+          context,
+          deps,
+          organizationId,
+          actor.subjectId,
+          state.euOnly,
+        ),
+      }),
+    );
+  });
+
   app.post("/v1/organizations/:organizationId/invitations", async (context) => {
     const { subjectId } = await requireOrganizationPerson(context, deps, "members:manage");
     const organizationId = parseId(
@@ -785,6 +999,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // `.invalid` addresses (RFC 2606) reach no one, and one is the stored
+    // placeholder of an account without an email address.
+    if (payload.email.trim().toLowerCase().endsWith(".invalid")) {
+      throw new HTTPException(422, { message: "That email address can't receive invitations" });
+    }
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {

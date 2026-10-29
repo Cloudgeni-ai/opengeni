@@ -4,8 +4,8 @@ import type { ActionCatalogEntry } from "@opengeni/contracts/app-actions";
  * Plain-language descriptions for catalog actions, so an agent searching the
  * catalog can tell what an action does and explain it to the person in the
  * words the app uses. They cover the Models and subscription settings
- * (subscription accounts, sharing, models, usage and resets); a test keeps
- * every such action described. The Settings guide in the bundled
+ * (subscription accounts, sharing, models, usage and resets) and tool
+ * approvals; a test keeps every such action described. The Settings guide in the bundled
  * opengeni-help Skill explains what each setting means.
  */
 
@@ -35,6 +35,48 @@ const RULES: Rule[] = [
     pattern: /\/vault-providers\/connections$/,
     text: () =>
       "List connected password managers and deployment availability: 1Password, Proton Pass, Keeper, Bitwarden and external vaults. Returns connection metadata and setup status, not secret values; does not contact providers.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Share a chat with anyone, for example family or a friend, without adding them to a workspace: creates a read-only link to the conversation as it is now, or refreshes the existing link so it includes the newest messages. Anyone with the link can read the conversation, without signing in: each person's messages under the name the chat shows for them, and the replies; tool details, files and anything not shown in the replies are left out. Only the person who started the chat can share it. Returns the link's url to give them.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Check whether a chat has a share link and get its url. enabled is false when share links are turned off here.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Stop sharing a chat: its share link stops working at once. Sharing it again later makes a new link.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/share-links$/,
+    text: () =>
+      "List the chats the person has shared with a link in this workspace, with each url.",
+  },
+  {
+    method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/members$/,
+    text: () =>
+      "Add someone who is already in the organization to a shared workspace, so they can see its shared chats and work there. A Personal workspace can't have other members. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/organizations\/:organizationId\/invitations$/,
+    text: () =>
+      "Invite someone by email to join the organization, optionally into shared workspaces. They see only the workspaces they are added to, never anyone's Personal workspace. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead; they need no account.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/visibility$/,
+    text: () =>
+      "Choose who in this workspace can see a chat: private (only the person who started it) or workspace (every member of this workspace). It never shows the chat to anyone outside the workspace; to let someone else read it, use createSessionShareLink.",
   },
   {
     method: "POST",
@@ -310,11 +352,65 @@ const RULES: Rule[] = [
     pattern: /\/sessions\/:sessionId\/realtime\/supergrok$/,
     text: () => "Start a SuperGrok realtime voice connection for a session.",
   },
+  // Buying credits: "add $20 to my account" should find these first time.
+  {
+    method: "GET",
+    pattern: /^\/v1\/billing$/,
+    text: () => "Read the organization's credit balance: how much money is left to spend.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/billing\/checkout$/,
+    text: () =>
+      "Buy credits: add money to the organization's balance, for example amountUsd 20 (5 to 10,000). Returns a secure payment page; creating it charges nothing, the person pays on the page.",
+  },
+  {
+    method: "GET",
+    pattern: /^\/v1\/billing\/checkout\/:checkoutSessionId$/,
+    text: () =>
+      "Check whether a credits payment went through, with the new balance once its credits are added.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/billing\/portal$/,
+    text: () =>
+      "Open the billing portal, where the person sees invoices and changes their payment method.",
+  },
+  {
+    method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/allowance\/grants$/,
+    text: () =>
+      "Give a workspace extra allowance credits under its spending limit. This doesn't add money to the organization's balance; to buy credits use createBillingCheckout.",
+  },
+  {
+    method: "GET",
+    pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
+    text: () =>
+      "Read an integration's tool approvals: whether each tool (for example send email or post a message) runs without asking (Allow), asks first (Ask) or is blocked (Block), with the connectionId and revision to pass when changing them.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
+    text: () =>
+      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools"), one action of a tool (target "action" with toolName and actionName) or the default for tools without their own approval (target "default"); permission null clears that approval. In Opengeni a Site\'s tool call set to Ask asks the viewer to confirm; on a published Site address it can\'t ask, so it fails there until it is set to Allow.',
+  },
+  {
+    method: "GET",
+    pattern: /\/session-mcp-tool-permissions$/,
+    text: () =>
+      "Read the tool approvals (Allow, Ask or Block) for MCP servers added to chats, with the revision to pass when changing them.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/session-mcp-tool-permissions$/,
+    text: () =>
+      'Change the tool approvals for an MCP server added to chats: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools") or the default for tools without their own approval (target "default"); permission null clears that approval.',
+  },
 ];
 
-/** Actions that must carry a description (subscriptions, models and vault connections). */
+/** Actions that must carry a description (subscriptions, models, vault connections and tool approvals). */
 export const DESCRIBED_ACTION_PATH =
-  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)|\/vault-providers\//;
+  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)|\/vault-providers\/|tool-permissions$/;
 
 function scopeOf(path: string): string {
   return path.startsWith("/v1/organizations/") ? "for the organization" : "in a workspace";

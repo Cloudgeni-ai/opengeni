@@ -54,7 +54,12 @@ import type {
   UpdateRecordingSpeakersResponse,
 } from "@opengeni/contracts";
 import type { OpenGeniClient } from "./client";
-import { type DesktopBridge, getDesktopBridge, getDesktopSystemAudio } from "./desktop-bridge";
+import {
+  type DesktopBridge,
+  type DesktopSystemAudioErrorCode,
+  getDesktopBridge,
+  getDesktopSystemAudio,
+} from "./desktop-bridge";
 import {
   createLiveTranscriber,
   type LiveTranscriber,
@@ -62,6 +67,8 @@ import {
   type LiveTranscriptTransport,
   type LiveWebSocketConstructor,
 } from "./recording-live";
+import { errorMessage } from "@opengeni/contracts/values";
+import { ownerNameField } from "./recording-owner";
 
 export * from "./recording-live";
 
@@ -784,6 +791,19 @@ export class RecordingUploader {
     return this.pumps.get(recordingId)?.status ?? null;
   }
 
+  /**
+   * Try a recording again after a failure retrying couldn't fix, once its
+   * cause is fixed (credits added, a model chosen). Its audio stays stored
+   * here until the server has it, so nothing is lost by failing. False when
+   * this uploader holds no failed upload for it.
+   */
+  retry(recordingId: string): boolean {
+    const pump = this.pumps.get(recordingId);
+    if (!pump?.status.failed) return false;
+    this.kick(recordingId);
+    return true;
+  }
+
   /** The finalize result, once a finished recording is on the server. */
   readonly finalized = new Map<string, FinalizeRecordingResponse>();
 
@@ -833,6 +853,9 @@ export class RecordingUploader {
       };
       this.pumps.set(recordingId, pump);
     }
+    // A new pass is a new attempt: what failed before says nothing about it,
+    // so whoever waits for this pass waits for its own result.
+    if (pump.status.failed) this.update(pump, { failed: null });
     pump.again = true;
     pump.wake?.();
     this.startPump(recordingId, pump);
@@ -866,6 +889,9 @@ export class RecordingUploader {
         if (done) return;
       } catch (error) {
         if (error instanceof PermanentRecordingError) {
+          // Passes asked for before it failed would only fail the same way;
+          // the next kick, such as retry(), starts again.
+          pump.again = false;
           this.update(pump, {
             uploading: false,
             failed: { code: error.code, message: error.message },
@@ -1135,8 +1161,81 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** The largest piece {@link uploadRecordingAudio} sends in one upload. */
+export const RECORDING_AUDIO_UPLOAD_PIECE_BYTES = 8 * 1024 * 1024;
+
+export type UploadRecordingAudioOptions = {
+  uploader: RecordingUploader;
+  workspaceId: string;
+  /** One encoded audio file, such as a recorder's WebM or a phone's AAC. */
+  audio: Blob;
+  /** Its type; the blob's own type by default. */
+  mimeType?: string;
+  /** How long it plays, when known; 0 otherwise. */
+  durationMilliseconds?: number;
+  /** A new id by default. */
+  recordingId?: string;
+  /** What the recording is, as at the start of a capture. */
+  create?: Omit<CreateRecordingRequest, "recordingId" | "tracks" | "startedAt"> & {
+    startedAt?: string;
+  };
+  /** What the audio was recorded from. Default: the microphone. */
+  source?: RecordingCaptureSource;
+  /** Stop waiting for the upload (it continues in the background). */
+  signal?: AbortSignal;
+};
+
+/**
+ * Send audio the app already has, such as a file or speech kept on the
+ * device, as a new one-track recording. It goes the way live capture does:
+ * stored locally first and uploaded in the background, so a dropped
+ * connection only delays it. Resolves as {@link RecordingUploader.finish}
+ * does, once the server has it and transcription has started.
+ */
+export async function uploadRecordingAudio(
+  options: UploadRecordingAudioOptions,
+): Promise<RecordingUploadStatus> {
+  const mimeType = options.mimeType || options.audio.type;
+  if (!mimeType) throw new TypeError("uploadRecordingAudio needs the audio's type.");
+  const bytes = new Uint8Array(await options.audio.arrayBuffer());
+  if (bytes.byteLength === 0) throw new TypeError("uploadRecordingAudio needs audio.");
+  const recordingId = options.recordingId ?? crypto.randomUUID();
+  const duration = Math.max(0, Math.round(options.durationMilliseconds ?? 0));
+  const { startedAt, ...create } = options.create ?? {};
+  await options.uploader.begin({
+    workspaceId: options.workspaceId,
+    recordingId,
+    create: {
+      ...create,
+      recordingId,
+      startedAt: startedAt ?? new Date(Date.now() - duration).toISOString(),
+      tracks: [{ trackNumber: 0, source: options.source ?? "microphone", mimeType }],
+    },
+  });
+  // Pieces of one file concatenate back into it, as a recorder's chunks do.
+  const pieces = Math.max(1, Math.ceil(bytes.byteLength / RECORDING_AUDIO_UPLOAD_PIECE_BYTES));
+  for (let index = 0; index < pieces; index += 1) {
+    const from = index * RECORDING_AUDIO_UPLOAD_PIECE_BYTES;
+    const piece = bytes.subarray(
+      from,
+      Math.min(bytes.byteLength, from + RECORDING_AUDIO_UPLOAD_PIECE_BYTES),
+    );
+    const start = Math.round((duration * from) / bytes.byteLength);
+    const end = Math.round((duration * (from + piece.byteLength)) / bytes.byteLength);
+    await options.uploader.addChunk({
+      recordingId,
+      trackNumber: 0,
+      chunkNumber: index,
+      bytes: piece,
+      sha256: await sha256Hex(piece),
+      startMilliseconds: start,
+      durationMilliseconds: end - start,
+    });
+  }
+  return await options.uploader.finish(recordingId, {
+    endedAt: new Date(),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
 }
 
 // --- Local stores -------------------------------------------------------------
@@ -1385,7 +1484,16 @@ export type RecorderSnapshot = {
     label: string;
   }>;
   upload: RecordingUploadStatus | null;
-  error: { code: RecorderErrorCode; message: string } | null;
+  error: {
+    code: RecorderErrorCode;
+    message: string;
+    /**
+     * Why the desktop app couldn't record computer audio, with
+     * system_audio_unavailable from a desktop source. Show your own words for
+     * it; message is the app's English sentence.
+     */
+    reason?: DesktopSystemAudioErrorCode;
+  } | null;
   /**
    * The live transcript per track while `liveTranscript` is on, else null
    * or absent. A preview only; it never affects the recording.
@@ -1420,6 +1528,12 @@ export type RecorderOptions = {
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
   transcription?: RecordingTranscriptionRequest;
+  /**
+   * The person recording's name, as your app knows it: their microphone's
+   * name in the transcript when computer or tab audio is recorded beside it
+   * and Opengeni has no name for them.
+   */
+  ownerName?: string;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /**
@@ -1673,11 +1787,19 @@ export function desktopSystemAudioSource(
         sampleRate = started.sampleRate;
       } catch (error) {
         finish();
+        const failure = (error && typeof error === "object" ? error : {}) as {
+          code?: unknown;
+          message?: unknown;
+        };
         const message =
-          error && typeof error === "object" && "message" in error
-            ? String((error as { message: unknown }).message)
+          typeof failure.message === "string"
+            ? failure.message
             : "This computer can't record its own audio.";
-        throw new RecorderCaptureError("system_audio_unavailable", message);
+        throw new RecorderCaptureError(
+          "system_audio_unavailable",
+          message,
+          desktopSystemAudioReason(failure.code),
+        );
       }
       for (const [id, samples] of early.splice(0)) if (id === captureId) write(samples);
       const id = captureId;
@@ -1818,8 +1940,8 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     }
   };
 
-  const fail = (code: RecorderErrorCode, message: string) => {
-    emit({ state: "failed", error: { code, message } });
+  const fail = (code: RecorderErrorCode, message: string, reason?: DesktopSystemAudioErrorCode) => {
+    emit({ state: "failed", error: { code, message, ...(reason ? { reason } : {}) } });
   };
 
   const liveSnapshot = () =>
@@ -1836,6 +1958,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         recordingId,
         trackNumber: capture.trackNumber,
         ...(options.liveWebSocket ? { WebSocket: options.liveWebSocket } : {}),
+        mediaTrack: capture.stream.getAudioTracks()[0] ?? null,
         onChange: () => emit({ live: liveSnapshot() }),
       });
     }
@@ -2019,7 +2142,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       try {
         streams = await openStreams();
       } catch (error) {
-        if (error instanceof RecorderCaptureError) fail(error.code, error.message);
+        if (error instanceof RecorderCaptureError) fail(error.code, error.message, error.reason);
         else fail("capture_failed", errorMessage(error));
         return;
       }
@@ -2064,6 +2187,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
           ...(options.metadata ? { metadata: options.metadata } : {}),
           ...(options.transcription ? { transcription: options.transcription } : {}),
+          ...ownerNameField(options.ownerName, captures),
           tracks: captures.map((capture) => ({
             trackNumber: capture.trackNumber,
             source: capture.source,
@@ -2123,6 +2247,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       if (snapshot.state !== "recording") return;
       for (const capture of captures)
         if (capture.recorder.state === "recording") capture.recorder.pause();
+      for (const capture of captures) capture.live?.setPaused(true);
       pausedAt = performance.now();
       emit({
         state: "paused",
@@ -2137,6 +2262,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       pausedAt = null;
       for (const capture of captures)
         if (capture.recorder.state === "paused") capture.recorder.resume();
+      for (const capture of captures) capture.live?.setPaused(false);
       emit({ state: "recording", pauseReason: null });
     },
 
@@ -2239,10 +2365,20 @@ export class RecorderCaptureError extends Error {
   constructor(
     readonly code: RecorderErrorCode,
     message: string,
+    /** The desktop app's reason, when computer audio couldn't be recorded. */
+    readonly reason?: DesktopSystemAudioErrorCode,
   ) {
     super(message);
     this.name = "RecorderCaptureError";
   }
+}
+
+function desktopSystemAudioReason(code: unknown): DesktopSystemAudioErrorCode {
+  return code === "unavailable" ||
+    code === "permission_denied" ||
+    code === "sound_server_unavailable"
+    ? code
+    : "capture_failed";
 }
 
 /** The browser's capture: MediaRecorder, IndexedDB and cross-tab capture locks. */

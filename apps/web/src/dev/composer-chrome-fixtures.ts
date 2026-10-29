@@ -78,8 +78,6 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     rigVersionId: null,
     channelId: null,
@@ -247,7 +245,7 @@ export function galleryGoal(overrides: Partial<SessionGoal> | null): UseGoalResu
   };
 }
 
-export function galleryAgentNode(index: number, overrides: Partial<Session> = {}): LineageNode {
+function galleryAgentNode(index: number, overrides: Partial<Session> = {}): LineageNode {
   const id = `${String(index + 1).padStart(8, "0")}-7777-4777-8777-${String(index + 1).padStart(12, "0")}`;
   return {
     session: gallerySession({
@@ -426,7 +424,7 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
   }),
   catalogModel({
     id: "opper/aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     provider: "opper",
     providerLabel: "Opper",

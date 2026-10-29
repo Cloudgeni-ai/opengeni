@@ -28,8 +28,11 @@
   option. `group` (a non-archived root page) keeps Site conversations out of
   the rows and returns `siteGroups` with its first page: one complete row per
   Site and project with the viewer's conversation count over the requested
-  archive scope, latest activity and status counts, bounded to the 200 most
-  recently active (`siteGroupsTruncated` marks more). Its continuation pages
+  archive scope, row time (its newest publish) and status counts, bounded to
+  200 rows (`siteGroupsTruncated` marks more). The bound keeps pinned rows
+  first, then the latest by newest publish or conversation activity, so a Site
+  whose conversation is active or needs you is kept ahead of Sites nobody
+  touched; the kept rows still sort by their row time. Its continuation pages
   are ordinary default pages. `include` lists them as ordinary rows and is
   bound into its cursor; the sidebar uses it for search, Archived, pins and
   work a Site conversation spawned. Both use the same viewer authorization,
@@ -46,13 +49,28 @@
   Site tab of its details. The Site fills the page and a
   chat panel sits beside it with one conversation open, the newest unless
   `?conversation=<id>` chooses one. The panel doesn't list conversations (the
-  Site's sidebar row does); it shows the open one as a regular chat with the
-  model picker, narrower, titled in its header. It resizes from its left edge
-  (drag, or the arrow keys, Home and End on the focused handle; double-click
-  resets) between 320 and 720 px, leaving the Site at least 360 px where there
-  is room, and hides to a strip (Enter on the handle, or its button). Width
-  and hidden state are remembered per person in this browser; choosing a
-  conversation shows a hidden panel again. The conversation open without a
+  Site's sidebar row does); it shows the open one as the regular chat
+  (`SessionRoute` with `placement="panel"`, the session panel turned off with
+  `SessionUiFeaturesOff`), narrower, titled in its header: the same composer,
+  messages and status row as on the chat's own page, so paste and drop of
+  files, the attach button, dictation, voice, the model chip and the queue
+  and steer row all work there. Files dragged over the page cover the Site
+  (`ChatFileDropCover`), so a drop on the Site attaches to the chat rather
+  than going to the Site's frame; the cover shows only while files are
+  dragged and the chat is shown and takes files. A Site with its own file
+  drop zone still gets a drag that enters the window directly over its
+  frame, until the drag crosses the console. The chat keeps the page's state
+  to itself: it isn't the header's or sidebar's open chat, isn't remembered
+  as the last chat and isn't reported to an embedding host, and Ctrl/⌘+F
+  opens its find only while focus is inside it. It resizes from its edge
+  toward the Site (drag, or the arrow keys, Home and End on the focused
+  handle; double-click resets) between 320 and 720 px, leaving the Site at
+  least 360 px where there is room, and hides to a strip (Enter on the
+  handle, or its button). Its ⋯ menu moves it to the left or right of the
+  Site (wide screens only; narrow ones stack the chat below); right is the
+  default. Width, side and hidden state are remembered per person in this
+  browser; choosing a conversation shows a hidden panel again. The
+  conversation open without a
   choice is fixed when the Site opens, so activity in another conversation
   never swaps it out. A `?conversation=` that isn't one of this Site's own
   top-level, unarchived conversations falls back to the Site. A nested row,
@@ -61,8 +79,11 @@
   and closing the row again is respected. **New** starts a conversation the
   way the Site's own chat does, sending the Site and its current version
   (`x-opengeni-site-id`, `x-opengeni-site-version`) with only the fields a
-  Site may set, so it is private to the viewer and listed under the Site. It
-  doesn't offer voice-first start. Once open, New stays open until a
+  Site may set, so it is private to the viewer and listed under the Site,
+  with the regular composer: files attached to the first message (the API
+  accepts file resources on a create from the console's Site view, without
+  a frame marker, never from Site code) and voice-first start. Once open, New
+  stays open until a
   conversation is chosen (choosing the Site's own row again does not close
   it). The panel follows `siteSessionIds` hints, so a conversation started in
   the Site beside it becomes the newest when the Site is next opened. The
@@ -105,13 +126,25 @@
     it changes, replacing the frame once, in the same render as its HTML,
     and keeping the version on screen until the new one has loaded; a failed
     update tries again, waiting longer each time (up to 30 seconds), and a
-    hidden tab waits until it is shown. The frame's label says what is true
-    (`ArtifactSandbox` `liveState`): **Live**, **Updating** while a new
+    hidden tab waits until it is shown. The frame says only what needs
+    attention (`ArtifactSandbox` `liveState`): **Updating** while a new
     version loads, or **Reconnecting** when a check or update failed (the
     version shown stays); on a narrow screen only its dot shows, and it is
-    still announced. On a Site published to the web, the header's link to
-    the published Site stands in for **Live**, and **Updating** or
-    **Reconnecting** shows beside it.
+    still announced. The Site view never shows the frame's plain **Live**,
+    so "live" never reads as "on the web".
+  - The header's one publication control (`SitePublicationControl`, read
+    with the viewer's own `getSitePublicationLink`) says whether the Site is
+    on the web. **Published** opens a menu with the address (the primary URL
+    the API reports), **Open**, **Copy link** and, for people with
+    `artifacts:publish`, **Publishing settings**. An unpublished Site shows
+    **Publish** to those people and nothing to anyone else; a taken-down
+    Site says **Taken down**. Publish and Publishing settings open the
+    Site's own publish form (`SitePublishPage` with `useSiteManagement`,
+    exactly as its Settings tab) as a page in place of the Site, which stays
+    mounted behind it, with the chat beside it; full screen is left first.
+    A successful Publish or Save, or its back link, returns to the Site and
+    the header shows the change at once. Nothing shows while the address is
+    loading, or where publishing isn't available.
   - The version chip in the Site's header (`SiteVersionMenu`) shows the live
     version and its recent history (eight, then **All versions** on the
     details page). **Undo last change** restores the version that was live
@@ -130,7 +163,8 @@
   filed in that project too, so the Site and its conversations stay together.
   A create that names no project (omitted or `null`) files the conversation
   with its Site; only a named project overrides that. Starting or moving
-  conversations never takes a Site out of its own project.
+  conversations never takes a Site out of its own project; moving its row
+  does (below).
   It is a row of its own rather than a child of that chat because a chat's
   children in the sidebar are the work it spawned, and a Site outlives and is
   used apart from its chat. The row is listed when the viewer lists that chat
@@ -140,14 +174,17 @@
   console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
-  latest open, which only lists the Site. A row's activity is the latest of
-  its conversations, its newest published version (creation is the first)
-  and the chats that published its versions (the one that created it and any
-  used to edit it), as far as the viewer can see them. So Sites in use rise
-  and untouched ones sort down like old sessions, without being hidden.
-  Opening a Site is not activity, just as opening a chat is not. Archiving,
-  restoring, rolling back or any other write to the Site's record is not
-  activity either. Opens are personal and never visible to anyone
+  latest open, which only lists the Site. A row's time is the Site's newest
+  published version (creation is the first) and nothing else, so Sites that
+  get new versions rise and the rest sort down like old sessions, without
+  being hidden. Messages and turns in its conversations (including a side
+  chat used to edit it) and in the chat that created or published it never
+  move it; a publish from any of them does. Opening a Site is not activity,
+  just as opening a chat is not. Archiving, restoring, rolling back (the
+  version chip's Undo, which makes an existing version current again and adds
+  none) or any other write to the Site's record does not move it either. A
+  viewer who cannot read the Site sees no publishes, so its row keeps the time
+  its first conversation there started. Opens are personal and never visible to anyone
   else; a Site page cannot record one. The console records one open per page
   (router history entry) that shows the Site view: not again when its client
   is replaced, only once a page that loaded hidden is shown, and not again
@@ -172,6 +209,26 @@
   again, restores it; a pin is kept. Archived Sites are not listed under the
   Archived filter. Archive on a spawned chat's row archives its workstream,
   since archive belongs to the top-level chat.
+- A Site row in a project moves like a chat row: "Move to project" in its
+  menu (right-click or the touch overflow menu) lists the same projects,
+  with Default taking it out of every project, and the row can be dragged
+  onto a project. Moving is shared, like a chat's project (`PUT
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/channel` with
+  `{ fromChannelId, channelId }`, `updateSiteProject` in the SDK,
+  `sessions:control` plus control of every conversation that moves, refused
+  on a Site origin; the Site itself moves only when it is in the caller's
+  audience). The row's
+  top-level conversations the caller sees in the source project move with it;
+  other people's private conversations stay where they are, so they may then
+  see the Site in two projects. When the source project is the Site's own as
+  the caller sees it (the one someone last moved it to, else the creating
+  chat's, or Default when they cannot see that chat), the Site moves too
+  (`site_project_placements`) and its new conversations are filed there;
+  deleting that project returns it to Default. A row left by a Site that is
+  no longer in the caller's audience moves only their conversations. One move
+  of a Site runs at a time. The Site itself, its publication, audience and
+  Artifacts entry never change. A pinned row has no project, so it offers no
+  move.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.
@@ -397,7 +454,6 @@ OPENGENI_REQUIRE_REAL_DB=1 bun test --max-concurrency=4 \
   apps/api/test/published-sites-postgres.test.ts
 bun test packages/sdk/test/site-ai.test.ts apps/api/test/sse-stream-bounds.test.ts
 bun scripts/public-api/check.ts
-OPENGENI_REQUIRE_REAL_DB=1 bun scripts/public-api/sdk-compat.ts
 ```
 
 Use the repository's pinned Bun/Node and an explicitly configured

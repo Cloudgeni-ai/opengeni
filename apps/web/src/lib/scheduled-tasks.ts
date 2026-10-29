@@ -244,7 +244,7 @@ export function newScheduledTaskFormState(
     sandboxBackend: "",
     machineSandboxId: machineDefault ? (defaults.defaultMachineSandboxId ?? "") : "",
     workingDir: "",
-    overlapPolicy: "allow_concurrent",
+    overlapPolicy: "steer",
     includeOpenGeniTool,
     // A new schedule that starts its own session follows the defaults, like a new chat.
     followsWorkspaceDefaults: true,

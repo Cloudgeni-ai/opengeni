@@ -108,6 +108,8 @@ import {
   clearSecretFilesCommand,
   secretEnvFileContent,
   secretEnvFilePath,
+  carryHasReferences,
+  profileEnvironmentOf,
   secretExecCarryFor,
   secretExecEnvironment,
   spliceCarry,
@@ -116,6 +118,7 @@ import {
   type SecretFileWriter,
 } from "../secret-delivery";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -995,6 +998,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
   /** Attempt scopes that received secret files on this session (cleanup). */
   private readonly secretScopes = new Set<string>();
+  /** Attempt scopes already told that this sandbox could not receive a profile. */
+  private readonly profileDeliveryNoted = new Set<string>();
   private readonly processControlReads = new Map<number, SharedProcessRead>();
   private readonly commandOwnerBackends = new Set<RoutableBackendSession>();
   /** Every backend whose settled op-stream results may still need a final ack.
@@ -1755,14 +1760,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<void> {
     if (!this.deps.captureProcessOutput) return;
     // Router byte-offset pages atomically append output and advance the exact
-    // expected cursor. Never send these through the legacy append-then-ack path.
+    // expected cursor. Never send these through the append-then-ack path.
     const atomicReceipt =
       record.pendingProviderReceipt ?? (typeof result === "string" ? result : undefined);
     if (
       atomicReceipt &&
       record.backend.session.captureCommandOutput &&
-      record.backend.session.getProviderCommandOutput?.(atomicReceipt)?.command.kind ===
-        "modal-router-v1"
+      record.backend.session.getProviderCommandOutput?.(atomicReceipt)
     ) {
       record.pendingProviderReceipt = atomicReceipt;
       try {
@@ -2724,17 +2728,45 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const cmd = (args as { cmd?: unknown }).cmd;
     const carry = secretExecCarryFor(cmd);
     if (!carry || typeof cmd !== "string") return args;
-    // Managed sandboxes run commands through POSIX sh. A carry the tool
-    // wrapper could not splice (no turn-cancellation wrapper) is spliced here.
-    const spliced = spliceCarry(carry, "posix");
-    const command = carry.spliced ? cmd : cmd.split(carry.command).join(spliced.text);
     const writer: SecretFileWriter = async (file) =>
       await withoutProviderCommandHandle(() =>
         writeSecretFileOnBackend(session, file, backend.kind),
       );
-    const env = await secretExecEnvironment(carry, spliced, writer);
+    let command = cmd;
+    let env: Record<string, string> = {};
+    if (carryHasReferences(carry)) {
+      // Managed sandboxes run commands through POSIX sh. A carry the tool
+      // wrapper could not splice (no turn-cancellation wrapper) is spliced here.
+      const spliced = spliceCarry(carry, "posix");
+      command = carry.spliced ? cmd : cmd.split(carry.command).join(spliced.text);
+      env = await secretExecEnvironment(carry, spliced, writer);
+    }
+    // Credential profile variables ride the same file, ahead of the command,
+    // so variables the command sets itself still win.
     const envFile = secretEnvFilePath(carry.scope);
-    await writer({ path: envFile, content: new TextEncoder().encode(secretEnvFileContent(env)) });
+    const content = new TextEncoder().encode(
+      secretEnvFileContent(env, profileEnvironmentOf(carry)),
+    );
+    if (!carryHasReferences(carry)) {
+      // Profile variables only: a sandbox that cannot receive the file (a
+      // backend without private writes, or a failed write) runs the command
+      // without them. A profile never fails a command. Attempt-end cleanup
+      // covers the scope even if a write fails part-way.
+      this.secretScopes.add(carry.scope);
+      try {
+        await writer({ path: envFile, content });
+      } catch {
+        if (!this.profileDeliveryNoted.has(carry.scope)) {
+          this.profileDeliveryNoted.add(carry.scope);
+          carry.deliveryNotes?.push(
+            "credential profile not applied: this sandbox could not receive it",
+          );
+        }
+        return args;
+      }
+      return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(cmd, envFile) };
+    }
+    await writer({ path: envFile, content });
     this.secretScopes.add(carry.scope);
     return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(command, envFile) };
   }
@@ -3462,7 +3494,7 @@ async function assertProviderCanSeeMaterializedPath(
       output: null,
       exitCode: null,
       providerSessionId: null,
-      causeMessage: cause instanceof Error ? cause.message : String(cause),
+      causeMessage: errorMessage(cause),
     });
     throw cause;
   }
@@ -3481,7 +3513,7 @@ async function assertProviderCanSeeMaterializedPath(
       output: returnedOutput || null,
       exitCode: null,
       providerSessionId: null,
-      causeMessage: cause instanceof Error ? cause.message : String(cause),
+      causeMessage: errorMessage(cause),
     });
   }
   const status = parseExecResponseBanner(output);

@@ -70,7 +70,11 @@ const context = {
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#chat">{children}</a>,
 }));
-mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => context,
+  // The account picker reads the same context to name each account's origin.
+  useOptionalAppContext: () => context,
+}));
 mock.module("./schedule-parts", () => ({
   useScheduleAccess: () => ({
     canManage: true,
@@ -190,7 +194,6 @@ beforeEach(() => {
     schedule: { type: "manual" },
     overlapPolicy: "allow_concurrent",
     executionDigest: "0".repeat(64),
-    variableSetId: null,
     rigId: null,
     metadata: {},
     agentConfig: {
@@ -313,8 +316,31 @@ test("an existing-chat schedule shows no account picker and saves no pins when r
   await act(async () => root.unmount());
 });
 
+test("an automation that continues a chat can steer its own running run", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig.tools = [];
+  const { container, root } = await render();
+  expect(container.textContent).toContain("Queue if still running");
+  const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+  const steer = choices.find((choice) => choice.textContent === "Steer")!;
+  expect(choices.map((choice) => choice.textContent)).toEqual(
+    expect.arrayContaining(["Queue", "Steer", "Skip"]),
+  );
+  await act(async () => {
+    steer.click();
+    await flush();
+  });
+  expect(steer.getAttribute("aria-checked")).toBe("true");
+  expect(container.textContent).toContain("The new run reaches the agent at its next step");
+  expect(container.textContent).toContain("Steer if still running");
+  const request = (await save(container)) as { overlapPolicy?: string };
+  expect(request.overlapPolicy).toBe("steer");
+  await act(async () => root.unmount());
+});
+
 test("an unpinned connector shows its current accounts and a message-only save sends no accounts", async () => {
   const { container, root } = await render();
+  expect(container.textContent).not.toContain("If the previous run is still working");
   expect(accountSwitches(container, "empty")[0]?.getAttribute("aria-checked")).toBe("true");
   expect(container.textContent).toContain(
     "Pinned for retained. Other connectors use your current accounts each run.",

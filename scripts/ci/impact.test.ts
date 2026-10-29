@@ -243,6 +243,7 @@ describe("fail-closed change impact", () => {
   test.each([
     "bun.lock",
     ".bun-version",
+    ".changeset/config.json",
     ".github/workflows/ci.yml",
     ".dockerignore",
     "scripts/ci/workspace.ts",
@@ -260,12 +261,24 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-deployment-mode");
     expect(plan.guards).toContain("migration-online-safety");
-    expect(plan.guards).toContain("migration-schema-contract");
+    expect(plan.guards).toContain("migration-immutability");
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
-    expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
+  });
+
+  test("docs and changeset notes alongside code select only the code's tests", () => {
+    const code = createImpactPlan(["apps/web/src/main.tsx"]);
+    const mixed = createImpactPlan([
+      "apps/web/src/main.tsx",
+      "docs/artifact-engine.md",
+      ".changeset/quiet-web.md",
+    ]);
+    expect(mixed.mode).toBe("focused");
+    expect(mixed.unitTests).toEqual(code.unitTests);
+    expect(mixed.typecheckProjects).toEqual(code.typecheckProjects);
+    expect(createImpactPlan([".changeset/quiet-web.md"]).mode).toBe("docs");
   });
 
   test("public API surface guards follow the API, contracts, SDK, and React graph", () => {
@@ -278,11 +291,9 @@ describe("fail-closed change impact", () => {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.guards).toContain("public-api");
-      expect(plan.guards).toContain("sdk-compat");
     }
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
-    expect(web.guards).not.toContain("sdk-compat");
   });
 
   test("the subscription contract guard runs on docs-only and focused plans", () => {
@@ -335,6 +346,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
@@ -354,6 +366,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/plugin-discovery.browser.e2e.ts",
       "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
+      "test/e2e/project-profile.browser.e2e.ts",
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
@@ -371,10 +384,12 @@ describe("fail-closed change impact", () => {
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -847,6 +862,20 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the desktop window bar helper selects every browser test that uses it", () => {
+    const plan = createImpactPlan(["test/e2e/desktop-window-bar.ts"]);
+    expect(plan.mode).toBe("focused");
+    for (const path of [
+      "test/e2e/artifact-desktop.browser.e2e.ts",
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
+      "test/e2e/session-sidebar.browser.e2e.ts",
+      "test/e2e/signed-out-page.browser.e2e.ts",
+    ]) {
+      expect(plan.e2eTests).toContain(path);
+    }
+  });
+
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
       "apps/web/src/components/rail/switcher-block.tsx",
@@ -929,6 +958,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
@@ -948,6 +978,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/plugin-discovery.browser.e2e.ts",
       "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
+      "test/e2e/project-profile.browser.e2e.ts",
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
@@ -965,10 +996,12 @@ describe("fail-closed change impact", () => {
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -1139,6 +1172,7 @@ function requiredResult(
     build: number;
     bakeImages?: boolean;
     preImage?: boolean;
+    attested?: boolean | undefined;
   },
 ): boolean {
   const result = spawnSync(
@@ -1178,6 +1212,10 @@ function requiredResult(
       "--argjson",
       "preImage",
       String(options.preImage ?? false),
+      // Omitted for old callers: the filter defaults to the unattested rules.
+      ...(options.attested === undefined
+        ? []
+        : ["--argjson", "attested", String(options.attested)]),
       "-f",
       "scripts/ci/required-results.jq",
     ],
@@ -1334,6 +1372,59 @@ describe("workflow fail-closed contracts", () => {
       false,
     );
     expect(requiredResult(results, { ...options, mode: "focused" })).toBe(false);
+  });
+
+  test("a Batch-attested main push requires skipped test lanes and real artifacts", () => {
+    const lanes = [
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ];
+    const results: Record<string, { result: string }> = {
+      plan: { result: "success" },
+      "artifact-runtime": { result: "success" },
+      deployment: { result: "success" },
+      images: { result: "success" },
+      ...Object.fromEntries(lanes.map((name) => [name, { result: "skipped" }])),
+    };
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 900,
+      integration: 20,
+      e2e: 10,
+      browser: 4,
+      artifactRuntime: true,
+      build: 30,
+      attested: true,
+    };
+    expect(requiredResult(results, options)).toBe(true);
+    // The same skipped lanes are a failure for an ordinary or omitted-attestation run.
+    expect(requiredResult(results, { ...options, attested: false })).toBe(false);
+    expect(requiredResult(results, { ...options, attested: undefined })).toBe(false);
+    // A lane that ran (even green) means the run was not uniformly attested.
+    for (const name of lanes)
+      for (const result of ["success", "failure", "cancelled"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const name of ["plan", "artifact-runtime", "deployment", "images"])
+      for (const result of ["failure", "cancelled", "skipped"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const extra of [
+      { event: "pull_request" as const },
+      { event: "schedule" as const },
+      { event: "workflow_dispatch" as const },
+      { mode: "focused" as const },
+      { bakeImages: false },
+    ])
+      expect(requiredResult(results, { ...options, ...extra })).toBe(false);
+    const { images: _images, ...preImage } = results;
+    expect(requiredResult(preImage, { ...options, preImage: true })).toBe(true);
+    expect(requiredResult(results, { ...options, preImage: true })).toBe(false);
   });
 
   test("pre-image validation requires every non-image lane exactly and never sees images", () => {

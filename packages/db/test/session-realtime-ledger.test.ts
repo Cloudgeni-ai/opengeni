@@ -31,7 +31,6 @@ import {
   listOutstandingSessionSystemUpdates,
   mutateSessionControlInTransaction,
   peekSessionWork,
-  recoverSessionDispatch,
   resolveCompanyBrainContextSelection,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
@@ -44,7 +43,6 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
 } from "../src/index";
-import { settleCodexCredentialLeaseLoss } from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
 import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 
@@ -2633,73 +2631,6 @@ describe("session realtime ledger", () => {
     );
     expect(unacknowledged?.clientAckedAt).toBeNull();
     expect(unacknowledged?.providerAckedAt).toBeNull();
-  });
-
-  test("projects deterministic errors from both exceptional terminal failure paths", async () => {
-    const leaseValue = await fixture();
-    const leaseConnection = await claimInitial(leaseValue);
-    await complete(leaseValue, leaseConnection.claimed.connection);
-    await proveProviderStarted(leaseValue, leaseConnection.claimed.connection);
-    const leaseExecution = await admitAndClaimDelegation(
-      leaseValue,
-      leaseConnection.claimed.connection,
-    );
-    const leaseLoss = await settleCodexCredentialLeaseLoss(client.db, {
-      accountId: leaseValue.owner.accountId,
-      workspaceId: leaseValue.owner.workspaceId,
-      sessionId: leaseValue.owner.sessionId,
-      turnId: leaseExecution.turn.id,
-      attemptId: leaseExecution.attemptId,
-      holderId: crypto.randomUUID(),
-      generation: 1,
-      expectedRedispatches: 0,
-      checkpointDurable: false,
-      recoveryPayload: { reason: "unused" },
-      failedPayload: {
-        code: "codex_credential_lease_lost_without_checkpoint",
-        error: "Credential lease was lost before a durable checkpoint.",
-      },
-    });
-    expect(leaseLoss.action).toBe("failed");
-
-    const crashValue = await fixture();
-    const crashConnection = await claimInitial(crashValue);
-    await complete(crashValue, crashConnection.claimed.connection);
-    await proveProviderStarted(crashValue, crashConnection.claimed.connection);
-    const crashExecution = await admitAndClaimDelegation(
-      crashValue,
-      crashConnection.claimed.connection,
-    );
-    const exhausted = await recoverSessionDispatch(client.db, crashValue.owner.workspaceId, {
-      sessionId: crashValue.owner.sessionId,
-      attemptId: crashExecution.attemptId,
-      timeoutType: "HEARTBEAT",
-      maxRedispatches: 0,
-    });
-    expect(exhausted.action).toBe("exceeded");
-
-    for (const [value, turnId, code] of [
-      [leaseValue, leaseExecution.turn.id, "codex_credential_lease_lost_without_checkpoint"],
-      [crashValue, crashExecution.turn.id, "worker_death_redispatch_exhausted"],
-    ] as const) {
-      const rows = await transaction(value.owner.workspaceId, (tx) =>
-        tx
-          .select()
-          .from(schema.sessionRealtimeEntries)
-          .where(
-            and(
-              eq(schema.sessionRealtimeEntries.turnId, turnId),
-              eq(schema.sessionRealtimeEntries.direction, "provider_out"),
-            ),
-          ),
-      );
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        kind: "error",
-        turnId,
-        payload: { code, status: "failed" },
-      });
-    }
   });
 
   test("does not deadlock ordinary work when delegation metadata is corrupted", async () => {

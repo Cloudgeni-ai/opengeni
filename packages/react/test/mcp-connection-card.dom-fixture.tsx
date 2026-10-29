@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { StrictMode } from "react";
 import type { OpenGeniClient, CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { matchingActiveMcpConnections } from "../src/mcp-connection-status";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
@@ -182,6 +183,54 @@ test("stopping sign-in restores retry without waiting for an unresponsive backen
       "Sign-in window closed",
     );
     expect(document.querySelector('button[aria-label="Close connection setup"]')).not.toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
+test("a blocked sign-in window shows the card's own line, not the browser helper's", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-blocked",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  let begun = 0;
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async () => {
+        begun += 1;
+        throw new Error("must not begin without a window");
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => null) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-blocked"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    expect(continueButton).toBeDefined();
+    await actRun(() => continueButton!.click());
+    await flush();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Your browser blocked the sign-in window.");
+    expect(text).not.toContain("Allow popups to connect your account");
+    expect(text).not.toContain("Connect popup");
+    expect(begun).toBe(0);
   } finally {
     await view.unmount();
     window.open = previousOpen;
@@ -391,12 +440,17 @@ test("a failed authorization retries with a fresh attempt", async () => {
     connectionRef: null,
   } as CapabilityCatalogItem;
   const begins: string[] = [];
+  const popupFinishes: unknown[] = [];
   let recoveries = 0;
   const client = {
     listCapabilities: async () => ({ items: [disconnected] }),
     connectTransport: () => ({
-      begin: async (_workspace: string, input: { idempotencyKey: string }) => {
+      begin: async (
+        _workspace: string,
+        input: { idempotencyKey: string; finishInPopup?: true },
+      ) => {
         begins.push(input.idempotencyKey);
+        popupFinishes.push(input.finishInPopup);
         return {
           id: `attempt-${begins.length}`,
           workspaceId: "workspace",
@@ -480,6 +534,8 @@ test("a failed authorization retries with a fresh attempt", async () => {
     await click("Try signing in again");
     expect(begins).toHaveLength(2);
     expect(begins[1]).not.toBe(begins[0]);
+    // Sign-in runs in the card's popup, which ends on a closing page.
+    expect(popupFinishes).toEqual([true, true]);
   } finally {
     await view.unmount();
     window.open = previousOpen;
@@ -978,6 +1034,99 @@ test("connecting your own account to a capability enabled for personal accounts 
   }
 });
 
+test("an integration only an admin can turn on says so after sign-in, not a generic failure", async () => {
+  sessionStorage.clear();
+  let committed = false;
+  const off = {
+    ...item,
+    id: "custom-service",
+    name: "Team tools",
+    enabled: false,
+    connectionRef: null,
+  } as unknown as CapabilityCatalogItem;
+  const account = { ...connection, id: "own-account", subjectId: "user:own" };
+  const attempt = {
+    id: "own-attempt",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [off] }),
+    listConnections: async () => (committed ? [account] : []),
+    listOwnConnectionAccounts: async () => (committed ? [account] : []),
+    enableCapability: async () => {
+      throw new OpenGeniApiError(
+        403,
+        JSON.stringify({ error: { message: "Only an admin can turn on this integration" } }),
+        { mutation: true },
+      );
+    },
+    connectTransport: () => ({
+      begin: async () => attempt,
+      advance: async () => {
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: account.id,
+            providerId: "mcp-oauth",
+            ownership: "personal",
+            status: "connected",
+            label: "Team tools",
+            version: 1,
+          },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={off.id}
+      name="Team tools"
+      returnUrl="https://host.example/"
+      dialogOnly
+      personalOnly
+    />,
+  );
+  try {
+    await flush();
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue to Team tools",
+    );
+    expect(button).toBeDefined();
+    await actRun(() => button!.click());
+    await flush();
+    expect(document.body.textContent).toContain(
+      "Only an admin can turn on Team tools. Ask an admin to turn it on, then connect your account.",
+    );
+    expect(document.body.textContent).not.toContain("Connection setup could not finish");
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 function conversationClient(options: { failAttach?: boolean } = {}) {
   const calls: string[] = [];
   const continuations: unknown[][] = [];
@@ -1144,4 +1293,94 @@ test("a server's sign-in inspection message stays out of the card", async () => 
   } finally {
     await view.unmount();
   }
+});
+
+test("a reviewed catalog service reads as the service; a hand-added server keeps its MCP label", async () => {
+  const render = async (source: CapabilityCatalogItem["source"]) => {
+    const shown = { ...item, source, enabled: false, connectionRef: null } as CapabilityCatalogItem;
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [shown] }),
+        listConnections: async () => [],
+        connectTransport: () => ({}),
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    ) as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="service"
+        name="Example service"
+        returnUrl="https://host.example/"
+      />,
+    );
+    await flush();
+    const header = document.querySelector(".og-session-capability-header");
+    const result = {
+      badge: header?.querySelector(".og-session-capability-type")?.textContent ?? null,
+      provider: header?.textContent?.includes("service.example") ?? false,
+    };
+    await view.unmount();
+    return result;
+  };
+  expect(await render("library")).toEqual({ badge: null, provider: true });
+  expect(await render("manual")).toEqual({ badge: "MCP server", provider: true });
+});
+
+test("the card asks who can use a connection only when someone else could", async () => {
+  const render = async (input: {
+    people: string[];
+    mcpUrl?: string;
+  }): Promise<{ asked: boolean; scope: string | null }> => {
+    const shown = {
+      ...item,
+      id: "service-sharing",
+      enabled: false,
+      connectionRef: null,
+      ...(input.mcpUrl ? { mcpUrl: input.mcpUrl } : {}),
+    } as CapabilityCatalogItem;
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [shown] }),
+        listWorkspaceMembers: async () => input.people.map((subjectId) => ({ subjectId })),
+        getAccessContext: async () => ({ subjectId: "user:me" }),
+        connectTransport: () => ({}),
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    ) as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId={`workspace-${input.people.join("-")}-${input.mcpUrl ?? ""}`}
+        capabilityId="service-sharing"
+        name="Example service"
+        returnUrl="https://host.example/"
+        dialogOnly
+      />,
+    );
+    await flush();
+    const result = {
+      asked: document.body.textContent?.includes("Who can use this connection?") ?? false,
+      scope: document.querySelector(".og-session-capability-scope")?.textContent ?? null,
+    };
+    await view.unmount();
+    return result;
+  };
+  // Alone in a shared workspace: the person's own account, no question.
+  expect(await render({ people: ["user:me", "api_key:ci"] })).toEqual({
+    asked: false,
+    scope: "Connects your own account. Only work you start can use it.",
+  });
+  // Someone else is here: the person decides, and sharing stays the default.
+  expect(await render({ people: ["user:me", "user:anna"] })).toMatchObject({ asked: true });
+  // Google's connectors only connect a person's own account, whoever else is here.
+  for (const mcpUrl of [
+    "https://gmailmcp.googleapis.com/mcp/v1",
+    "https://calendarmcp.googleapis.com/mcp/v1",
+  ])
+    expect(await render({ people: ["user:me", "user:anna"], mcpUrl })).toMatchObject({
+      asked: false,
+    });
 });

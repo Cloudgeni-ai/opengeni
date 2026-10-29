@@ -117,6 +117,29 @@ describe("decideScheduledTaskBlocker", () => {
     });
   });
 
+  test("an owner whose saved access changed pauses at once and is told to save it again", () => {
+    // The admission fence refuses the run, or the claim fence fails it after
+    // admission; both hold for every later run of the same saved revision.
+    for (const error of [
+      "scheduled_run_authority_proof_rejected",
+      "scheduled_causal_membership_changed",
+    ]) {
+      const refused = run("failed", { error });
+      const decision = decideScheduledTaskBlocker(facts([run("succeeded"), refused]));
+      expect(decision).toMatchObject({ kind: "block", state: "paused", reason: error });
+      if (decision.kind !== "block") throw new Error("expected a block");
+      expect(decision.message).toContain("The access it was saved with has changed");
+      expect(decision.message).toContain("open it and save it");
+    }
+    const refusal = run("failed", {
+      error: "scheduled_authority_unavailable",
+      admissionRefusal: { reason: "scheduled_authority_unavailable", retryable: false },
+    });
+    const decision = decideScheduledTaskBlocker(facts([refusal]));
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.message).toContain("open it and save it");
+  });
+
   test("one ended chat does not block a schedule that starts a new chat each run", () => {
     const ended = run("skipped", { error: "session_cancelled", sessionId: chatId });
     expect(
@@ -147,6 +170,36 @@ describe("decideScheduledTaskBlocker", () => {
     });
     if (decision.kind !== "block") throw new Error("expected a block");
     expect(decision.message).toContain("The last 3 scheduled runs were skipped");
+  });
+
+  test("runs skipped while the chat waits for a model account name the fix", () => {
+    const waiting = Array.from({ length: SCHEDULED_TASK_BLOCKER_STREAK }, (_, index) =>
+      run("skipped", {
+        // The run that parked the chat may have skipped only as busy.
+        error: index === 0 ? "scheduled_session_not_idle" : "scheduled_session_waiting_capacity",
+      }),
+    );
+    const decision = decideScheduledTaskBlocker(facts([run("succeeded"), ...waiting]));
+    expect(decision).toMatchObject({
+      kind: "block",
+      state: "notified",
+      reason: "scheduled_session_waiting_capacity",
+    });
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.message).toContain("waiting for a model account");
+    expect(decision.message).toContain("Pick another model in that chat");
+  });
+
+  test("an older model-account wait followed by plain busy skips is not named", () => {
+    const skipped = Array.from({ length: SCHEDULED_TASK_BLOCKER_STREAK }, (_, index) =>
+      run("skipped", {
+        error: index === 0 ? "scheduled_session_waiting_capacity" : "scheduled_session_not_idle",
+      }),
+    );
+    const decision = decideScheduledTaskBlocker(facts([run("succeeded"), ...skipped]));
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.reason).not.toBe("scheduled_session_waiting_capacity");
+    expect(decision.message).not.toContain("waiting for a model account");
   });
 
   test("a daily, weekly or one-time schedule tells the owner on its first failed run", () => {

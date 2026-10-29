@@ -3,6 +3,7 @@ import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
   DEFERRED_RUNTIME_PRIVATE_ROUTINES,
+  DEFERRED_RUNTIME_TARGET_ROUTINES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
@@ -1486,6 +1487,16 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Deferred target-schema capabilities stay withheld until the previous
+    -- release knows them (DEFERRED_RUNTIME_TARGET_ROUTINES).
+    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_TARGET_ROUTINES.map(literal).join(",")} ]::text[] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC, %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ${organizationRecoveryRoutines} LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format(
@@ -2706,6 +2717,13 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.record_organization_signup_use_case(uuid,text,text) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.organization_signup_current_use_cases') IS NOT NULL THEN
+      -- The person's current signup answer (1007): ordinary row access under
+      -- FORCE RLS to the tenant, never DELETE or schema authority.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_current_use_cases FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.organization_signup_current_use_cases FROM PUBLIC;
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE opengeni_private.organization_signup_current_use_cases TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.organization_slack_bot_access') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_slack_bot_access FROM %I', ${literal(role)});

@@ -69,6 +69,14 @@ pub(crate) struct Sandbox {
     /// `None` until one is reported, except for a VM found running, which
     /// counts at its full size until then.
     pub resident: Option<u64>,
+    /// How its running VM uses memory beyond what `resident` says: what
+    /// the kernel compressed of it and how long it stalled (ADR 24).
+    pub paging: crate::host::outgrowth::Paging,
+    /// Whether its guest may still be shrunk for host memory (ADR 24).
+    pub shrink: crate::host::outgrowth::Shrink,
+    /// The memory bounds last asked of its running VM; `None` for those it
+    /// runs with from its start or resume (its request, no `memory.high`).
+    pub bound: Option<crate::host::outgrowth::Bound>,
     /// What it may take of host memory.
     pub size: Size,
     /// Where its wake stands with admission.
@@ -121,7 +129,8 @@ pub(crate) struct Sandbox {
 #[derive(Debug)]
 pub(crate) struct LocalDisk {
     /// Bytes its disk may still grow by while its VM runs: its size's
-    /// `disk` until [`crate::Input::DiskGrowth`] measures it.
+    /// `disk` until [`crate::Input::DiskGrowth`] measures it, and again
+    /// from the end of each pause whose guest trimmed its disk.
     pub growth: u64,
     /// Whether a wake from object storage may still be writing its local
     /// copy: from that wake's start until [`crate::Input::Hydrating`]
@@ -157,6 +166,9 @@ impl Sandbox {
             requested: Level::Running,
             // Until it is measured, a VM found running may hold all of it.
             resident: state.level.has_process().then_some(size.limit),
+            paging: crate::host::outgrowth::Paging::default(),
+            shrink: crate::host::outgrowth::Shrink::Open,
+            bound: None,
             size,
             room: WakeRoom::Open,
             fresh_until: None,
@@ -330,6 +342,9 @@ impl Sandbox {
             self.health = Health::Sound;
         }
         self.resident = None;
+        self.paging = crate::host::outgrowth::Paging::default();
+        self.shrink = crate::host::outgrowth::Shrink::Open;
+        self.bound = None;
         self.balloon = None;
         self.balloon_sent = None;
         self.balloon_taken = None;
@@ -404,8 +419,7 @@ impl Sandbox {
         if self.backing_off(now) {
             return None;
         }
-        // Pausing and saving it for host memory goes on whoever wants it.
-        if self.wants_awake() && !self.leaving() {
+        if self.wants_awake() {
             if self.room == WakeRoom::Refused {
                 return None;
             }

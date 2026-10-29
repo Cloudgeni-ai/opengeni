@@ -34,6 +34,7 @@ import {
   SandboxWorkspaceMutationOutputRejectedError,
   retainedProcessSettlementIdentity,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   verifyDirectWorkspaceMutationSettlement,
   verifyRetainedProcessMutationSettlement,
   type Database,
@@ -42,6 +43,10 @@ import {
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import {
+  backgroundCommandWakeSender,
+  type BackgroundCommandWakeSignal,
+} from "./agent-background-commands";
 import {
   ComputeSandboxSession,
   isProviderSandboxGoneDuringRoutedOperation,
@@ -141,6 +146,9 @@ export type ChannelARoutingServices = {
   onSandboxOperation?: RoutingSandboxOperationObserver;
   onSandboxCaptureWait?: RoutingSandboxCaptureWaitObserver;
   waitSignal?: AbortSignal;
+  /** Wakes a session waiting on a background command this routing settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: BackgroundCommandWakeSignal | null | undefined;
 };
 
 /**
@@ -716,6 +724,10 @@ export function wrapChannelABoxWithRouting(
             .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
             .catch(() => undefined);
         }
+        await signalBackgroundCommandWakes(
+          settlement.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
+        );
       }
     : undefined;
   const resolver = makeActiveBackendResolver({
@@ -861,6 +873,12 @@ export function wrapChannelABoxWithRouting(
                   payload: { sandboxId: homeLease.instanceId },
                 },
               ]).catch(() => undefined);
+            }
+            if (marked.status === "marked") {
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;

@@ -21,8 +21,13 @@ export type SessionListEntryInput = Omit<
   | "archived"
   | "archivedAt"
   | "archiveVersion"
-> &
-  Partial<
+  | "description"
+  | "avatar"
+> & {
+  /** Absent from older servers' rows and SDK-projected sessions. */
+  description?: string | null | undefined;
+  avatar?: Session["avatar"] | undefined;
+} & Partial<
     Pick<
       Session,
       | "pinned"
@@ -62,6 +67,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     automationWait: session.automationWait,
     title: session.title,
     titleSource: session.titleSource,
+    description: session.description ?? null,
+    avatar: session.avatar ?? null,
     displayTitle: deriveSessionDisplayTitle(session),
     renameSeed: sessionTitleIsPending(session)
       ? (deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "")

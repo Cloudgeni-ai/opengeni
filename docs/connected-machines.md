@@ -323,6 +323,15 @@ exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
 `/workspace` has no special meaning on a machine.
 
+The machine's own Git identity applies to commits. Only on a machine where Git
+cannot derive an address from the hostname (typically a fresh container, whose
+hostname has no domain) and whose agent environment has no `EMAIL` do commands
+receive `EMAIL=agent@opengeni.invalid`, Git's last-resort commit email;
+`GIT_*_EMAIL` and any `user.email` setting still win. The agent asks Git once
+per process. The author name still comes from the account, so a container
+running as a uid with no passwd entry has no name and its commits still need
+`user.name`.
+
 The Files surface advertises that effective path as `FileSystem.root`, including
 Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
 in the same namespace and sends the negotiated `{ epoch, root }` identity with
@@ -495,19 +504,36 @@ infer the Chrome device.
 
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
-inventory must name the exact live port. `stateGeneration` is created once per
-extension worker lifetime and reused by every native reconnect in it; Chrome
-keeps the tab ids, pages and debugger attachments that the worker owns for
-exactly that long. The agent reports `stateGeneration` as the profile's
+inventory must name the exact live port. `stateGeneration` names the
+extension's live state: the tab ids, pages and the extension's debugger
+attachments. Chrome keeps those while it stops and restarts the extension's
+background worker, which it does whenever it likes; it drops the attachments
+when the extension reloads or updates, and everything when Chrome restarts.
+The extension keeps `stateGeneration` in `chrome.storage.session`, which lives
+exactly as long, together with the tabs it has attached. A new worker reads
+them, probes each recorded attachment with a debugger command that changes
+nothing, carries on with the ones that answer, and only then reports the same
+`stateGeneration`. The agent reports `stateGeneration` as the profile's
 inventory `connectionGeneration` (the placement instance above), so a
-native-host exit, an agent restart or an agent update reconnects in place and
-the profile's sessions stay live; if the agent restarted, the next action
-re-creates the controller session. A restarted worker, a reloaded or updated
-extension, or a restarted Chrome reports a new `stateGeneration` and ends the
-sessions as above. Extensions that do not send `stateGeneration` keep the
-per-port behavior, and the agent's update gate waits while one of them backs a
-live attached controller, because restarting would end its sessions. A
-quiescent attached session does not otherwise hold back an agent update.
+native-host exit, an agent restart or update, or a restarted extension worker
+reconnects in place and the profile's sessions stay live; if the agent
+restarted, the next action re-creates the controller session. A reloaded or
+updated extension, or a restarted Chrome, starts a new `stateGeneration` and
+ends the sessions as above. Extensions that do not send `stateGeneration`, or
+that keep it per worker (older versions), keep that narrower behavior, and the
+agent's update gate waits while one without it backs a live attached
+controller, because restarting would end its sessions. A quiescent attached
+session does not otherwise hold back an agent update.
+
+The debugger event buffer does not survive a worker restart, and its sequence
+numbers start again. Every `debugger.poll` result names the worker's event
+`stream`; browserd treats a different stream as lost history and
+resynchronizes, re-attaching each tab when it is next used. Commands that were
+in flight on the old worker fail on the closed native port, so their outcome
+is unknown and nothing replays them; once a new stream appears, a tab whose
+input was in flight is usable again. Each time a worker carries on an earlier
+worker's state, the extension adds `{at, attachmentsKept, attachmentsEnded,
+tabsClosed}` to `stateResumptions` in `chrome.storage.local` (the latest 20).
 
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
@@ -961,10 +987,10 @@ of the command: the daemon chooses that workload's cgroup and OOM score. Operato
 must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
-installer never resets them with runtime `set-property`. A verified self-update
-migrates only the byte-identical old generated unit after proving its live MainPID,
-canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
-left untouched with an actionable diagnostic. The default operation leaf has no
+installer never resets them with runtime `set-property`. The agent never rewrites
+a unit on its own: at startup it only warns when the live unit is custom or systemd
+did not place it in the `supervisor` subgroup, and `service install --restart`
+adopts the generated unit. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any
@@ -1321,8 +1347,22 @@ interrupted/outcome-unknown rather than replayed automatically.
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
 workspace—even on a different Opengeni deployment—adds an independent link and
-preserves all existing links. There are two enrollment paths. Both require the
-caller to hold `enrollments:manage`.
+preserves all existing links. There are two enrollment paths. Both follow the
+machine's scope (`apps/api/src/sandbox/machine-authority.ts`, the one rule for
+every enrollment and per-machine write):
+
+- **Only me** (`user`): any teammate with `enrollments:read`, signed in as
+  themselves. The owner is always the caller. A credential acting for a person
+  (a delegated bearer, a connected agent, an organization key acting as a user)
+  keeps needing `enrollments:manage`, so a read-only delegation never connects
+  a machine; keys, services and agents acting as themselves are refused.
+- **This workspace**: `enrollments:manage`.
+- **Organization**: `enrollments:manage` and `account:admin`.
+
+The same rule covers declining a pairing code and, for an existing machine,
+removal, command policy, screen control, macOS privacy panes and agent updates.
+`list_scoped_enrollments` returns an Only me machine only to its owner, so a
+teammate reaches only their own. Refusals are plain sentences.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1386,10 +1426,7 @@ private to the user, and ends the agent's process tree only if it does not stop
 within 45 seconds. The agent stays paused across sign-ins until `start`.
 `status` prints `opengeni-agent background task: running`, `paused`, `stopped`
 or `not installed`, read from the agent's own instance lock. The agent does not
-run while nobody is signed in to Windows. Earlier releases
-registered an `OpengeniAgent` Windows Service that could never start; `start`
-deletes it when allowed, and otherwise prints the one elevated command that
-removes it.
+run while nobody is signed in to Windows.
 
 The agent also never treats a filesystem root or the Windows system directory
 as its workspace, so an older service definition needs no manual step: when
@@ -1624,7 +1661,14 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   the session onto that machine and sends `Use the machine “<name>” for this
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
-  on a question is moved and keeps the question;
+  on a question is moved and keeps the question. No machine is promoted: every
+  reachable machine gets the same quiet button (only a machine that just
+  connected from the card's own dialog gets the primary one), because the card
+  can't know which computer the person means;
+- ends the card with an **Another computer** row (its own list, after the
+  machines and any screen control and Chrome rows) whose **Connect** opens the
+  connect flow below, so connecting a computer that isn't connected yet is a
+  peer of using a listed one rather than a trailing link;
 - inside the desktop app, **Use this computer** calls the existing desktop host
   connection directly, with personal ownership and screen-control consent. There
   is no second setup confirmation; required operating-system permission prompts
@@ -1640,7 +1684,9 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   Mobile browsers direct the person to the computer they want to connect;
 - inside the desktop app, the same dialog is **Connect a machine**: for the
   computer the app runs on it shows the **Computer use** switch (off, turning
-  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  on, on, waiting on a macOS permission, or a problem with one fix; turning on
+  that hasn't connected after a minute becomes a problem saying why, with
+  **Try again**), and never
   offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
   command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
@@ -1656,15 +1702,19 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   that was offline, comes online the same dialog shows its name, **Connected**
   and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
   chat** (the same attach path as the list). Closing the dialog stops the watch;
-- once a machine with a screen is reachable (the chat's own machine first),
-  offers the
+- once this chat runs on a reachable machine with a screen, shows that
+  machine's screen control and offers the
   [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
-  stops after ten minutes or when the inventory is not readable.
+  stops after ten minutes or when the inventory is not readable. Before the
+  chat runs on a machine these rows stay hidden, so steps about a machine the
+  person may not mean don't compete with choosing or connecting the right one.
 
-Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
-moving the chat needs `sessions:control`. The card says who can act otherwise.
+Reading the list needs `enrollments:read`; connecting follows the scope rule
+above (every teammate connects an Only me machine; This workspace needs
+`enrollments:manage`); moving the chat needs `sessions:control`. The card says
+who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
 
 Embedded products supply `SessionConversation.computerConnection` (also through
@@ -1680,7 +1730,8 @@ Screen-control consent lives on the enrollment row and in the credentials the
 machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
-(`enrollments:manage`; `account:admin` for organization machines; no body)
+(the scope rule above: the owner for an Only me machine, `enrollments:manage`
+for a workspace machine, also `account:admin` for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control
@@ -1697,9 +1748,8 @@ Otherwise it is `status: "pending"` with a `reason`:
 - `agent_update_required`: the agent predates the `credential_renew`
   capability. Update it, and the successor's Hello applies it.
 - `renewal_failed`: retry the request.
-- `reconnect_required`: the machine's connection predates in-place renewal
-  (for example a legacy-origin connection file). Run the connect command on it
-  again with screen control on. The chat card's **Connect again** opens the
+- `reconnect_required`: the machine's saved connection can't be renewed in
+  place. Run the connect command on it again with screen control on. The chat card's **Connect again** opens the
   connect dialog with screen control on and the machine's current access
   chosen (**Only me** for a personal machine, otherwise **This workspace**), so
   following the defaults reconnects the same machine without changing who can
@@ -2030,7 +2080,7 @@ expecting transactional support. Changing transport limits is not required.
 
 ## Run as another local user
 
-Exec (including op-stream and background commands), git, PTY open and every file
+Exec (including op-stream and background commands), PTY open and every file
 request, transactional uploads included, carry an optional `run_as`: a local user
 name, else a decimal uid, which must exist in the machine's password database.
 The agent honors it only when it advertises `Capabilities.run_as`, which it does

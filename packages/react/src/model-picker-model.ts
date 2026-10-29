@@ -13,6 +13,7 @@ import {
   projectClientModelRows,
   runnableLatencyModesForModel,
   scopedBillingClassLabel,
+  withDistinctLabels,
   type PickerBillingClass,
   type PickerModelRow,
 } from "./model-policy";
@@ -188,21 +189,26 @@ export function effectiveRows<TIcon>(
   const rows =
     props.rows !== undefined ? props.rows : projectClientModelRows(t, props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages(t), ...props.messages };
-  return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
-    const scoped =
-      props.collapseScopes === false
-        ? {
-            ...row,
-            label: row.catalog.label,
-            billingClassLabel: scopedBillingClassLabel(t, row.billingClass),
-          }
-        : row;
-    if (props.collapseScopes === false) {
-      if (row.catalog.shortLabel) scoped.shortLabel = row.catalog.shortLabel;
-      else delete scoped.shortLabel;
-    }
+  const available = applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly);
+  const scopedRows =
+    props.collapseScopes === false
+      ? withDistinctLabels(
+          t,
+          available.map((row) => {
+            const scoped = {
+              ...row,
+              label: row.catalog.label,
+              billingClassLabel: scopedBillingClassLabel(t, row.billingClass),
+            };
+            if (row.catalog.shortLabel) scoped.shortLabel = row.catalog.shortLabel;
+            else delete scoped.shortLabel;
+            return scoped;
+          }),
+        )
+      : available;
+  return scopedRows.map((row) => {
     const label = groupPresentationFor(props, row.billingClass)?.label;
-    return label === undefined ? scoped : { ...scoped, billingClassLabel: label };
+    return label === undefined ? row : { ...row, billingClassLabel: label };
   });
 }
 

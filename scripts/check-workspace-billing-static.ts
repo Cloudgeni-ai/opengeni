@@ -127,14 +127,22 @@ function normalizeFileList(stdout: string): string[] {
 // Child paths remain forbidden even in these files. See docs/mcp-surfaces.md.
 const organizationMcpSurfaceFiles = new Set([
   "apps/api/src/mcp-oauth.ts",
+  // EU-only: the calling-workspace check covers the organization MCP endpoint too.
+  "apps/api/src/mcp/workspace-content-flow.ts",
   "apps/api/src/organization-mcp.ts",
+  // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
+  "apps/api/test/disconnect-audit-postgres.test.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
   "apps/api/test/personal-api-keys.test.ts",
+  "apps/api/test/workspace-content-flow-e2e.test.ts",
+  "apps/api/test/workspace-content-flow-mcp.test.ts",
   "apps/web/src/App.tsx",
   "apps/web/src/components/organization-access/organization-connected-agents.tsx",
   "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
   "packages/sdk/src/client.ts",
   "packages/sdk/src/site-browser-runtime.gen.ts",
+  // Opengeni's organization MCP endpoint added as a remote MCP server.
+  "packages/runtime/test/calling-workspace-prepare.test.ts",
   "scripts/public-api/surface.gen.json",
 ]);
 
@@ -256,6 +264,9 @@ const billingPortalSurfaceFiles = new Set([
   // Generated organization MCP action metadata likewise records, never serves,
   // the billing route; calls dispatch through the canonical route's own guards.
   "packages/contracts/src/app-action-catalog.gen.ts",
+  // Names the route a chat's action call may use, to show the page it opens;
+  // records, never serves, the route.
+  "packages/contracts/src/session-history.ts",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {
@@ -274,6 +285,10 @@ export function checkBillingPortalSurface(file: string, text: string, out: Findi
 const GITHUB_APP_MANIFEST_FILE = "packages/github/src/index.ts";
 const GITHUB_WEBHOOK_RECEIVER_FILE = "packages/core/src/domain/event-triggers/github-events.ts";
 const GITHUB_WEBHOOK_PATH = ["/v1", "webhooks", "github"].join("/");
+/** A template literal whose only content is one base-URL variable followed by the receiver path. */
+const GITHUB_WEBHOOK_URL_TEMPLATE = new RegExp(
+  `\`\\$\\{[A-Za-z_$][\\w$]*\\}${GITHUB_WEBHOOK_PATH.replaceAll("/", "\\/")}\``,
+);
 
 /**
  * The GitHub App manifest may advertise webhooks only to the event-source
@@ -287,7 +302,7 @@ export function checkGithubWebhookAdvertising(
   out: Finding[],
 ): void {
   if (file !== GITHUB_APP_MANIFEST_FILE || !text.includes("hook_attributes")) return;
-  const advertisesReceiver = text.includes(`\${base}${GITHUB_WEBHOOK_PATH}\``);
+  const advertisesReceiver = GITHUB_WEBHOOK_URL_TEMPLATE.test(text);
   const receiverSignedAndIdempotent =
     receiver.includes('"x-hub-signature-256"') && receiver.includes('"x-github-delivery"');
   if (advertisesReceiver && receiverSignedAndIdempotent) return;

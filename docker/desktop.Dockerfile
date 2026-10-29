@@ -30,7 +30,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM scratch AS chrome-assets
 
-ADD --checksum=sha256:8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_155.0.8059.84-1_amd64.deb /google-chrome-stable.deb
+ADD --checksum=sha256:6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb /google-chrome-stable.deb
 
 FROM rust:1.82-bookworm AS computer-native-build
 
@@ -195,6 +195,7 @@ RUN set -eux; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    cp -aL packages/contracts/node_modules/entities "$runtime/node_modules/entities"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
     test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
@@ -336,8 +337,8 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=155.0.8059.79-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261015T173155Z
+ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive
@@ -700,6 +701,11 @@ RUN set -eux; \
     bash -n /usr/local/bin/opengeni-browserd-down; \
     sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS; \
     bash -n /usr/local/bin/opengeni-record
+
+# The same lowest-precedence commit identity as the sandbox image (see
+# docker/sandbox.Dockerfile): anything a deployment, user or repository sets wins.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
 
 ENV HOME=/workspace
 ENV DISPLAY=:0

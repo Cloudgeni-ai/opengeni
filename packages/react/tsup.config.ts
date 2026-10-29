@@ -42,6 +42,7 @@ export default defineConfig({
     "src/queue-presentation-model.ts",
     "src/composer-messages.ts",
     "src/messages.ts",
+    "src/markdown-math.ts",
     "src/sandbox-label-model.ts",
     "src/model-picker-model.ts",
     "src/model-mark-paths.ts",
@@ -57,6 +58,7 @@ export default defineConfig({
     "src/session-attention-model.ts",
     "src/in-chat-connect-model.ts",
     "src/approval-review-model.ts",
+    "src/interactive-answer-model.ts",
     "src/testing/session-scenarios.ts",
     "src/testing/meetings-fixture.ts",
     "src/realtime.ts",
@@ -74,6 +76,7 @@ export default defineConfig({
     "src/terminal.ts",
     "src/editor.ts",
     "src/desktop.ts",
+    "src/desktop-dictation.ts",
     "src/workbench.ts",
     // `./ui/*` is a subpath pattern export: every primitive is its own entry.
     "src/ui/*.tsx",

@@ -22,6 +22,15 @@ import {
   type ExtensionHello,
   type ExtensionInventory,
 } from "./protocol";
+import {
+  SitePermissionError,
+  isSitePermission,
+  openSitePermissionsPage,
+  removeSitePermission,
+  setSitePermission,
+  sitePermissionsState,
+  turnOffSitePermissions,
+} from "./site-permissions";
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
@@ -42,11 +51,15 @@ const UPDATE_CHECK_INTERVAL_MS = 10 * 60_000;
 // extension adds one of its own pages to it as a frame, and refuses to attach
 // again while that frame is there; Chromium treats this as intended. Password
 // managers do it whenever a login field gets focus, to show their inline menu.
-// So when Chrome ends debugging of a tab, or refuses to attach to one, the
-// extension removes other extensions' frames from it. A page that keeps adding
-// them is left alone after this many removals in this window.
+// So when Chrome ends debugging of a tab, refuses to attach to one, or refuses
+// a command for one, the extension removes other extensions' frames from it. A
+// page that keeps adding them is left alone after this many removals in this
+// window.
 const FRAME_REMOVAL_LIMIT = 5;
 const FRAME_REMOVAL_WINDOW_MS = 30_000;
+// A removal still running after this long (a page whose renderer hangs) is
+// given up, as one Chrome refused, so it holds nothing up.
+const FRAME_REMOVAL_TIMEOUT_MS = 3_000;
 // Extensions known to add such frames, named in the error when one keeps doing it.
 const FRAME_EXTENSION_NAMES: Readonly<Record<string, string>> = {
   aeblfdkhhhdcdjpifhhbdiojplfjncoa: "1Password",
@@ -60,6 +73,31 @@ type StoredState = {
   profileLabel?: string | null;
   inventoryRevision?: number;
 };
+
+// What outlives this worker. Chrome stops an extension's worker and starts a
+// new one whenever it likes, and keeps the tabs, their ids and this
+// extension's debugger attachments meanwhile; it drops the attachments when
+// the extension reloads or updates, and everything when Chrome restarts.
+// chrome.storage.session lives exactly as long, so the state generation kept
+// there names that live state, and the debugger attachments recorded there
+// let a new worker carry on with them.
+type LiveState = {
+  stateGeneration: string;
+  lastAttachment: number;
+  // Attached tab ids, each with the number of its current attachment.
+  attachments: Record<string, number>;
+  // Tabs an agent opened (with tabs.create) that are still open: only in
+  // those can an agent set a site permission.
+  createdTabs?: number[];
+};
+const LIVE_STATE_KEY = "liveState";
+// How a new worker found the live state of the workers before it, newest
+// last, in chrome.storage.local: which attachments it could carry on with.
+const STATE_RESUMPTIONS_KEY = "stateResumptions";
+const MAX_STATE_RESUMPTIONS = 20;
+// A debugger command that reads and changes nothing, and that Chrome refuses
+// unless this extension is attached to the tab.
+const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
 
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
@@ -83,6 +121,8 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 // name an attachment are refused once it has ended, so a late one can never
 // run under a newer attachment of the same tab.
 const attachedDebuggerTabs = new Map<number, number>();
+// Tabs an agent opened that are still open.
+const agentCreatedTabs = new Set<number>();
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
 let lastAttachment = Math.floor(Math.random() * 2 ** 40);
@@ -90,18 +130,156 @@ let lastAttachment = Math.floor(Math.random() * 2 ** 40);
 // recent removals started.
 const frameRemovals = new Map<number, Promise<readonly string[] | null>>();
 const frameRemovalTimes = new Map<number, number[]>();
+// How many removals of each tab have finished, and the last one's result: a
+// refusal of something sent before a removal finished is explained by the
+// frames that removal handled, so it does not spend another.
+const finishedFrameRemovals = new Map<
+  number,
+  { count: number; removed: readonly string[] | null }
+>();
 // Other extensions whose frames were last removed from each tab.
 const removedFrameExtensions = new Map<number, readonly string[]>();
 let updatePending = false;
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let commandsInFlight = 0;
 let lastAgentCommandAtMs = Date.now();
-// Tab ids, debugger attachments and the event buffer above live exactly as long
-// as this worker. Every native reconnect in that lifetime reports the same
-// state generation, so the agent can keep sessions bound across agent or
-// native-host restarts while the per-port connection generation still fences
-// each transport.
-const STATE_GENERATION = crypto.randomUUID();
+// The live state's generation once read or started (see LiveState). Every
+// native reconnect reports it, from this worker or a later one, so the agent
+// keeps sessions bound across agent, native-host and worker restarts while the
+// per-port connection generation still fences each transport.
+let liveState: Promise<string> | null = null;
+let currentStateGeneration: string | null = null;
+let liveStateWrite: Promise<void> = Promise.resolve();
+// The debugger event buffer lives only as long as this worker, and its
+// sequence numbers start again with the next one. Each poll names this
+// worker's stream, so a reader can tell a restarted buffer from its own.
+const EVENT_STREAM = crypto.randomUUID();
+
+/** The live state's generation: the one an earlier worker recorded, with the
+ * debugger attachments it left that are still attached, or a new one. */
+function stateGeneration(): Promise<string> {
+  liveState ??= resumeLiveState();
+  return liveState;
+}
+
+async function resumeLiveState(): Promise<string> {
+  let stored: LiveState | null;
+  try {
+    stored = parseLiveState((await chrome.storage.session.get(LIVE_STATE_KEY))[LIVE_STATE_KEY]);
+  } catch {
+    // Without session storage this worker's state is all there is.
+    currentStateGeneration = crypto.randomUUID();
+    return currentStateGeneration;
+  }
+  if (!stored) {
+    currentStateGeneration = crypto.randomUUID();
+    await recordLiveState();
+    return currentStateGeneration;
+  }
+  lastAttachment = stored.lastAttachment;
+  let kept = 0;
+  let detached = 0;
+  let closed = 0;
+  for (const [tab, attachment] of Object.entries(stored.attachments)) {
+    const tabId = Number(tab);
+    if (await debuggingTab(tabId)) {
+      attachedDebuggerTabs.set(tabId, attachment);
+      kept += 1;
+    } else if (await tabExists(tabId)) {
+      detached += 1;
+    } else {
+      closed += 1;
+    }
+  }
+  for (const tabId of stored.createdTabs ?? []) {
+    if (await tabExists(tabId)) agentCreatedTabs.add(tabId);
+  }
+  // Only now: until then nothing records the attachments or applies an update.
+  currentStateGeneration = stored.stateGeneration;
+  await recordLiveState();
+  await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
+  maybeApplyUpdate();
+  return stored.stateGeneration;
+}
+
+function parseLiveState(value: unknown): LiveState | null {
+  if (value === null || typeof value !== "object") return null;
+  const state = value as Partial<LiveState>;
+  if (typeof state.stateGeneration !== "string" || state.stateGeneration.length === 0) return null;
+  const attachments: Record<string, number> = {};
+  for (const [tab, attachment] of Object.entries(state.attachments ?? {})) {
+    if (Number.isSafeInteger(Number(tab)) && Number.isSafeInteger(attachment))
+      attachments[tab] = attachment;
+  }
+  return {
+    stateGeneration: state.stateGeneration,
+    lastAttachment: Number.isSafeInteger(state.lastAttachment)
+      ? state.lastAttachment!
+      : lastAttachment,
+    attachments,
+    createdTabs: Array.isArray(state.createdTabs)
+      ? state.createdTabs.filter((tabId) => Number.isSafeInteger(tabId))
+      : [],
+  };
+}
+
+/** Record the live state for the next worker, in order. Best effort: a
+ * worker that cannot record it leaves the next one a new state. */
+function recordLiveState(): Promise<void> {
+  const generation = currentStateGeneration;
+  if (generation === null) return liveStateWrite;
+  const state: LiveState = {
+    stateGeneration: generation,
+    lastAttachment,
+    attachments: Object.fromEntries(
+      [...attachedDebuggerTabs].map(([tabId, attachment]) => [String(tabId), attachment]),
+    ),
+    createdTabs: [...agentCreatedTabs],
+  };
+  liveStateWrite = liveStateWrite
+    .then(async () => await chrome.storage.session.set({ [LIVE_STATE_KEY]: state }))
+    .catch(() => undefined);
+  return liveStateWrite;
+}
+
+async function recordResumption(result: {
+  attachmentsKept: number;
+  attachmentsEnded: number;
+  tabsClosed: number;
+}): Promise<void> {
+  console.info("continued the live state of an earlier worker", result);
+  try {
+    const stored = (await chrome.storage.local.get(STATE_RESUMPTIONS_KEY))[STATE_RESUMPTIONS_KEY];
+    const earlier = Array.isArray(stored) ? stored : [];
+    await chrome.storage.local.set({
+      [STATE_RESUMPTIONS_KEY]: [...earlier, { at: new Date().toISOString(), ...result }].slice(
+        -MAX_STATE_RESUMPTIONS,
+      ),
+    });
+  } catch {
+    // Diagnostics only.
+  }
+}
+
+/** Whether this extension's debugger is attached to the tab, as Chrome
+ * answers a command that does nothing. */
+async function debuggingTab(tabId: number): Promise<boolean> {
+  try {
+    await chrome.debugger.sendCommand({ tabId }, ATTACHMENT_PROBE_METHOD, {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tabExists(tabId: number): Promise<boolean> {
+  try {
+    await chrome.tabs.get(tabId);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function storedState(): Promise<Required<StoredState>> {
   const stored = (await chrome.storage.local.get([
@@ -143,7 +321,11 @@ async function tabs(): Promise<AttachedTab[]> {
 }
 
 async function device(revision: number, generation: string): Promise<ExtensionDevice> {
-  const [state, platform] = await Promise.all([storedState(), chrome.runtime.getPlatformInfo()]);
+  const [state, platform, liveGeneration] = await Promise.all([
+    storedState(),
+    chrome.runtime.getPlatformInfo(),
+    stateGeneration(),
+  ]);
   const product = browserProduct(navigator.userAgent);
   currentDeviceId = state.deviceId;
   currentProfileLabel = state.profileLabel;
@@ -157,7 +339,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
     platform: extensionPlatform(platform),
     architecture: extensionArchitecture(platform),
     connectionGeneration: generation,
-    stateGeneration: STATE_GENERATION,
+    stateGeneration: liveGeneration,
     inventoryRevision: revision,
     capabilities: {
       tabInventory: true,
@@ -333,6 +515,8 @@ async function settleCommandNow(
     if (command.deviceId !== currentDeviceId || command.connectionGeneration !== generation) {
       throw new BridgeCommandError("fenced", "attached browser connection changed", true);
     }
+    // A new worker first takes over the debugger attachments it inherited.
+    await stateGeneration();
     // Event polling and pings continue while nothing is happening; only real
     // tab and debugger work counts as an agent using this browser.
     if (command.payload.type !== "debugger.poll" && command.payload.type !== "ping") {
@@ -365,13 +549,17 @@ async function settleCommandNow(
 async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
   switch (command.type) {
     case "ping":
-      return { pong: true };
+      // Commands added since the first release, so the agent can tell
+      // whether this extension knows them before it sends one.
+      return { pong: true, sitePermissions: true };
     case "tabs.list":
       return { tabs: await tabs() };
     case "tabs.create": {
       const created = await createTab(command.url);
       const tab = attachedTab(created);
       if (!tab) throw new BridgeCommandError("tab_unavailable", "Chrome did not create a tab");
+      agentCreatedTabs.add(created.id!);
+      void recordLiveState();
       scheduleInventory();
       return { tab };
     }
@@ -424,11 +612,56 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
         tabId,
         ...(command.sessionId ? { sessionId: command.sessionId } : {}),
       };
-      const response = await chrome.debugger.sendCommand(source, command.method, command.params);
-      return { result: response ?? {} };
+      const send = () => chrome.debugger.sendCommand(source, command.method, command.params);
+      const removalsBefore = finishedFrameRemovalCount(tabId);
+      try {
+        return { result: (await send()) ?? {} };
+      } catch (error) {
+        // Chrome can keep debugging a tab that holds another extension's page
+        // as a frame (one it attached to while the frame was still loading)
+        // but then refuses every command, without running it. Remove the
+        // frames (sharing one removal among commands refused together) and
+        // send the command again, once.
+        if (!otherExtensionFrameRefusal(error)) throw error;
+        let { removed, reused } = await frameRemovalSince(tabId, removalsBefore);
+        for (;;) {
+          if (removed === null) throw otherExtensionFramesError(tabId);
+          if (attachedDebuggerTabs.get(tabId) !== attachment) {
+            throw new BridgeCommandError(
+              "debugger_unavailable",
+              `The ${BRAND.product} attachment this command was sent for has ended`,
+            );
+          }
+          try {
+            return { result: (await send()) ?? {} };
+          } catch (retry) {
+            if (!otherExtensionFrameRefusal(retry)) throw retry;
+            // The removal this refusal reused finished before the frame came
+            // back: remove it once more before giving up.
+            if (reused) {
+              reused = false;
+              removed = await frameRemoval(tabId);
+              continue;
+            }
+            throw removed.length > 0 ? otherExtensionFramesError(tabId) : unremovableFrameError();
+          }
+        }
+      }
     }
     case "downloads.find":
       return { downloads: await findDownloads(command.url, command.startedAfter) };
+    case "permissions.set":
+      try {
+        return await setSitePermission(command, {
+          openedByAgent: (tabId) => agentCreatedTabs.has(numericTabId(tabId)),
+          controlledTab,
+        });
+      } catch (error) {
+        if (error instanceof SitePermissionError) {
+          throw new BridgeCommandError(error.code, error.message);
+        }
+        throw error;
+      }
     case "debugger.poll": {
       const firstSequence = debuggerEvents[0]?.sequence ?? debuggerSequence + 1;
       const available = debuggerEvents.filter((event) => event.sequence > command.afterSequence);
@@ -438,12 +671,23 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
         cursor: events.at(-1)?.sequence ?? debuggerSequence,
         // Pagination is not history loss: the next poll continues from cursor.
         truncated: debuggerEvents.length > 0 && command.afterSequence < firstSequence - 1,
+        // A different stream than a reader's last poll means this buffer
+        // started again with a new worker: events in between are lost.
+        stream: EVENT_STREAM,
       };
     }
   }
 }
 
 const MAX_FOUND_DOWNLOADS = 16;
+
+/** The tab, while the agent's attachment to it lasts. */
+async function controlledTab(tabId: string, attachment: number): Promise<chrome.tabs.Tab | null> {
+  const id = numericTabId(tabId);
+  if (attachedDebuggerTabs.get(id) !== attachment) return null;
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  return attachedDebuggerTabs.get(id) === attachment ? tab : null;
+}
 
 /**
  * Opens a tab without raising Chrome. Opengeni renders and controls attached
@@ -515,38 +759,71 @@ async function requireControllableTab(tabId: number): Promise<void> {
 }
 
 async function detachDebugger(tabId: number): Promise<void> {
-  if (!attachedDebuggerTabs.delete(tabId)) return;
+  if (attachedDebuggerTabs.delete(tabId)) void recordLiveState();
+  // Also an attachment an earlier worker left without recording it.
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
-    // Already detached is the desired idempotent state.
+    // Not attached is the desired idempotent state.
   }
 }
 
 /** Attaches Chrome's debugger to a tab, first removing other extensions'
- * frames when Chrome refuses because of one. */
+ * frames when Chrome refuses because of one. An attachment an earlier worker
+ * of this extension left on the tab without recording it is taken over. */
 async function attachDebugger(tabId: number): Promise<void> {
+  const removalsBefore = finishedFrameRemovalCount(tabId);
   try {
     await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
   } catch (error) {
+    if (alreadyAttached(error) && (await debuggingTab(tabId))) {
+      if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+      void recordLiveState();
+      return;
+    }
     if (!otherExtensionFrameRefusal(error)) throw error;
-    const removed = await removeOtherExtensionFrames(tabId);
-    if (removed === null) throw otherExtensionFramesError(tabId);
-    try {
-      await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
-    } catch (retry) {
-      if (!otherExtensionFrameRefusal(retry)) throw retry;
-      throw removed.length > 0 ? otherExtensionFramesError(tabId) : unremovableFrameError();
+    let { removed, reused } = await frameRemovalSince(tabId, removalsBefore);
+    for (;;) {
+      if (removed === null) throw otherExtensionFramesError(tabId);
+      try {
+        await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
+        break;
+      } catch (retry) {
+        if (!otherExtensionFrameRefusal(retry)) throw retry;
+        if (reused) {
+          reused = false;
+          removed = await frameRemoval(tabId);
+          continue;
+        }
+        throw removed.length > 0 ? otherExtensionFramesError(tabId) : unremovableFrameError();
+      }
     }
   }
   // Another attach of this tab may have finished first; keep its number.
   if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+  void recordLiveState();
+}
+
+/** Chrome refuses a second attach of this extension to a tab with "Another
+ * debugger is already attached to the tab with id: N." */
+function alreadyAttached(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.trim().startsWith("Another debugger is already attached to the tab")
+  );
 }
 
 /** Chrome refuses to attach to a tab holding another extension's page with
- * "Cannot access a chrome-extension:// URL of different extension". */
+ * "Cannot access a chrome-extension:// URL of different extension", and
+ * refuses commands on such a tab the same way. Nothing else that mentions an
+ * extension address (a refused navigation to one, say) is about a frame. */
 function otherExtensionFrameRefusal(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("chrome-extension://");
+  return (
+    error instanceof Error &&
+    error.message
+      .trim()
+      .startsWith("Cannot access a chrome-extension:// URL of different extension")
+  );
 }
 
 function otherExtensionFramesError(tabId: number): BridgeCommandError {
@@ -574,11 +851,42 @@ function unremovableFrameError(): BridgeCommandError {
 /** Starts removing other extensions' frames from a tab Chrome stopped
  * debugging; an attach of that tab waits for it. */
 function startFrameRemoval(tabId: number): void {
-  if (frameRemovals.has(tabId)) return;
-  frameRemovals.set(
-    tabId,
-    removeOtherExtensionFrames(tabId).finally(() => frameRemovals.delete(tabId)),
-  );
+  void frameRemoval(tabId);
+}
+
+/** The tab's running removal of other extensions' frames, or a new one. */
+function frameRemoval(tabId: number): Promise<readonly string[] | null> {
+  const running = frameRemovals.get(tabId);
+  if (running) return running;
+  const removal: Promise<readonly string[] | null> = removeOtherExtensionFrames(tabId)
+    .then((removed) => {
+      // A tab closed meanwhile keeps nothing.
+      if (frameRemovals.get(tabId) === removal)
+        finishedFrameRemovals.set(tabId, { count: finishedFrameRemovalCount(tabId) + 1, removed });
+      return removed;
+    })
+    .finally(() => {
+      if (frameRemovals.get(tabId) === removal) frameRemovals.delete(tabId);
+    });
+  frameRemovals.set(tabId, removal);
+  return removal;
+}
+
+function finishedFrameRemovalCount(tabId: number): number {
+  return finishedFrameRemovals.get(tabId)?.count ?? 0;
+}
+
+/** Removes the frames behind a refusal of something sent once
+ * `finishedBefore` removals of the tab had finished. A removal that finished
+ * since then already handled them (`reused`); one still running is shared. */
+async function frameRemovalSince(
+  tabId: number,
+  finishedBefore: number,
+): Promise<{ removed: readonly string[] | null; reused: boolean }> {
+  const finished = finishedFrameRemovals.get(tabId);
+  if (finished && finished.count !== finishedBefore)
+    return { removed: finished.removed, reused: true };
+  return { removed: await frameRemoval(tabId), reused: false };
 }
 
 /** Removes frames showing other extensions' pages from every frame of a tab.
@@ -601,12 +909,15 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
     });
   let results: Awaited<ReturnType<typeof run>>;
   try {
-    results = await run({ tabId, allFrames: true });
-  } catch {
+    results = await withinFrameRemovalTimeout(run({ tabId, allFrames: true }));
+  } catch (error) {
+    // A page that does not answer is not asked again.
+    if (error instanceof FrameRemovalTimeout) return [];
     try {
-      results = await run({ tabId });
+      results = await withinFrameRemovalTimeout(run({ tabId }));
     } catch {
-      // A closed tab, or a page Chrome does not let extensions script.
+      // A closed tab, a page Chrome does not let extensions script, or one
+      // that does not answer.
       return [];
     }
   }
@@ -624,6 +935,24 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
     console.warn(`removed other extensions' frames from tab ${tabId}: ${removed.join(", ")}`);
   }
   return removed;
+}
+
+class FrameRemovalTimeout extends Error {}
+
+/** The script's results, or a FrameRemovalTimeout once the removal has run
+ * for FRAME_REMOVAL_TIMEOUT_MS. */
+async function withinFrameRemovalTimeout<T>(script: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      script,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new FrameRemovalTimeout()), FRAME_REMOVAL_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /** Runs in a page frame, in this extension's isolated world: removes elements
@@ -683,7 +1012,9 @@ function requestExtensionUpdate(): void {
 }
 
 function maybeApplyUpdate(): void {
-  if (!updatePending || commandsInFlight > 0) return;
+  // Until a new worker has taken over the attachments it inherited, it cannot
+  // tell whether an agent is still driving a tab.
+  if (!updatePending || commandsInFlight > 0 || currentStateGeneration === null) return;
   const idleMs = Date.now() - lastAgentCommandAtMs;
   if (attachedDebuggerTabs.size === 0 || idleMs >= UPDATE_IDLE_RELOAD_MS) {
     chrome.runtime.reload();
@@ -801,6 +1132,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   const attachment = attachedDebuggerTabs.get(source.tabId);
   if (attachment === undefined) return;
   attachedDebuggerTabs.delete(source.tabId);
+  void recordLiveState();
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,
@@ -815,7 +1147,10 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (agentCreatedTabs.delete(tabId)) void recordLiveState();
   frameRemovalTimes.delete(tabId);
+  frameRemovals.delete(tabId);
+  finishedFrameRemovals.delete(tabId);
   removedFrameExtensions.delete(tabId);
   appendDebuggerEvent({
     tabId: String(tabId),
@@ -864,9 +1199,14 @@ for (const event of [
   event.addListener(scheduleInventory as never);
 }
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
-  const typed = message as { type: string; profileLabel?: unknown };
+  const typed = message as {
+    type: string;
+    profileLabel?: unknown;
+    pattern?: unknown;
+    permission?: unknown;
+  };
   if (typed.type === "status") {
     const connected = nativePort !== null && readyGeneration === connectionGeneration;
     const status = connected
@@ -895,6 +1235,25 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
       respond({ saved: true, profileLabel });
     });
     return true;
+  }
+  // The popup and the site permissions page, never a page script.
+  if (!sender.url?.startsWith(chrome.runtime.getURL(""))) return false;
+  const answer = (work: Promise<unknown>) => {
+    void work.then(respond, (error: unknown) =>
+      respond({ error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  };
+  switch (typed.type) {
+    case "site_permissions":
+      return answer(sitePermissionsState());
+    case "remove_site_permission":
+      if (typeof typed.pattern !== "string" || !isSitePermission(typed.permission)) return false;
+      return answer(removeSitePermission(typed.pattern, typed.permission));
+    case "turn_off_site_permissions":
+      return answer(turnOffSitePermissions());
+    case "open_site_permissions":
+      return answer(openSitePermissionsPage({ bringForward: true }).then(() => ({ opened: true })));
   }
   return false;
 });

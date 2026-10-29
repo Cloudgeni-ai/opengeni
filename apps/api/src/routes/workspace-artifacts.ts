@@ -6,7 +6,9 @@ import {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
@@ -24,6 +26,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireSessionAuthorization,
+  requireSessionAuthorizations,
   resolveNewSiteAudience,
   resolveSiteAudienceChange,
   SessionAuthorizationDeniedError,
@@ -39,8 +42,12 @@ import {
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
   listWorkspaceArtifacts,
+  ChannelNotFoundError,
+  listSiteProjectConversationIds,
+  moveSiteToProject,
   recordSiteOpened,
   setSiteSidebarState,
+  SITE_PROJECT_MOVE_LIMIT,
   nestedPostgresSqlState,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
@@ -298,6 +305,62 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         ),
       );
     } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // Move a Site's row to another project (or Default), like moving a chat.
+  // Projects are shared, so this needs sessions:control as a chat move does,
+  // plus control of every conversation that moves with the row. The Site stays
+  // as it is: publication, audience and Artifacts never change.
+  app.put(`${base}/:artifactId/channel`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
+    if (currentSiteSessionOrigin())
+      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+    const siteId = artifactId(context);
+    const change = await body(context, UpdateSiteProjectRequest);
+    const viewer = await siteViewerForGrant(deps.db, grant);
+    if (!viewer.subjectId)
+      throw new HTTPException(403, { message: "A signed-in person is required" });
+    const sessionIds = await listSiteProjectConversationIds(deps.db, {
+      workspaceId,
+      subjectId: viewer.subjectId,
+      siteId,
+      channelId: change.fromChannelId,
+    });
+    if (sessionIds.length > SITE_PROJECT_MOVE_LIMIT)
+      throw new HTTPException(422, { message: "This Site has too many conversations to move" });
+    if (sessionIds.length > 0) {
+      const decisions = await requireSessionAuthorizations(deps, grant, {
+        sessionIds,
+        operation: "session.control",
+        surface: "http",
+      });
+      for (const decision of decisions) {
+        if (decision.status === "fulfilled") continue;
+        if (decision.reason instanceof SessionAuthorizationDeniedError)
+          throw new HTTPException(403, {
+            message: "You can't move every conversation of this Site",
+          });
+        throw decision.reason;
+      }
+    }
+    try {
+      const moved = await moveSiteToProject(deps.db, {
+        workspaceId,
+        subjectId: viewer.subjectId,
+        siteId,
+        fromChannelId: change.fromChannelId,
+        channelId: change.channelId,
+        sessionIds,
+      });
+      return context.json(
+        SiteProjectResponse.parse({ siteId, channelId: change.channelId, ...moved }),
+      );
+    } catch (error) {
+      if (error instanceof ChannelNotFoundError)
+        throw new HTTPException(422, { message: error.message });
       return workspaceArtifactErrorResponse(context, error);
     }
   });

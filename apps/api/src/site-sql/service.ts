@@ -38,6 +38,7 @@ import {
   getSiteSqlDatabase,
   getSiteSqlQuery,
   getSitePublication,
+  getVerifiedSubjectEmail,
   getWorkspaceSiteLimitProfile,
   listSiteSqlMigrations,
   listSiteSqlQueries,
@@ -68,6 +69,7 @@ import {
   requireSitePlatformQuota,
 } from "../site-publishing/platform-usage";
 import {
+  isPublishedViewer,
   resolveSiteDataAccess,
   type SiteDataAccess,
   type SiteDataSurface,
@@ -88,6 +90,7 @@ import {
   siteSqlSchemaEntries,
   siteSqlSchemaStatements,
 } from "./format";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Site SQL: optional per-Site Cloudflare storage. One SQLite Durable Object
@@ -501,7 +504,7 @@ async function meter(
       siteId: resolved.scope.siteId,
       rowsRead: usage.rowsRead,
       rowsWritten: usage.rowsWritten,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
   if (platform) await afterSitePlatformUsage(deps, workspace, platform);
@@ -935,10 +938,46 @@ export async function inspectSiteSql(
 // Running SQL
 // ---------------------------------------------------------------------------
 
-/** The values Opengeni binds for `:viewer`, `:viewer_kind` and `:viewer_signed_in`. */
+/**
+ * How the viewer reaches the Site and their verified email, for
+ * `:viewer_access` and `:viewer_email`; nulls for callers with no person.
+ */
+export type SiteSqlViewerIdentity = {
+  access: "member" | "invited" | "user" | "guest" | null;
+  email: string | null;
+};
+
+/**
+ * The viewer's identity for a statement that names `params`. A published
+ * Site's viewer carries it from their verified site session; anyone else
+ * reaching the Site through the workspace (a member's console frame, their
+ * agent, the Data view) is a workspace member, whose verified email is
+ * read only when the statement asks for `:viewer_email`.
+ */
+async function siteSqlViewerIdentity(
+  deps: SiteSqlDeps,
+  authority: SiteSqlAuthority,
+  resolved: Resolved,
+  params: readonly string[],
+): Promise<SiteSqlViewerIdentity> {
+  if (isPublishedViewer(authority))
+    return {
+      access: authority.access ?? (resolved.guest ? "guest" : null),
+      email: resolved.guest ? null : (authority.email ?? null),
+    };
+  const subjectId = resolved.guest ? null : resolved.access.subjectId;
+  if (!subjectId) return { access: null, email: null };
+  const email = params.includes("viewer_email")
+    ? await getVerifiedSubjectEmail(deps.db, subjectId).catch(() => null)
+    : null;
+  return { access: "member", email };
+}
+
+/** The values Opengeni binds for `:viewer`, `:viewer_kind`, `:viewer_signed_in`, `:viewer_access` and `:viewer_email`. */
 export function siteSqlPrincipalParams(
   access: Pick<SiteDataAccess, "caller" | "subjectId">,
   guest: boolean,
+  identity: SiteSqlViewerIdentity = { access: guest ? "guest" : null, email: null },
 ): Record<string, SiteSqlValue> {
   const principal = access.caller.principal;
   const kind = principal.includes(":") ? principal.slice(0, principal.indexOf(":")) : principal;
@@ -946,6 +985,8 @@ export function siteSqlPrincipalParams(
     viewer: principal,
     viewer_kind: kind,
     viewer_signed_in: !guest && access.subjectId !== null ? 1 : 0,
+    viewer_access: identity.access,
+    viewer_email: guest ? null : identity.email,
   };
 }
 
@@ -1040,7 +1081,11 @@ export async function runSiteSqlQuery(
     const bound = bindParams(
       query.params,
       params,
-      siteSqlPrincipalParams(resolved.access, resolved.guest),
+      siteSqlPrincipalParams(
+        resolved.access,
+        resolved.guest,
+        await siteSqlViewerIdentity(deps, authority, resolved, query.params),
+      ),
       { requireAll: true },
     );
     const maxRows = Math.min(query.maxRows ?? limits.maxRowsPerCall, limits.maxRowsPerCall);
@@ -1129,7 +1174,11 @@ export async function runSiteSqlStatement(
     const bound = bindParams(
       compiled.paramNames,
       request.params ?? {},
-      siteSqlPrincipalParams(resolved.access, false),
+      siteSqlPrincipalParams(
+        resolved.access,
+        false,
+        await siteSqlViewerIdentity(deps, authority, resolved, compiled.paramNames),
+      ),
       { requireAll: true },
     );
     const response = await callSiteDb<SiteDbRunResponse>(
@@ -1573,7 +1622,7 @@ export async function siteSqlSitesOfWorkspace(
   } catch (error) {
     console.warn("[site-sql] could not list a workspace's Site databases before deleting it", {
       workspaceId: scope.workspaceId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return [];
   }
@@ -1622,7 +1671,7 @@ export async function dropSiteSqlDatabases(
         result.dropped.push(siteId);
       } catch (error) {
         result.failed.push(siteId);
-        errors[siteId] = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+        errors[siteId] = errorMessage(error).slice(0, 200);
       }
     }
   };

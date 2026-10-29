@@ -21,7 +21,7 @@ use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
-pub use cgroup::MemoryStats;
+pub use cgroup::{MemoryStats, Writes};
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
 pub use spec::{
@@ -46,6 +46,19 @@ pub enum Found {
     Running,
     /// Its processors are stopped; its memory is in place.
     Paused,
+}
+
+/// What [`Engine::keep_memory_room`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKept {
+    /// Nothing: the reserve is free, nothing limits the VMs together, or a
+    /// drop asked earlier is under way.
+    Free,
+    /// It is dropping this many bytes of the VMs' page cache.
+    Dropping(u64),
+    /// It cannot: the kernel cannot be asked for page cache alone (Linux
+    /// 6.9 and later can). Said once; every later call is `Free`.
+    Unsupported,
 }
 
 /// Whether an engine can load memory images made under some runtime.
@@ -222,6 +235,27 @@ pub trait Engine: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Bytes of memory its VMs may still take together, if the engine
+    /// limits what they hold together: the limit less what they hold now,
+    /// page cache the host can drop at once left out as in
+    /// [`Engine::resident_bytes`]. A new guest gets no more than this
+    /// however much the host has free, so the host counts it as the most
+    /// that is available. `None` where nothing limits them together.
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
+    /// Drops page cache charged to the VMs together, and only cache, while
+    /// less than `reserve` is free under the limit on what they hold
+    /// together, in the background: [`Engine::memory_room`] counts that
+    /// cache as available, so the reserve the host keeps for sandboxes
+    /// growing within their request has to be free memory, not cache the
+    /// first of them to grow would wait to drop. Nothing where nothing
+    /// limits them together.
+    fn keep_memory_room(&self, _reserve: u64) -> RoomKept {
+        RoomKept::Free
+    }
+
     /// Bytes of host memory the VM holds right now; with huge-page guest
     /// memory, the huge pages it holds. Page cache the host can drop at
     /// once, such as what its disk writes and saved images leave, is not
@@ -241,9 +275,43 @@ pub trait Engine: Send + Sync + 'static {
     /// same VM mean anything.
     fn io_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
 
-    /// The VM's zswap traffic and memory pressure so far. A running VM is
-    /// never compressed, so its `zswpout` grows only while it is paused.
-    /// Engines that cannot tell report an error.
+    /// What the VM's processes have written through system calls since
+    /// they started: every write its VMM makes to the VM's drives counts
+    /// once the call returns, and every file page it dirties, also with no
+    /// write call (as a discard over part of a block does), counts as it is
+    /// dirtied, besides others an engine documents. Only differences
+    /// between readings of the same VM mean anything. Engines that cannot
+    /// tell report an error.
+    fn writes(&self, vm: &Self::Vm) -> Result<Writes, EngineError> {
+        let _ = vm;
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "writes",
+            "this engine does not count a VM's writes",
+        ))
+    }
+
+    /// Resolves once every write to the VM's drives that its VMM had
+    /// started when this is first polled has returned, so a
+    /// [`Engine::writes`] reading taken after it counts them all. The
+    /// future does not borrow the VM. Engines that cannot tell report an
+    /// error.
+    fn settle_writes(
+        &self,
+        vm: &Self::Vm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let _ = vm;
+        std::future::ready(Err(EngineError::new(
+            ErrorKind::Transient,
+            "settle_writes",
+            "this engine cannot tell when a VM's writes have returned",
+        )))
+    }
+
+    /// The VM's zswap traffic and memory pressure so far, and what of its
+    /// memory is compressed now. A running VM is compressed only on a host
+    /// that lets the kernel do so (ADR 24). Engines that cannot tell
+    /// report an error.
     fn memory_stats(&self, vm: &Self::Vm) -> Result<MemoryStats, EngineError> {
         let _ = vm;
         Err(EngineError::new(
@@ -251,6 +319,22 @@ pub trait Engine: Send + Sync + 'static {
             "memory_stats",
             "this engine does not report memory statistics",
         ))
+    }
+
+    /// Whether the guest's last words were that it halted: it stopped its
+    /// processors for good, as Linux does for a halt and for a power-off
+    /// its VMM gives it no way to make (Firecracker on x86). Its VM then
+    /// runs on, but its guest never will. The words are the guest's own,
+    /// and it can write them whenever it likes, so they say only why a
+    /// guest that also takes no connection has stopped. The future reads
+    /// a little of a file off the caller's thread and does not borrow the
+    /// VM. Engines that cannot tell say no.
+    fn halted(
+        &self,
+        vm: &Self::Vm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        let _ = vm;
+        std::future::ready(Ok(false))
     }
 
     /// Gives the VM new guarantees, as [`VmSpec::memory_request_mib`] and
@@ -285,6 +369,56 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Whether the kernel may compress running VMs' memory (ADR 24): on
+    /// an engine that does not, a running VM's compressed pages are a
+    /// defect worth a warning.
+    fn compresses_running(&self) -> bool {
+        false
+    }
+
+    /// How many VM processes, VMMs and pagers, the kernel's out-of-memory
+    /// killer ended since the engine took the host: a VM it ends this way
+    /// loses its running programs, which the host's memory rule (ADR 24)
+    /// exists to prevent. `None` where the engine cannot tell.
+    fn oom_kills(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
+    /// Bounds the running VM's memory as the host's memory rule asks
+    /// (ADR 24): `low` bytes the kernel keeps it from losing to others,
+    /// and `high` bytes past which it waits on its own allocations while
+    /// the kernel compresses its coldest pages, or no such point for
+    /// `None`. A VM starts, resumes and is adopted with its request as its
+    /// low and no high. Applied in the background, the latest asked
+    /// winning; a pause or a resume drops one not yet applied. Returns at
+    /// once. Engines that cannot bound a VM report an error.
+    fn bound_memory(&self, vm: &Self::Vm, low: u64, high: Option<u64>) -> Result<(), EngineError> {
+        let _ = (vm, low, high);
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "bound_memory",
+            "this engine cannot bound a VM's memory",
+        ))
+    }
+
+    /// Tells the guest of `vm`, started from `spec`, how long each of its
+    /// writable drives is now: their files grew since it last learned
+    /// that, at its boot or in the state it was restored from. A paused
+    /// guest learns it when it next runs. Engines whose drives cannot
+    /// change length report an error, and the VM keeps the drives it had.
+    fn resize_drives(
+        &self,
+        vm: &Self::Vm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let _ = (vm, spec);
+        std::future::ready(Err(EngineError::new(
+            ErrorKind::Transient,
+            "resize_drives",
+            "this engine cannot change a drive's length",
+        )))
+    }
+
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.
@@ -296,7 +430,10 @@ pub trait Engine: Send + Sync + 'static {
     /// balloon rather than run out of memory. Every pause lets the balloon
     /// go first, and a request that comes once the VM is paused or ended
     /// does nothing and fails, so a VM never sleeps with its balloon set
-    /// and a request not made is never taken for done. For 0, resolves
+    /// and a request not made is never taken for done. Requests take
+    /// effect in the order this is called: one that reaches the VM after a
+    /// later request, or a later pause or resume, does nothing and fails,
+    /// so the setting asked last is the one that holds. For 0, resolves
     /// once the guest has taken back every page it gave. The future does
     /// not borrow the VM. Engines without balloons do nothing.
     fn set_balloon(

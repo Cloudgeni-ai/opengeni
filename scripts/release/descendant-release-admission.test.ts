@@ -133,6 +133,8 @@ type Variant =
   | "bad-tree"
   | "conflict-resolved"
   | "direct-commit"
+  | "squash-intervening"
+  | "squash-bad-tree"
   | "mutate-version"
   | "pending-changeset";
 
@@ -248,6 +250,11 @@ function scenario(variant: Variant): Scenario {
     }
     repo.write("src/b.txt", "b-resolved\n");
     firstIntervening = repo.commit("Merge pull request #101 from pr1");
+  } else if (variant === "squash-intervening" || variant === "squash-bad-tree") {
+    // The merge batcher lands an ordinary PR as one squash commit.
+    repo.git("merge", "-q", "--squash", "pr1");
+    if (variant === "squash-bad-tree") repo.write("src/hidden.txt", "unreviewed\n");
+    firstIntervening = repo.commit("Change a (#101)");
   } else {
     firstIntervening = repo.merge("pr1", "Merge pull request #101 from pr1");
   }
@@ -1019,7 +1026,15 @@ describe("tested-descendant release admission", () => {
 
   test("rejects direct single-parent commits between provenance and candidate", async () => {
     const s = scenario("direct-commit");
-    await expect(admit(s)).rejects.toThrow("is not a two-parent merge");
+    await expect(admit(s)).rejects.toThrow("is not associated with exactly one pull request");
+  });
+
+  test("admits a squash-landed PR between provenance and candidate", async () => {
+    await expect(admit(scenario("squash-intervening"))).resolves.toBeDefined();
+    const tampered = scenario("squash-bad-tree");
+    await expect(admit(tampered)).rejects.toThrow(
+      `landed merge content mismatch at ${tampered.firstIntervening}`,
+    );
   });
 
   test("rejects a hand-modified intervening merge tree through the merge-tree audit", async () => {
@@ -1342,6 +1357,20 @@ describe("tested-descendant release admission", () => {
         "full-green receipt names another source or mode",
       ],
       [
+        // An attested main push recorded its batch result: not a release source.
+        (fixture) =>
+          changeReceipt(fixture, "full-green-main-", (body) => {
+            body.attestation = {
+              workflow: ".github/workflows/batch-ci.yml",
+              batchRunId: "9001",
+              batchRunAttempt: "1",
+              batchHeadSha: s.candidate,
+              tree: "f".repeat(40),
+            };
+          }),
+        "full-green receipt reused Batch CI; a release source needs the full main suite",
+      ],
+      [
         (fixture) =>
           changeReceipt(fixture, "canary-images-", (body) => {
             body.producer.runAttempt = "1";
@@ -1459,11 +1488,13 @@ describe("descendant merge-content audit", () => {
     const good = scenario("good");
     expect(audit("bad-tree")).toThrow("landed merge content mismatch");
     expect(audit("conflict-resolved")).toThrow("cannot be recomputed without conflict resolution");
-    expect(audit("direct-commit")).toThrow("is not a two-parent merge");
+    expect(audit("direct-commit")).toThrow("is not a proven squash or two-parent merge");
+    // A squash needs its provider-proven PR head.
+    expect(audit("squash-intervening")).toThrow("is not a proven squash or two-parent merge");
     expect(audit("side-branch")).toThrow(
       "Version provenance is not on the release candidate's first-parent main history",
     );
-    expect(audit("squash-provenance")).toThrow("is not a two-parent merge");
+    expect(audit("squash-provenance")).toThrow("is not a proven squash or two-parent merge");
     expect(audit("good", { maximumMerges: 1 })).toThrow(
       "descendant first-parent history length is outside the admitted bound",
     );

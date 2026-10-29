@@ -31,6 +31,7 @@ import type {
 import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
+  BROWSER_WAIT_HOLD_MAX_MS,
   BrowserDownloadExportRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
   NetworkRouteConsistency,
@@ -66,6 +67,7 @@ import {
 } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import {
+  readDetachedBrowserRecord,
   readDetachedBrowserRecords,
   removeDetachedBrowserRecord,
   writeDetachedBrowserRecord,
@@ -172,6 +174,7 @@ import {
   type BrowserRelaunchReason,
   type StoppedBrowserTab,
 } from "./stopped-browser-tabs";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const DEFAULT_MAX_SESSIONS = 64;
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -224,6 +227,14 @@ function releaseOnClose(
 export type BrowserSessionReference = {
   browserSessionId: string;
   controllerGeneration: string;
+};
+
+/** About the caller of one createSession, not the session itself. */
+export type BrowserSupervisorCreation = {
+  /** The caller can take a session with no observation (null): one that
+   * continued in the person's own browser with no tab of its own. Callers
+   * from before such sessions omit it and get a new tab instead. */
+  acceptsNoObservation?: boolean;
 };
 
 export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
@@ -291,9 +302,15 @@ export type BrowserStateRestoreInput = {
 };
 
 export type BrowserSupervisorSession = BrowserSessionReference & {
-  observation: BrowserObservation;
+  /** Null only in the person's own browser, for a session that continued
+   * there with none of its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservation | null;
   /** Returned only by the create that launched the browser. */
   notice?: string;
+  /** How this headed managed browser shows on the machine as launched: in a
+   * native window, or offscreen with none. Absent for headless, remote and
+   * attached browsers. */
+  display?: "window" | "offscreen";
 };
 
 export type BrowserStateCaptureInput = BrowserSessionReference & {
@@ -305,13 +322,22 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
   upload: BrowserStateUploadAuthority;
 };
 
+/** Whether the caller asked for BrowserObservation.notice (see
+ * BROWSER_OBSERVATION_NOTICES_PARAMETER): the agent's own tools do, so a
+ * notice reaches the agent and nothing else uses it up. */
+export type BrowserObservationNoticeOptions = { notices?: boolean };
+
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
   readonly networkNotice?: string | null;
+  readonly display?: "window" | "offscreen" | null;
   /** The load error of the page start() kept on the browser's error page. */
   readonly startLoadError?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
+  /** Start a session continuing in the person's browser in a tab it left
+   * there; null when it has none left, so it starts with no tab. */
+  resume?(): Promise<BrowserObservation | null>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
@@ -368,6 +394,14 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * reopened tab keeps its earlier ID, and calls naming an earlier tab that
    * did not reopen say why it is gone. */
   noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
+  /** The plain notice that a relaunch reloaded this tab's page, for the
+   * first result about it that reaches the caller; null when there is none
+   * or it was already given. */
+  takeReloadedTabNotice?(tabId: string): string | null;
+  /** The http(s) URL a tab showing the browser's error page failed to load:
+   * the address the browser reopens it at after a relaunch. Null when it
+   * can't be read. */
+  errorPageUrl?(tabId: string): Promise<string | null>;
   /** Give open tabs the IDs callers already hold for them (an earlier
    * controller on the same browser gave them those IDs). */
   adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
@@ -489,6 +523,8 @@ type Runtime = {
    * returned once from createSession instead of immediately rebuilding the
    * same accessibility tree through a second controller round trip. */
   creationObservation: BrowserObservation | null;
+  /** The runtime continued a session that had no tab left, so it has none. */
+  startedWithoutTab: boolean;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
   /** Outstanding uses that keep the browser's windows presented. Each is
@@ -498,6 +534,10 @@ type Runtime = {
   recording: BrowserRecording | null;
   /** When a request last reached this browser (supervisor clock). */
   lastUsedAt: number;
+  /** Until when the agent session using this browser keeps it while it
+   * works or deliberately waits (supervisor clock), or null; see
+   * `waitHoldEnds`. */
+  waitHoldUntil: number | null;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
@@ -568,6 +608,10 @@ export class BrowserSupervisor {
   private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
   /** Browsers an earlier controller handed off that this one is stopping. */
   private readonly releasingDetached = new Map<string, Promise<unknown>>();
+  /** Wait holds on handed-off browsers this controller has not adopted, by
+   * browser session id (supervisor clock); see `holdForWait`. Read without
+   * yielding by the sweep, so a hold set before its claim always counts. */
+  private readonly detachedWaitHolds = new Map<string, number>();
   /** Handed-off browsers the last sweep found still waiting for their idle
    * time; the controller is not empty while any remain. */
   private detachedWaiting = 0;
@@ -665,7 +709,7 @@ export class BrowserSupervisor {
       } catch (error) {
         console.warn("browserd.idle_release_failed", {
           browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       } finally {
         if (this.ending.get(browserSessionId) === ending) this.ending.delete(browserSessionId);
@@ -716,7 +760,7 @@ export class BrowserSupervisor {
       ledgers = await readAttachedTabLedgers(this.rootDirectory);
     } catch (error) {
       console.warn("browserd.attached_leftover_release_failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return [];
     }
@@ -782,7 +826,7 @@ export class BrowserSupervisor {
         this.attachedLeftoverWarnings.add(browserSessionId);
         console.warn("browserd.attached_leftover_release_failed", {
           browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
       return false;
@@ -798,7 +842,7 @@ export class BrowserSupervisor {
       records = await readDetachedBrowserRecords(this.rootDirectory);
     } catch (error) {
       console.warn("browserd.detached_release_failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return [];
     }
@@ -818,7 +862,9 @@ export class BrowserSupervisor {
       )
         continue;
       if (this.closed) break;
-      if (record.lastUsedAt > idleBefore) {
+      const waitHoldUntil =
+        this.detachedWaitHolds.get(browserSessionId) ?? record.waitHoldUntil ?? null;
+      if (idleSince(record.lastUsedAt, waitHoldUntil) > idleBefore) {
         waiting += 1;
         continue;
       }
@@ -834,12 +880,13 @@ export class BrowserSupervisor {
       this.releasingDetached.set(browserSessionId, release);
       try {
         await release;
+        this.detachedWaitHolds.delete(browserSessionId);
         released.push(browserSessionId);
       } catch (error) {
         waiting += 1;
         console.warn("browserd.detached_release_failed", {
           browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       } finally {
         if (this.releasingDetached.get(browserSessionId) === release)
@@ -979,8 +1026,20 @@ export class BrowserSupervisor {
     return supervisor;
   }
 
+  /** A browser this controller launches always shows a tab. */
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions & {
+      transport?: Exclude<BrowserSupervisorTransport, { kind: "attached_chrome" }>;
+    },
+    creation?: BrowserSupervisorCreation,
+  ): Promise<BrowserSupervisorSession & { observation: BrowserObservation }>;
   async createSession(
     optionsInput: BrowserSupervisorSessionOptions,
+    creation?: BrowserSupervisorCreation,
+  ): Promise<BrowserSupervisorSession>;
+  async createSession(
+    optionsInput: BrowserSupervisorSessionOptions,
+    creation: BrowserSupervisorCreation = {},
   ): Promise<BrowserSupervisorSession> {
     this.assertOpen();
     const options = validateSessionOptions(optionsInput);
@@ -994,7 +1053,7 @@ export class BrowserSupervisor {
         "ephemeral browser contexts are disabled by the operator",
       );
     }
-    const request = this.createValidatedSession(options);
+    const request = this.createValidatedSession(options, creation.acceptsNoObservation === true);
     this.creationRequests.add(request);
     try {
       return await request;
@@ -1306,6 +1365,7 @@ export class BrowserSupervisor {
 
   private async createValidatedSession(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<BrowserSupervisorSession> {
     await this.retireTerminalSessions();
     // A handed-off browser being stopped for idleness is never adopted while
@@ -1325,7 +1385,8 @@ export class BrowserSupervisor {
       await this.recordWorkingAuthority(active, options);
       return {
         ...binding(active),
-        observation: await this.currentObservation(active),
+        ...displayOf(active),
+        observation: await this.currentObservation(active, acceptsNoObservation),
       };
     }
     const pending = this.creating.get(options.browserSessionId);
@@ -1335,7 +1396,8 @@ export class BrowserSupervisor {
       await this.recordWorkingAuthority(runtime, options);
       return {
         ...binding(runtime),
-        observation: await this.currentObservation(runtime),
+        ...displayOf(runtime),
+        observation: await this.currentObservation(runtime, acceptsNoObservation),
       };
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
@@ -1344,7 +1406,7 @@ export class BrowserSupervisor {
         `This machine is already running its limit of ${this.maxSessions} managed browsers. End browser sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
-    const creation = this.buildRuntime(options);
+    const creation = this.buildRuntime(options, acceptsNoObservation);
     this.creating.set(options.browserSessionId, creation);
     try {
       const runtime = await creation;
@@ -1363,9 +1425,21 @@ export class BrowserSupervisor {
       // This controller holds the browser now; an earlier handoff record
       // must not outlive that.
       await removeDetachedBrowserRecord(runtime.sessionDirectory).catch(() => undefined);
+      // A wait hold set on the handed-off browser carries over: another
+      // session's use does not end the waiting session's wait.
+      const detachedHold = this.detachedWaitHolds.get(options.browserSessionId);
+      this.detachedWaitHolds.delete(options.browserSessionId);
+      if (detachedHold !== undefined && runtime.waitHoldUntil === null) {
+        runtime.waitHoldUntil = detachedHold;
+      }
       this.sessions.set(options.browserSessionId, runtime);
-      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+      const observation =
+        runtime.creationObservation ??
+        (runtime.startedWithoutTab
+          ? null
+          : await this.currentObservation(runtime, acceptsNoObservation));
       runtime.creationObservation = null;
+      runtime.startedWithoutTab = false;
       // The browser opened even if its first page did not load; say why in
       // plain words rather than leave the caller to infer it from the
       // browser's error page.
@@ -1375,11 +1449,13 @@ export class BrowserSupervisor {
           ? `initialUrl did not load (${loadError}); the tab shows the browser's error page.`
           : null,
         runtime.driver.networkNotice,
+        runtime.driver.display === "offscreen" ? offscreenBrowserNotice(process.platform) : null,
       ]
         .filter((line): line is string => Boolean(line))
         .join(" ");
       return {
         ...binding(runtime),
+        ...displayOf(runtime),
         observation,
         ...(notice ? { notice } : {}),
       };
@@ -1508,6 +1584,7 @@ export class BrowserSupervisor {
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
+    options: BrowserObservationNoticeOptions = {},
   ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.mutateWithRecovery(runtime, async () => {
@@ -1517,7 +1594,7 @@ export class BrowserSupervisor {
     this.noteRecordingTarget(runtime, "select_tab", observation.target.id, {
       url: observation.target.url,
     });
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async closeTarget(
@@ -1532,13 +1609,17 @@ export class BrowserSupervisor {
     return targets;
   }
 
-  async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
+  async observe(
+    reference: BrowserSessionReference,
+    targetId: string,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.readWithRecovery(runtime, async () => {
       return await runtime.controller.observe(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async targetState(
@@ -1568,17 +1649,20 @@ export class BrowserSupervisor {
     return this.requireActive(reference).driver.readClipboard();
   }
 
-  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+  async action(
+    command: BrowserActionCommand,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
     });
     // Logged as the agent sent it: secret references are not resolved here.
     this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
-    const receipt = await this.presented(
-      runtime,
-      async () => await runtime.controller.run(command),
-    );
+    const ran = await this.presented(runtime, async () => await runtime.controller.run(command));
+    const receipt = ran.observation
+      ? { ...ran, observation: this.reported(runtime, ran.observation, options) }
+      : ran;
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
       await this.recoverIfUnavailable(runtime).catch(() => false);
@@ -2111,12 +2195,15 @@ export class BrowserSupervisor {
    * move the directory meanwhile. An adoption that owns the directory, and
    * is not one this launch's authority carries forward, refuses the launch;
    * the launch never falls back to anything else. */
-  private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
+  private async buildRuntime(
+    options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
+  ): Promise<Runtime> {
     try {
       return await this.withOwnedWorkingDirectory(
         "launch",
         options,
-        async () => await this.buildOwnedRuntime(options),
+        async () => await this.buildOwnedRuntime(options, acceptsNoObservation),
       );
     } catch (error) {
       throw browserLaunchFailure(error);
@@ -2125,6 +2212,7 @@ export class BrowserSupervisor {
 
   private async buildOwnedRuntime(
     options: ValidatedBrowserSupervisorSessionOptions,
+    acceptsNoObservation: boolean,
   ): Promise<Runtime> {
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const profileDirectory = join(sessionDirectory, "profile");
@@ -2467,10 +2555,12 @@ export class BrowserSupervisor {
         },
         lastTargets: [],
         creationObservation: null,
+        startedWithoutTab: false,
         recovery: null,
         presence: new Set(),
         recording: null,
         lastUsedAt: this.now(),
+        waitHoldUntil: null,
       };
       runtime.controller = this.createController(runtime, driver);
       // Startup and tab restoration are a use of the browser: nothing may park
@@ -2491,9 +2581,17 @@ export class BrowserSupervisor {
         } else {
           // The browser opens even when its first page fails to load: the tab
           // shows the browser's error page, which names the failure.
-          const observation = await driver.start(options.initialUrl, { keepTabOnLoadError: true });
+          // A session continuing in the person's browser carries on in a
+          // tab it left there, and opens none when it has none left. A
+          // caller that cannot take a session without an observation (one
+          // from before such sessions) gets a new tab, as before.
+          const observation =
+            options.initialUrl === undefined && driver.resume && acceptsNoObservation
+              ? await driver.resume()
+              : await driver.start(options.initialUrl, { keepTabOnLoadError: true });
           runtime.creationObservation = observation;
-          runtime.lastTargets = [observation.target];
+          runtime.startedWithoutTab = observation === null;
+          runtime.lastTargets = observation ? [observation.target] : [];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         }
       } finally {
@@ -3066,6 +3164,20 @@ export class BrowserSupervisor {
     this.rememberTarget(runtime, observation.target);
   }
 
+  /** An observation for a caller that asked for notices says, once, that a
+   * relaunch reloaded its tab's page. Other callers (a person's viewer, auth
+   * checks, API clients) neither see the notice nor use it up. */
+  private reported(
+    runtime: Runtime,
+    observation: BrowserObservation,
+    options: BrowserObservationNoticeOptions,
+  ): BrowserObservation {
+    const notice = options.notices
+      ? runtime.driver.takeReloadedTabNotice?.(observation.target.id)
+      : null;
+    return notice ? { ...observation, notice } : observation;
+  }
+
   private rememberTarget(runtime: Runtime, target: BrowserTarget): void {
     const index = runtime.lastTargets.findIndex((entry) => entry.id === target.id);
     if (target.selected) {
@@ -3115,12 +3227,21 @@ export class BrowserSupervisor {
     );
   }
 
-  private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
+  /** The selected tab's observation. In the person's own browser, its other
+   * tabs are theirs, not this session's: with no tab selected the session
+   * has none, and it is given none when the caller can take that (null), or
+   * else a new tab of its own. */
+  private async currentObservation(
+    runtime: Runtime,
+    acceptsNoObservation: boolean,
+  ): Promise<BrowserObservation | null> {
     const targets = await this.readWithRecovery(runtime, async () => {
       return await runtime.driver.listTargets();
     });
     this.rememberTargets(runtime, targets);
-    const selected = targets.find((target) => target.selected) ?? targets[0];
+    const personsBrowser = runtime.options.transport.kind === "attached_chrome";
+    const selected =
+      targets.find((target) => target.selected) ?? (personsBrowser ? undefined : targets[0]);
     if (selected) {
       const observation = await this.readWithRecovery(runtime, async () => {
         return await runtime.controller.observe(selected.id);
@@ -3128,6 +3249,7 @@ export class BrowserSupervisor {
       this.rememberObservation(runtime, observation);
       return observation;
     }
+    if (personsBrowser && acceptsNoObservation) return null;
     const observation = await this.mutateWithRecovery(runtime, async () => {
       return await runtime.driver.openTarget();
     });
@@ -3396,6 +3518,68 @@ export class BrowserSupervisor {
     return runtime;
   }
 
+  /**
+   * Keeps a browser while the agent session using it works or deliberately
+   * waits: the control plane renews a short hold every few minutes for as long
+   * as that lasts, and the idle release leaves the browser running, page
+   * state and all, until the latest hold (see `waitHoldEnds` for the cap). The
+   * normal idle time then counts from the hold's end, so a session that just
+   * stopped still finds its browser for a while. A hold only ever extends: no
+   * renewal, from whichever API process, shortens another, and nothing ever
+   * needs to end one. This is not a use of the browser. A time already past
+   * changes nothing.
+   *
+   * A browser handed off by an earlier controller and not adopted yet is
+   * held too, so a wait right after a restart or update keeps it. A browser
+   * this controller does not hold is left alone, never launched for this.
+   * Returns whether the browser is held.
+   */
+  async holdForWait(reference: BrowserSessionReference, hold: WaitHold): Promise<boolean> {
+    const runtime = this.sessions.get(reference.browserSessionId);
+    if (runtime) {
+      if (runtime.options.controllerGeneration !== reference.controllerGeneration) return false;
+      runtime.waitHoldUntil = nextWaitHold(runtime.waitHoldUntil, hold, this.now());
+      return this.now() < waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil);
+    }
+    return await this.holdDetachedForWait(reference.browserSessionId, hold);
+  }
+
+  private detachedUnsettled(browserSessionId: string): boolean {
+    return (
+      this.closed ||
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId) ||
+      this.ending.has(browserSessionId) ||
+      this.adopting.has(browserSessionId) ||
+      this.endingWorkingCopies.has(browserSessionId) ||
+      this.releasingDetached.has(browserSessionId)
+    );
+  }
+
+  /** The hold for a handed-off browser: kept in memory for the sweep and in
+   * its record, so a further restart keeps it too (best effort). */
+  private async holdDetachedForWait(browserSessionId: string, hold: WaitHold): Promise<boolean> {
+    if (this.detachedUnsettled(browserSessionId)) return false;
+    const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+    const record = await readDetachedBrowserRecord(sessionDirectory, browserSessionId);
+    if (!record || this.detachedUnsettled(browserSessionId)) return false;
+    const current = this.detachedWaitHolds.get(browserSessionId) ?? record.waitHoldUntil ?? null;
+    const next = nextWaitHold(current, hold, this.now());
+    if (next === null) this.detachedWaitHolds.delete(browserSessionId);
+    else this.detachedWaitHolds.set(browserSessionId, next);
+    const { waitHoldUntil: _previous, ...unheld } = record;
+    await writeDetachedBrowserRecord(
+      sessionDirectory,
+      next === null ? unheld : { ...unheld, waitHoldUntil: next },
+    ).catch((error: unknown) => {
+      console.warn("browserd.detached_record_failed", {
+        browserSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return this.now() < waitHoldEnds(record.lastUsedAt, next);
+  }
+
   /** Keep the tabs a managed browser has as its controller stops it or lets
    * it go, so a browser launched on its profile later can say what became of
    * each. Best effort: without the record a missing tab is only unexplained. */
@@ -3409,7 +3593,7 @@ export class BrowserSupervisor {
     let targets: readonly BrowserTarget[] = runtime.lastTargets;
     if (driverAvailable) {
       try {
-        targets = await runtime.driver.listTargets();
+        targets = await restorableTargets(runtime.driver, await runtime.driver.listTargets());
       } catch {
         // The last tabs this controller saw.
       }
@@ -3427,7 +3611,7 @@ export class BrowserSupervisor {
     } catch (error) {
       console.warn("browserd.stopped_tabs_record_failed", {
         browserSessionId: runtime.options.browserSessionId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -3487,12 +3671,13 @@ export class BrowserSupervisor {
           // A live view, recording or request still open at shutdown is a use
           // that has not ended yet, so the successor's idle time starts now.
           lastUsedAt: runtime.presence.size > 0 ? this.now() : runtime.lastUsedAt,
+          ...(runtime.waitHoldUntil !== null ? { waitHoldUntil: runtime.waitHoldUntil } : {}),
           process: runtime.workingReceipt.process,
         });
       } catch (error) {
         console.warn("browserd.detached_record_failed", {
           browserSessionId: runtime.options.browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }
@@ -3884,7 +4069,7 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
   const transport = runtime.options.transport.kind;
   return (
     (transport === "managed" || transport === "attached_chrome") &&
-    runtime.lastUsedAt <= idleBefore &&
+    idleSince(runtime.lastUsedAt, runtime.waitHoldUntil) <= idleBefore &&
     runtime.presence.size === 0 &&
     runtime.recording?.summary().state !== "recording" &&
     runtime.recovery === null &&
@@ -3895,6 +4080,33 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
       ? runtime.lifecycle === "active" && runtime.driver.isTerminal?.() !== true
       : hasPreservableWorkingRuntime(runtime))
   );
+}
+
+/**
+ * Until when the session using a browser keeps it past the idle release
+ * time: the hold's time (a wait's deadline, or far off while the session
+ * works), but never more than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's
+ * last use, so a long turn or repeated waits cannot keep a browser nobody
+ * uses. Without a hold, never (negative infinity).
+ */
+export function waitHoldEnds(lastUsedAt: number, waitHoldUntil: number | null): number {
+  if (waitHoldUntil === null) return Number.NEGATIVE_INFINITY;
+  return Math.min(waitHoldUntil, lastUsedAt + BROWSER_WAIT_HOLD_MAX_MS);
+}
+
+/** Since when a browser counts as unused for its idle release: its last use,
+ * or the end of a wait hold after it, so the turn a wait resumes gets the
+ * normal idle time to use its browser again. */
+export function idleSince(lastUsedAt: number, waitHoldUntil: number | null): number {
+  return Math.max(lastUsedAt, waitHoldEnds(lastUsedAt, waitHoldUntil));
+}
+
+/** A hold sent by the control plane: keep the browser until `until`. */
+export type WaitHold = { until: number };
+
+function nextWaitHold(current: number | null, hold: WaitHold, now: number): number | null {
+  if (hold.until <= now) return current;
+  return current === null ? hold.until : Math.max(current, hold.until);
 }
 
 /** Whether the browser is still receiving a download. A store that cannot be
@@ -3944,6 +4156,24 @@ function binding(runtime: Runtime): BrowserSessionReference {
     browserSessionId: runtime.options.browserSessionId,
     controllerGeneration: runtime.options.controllerGeneration,
   };
+}
+
+/** The display the running browser was launched with, for the caller to
+ * report instead of inferring it from the requested mode. */
+function displayOf(runtime: Runtime): { display?: "window" | "offscreen" } {
+  const display = runtime.driver.display;
+  return display ? { display } : {};
+}
+
+/** One short line for the agent when a headed browser was launched offscreen
+ * (the session line already says it has no window): what a person at the
+ * machine can see, and what to use for a step only they can do. On macOS a
+ * managed browser is offscreen so it never takes over the person's screen; on
+ * Linux only when there is no display. */
+export function offscreenBrowserNotice(platform: NodeJS.Platform): string {
+  return platform === "darwin"
+    ? "A person sees it only in the live view; for a step they must do at this Mac, use placement attached_device, or computer_open then browser_open with linkedComputerSessionId."
+    : "A person sees it only in the live view; for a step that needs a real window, use placement attached_device.";
 }
 
 /** Virtual WebAuthn needs the CDP WebAuthn domain and browser-level target
@@ -4813,6 +5043,24 @@ function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
     }));
 }
 
+/** Tabs as the browser reopens them after a relaunch: a tab showing the
+ * browser's error page is reopened at the address it failed to load, so it is
+ * recorded and matched under that address. Only for pairing tabs across a
+ * relaunch; what callers are shown keeps the browser's own URL. */
+async function restorableTargets(
+  driver: BrowserSupervisorDriver,
+  targets: readonly BrowserTarget[],
+): Promise<BrowserTarget[]> {
+  return await Promise.all(
+    targets.map(async (target) => {
+      if (!driver.errorPageUrl || !target.url.toLowerCase().startsWith("chrome-error:"))
+        return target;
+      const url = await driver.errorPageUrl(target.id).catch(() => null);
+      return url ? { ...target, url } : target;
+    }),
+  );
+}
+
 /** Tell a relaunched browser's driver which of its tabs reopened each tab of
  * the browser before it, so they keep their IDs. True when any did. Best
  * effort: a failure only leaves an old tab ID unexplained. */
@@ -4825,8 +5073,16 @@ async function noteRelaunchedTabs(
 ): Promise<boolean> {
   if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
   try {
-    const tabs = matchReopenedTabs(previous, current ?? (await driver.listTargets()));
-    if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
+    const reopened = await restorableTargets(driver, current ?? (await driver.listTargets()));
+    const tabs = matchReopenedTabs(previous, reopened);
+    if (tabs.length > 0) {
+      driver.noteRelaunchedTabs({
+        reason,
+        ...details,
+        tabs,
+        restoredTargetIds: reopened.map((target) => target.id),
+      });
+    }
     return tabs.some((tab) => tab.replacementId !== null);
   } catch {
     // Unexplained, not failed.

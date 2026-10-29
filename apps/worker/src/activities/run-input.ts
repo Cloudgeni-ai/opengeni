@@ -28,6 +28,7 @@ import {
 } from "@opengeni/db";
 import {
   createModelImageSizer,
+  sniffModelImageType,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -174,6 +175,12 @@ export type TurnInputOptions = {
   mountedFileResources?: readonly ResourceRef[];
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
+  /**
+   * A turn not served by Codex never sends Codex's opaque remote compaction
+   * checkpoint. A model switch rebuilds it before the turn; this is the
+   * backstop when that rebuild has not replaced it.
+   */
+  omitRemoteCompactionItems?: boolean;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -475,6 +482,11 @@ async function boundedAttachmentImage(
     boundedImageSizers.set(bound, sizer);
   }
   try {
+    // A file whose stored type does not match its bytes (a JPEG saved as
+    // image/png) keeps the original projection it always had, so earlier
+    // requests stay byte-identical. The provider transport labels it correctly.
+    if (sniffModelImageType(Buffer.from(data.slice(0, 24), "base64")) !== attachment.contentType)
+      return original;
     const sized = await sizer(data, attachment.contentType);
     if (sized.data === data && sized.mediaType === attachment.contentType) return original;
     return {
@@ -882,7 +894,10 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: ActiveHistoryLoader = loadActiveHistoryForTurn,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
+  preparationOptions: Pick<
+    TurnInputOptions,
+    "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems"
+  > = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [activeHistory, envelope] = await Promise.all([
@@ -893,7 +908,9 @@ async function messageInput(
       getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
     ),
   ]);
-  const stored = activeHistory.items;
+  const stored = preparationOptions.omitRemoteCompactionItems
+    ? activeHistory.items.filter((row) => row.item.type !== "compaction")
+    : activeHistory.items;
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",

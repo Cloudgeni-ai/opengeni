@@ -64,6 +64,199 @@ function measureZoomSurface(width = 1000, height = 800): () => void {
 }
 
 describe("LightboxProvider gallery", () => {
+  /** Opens a lone image of the given pixel size in a 1000 x 800 image area. */
+  async function openLoneImage(naturalWidth: number, naturalHeight: number) {
+    let controller: ReturnType<typeof useLightboxOptional> = null;
+    function Probe() {
+      controller = useLightboxOptional();
+      return <button type="button" data-open="only" />;
+    }
+    const restore = measureZoomSurface();
+    const rendered = await renderComponent(
+      <LightboxProvider>
+        <Probe />
+      </LightboxProvider>,
+    );
+    await act(async () => {
+      controller?.open("blob:only", undefined, document.querySelector<HTMLElement>("[data-open]"));
+    });
+    const image = document.querySelector<HTMLImageElement>("figure img")!;
+    Object.defineProperty(image, "naturalWidth", { configurable: true, value: naturalWidth });
+    Object.defineProperty(image, "naturalHeight", { configurable: true, value: naturalHeight });
+    await act(async () => {
+      image.dispatchEvent(new Event("load"));
+    });
+    return {
+      image,
+      surface: document.querySelector<HTMLElement>("[data-zoom-pan-surface]")!,
+      percent: () => document.querySelector("[data-zoom-percent]")?.textContent,
+      open: () => document.querySelector('[role="dialog"]')?.getAttribute("data-state") === "open",
+      async cleanup() {
+        restore();
+        await rendered.unmount();
+      },
+    };
+  }
+
+  /** A mouse press and release at one point, as a click on the zoom surface. */
+  async function clickAt(target: Element, x: number, y: number) {
+    for (const type of ["pointerdown", "pointerup"] as const) {
+      await act(async () => {
+        target.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 1,
+            pointerType: "mouse",
+            button: 0,
+            clientX: x,
+            clientY: y,
+          }),
+        );
+      });
+    }
+    await act(async () => {
+      target.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y }),
+      );
+    });
+  }
+
+  test("a click beside the image closes the viewer at any zoom and never zooms it", async () => {
+    // 600 x 400 pixels, enlarged to fit at 161%, as in the reported case (126%).
+    const lightbox = await openLoneImage(600, 400);
+    try {
+      expect(lightbox.percent()).toBe("161%");
+      // A click on the image shrinks it to actual size, 600 x 400 at (200, 200).
+      await clickAt(lightbox.surface, 500, 400);
+      expect(lightbox.percent()).toBe("100%");
+      expect(lightbox.open()).toBe(true);
+      // The dark backdrop right beside the image closes it; it does not zoom back.
+      await clickAt(lightbox.surface, 150, 400);
+      expect(lightbox.percent()).toBe("100%");
+      expect(lightbox.open()).toBe(false);
+    } finally {
+      await lightbox.cleanup();
+    }
+  });
+
+  test("the zoom cursor shows what a click on the image will do, and only on the image", async () => {
+    const lightbox = await openLoneImage(600, 400);
+    const cursor = (element: Element) =>
+      [...element.classList].filter((name) => name.startsWith("cursor-"));
+    try {
+      // Enlarged to fit: a click shrinks it.
+      expect(cursor(lightbox.image)).toEqual(["cursor-zoom-out"]);
+      expect(lightbox.image.getAttribute("data-zoom-click")).toBe("out");
+      await clickAt(lightbox.surface, 500, 400);
+      // At actual size: the next click enlarges it again.
+      expect(cursor(lightbox.image)).toEqual(["cursor-zoom-in"]);
+      expect(lightbox.image.getAttribute("data-zoom-click")).toBe("in");
+      await clickAt(lightbox.surface, 500, 400);
+      expect(lightbox.percent()).toBe("161%");
+      expect(cursor(lightbox.image)).toEqual(["cursor-zoom-out"]);
+      // The backdrop around the image keeps the ordinary arrow: a click there closes.
+      expect(cursor(lightbox.surface)).toEqual([]);
+      // The image takes the pointer so its own cursor shows.
+      expect(lightbox.image.classList.contains("pointer-events-none")).toBe(false);
+    } finally {
+      await lightbox.cleanup();
+    }
+  });
+
+  test("a large image zooms in on click, then pans with a grab cursor", async () => {
+    const lightbox = await openLoneImage(2000, 1500);
+    try {
+      expect(lightbox.percent()).toBe("48%");
+      expect(lightbox.image.classList.contains("cursor-zoom-in")).toBe(true);
+      await clickAt(lightbox.surface, 500, 400);
+      expect(lightbox.percent()).toBe("100%");
+      expect(lightbox.image.classList.contains("cursor-grab")).toBe(true);
+      expect(lightbox.open()).toBe(true);
+    } finally {
+      await lightbox.cleanup();
+    }
+  });
+
+  test("empty space around the image area closes the viewer; its controls do not", async () => {
+    const lightbox = await openLoneImage(600, 400);
+    try {
+      // The zoom controls' pill and its percentage act on zoom; they never close.
+      await clickAt(document.querySelector("[data-zoom-percent]")!, 0, 0);
+      await clickAt(document.querySelector("[data-zoom-controls]")!, 0, 0);
+      expect(lightbox.open()).toBe(true);
+      // A drag that starts on the image and is released in the gutter never closes.
+      await act(async () => {
+        lightbox.image.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, pointerId: 2, pointerType: "mouse" }),
+        );
+      });
+      await act(async () => {
+        document.querySelector("figure")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(lightbox.open()).toBe(true);
+      // The figure's gutters and the gaps around the zoom controls are backdrop too.
+      await clickAt(document.querySelector("figure")!, 0, 0);
+      expect(lightbox.open()).toBe(false);
+    } finally {
+      await lightbox.cleanup();
+    }
+  });
+
+  test("the caption is backdrop too, and Escape still closes", async () => {
+    const first = await openLoneImage(600, 400);
+    try {
+      // Selecting the caption's text is a drag across it; that keeps the viewer open.
+      const caption = document.querySelector("figcaption")!;
+      const range = document.createRange();
+      range.selectNodeContents(caption);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(range);
+      await clickAt(caption, 0, 0);
+      expect(first.open()).toBe(true);
+      document.getSelection()!.removeAllRanges();
+      await clickAt(document.querySelector("figcaption")!, 0, 0);
+      expect(first.open()).toBe(false);
+    } finally {
+      await first.cleanup();
+    }
+    const second = await openLoneImage(600, 400);
+    try {
+      await act(async () => {
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+      expect(second.open()).toBe(false);
+    } finally {
+      await second.cleanup();
+    }
+  });
+
+  test("no part of the open viewer moves a desktop window, and its close button gives feedback", async () => {
+    const lightbox = await openLoneImage(600, 400);
+    try {
+      // Electron keeps window-drag regions of the page underneath (the session
+      // header) live through an overlay unless the overlay opts out.
+      const dialog = document.querySelector('[role="dialog"]')!;
+      const overlay = dialog.previousElementSibling!;
+      for (const layer of [dialog, overlay]) {
+        expect(layer.classList.contains("[-webkit-app-region:no-drag]")).toBe(true);
+        expect(layer.classList.contains("[app-region:no-drag]")).toBe(true);
+      }
+      const close = document.querySelector('button[aria-label="Close"]')!;
+      for (const feedback of ["hover:bg-white/15", "active:bg-white/25"]) {
+        expect(close.classList.contains(feedback)).toBe(true);
+      }
+      await act(async () => {
+        (close as HTMLButtonElement).click();
+      });
+      expect(lightbox.open()).toBe(false);
+    } finally {
+      await lightbox.cleanup();
+    }
+  });
+
   test("pages through registered chat images in document order, wrapping around", async () => {
     const loads: string[] = [];
     const released: string[] = [];

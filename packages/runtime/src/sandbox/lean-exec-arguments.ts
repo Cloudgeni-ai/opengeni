@@ -29,6 +29,13 @@
  * pass through unchanged, so every argument object that is valid today runs
  * exactly as before. `shell` and `workdir` keep their existing absent/null
  * meaning (default shell, turn cwd).
+ *
+ * The `tty` hint names `write_stdin` only when the same tool list offers it.
+ * Sessions whose backend runs commands without stdin (Connected Machines and
+ * several cloud providers) get no `write_stdin`, so the hint there must not
+ * point at a tool the model cannot call. Both variants are fixed strings and
+ * depend only on whether `write_stdin` is in the list, which is stable for a
+ * session's placement, so the tool block changes only when the placement does.
  */
 import type { Tool } from "@openai/agents";
 
@@ -39,42 +46,50 @@ export const LEAN_EXEC_COMMAND_DEFAULTS = {
   yield_time_ms: 10_000,
 } as const;
 
-export const LEAN_EXEC_COMMAND_PARAMETERS = {
-  type: "object",
-  properties: {
-    cmd: { type: "string", minLength: 1, description: "Shell command to execute." },
-    max_output_tokens: {
-      type: "integer",
-      minimum: 1,
-      description: "Maximum number of tokens to return. Excess output will be truncated.",
+function leanExecCommandParameters(ttyDescription: string) {
+  return {
+    type: "object",
+    properties: {
+      cmd: { type: "string", minLength: 1, description: "Shell command to execute." },
+      max_output_tokens: {
+        type: "integer",
+        minimum: 1,
+        description: "Maximum number of tokens to return. Excess output will be truncated.",
+      },
+      yield_time_ms: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.",
+      },
+      workdir: {
+        type: "string",
+        description: "Working directory for the command. Omit to use the turn cwd.",
+      },
+      tty: { type: "boolean", description: ttyDescription },
+      login: {
+        type: "boolean",
+        description: "Run the shell with -l/-i (login) semantics. Omit for the default of false.",
+      },
+      shell: {
+        type: "string",
+        description: "Shell binary to launch. Omit to use the default shell.",
+      },
     },
-    yield_time_ms: {
-      type: "integer",
-      minimum: 0,
-      description:
-        "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.",
-    },
-    workdir: {
-      type: "string",
-      description: "Working directory for the command. Omit to use the turn cwd.",
-    },
-    tty: {
-      type: "boolean",
-      description:
-        "Allocate a TTY (needed to interrupt the process later with Ctrl-C through write_stdin). Omit for the default of false.",
-    },
-    login: {
-      type: "boolean",
-      description: "Run the shell with -l/-i (login) semantics. Omit for the default of false.",
-    },
-    shell: {
-      type: "string",
-      description: "Shell binary to launch. Omit to use the default shell.",
-    },
-  },
-  required: ["cmd", "max_output_tokens"],
-  additionalProperties: false,
-} as const;
+    required: ["cmd", "max_output_tokens"],
+    additionalProperties: false,
+  } as const;
+}
+
+/** The lean schema when the same tool list offers `write_stdin`. */
+export const LEAN_EXEC_COMMAND_PARAMETERS = leanExecCommandParameters(
+  "Allocate a TTY (needed to interrupt the process later with Ctrl-C through write_stdin). Omit for the default of false.",
+);
+
+/** The lean schema when the session runs commands without stdin. */
+export const LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN = leanExecCommandParameters(
+  "Allocate a TTY. Omit for the default of false.",
+);
 
 const LEAN_EXEC_COMMAND_DESCRIPTION =
   "Runs a shell command, returning output or a session ID for ongoing interaction. Pass only `cmd`, `max_output_tokens` and any argument whose value differs from its default.";
@@ -110,6 +125,9 @@ export function canonicalizeLeanExecCommandInput(input: string): string {
  * the turn-cancellation and routing wrappers see canonical arguments.
  */
 export function withLeanExecCommandArguments(tools: Tool<unknown>[]): Tool<unknown>[] {
+  const parameters = tools.some((tool) => tool.name === "write_stdin")
+    ? LEAN_EXEC_COMMAND_PARAMETERS
+    : LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN;
   return tools.map((capabilityTool) => {
     if (capabilityTool.type !== "function" || capabilityTool.name !== "exec_command") {
       return capabilityTool;
@@ -118,7 +136,7 @@ export function withLeanExecCommandArguments(tools: Tool<unknown>[]): Tool<unkno
     return {
       ...capabilityTool,
       description: LEAN_EXEC_COMMAND_DESCRIPTION,
-      parameters: LEAN_EXEC_COMMAND_PARAMETERS as unknown as typeof capabilityTool.parameters,
+      parameters: parameters as unknown as typeof capabilityTool.parameters,
       strict: false,
       invoke: (runContext, input, details) =>
         invoke(

@@ -61,9 +61,15 @@ Each organization subscription account has its own page.
 - Sharing work between this workspace's accounts: Spread work shares new chats
   evenly across accounts that can serve them. Primary first starts new chats on
   the primary account and uses another account when it can't serve them.
-- Keep Codex chats portable: summarizes long chats in a form another provider's
-  model can continue. Off keeps new chats on Codex, with better memory of long
-  conversations.
+- Switching models in a Codex chat: any chat can switch to another model at
+  any time, with no setting to turn on. A Codex chat keeps ChatGPT's own memory
+  of long conversations while it stays on Codex. On the first switch to another
+  provider's model, Opengeni rebuilds a plain summary of the earlier messages
+  from the chat's stored history (the transcript notes "Earlier messages
+  summarized for the new model"), and the chat uses that portable form from
+  then on. When a ChatGPT/Codex plan runs out of usage, the chat says when it
+  resets and, by default, continues on its own then. Turn off "Continue at
+  reset" to pause it instead, or pick another model to carry on right away.
 - Codex Apps: lets agents use the ChatGPT apps connected to one account. It must
   be an account owned by the workspace.
 

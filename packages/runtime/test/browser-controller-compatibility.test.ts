@@ -111,34 +111,11 @@ describe("browser actions an older controller rejects", () => {
     expect(missing).toEqual([]);
   });
 
-  test("names exact on a text locator inside a batch and its alternative", () => {
-    const action = sentAction({
-      type: "batch",
-      actions: [
-        { type: "fill", locator: { kind: "ref", ref: "e1" }, value: "x" },
-        { type: "click", locator: { kind: "text", text: "Save", exact: true } },
-      ],
-    });
-    expect(olderBrowserControllerMessage(action, true)).toBe(
-      "This browser's controller runs in an older Opengeni agent that does not accept " +
-        '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
-        "the element by its ref. Updating the agent adds support.",
-    );
-    expect(
-      olderBrowserControllerMessage(
-        sentAction({ type: "click", locator: { kind: "label", text: "Email", exact: false } }),
-        false,
-      ),
-    ).toBe(
-      "This browser's controller image is older than this server and does not accept " +
-        '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
-        "the element by its ref. Updating the controller image adds support.",
-    );
-  });
-
-  test("an older role locator exact or no newer option gets the general refusal", () => {
+  test("options every baseline controller accepts get the general refusal", () => {
     for (const action of [
       { type: "click", locator: { kind: "role", role: "button", name: "Save", exact: true } },
+      { type: "click", locator: { kind: "text", text: "Save", exact: true } },
+      { type: "click", locator: { kind: "label", text: "Email", exact: false } },
       { type: "click", locator: { kind: "text", text: "Save" } },
     ]) {
       expect(olderBrowserControllerMessage(sentAction(action), true)).toBe(
@@ -147,5 +124,24 @@ describe("browser actions an older controller rejects", () => {
           "the agent adds support.",
       );
     }
+  });
+
+  test("names viewport_reset, alone or inside a batch, and its alternative", () => {
+    const message =
+      "This browser's controller runs in an older Opengeni agent that does not accept " +
+      'type "viewport_reset" on an action. Nothing ran. Retry without type "viewport_reset", ' +
+      "or set type viewport with the window's own width and height. Updating the agent adds support.";
+    expect(olderBrowserControllerMessage(sentAction({ type: "viewport_reset" }), true)).toBe(
+      message,
+    );
+    expect(
+      olderBrowserControllerMessage(
+        sentAction({
+          type: "batch",
+          actions: [{ type: "viewport_reset" }, { type: "navigate", url: "https://example.com/" }],
+        }),
+        true,
+      ),
+    ).toBe(message);
   });
 });

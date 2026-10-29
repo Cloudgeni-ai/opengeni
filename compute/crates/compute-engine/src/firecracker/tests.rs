@@ -1,6 +1,6 @@
 use super::runtime::{Format, cpu_model, runtime_of};
 use super::*;
-use crate::spec::Network;
+use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -124,6 +124,30 @@ fn only_a_refusal_or_an_exit_while_loading_counts_against_an_image() {
     assert_eq!(load_failure(died, false).kind, ErrorKind::MemoryLost);
 }
 
+/// An image saved on a host whose KVM kept no realtime clock is told apart
+/// from other refusals by Firecracker's answer, as a nested host without an
+/// invariant TSC gives it, so the restore is tried once more without moving
+/// the clock; any other refusal stands.
+#[test]
+fn a_refusal_for_a_missing_realtime_clock_is_told_apart() {
+    let refusal = |status, body: &str| ApiError::Status {
+        method: "PUT",
+        path: "/snapshot/load".into(),
+        status,
+        body: body.into(),
+    };
+    let missing = r#"{"fault_message":"Load snapshot error: Failed to restore from snapshot: Failed to build microVM from snapshot: Failed to restore microVM state: clock_realtime requested but not present in the snapshot state"}"#;
+    assert!(lacks_realtime_clock(&refusal(400, missing)));
+    assert!(!lacks_realtime_clock(&refusal(
+        400,
+        r#"{"fault_message":"Load snapshot error: unsupported snapshot version"}"#
+    )));
+    assert!(!lacks_realtime_clock(&refusal(500, missing)));
+    assert!(!lacks_realtime_clock(&ApiError::Timeout(
+        Duration::from_secs(1)
+    )));
+}
+
 /// A launch records its runtime beside the jail, so an agent that takes
 /// the VMM back later knows which runtime its snapshots belong to.
 #[test]
@@ -152,26 +176,6 @@ fn a_launch_leaves_its_runtime_for_a_later_agent() {
 
 /// A trim that measured the previous launch's log and punches it out late
 /// reaches only that file, never what the next launch has begun to write.
-#[test]
-fn a_late_trim_of_the_last_log_spares_the_new_one() {
-    use std::io::Write;
-    use std::os::unix::fs::FileExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("vmm.log");
-    fs::write(&path, vec![b'o'; 64 << 10]).unwrap();
-    // The trimmer opens and measures the old log...
-    let trimming = File::options().write(true).open(&path).unwrap();
-    let measured = trimming.metadata().unwrap().len();
-    // ...a new launch starts its log meanwhile...
-    let mut fresh = fresh_log(&path).unwrap();
-    fresh.write_all(b"new launch\n").unwrap();
-    // ...and the trim lands on what it measured.
-    let zeros = vec![0; usize::try_from(measured).unwrap()];
-    trimming.write_all_at(&zeros, 0).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), b"new launch\n");
-}
-
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {
@@ -370,6 +374,101 @@ async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
     assert!(matches!(error, ApiError::Timeout(_)), "{error}");
 }
 
+/// Makes a group's `memory.pressure` report its processes waiting for
+/// memory all the time, as when the kernel slows them, until dropped.
+struct Waiting {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Waiting {
+    fn start(group: &Path) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (group, stopped) = (group.to_owned(), std::sync::Arc::clone(&stop));
+        let writer = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !stopped.load(Ordering::Relaxed) {
+                // Ahead of the clock, so no look finds less than all of
+                // its time waited.
+                let total = started.elapsed().as_micros() * 2;
+                let next = group.join("memory.pressure.next");
+                fs::write(
+                    &next,
+                    format!(
+                        "some avg10=100.00 avg60=100.00 avg300=100.00 total={total}\n\
+                         full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                    ),
+                )
+                .unwrap();
+                fs::rename(&next, group.join("memory.pressure")).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Self {
+            stop,
+            writer: Some(writer),
+        }
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// Once the VMs together pass the memory the host leaves them, the kernel
+/// slows every VMM thread that takes more, and a VMM it slows answers
+/// late: its request waits that out instead of failing, then has its own
+/// time again.
+#[tokio::test]
+async fn time_a_vmm_waits_for_memory_does_not_count_toward_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_vms, own) = vms_group(dir.path());
+    let waiting = Waiting::start(own.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let started = std::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // Many times its 200 ms deadline.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(!call.is_finished(), "the slowed VMM's request kept waiting");
+    drop(waiting);
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(1_150) && took < Duration::from_secs(3),
+        "once no longer slowed it had its own time, then failed: {took:?}"
+    );
+}
+
+/// A VMM stuck while its group waits for memory for good, as under a limit
+/// of its own its guest keeps pushing against, still fails in the end: of
+/// time it waits, only so much a request goes uncounted.
+#[tokio::test]
+async fn a_vmm_that_never_stops_waiting_for_memory_fails_in_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_vms, own) = vms_group(dir.path());
+    let _waiting = Waiting::start(own.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api
+        .held_by(own)
+        .with_memory_wait_limit(Duration::from_millis(500));
+    let started = std::time::Instant::now();
+    let error = api.call("GET", "/", None).await.unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(650) && took < Duration::from_secs(2),
+        "the 500 ms it may wait, then its 200 ms: {took:?}"
+    );
+}
+
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(
@@ -433,9 +532,11 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
     };
     let jail = Jail::new(&spec).unwrap();
     let bare = MemoryProfile::bare_metal();
-    let body = load_request(&spec, &jail, &files, bare).unwrap();
+    let body = load_request(&spec, &jail, &files, bare, true).unwrap();
     assert_eq!(body["clock_realtime"], true);
     assert_eq!(body["resume_vm"], false);
+    let clock_as_saved = load_request(&spec, &jail, &files, bare, false).unwrap();
+    assert_eq!(clock_as_saved["clock_realtime"], false);
     assert_eq!(body["snapshot_path"], "/vm.state");
     assert_eq!(body["mem_backend"]["backend_path"], "/vm.mem");
     assert_eq!(body["vsock_override"]["uds_path"], "/vsock.sock");
@@ -446,7 +547,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
         mac: "06:00:ac:10:00:02".into(),
         namespace: None,
     });
-    let body = load_request(&spec, &jail, &files, bare).unwrap();
+    let body = load_request(&spec, &jail, &files, bare, true).unwrap();
     assert_eq!(
         body["network_overrides"],
         json!([{ "iface_id": "eth0", "host_dev_name": "tap0" }])
@@ -457,7 +558,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
         memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
         made_under: None,
     };
-    assert!(load_request(&spec, &jail, &outside, bare).is_err());
+    assert!(load_request(&spec, &jail, &outside, bare, true).is_err());
 }
 
 fn spec() -> VmSpec {
@@ -480,6 +581,33 @@ fn spec() -> VmSpec {
     }
 }
 
+/// The host gets back what the guest frees on a disk it may write; a
+/// read-only drive takes no discard, which Firecracker refuses for one.
+#[test]
+fn writable_drives_take_the_guests_discards() {
+    let mut drive = Drive {
+        id: "rootfs".into(),
+        path: "/lab/vm/firecracker/a/root/rootfs.ext4".into(),
+        root: true,
+        read_only: false,
+    };
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(
+        config,
+        json!({
+            "drive_id": "rootfs",
+            "path_on_host": "/rootfs.ext4",
+            "is_root_device": true,
+            "is_read_only": false,
+            "discard": true,
+        })
+    );
+    drive.read_only = true;
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(config["is_read_only"], true);
+    assert_eq!(config["discard"], false);
+}
+
 #[test]
 fn the_profile_decides_page_size_and_dirty_tracking() {
     let bare = machine_config(&spec(), MemoryProfile::bare_metal());
@@ -495,12 +623,12 @@ fn the_profile_decides_page_size_and_dirty_tracking() {
         memory: paged_source(),
         made_under: None,
     };
-    let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
+    let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested(), true).unwrap();
     assert_eq!(body["mem_backend"]["backend_type"], "Uffd");
     assert_eq!(body["mem_backend"]["backend_path"], "/uffd.sock");
     assert_eq!(body["huge_pages"], "2M");
     assert_eq!(body["track_dirty_pages"], false);
-    let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal()).unwrap();
+    let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal(), true).unwrap();
     assert_eq!(body["huge_pages"], "None");
     assert_eq!(body["track_dirty_pages"], true);
 }

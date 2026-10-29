@@ -59,6 +59,7 @@ export type BrowserTextObservation = {
     | undefined;
   dialog?: { type: string; message: string; defaultPrompt?: string | undefined } | null | undefined;
   screenshot?: unknown;
+  notice?: string | undefined;
   agentView: {
     sourceKind: string;
     nodes: readonly BrowserTextNode[];
@@ -235,6 +236,7 @@ export function browserObservationText(
 ): string {
   const allRefs = options.allRefs === true;
   const lines = [browserTargetLine({ ...observation.target, selected: false })];
+  if (observation.notice) lines.push(observation.notice);
   const viewport = observation.viewport;
   if (viewport) {
     const extras = [
@@ -420,12 +422,21 @@ export function browserSessionLine(session: {
   placement: { kind: string };
   engine?: string | null | undefined;
   headless?: boolean | null | undefined;
+  display?: string | null | undefined;
   identityId?: string | null | undefined;
   failureCode?: string | null | undefined;
 }): string {
   const engine = session.engine ?? "browser";
+  // A headed browser its controller launched offscreen has no window on the
+  // machine's screen; saying only "headed" would promise one.
   const mode =
-    session.placement.kind === "attached_device" ? "" : session.headless ? " headless" : " headed";
+    session.placement.kind === "attached_device"
+      ? ""
+      : session.headless
+        ? " headless"
+        : session.display === "offscreen"
+          ? " headed, offscreen with no window,"
+          : " headed";
   const placement = PLACEMENT_LABELS[session.placement.kind] ?? session.placement.kind;
   const extras = [
     session.identityId ? `identity ${session.identityId}` : null,

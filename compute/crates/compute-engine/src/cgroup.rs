@@ -4,12 +4,18 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 /// Serializes updates of a parent group's `memory.low`, so that the last
 /// one written counts every child's.
 static PARENT_LOW: Mutex<()> = Mutex::new(());
+
+/// How often [`Cgroup::set_memory_high`] looks whether the limit it is
+/// writing applies yet.
+const MEMORY_HIGH_LOOK: Duration = Duration::from_millis(20);
 
 /// The controllers a parent group hands its VMs' groups.
 const CONTROLLERS: &str = "+memory +cpu";
@@ -61,6 +67,16 @@ impl Cgroup {
     /// Bytes of memory charged to the group, compressed swap included.
     pub fn memory_current(&self) -> io::Result<u64> {
         read_u64(&self.path.join("memory.current"))
+    }
+
+    /// Bytes of host memory the group's compressed pages take
+    /// (`memory.zswap.current`), part of [`Self::memory_current`]; 0 on a
+    /// kernel without zswap.
+    pub fn memory_compressed(&self) -> io::Result<u64> {
+        match read_u64(&self.path.join("memory.zswap.current")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+            read => read,
+        }
     }
 
     /// Bytes of memory charged to the group that the kernel cannot drop
@@ -125,11 +141,46 @@ impl Cgroup {
     /// is left out, so only differences between readings of the same
     /// processes mean anything.
     pub fn io_bytes(&self) -> io::Result<u64> {
-        let procs = fs::read_to_string(self.path.join("cgroup.procs"))?;
         let mut total = 0_u64;
+        self.each_io(|counters| {
+            total = total.saturating_add(parse_io_bytes(counters)?);
+            Ok(())
+        })?;
+        Ok(total)
+    }
+
+    /// What the group's processes have written through `write(2)` and its
+    /// kin: the bytes (`wchar` in `/proc/<pid>/io`, every thread counted)
+    /// and the calls (`syscw`), and the bytes of the pages they dirtied
+    /// for files (`write_bytes`). A call counts once it returns; a page
+    /// counts as it is dirtied, so also one dirtied without a write call,
+    /// as a hole punched over part of a block zeroes the rest of that
+    /// block. For a Firecracker VMM that covers every write and discard
+    /// its synchronous block devices make, besides its tap's and part of
+    /// its vsock's traffic (see [`Self::io_bytes`]). A process that ends
+    /// between listing and reading is left out, so only differences
+    /// between readings of the same processes mean anything.
+    pub fn writes(&self) -> io::Result<Writes> {
+        let mut total = Writes::default();
+        self.each_io(|counters| {
+            let found = parse_writes(counters)?;
+            total = Writes {
+                bytes: total.bytes.saturating_add(found.bytes),
+                calls: total.calls.saturating_add(found.calls),
+                dirtied: total.dirtied.saturating_add(found.dirtied),
+            };
+            Ok(())
+        })?;
+        Ok(total)
+    }
+
+    /// Calls `take` with the `/proc/<pid>/io` counters of each of the
+    /// group's processes, skipping one that ends meanwhile.
+    fn each_io(&self, mut take: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+        let procs = fs::read_to_string(self.path.join("cgroup.procs"))?;
         for pid in procs.split_whitespace() {
             match fs::read_to_string(format!("/proc/{pid}/io")) {
-                Ok(counters) => total = total.saturating_add(parse_io_bytes(&counters)?),
+                Ok(counters) => take(&counters)?,
                 Err(error)
                     if error.kind() == io::ErrorKind::NotFound
                         || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
@@ -137,7 +188,7 @@ impl Cgroup {
                 Err(error) => return Err(error),
             }
         }
-        Ok(total)
+        Ok(())
     }
 
     /// Stops the kernel from compressing or swapping out any more of the
@@ -152,6 +203,91 @@ impl Cgroup {
             _ => {}
         }
         fs::write(self.path.join("memory.zswap.max"), "0")
+    }
+
+    /// Lets the kernel compress the group's memory into zswap, and never
+    /// write it to a swap device (`memory.zswap.writeback` 0): what it
+    /// compresses stays in RAM, and nothing of the guest reaches a disk.
+    /// Needs zswap on (see [`zswap_enabled`]); without it, writeback 0
+    /// means nothing and swap would go to disk.
+    pub fn open_zswap(&self) -> io::Result<()> {
+        fs::write(self.path.join("memory.zswap.writeback"), "0")?;
+        fs::write(self.path.join("memory.swap.max"), "max")?;
+        fs::write(self.path.join("memory.zswap.max"), "max")
+    }
+
+    /// The group's swap slots: bytes of them it holds now
+    /// (`memory.swap.current`) and the most it may (`memory.swap.max`,
+    /// `None` for no limit). zswap takes a slot for every page it is given,
+    /// even one it refuses to keep. `None` on a kernel without swap.
+    pub fn swap(&self) -> io::Result<Option<Swap>> {
+        let used = match read_u64(&self.path.join("memory.swap.current")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            read => read?,
+        };
+        let max = parse_limit(&fs::read_to_string(self.path.join("memory.swap.max"))?)?;
+        Ok(Some(Swap { used, max }))
+    }
+
+    /// Sets the most swap the group may hold (`memory.swap.max`), or no
+    /// limit for `None`. The kernel stops taking its anonymous pages out of
+    /// RAM once it holds that much, and takes nothing back for it.
+    pub fn set_swap_max(&self, bytes: Option<u64>) -> io::Result<()> {
+        let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
+        fs::write(self.path.join("memory.swap.max"), value)
+    }
+
+    /// Bytes of the group's memory the kernel has taken out of RAM so far
+    /// without writing it anywhere, at their original size: pages zswap
+    /// kept compressed and pages that were all zeros (`zswpout` and
+    /// `swpout_zero` in `memory.stat`). 0 on a kernel that says neither.
+    pub fn memory_stored(&self) -> io::Result<u64> {
+        let stat = fs::read_to_string(self.path.join("memory.stat"))?;
+        let page = u64::try_from(rustix::param::page_size()).unwrap_or(4096);
+        Ok(stored_pages(&stat).saturating_mul(page))
+    }
+
+    /// Asks the kernel to reclaim up to `bytes` from the group now
+    /// (`memory.reclaim`): file pages dropped, and with zswap open (see
+    /// [`Cgroup::open_zswap`]) anonymous pages compressed. Returns `false`
+    /// when it reclaimed less than asked, because what is left is in use or
+    /// already compressed. Blocks while it works; call it from a blocking
+    /// thread.
+    pub fn reclaim(&self, bytes: u64) -> io::Result<bool> {
+        match fs::write(self.path.join("memory.reclaim"), bytes.max(1).to_string()) {
+            Ok(()) => Ok(true),
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Drops up to `bytes` of the group's page cache now, and nothing else
+    /// (`memory.reclaim` with `swappiness=0`): no anonymous page is
+    /// compressed for it. `None` on a kernel that cannot be asked for
+    /// cache alone (before 6.9). Blocks while it works; call it from a
+    /// blocking thread.
+    pub fn drop_cache(&self, bytes: u64) -> io::Result<Option<()>> {
+        let asked = format!("{} swappiness=0", bytes.max(1));
+        match fs::write(self.path.join("memory.reclaim"), asked) {
+            Ok(()) => Ok(Some(())),
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) => {
+                Ok(Some(()))
+            }
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Bytes of page cache charged to the group that are clean and mapped
+    /// by no process, its children's and what ended children left it
+    /// included: what [`Cgroup::drop_cache`] can drop at once.
+    pub fn droppable_cache(&self) -> io::Result<u64> {
+        let stat = fs::read_to_string(self.path.join("memory.stat"))?;
+        Ok(Cache::of(&stat).droppable())
     }
 
     /// Sets the memory the group is protected from reclaim for others
@@ -178,6 +314,43 @@ impl Cgroup {
     pub fn set_memory_max(&self, bytes: Option<u64>) -> io::Result<()> {
         let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
         fs::write(self.path.join("memory.max"), value)
+    }
+
+    /// Sets the memory above which the kernel slows the group's processes
+    /// down as they take more (`memory.high`), reclaiming from the group
+    /// first and making each wait on its own allocations, or no such
+    /// point for `None`. It never ends a process: a group past it only
+    /// gets slower.
+    ///
+    /// Setting it below what the group holds makes the kernel reclaim the
+    /// difference. Kernels that honour `O_NONBLOCK` for the file leave that
+    /// to the group's own allocations; older ones do it in the write, after
+    /// the limit already applies, for as long as reclaim makes progress,
+    /// writeback of dirty disk pages included. The writer would wait all
+    /// that time: a starting host agent, for one, before it renews its
+    /// lease. So the write runs on a thread of its own, and this returns
+    /// its result when it ends, or `Ok` as soon as the group shows the new
+    /// limit while the kernel goes on reclaiming toward it on that thread.
+    /// It never returns before the limit applies: a later setting cannot be
+    /// overtaken by this one.
+    pub fn set_memory_high(&self, bytes: Option<u64>) -> io::Result<()> {
+        let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
+        let path = self.path.join("memory.high");
+        // The kernel keeps whole pages, and shows what it keeps.
+        let page = u64::try_from(rustix::param::page_size()).unwrap_or(4096);
+        let shown = bytes.map(|bytes| bytes - bytes % page);
+        write_until_applied(
+            MEMORY_HIGH_LOOK,
+            move || write_nonblocking(&path, value.as_bytes()),
+            || Ok(self.memory_high()? == shown),
+        )
+    }
+
+    /// The group's `memory.high` as it is now: `None` for no limit
+    /// (`max`), which is also what an operator writing `max` leaves.
+    pub fn memory_high(&self) -> io::Result<Option<u64>> {
+        let value = fs::read_to_string(self.path.join("memory.high"))?;
+        parse_limit(&value)
     }
 
     /// Sets the parent group's `memory.low` to the sum of its children's.
@@ -226,13 +399,35 @@ impl Cgroup {
         claim_for_children(&self.path)
     }
 
-    /// The group's zswap traffic and memory pressure so far.
+    /// The group's zswap traffic and memory pressure so far, and its
+    /// `memory.high` now.
     pub fn memory_stats(&self) -> io::Result<MemoryStats> {
         let stat = fs::read_to_string(self.path.join("memory.stat"))?;
         // Without pressure stall information the file is missing or
         // unreadable; the rest still counts.
         let pressure = fs::read_to_string(self.path.join("memory.pressure")).ok();
-        Ok(parse_memory_stats(&stat, pressure.as_deref()))
+        Ok(MemoryStats {
+            high: self.memory_high().ok().flatten(),
+            ..parse_memory_stats(&stat, pressure.as_deref())
+        })
+    }
+
+    /// How long, all told, some of the group's processes have waited for
+    /// memory (`some total` in `memory.pressure`), the kernel's reclaim and
+    /// its slowing of groups past `memory.high` included; `None` without
+    /// pressure stall information.
+    pub fn memory_waited(&self) -> io::Result<Option<Duration>> {
+        let pressure = fs::read_to_string(self.path.join("memory.pressure"))?;
+        let stats = parse_memory_stats("", Some(&pressure));
+        Ok(stats.pressure_some_us.map(Duration::from_micros))
+    }
+
+    /// How many processes in the group and below it the kernel's
+    /// out-of-memory killer ended since the group was made (`oom_kill` in
+    /// `memory.events`, which counts the groups below too).
+    pub fn oom_kills(&self) -> io::Result<u64> {
+        let events = fs::read_to_string(self.path.join("memory.events"))?;
+        Ok(parse_oom_kills(&events))
     }
 
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
@@ -460,9 +655,19 @@ pub struct MemoryStats {
     pub zswpout: u64,
     /// Pages brought back from zswap since the group was created.
     pub zswpin: u64,
+    /// Bytes its compressed pages take in RAM now (`zswap` in
+    /// `memory.stat`); `None` on a kernel that does not say.
+    pub compressed: Option<u64>,
+    /// Bytes of its memory compressed into zswap now, at their original
+    /// size (`zswapped`). Its swap never reaches a disk (writeback is off),
+    /// so this is all of its memory out of RAM.
+    pub swapped: Option<u64>,
     /// Share of the last ten seconds in which some of the group's processes
     /// waited for memory, in percent (`some avg10` in `memory.pressure`).
     pub pressure_some_avg10: Option<f64>,
+    /// Share of the last ten seconds in which all of them did at once, in
+    /// percent (`full avg10`): time the group got nothing done for memory.
+    pub pressure_full_avg10: Option<f64>,
     /// Microseconds in which some of the group's processes waited for
     /// memory (`some total` in `memory.pressure`); `None` without pressure
     /// stall information.
@@ -472,6 +677,9 @@ pub struct MemoryStats {
     /// Page faults that had to wait for a page to be read in or brought
     /// back from zswap (`pgmajfault` in `memory.stat`).
     pub major_faults: Option<u64>,
+    /// Its `memory.high` as the kernel holds it now; `None` for none, or
+    /// when it cannot be read.
+    pub high: Option<u64>,
 }
 
 fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
@@ -485,6 +693,8 @@ fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
         match name {
             "zswpout" => stats.zswpout = value().unwrap_or(0),
             "zswpin" => stats.zswpin = value().unwrap_or(0),
+            "zswap" => stats.compressed = value(),
+            "zswapped" => stats.swapped = value(),
             "pgmajfault" => stats.major_faults = value(),
             _ => {}
         }
@@ -500,6 +710,7 @@ fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
             match (kind, key) {
                 ("some", "avg10") => stats.pressure_some_avg10 = value.parse().ok(),
                 ("some", "total") => stats.pressure_some_us = value.parse().ok(),
+                ("full", "avg10") => stats.pressure_full_avg10 = value.parse().ok(),
                 ("full", "total") => stats.pressure_full_us = value.parse().ok(),
                 _ => {}
             }
@@ -592,6 +803,19 @@ pub fn zswap_enabled() -> io::Result<bool> {
     }
 }
 
+/// Bytes of swap the host has (`SwapTotal` in `/proc/meminfo`): what zswap
+/// can hold at most, at its pages' original size, since every compressed
+/// page takes a swap slot even when it never reaches the device.
+pub fn swap_total() -> io::Result<u64> {
+    let meminfo = fs::read_to_string("/proc/meminfo")?;
+    Ok(meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("SwapTotal:"))
+        .and_then(|value| value.trim().strip_suffix("kB"))
+        .and_then(|kib| kib.trim().parse::<u64>().ok())
+        .map_or(0, |kib| kib << 10))
+}
+
 /// Sets `parent`'s `memory.low` to the sum of its child groups'. The caller
 /// holds [`PARENT_LOW`].
 fn claim_for_children(parent: &Path) -> io::Result<()> {
@@ -622,6 +846,97 @@ fn read_u64(path: &Path) -> io::Result<u64> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// A group's swap slots; see [`Cgroup::swap`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Swap {
+    /// Bytes of slots it holds (`memory.swap.current`).
+    pub used: u64,
+    /// The most it may hold (`memory.swap.max`); `None` for no limit.
+    pub max: Option<u64>,
+}
+
+/// Pages a group's `memory.stat` says the kernel took out of RAM without a
+/// disk: `zswpout` and `swpout_zero`.
+fn stored_pages(stat: &str) -> u64 {
+    stat.lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| matches!(*name, "zswpout" | "swpout_zero"))
+        .filter_map(|(_, value)| value.trim().parse::<u64>().ok())
+        .fold(0, u64::saturating_add)
+}
+
+/// `oom_kill` of a `memory.events` file; 0 when it has none.
+fn parse_oom_kills(events: &str) -> u64 {
+    events
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(name, _)| *name == "oom_kill")
+        .and_then(|(_, value)| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// A memory limit file's value: bytes, or `None` for `max`.
+fn parse_limit(value: &str) -> io::Result<Option<u64>> {
+    match value.trim() {
+        "max" => Ok(None),
+        bytes => bytes
+            .parse()
+            .map(Some)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+    }
+}
+
+/// Writes `value` to the control file at `path`, opened with `O_NONBLOCK`
+/// for the kernels that honour it, in one write as cgroup files take it,
+/// replacing what is there as [`fs::write`] does.
+fn write_nonblocking(path: &Path, value: &[u8]) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    let file = rustix::fs::open(
+        path,
+        OFlags::WRONLY | OFlags::TRUNC | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let written = rustix::io::write(&file, value)?;
+    if written == value.len() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("{} took {written} of {} bytes", path.display(), value.len()),
+        ))
+    }
+}
+
+/// Runs `write` on a thread of its own and returns its result once it
+/// ends, or `Ok` once `applied` says its effect shows while it goes on,
+/// looking every `look`.
+fn write_until_applied(
+    look: Duration,
+    write: impl FnOnce() -> io::Result<()> + Send + 'static,
+    applied: impl Fn() -> io::Result<bool>,
+) -> io::Result<()> {
+    let (done, outcome) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("cgroup-write".to_owned())
+        .spawn(move || {
+            // Nobody listens once the effect showed.
+            let _ = done.send(write());
+        })?;
+    loop {
+        match outcome.recv_timeout(look) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {
+                if applied()? {
+                    return Ok(());
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the cgroup write ended without a result"));
+            }
+        }
+    }
+}
+
 fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
     stat.lines()
         .find_map(|line| line.strip_prefix("usage_usec "))
@@ -630,15 +945,50 @@ fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cpu.stat has no usage_usec"))
 }
 
+/// What processes have written through `write(2)` and its kin, and the
+/// file pages they dirtied; see [`Cgroup::writes`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Writes {
+    /// Bytes written.
+    pub bytes: u64,
+    /// Write calls that returned.
+    pub calls: u64,
+    /// Bytes of the file pages dirtied, by write calls or otherwise: a
+    /// page dirtied again before it is written out counts once.
+    pub dirtied: u64,
+}
+
+impl Writes {
+    /// What was written since `earlier`, a reading of the same processes.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            bytes: self.bytes.saturating_sub(earlier.bytes),
+            calls: self.calls.saturating_sub(earlier.calls),
+            dirtied: self.dirtied.saturating_sub(earlier.dirtied),
+        }
+    }
+}
+
+/// The value of counter `name` (with its colon) in `/proc/<pid>/io`.
+fn io_counter(counters: &str, name: &str) -> io::Result<u64> {
+    counters
+        .lines()
+        .find_map(|line| line.strip_prefix(name))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("io has no {name}")))
+}
+
+fn parse_writes(counters: &str) -> io::Result<Writes> {
+    Ok(Writes {
+        bytes: io_counter(counters, "wchar:")?,
+        calls: io_counter(counters, "syscw:")?,
+        dirtied: io_counter(counters, "write_bytes:")?,
+    })
+}
+
 fn parse_io_bytes(counters: &str) -> io::Result<u64> {
-    let field = |name: &str| {
-        counters
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("io has no {name}")))
-    };
-    Ok(field("rchar:")?.saturating_add(field("wchar:")?))
+    Ok(io_counter(counters, "rchar:")?.saturating_add(io_counter(counters, "wchar:")?))
 }
 
 /// Refuses VM groups at `relative` (below the cgroup v2 root) that lie
@@ -708,244 +1058,4 @@ fn encloses(outer: &Path, inner: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn controllers_are_enabled_in_every_group_above_a_parent() {
-        let mount = tempfile::tempdir().unwrap();
-        fs::create_dir_all(mount.path().join("fleet/hosts")).unwrap();
-        enable_controllers_above(mount.path(), Path::new("fleet/hosts/vms")).unwrap();
-        for group in ["", "fleet", "fleet/hosts"] {
-            let control = mount.path().join(group).join("cgroup.subtree_control");
-            assert_eq!(fs::read_to_string(control).unwrap(), CONTROLLERS, "{group}");
-        }
-        assert!(!mount.path().join("fleet/hosts/vms").exists());
-        // Only the root is above a group just below it.
-        let mount = tempfile::tempdir().unwrap();
-        enable_controllers_above(mount.path(), Path::new("compute")).unwrap();
-        assert!(mount.path().join("cgroup.subtree_control").exists());
-        assert!(!mount.path().join("compute").exists());
-    }
-
-    #[test]
-    fn vm_groups_must_lie_outside_the_callers_own() {
-        let own = parse_own("0::/system.slice/compute-host.service\n").unwrap();
-        assert_eq!(own, Path::new("system.slice/compute-host.service"));
-        assert!(!encloses(&own, Path::new("compute")));
-        assert!(!encloses(
-            &own,
-            Path::new("system.slice/compute-host.service2")
-        ));
-        assert!(encloses(
-            &own,
-            Path::new("system.slice/compute-host.service/vms")
-        ));
-        assert!(encloses(
-            &own,
-            Path::new("system.slice/compute-host.service")
-        ));
-        // A process in the root group, as in a container without a unit.
-        let root = parse_own("0::/\n").unwrap();
-        assert!(!encloses(&root, Path::new("compute")));
-        assert_eq!(parse_own("1:name=systemd:/x\n"), None);
-    }
-
-    #[test]
-    fn reads_the_freezer_from_cgroup_events() {
-        let running = Freezer::parse(false, "populated 1\nfrozen 0\n");
-        assert_eq!(
-            running,
-            Freezer {
-                asked: false,
-                frozen: false,
-                empty: false
-            }
-        );
-        let frozen = Freezer::parse(true, "populated 1\nfrozen 1\n");
-        assert!(frozen.asked && frozen.frozen && !frozen.empty);
-        // An empty group a freeze was asked of reports frozen too.
-        let empty = Freezer::parse(true, "populated 0\nfrozen 1\n");
-        assert!(empty.empty && empty.frozen);
-        assert!(Freezer::parse(false, "").empty);
-    }
-
-    /// A group with processes is held frozen once the kernel says it is,
-    /// or while it or a group above it asks for a freeze, even one that
-    /// reads `frozen 0` because a process in it is ending.
-    #[test]
-    fn a_group_is_held_frozen_by_its_own_freeze_or_one_above() {
-        let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path().join("vms");
-        let vm = parent.join("vm");
-        std::fs::create_dir_all(&vm).unwrap();
-        let set = |path: &Path, freeze: &str, events: &str| {
-            std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
-            std::fs::write(path.join("cgroup.events"), events).unwrap();
-        };
-        let group = Cgroup::at(&vm);
-        set(&parent, "0", "populated 1\nfrozen 0\n");
-        set(&vm, "0", "populated 1\nfrozen 0\n");
-        assert!(!group.is_held_frozen().unwrap(), "running");
-        set(&parent, "1", "populated 1\nfrozen 0\n");
-        assert!(group.is_held_frozen().unwrap(), "the group above asks");
-        set(&vm, "0", "populated 1\nfrozen 1\n");
-        assert!(group.is_held_frozen().unwrap());
-        set(&parent, "0", "populated 1\nfrozen 0\n");
-        set(&vm, "1", "populated 1\nfrozen 0\n");
-        assert!(
-            group.is_held_frozen().unwrap(),
-            "its own freeze, still completing"
-        );
-        set(&vm, "1", "populated 0\nfrozen 1\n");
-        assert!(!group.is_held_frozen().unwrap(), "nothing left to hold");
-        assert!(!Cgroup::at(parent.join("gone")).is_held_frozen().unwrap());
-
-        let names = |group: &Cgroup| {
-            let mut names: Vec<_> = group
-                .children()
-                .unwrap()
-                .iter()
-                .map(|child| child.path().file_name().unwrap().to_owned())
-                .collect();
-            names.sort();
-            names
-        };
-        std::fs::create_dir(parent.join("other")).unwrap();
-        assert_eq!(
-            names(&Cgroup::at(&parent)),
-            ["other", "vm"],
-            "groups, not files"
-        );
-        assert_eq!(names(&Cgroup::at(parent.join("gone"))), [""; 0]);
-    }
-
-    #[test]
-    fn reads_processor_time_from_cpu_stat() {
-        let stat = "usage_usec 1234567\nuser_usec 1000000\nsystem_usec 234567\n";
-        assert_eq!(
-            parse_cpu_usage(stat).unwrap(),
-            Duration::from_micros(1_234_567)
-        );
-        assert!(parse_cpu_usage("user_usec 5\n").is_err());
-    }
-
-    /// Groups VMs left behind claim no protection once an engine starts:
-    /// empty ones go, and the parent claims what those with a process do.
-    #[test]
-    fn empty_groups_left_behind_are_removed_with_their_claims() {
-        let parent = tempfile::tempdir().unwrap();
-        let running = parent.path().join("running");
-        fs::create_dir(&running).unwrap();
-        fs::write(running.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
-        fs::write(running.join("memory.low"), "536870912\n").unwrap();
-        // A real group's control files go with it; here an empty directory
-        // stands for one left behind.
-        fs::create_dir(parent.path().join("left-behind")).unwrap();
-        fs::write(parent.path().join("memory.low"), "9663676416\n").unwrap();
-        Cgroup::at(parent.path()).remove_empty_children().unwrap();
-        assert!(running.exists());
-        assert!(!parent.path().join("left-behind").exists());
-        assert_eq!(
-            fs::read_to_string(parent.path().join("memory.low")).unwrap(),
-            "536870912"
-        );
-    }
-
-    #[test]
-    fn reads_zswap_traffic_and_pressure() {
-        let stat = "anon 4096\nzswap 0\nzswapped 0\nzswpin 3\nzswpout 17\nzswpwb 0\n\
-                    pgfault 900\npgmajfault 42\n";
-        let pressure = "some avg10=1.25 avg60=0.40 avg300=0.08 total=12345\n\
-                        full avg10=0.50 avg60=0.10 avg300=0.02 total=4567\n";
-        assert_eq!(
-            parse_memory_stats(stat, Some(pressure)),
-            MemoryStats {
-                zswpout: 17,
-                zswpin: 3,
-                pressure_some_avg10: Some(1.25),
-                pressure_some_us: Some(12_345),
-                pressure_full_us: Some(4567),
-                major_faults: Some(42),
-            }
-        );
-        // Without zswap, fault counts or pressure stall information: absent,
-        // not zero.
-        assert_eq!(
-            parse_memory_stats("anon 4096\n", None),
-            MemoryStats::default()
-        );
-    }
-
-    #[test]
-    fn page_cache_the_host_can_drop_is_not_held() {
-        // A paused VM just after its 8 GiB image was saved: 330 MB of guest
-        // memory, and the image's page cache charged to its group.
-        let stat = "anon 329879552\nfile 8237420544\nkernel 22253568\nshmem 8192\n\
-                    file_mapped 40960\nfile_dirty 0\nfile_writeback 0\n\
-                    active_file 8235515904\ninactive_file 1896448\n";
-        assert_eq!(droppable_cache(stat), 8_237_420_544 - 8192 - 40960);
-        let group = tempfile::tempdir().unwrap();
-        fs::write(group.path().join("memory.current"), "8589553664\n").unwrap();
-        fs::write(group.path().join("memory.stat"), stat).unwrap();
-        assert_eq!(
-            Cgroup::at(group.path()).memory_held().unwrap(),
-            8_589_553_664 - (8_237_420_544 - 8192 - 40960)
-        );
-        // Cache still to be written, shared memory (tmpfs) and mapped files
-        // stay held.
-        let busy = "file 3000\nshmem 1000\nfile_mapped 500\nfile_dirty 700\nfile_writeback 300\n";
-        assert_eq!(droppable_cache(busy), 500);
-        // More kept than cached (a page both mapped and dirty) drops nothing.
-        assert_eq!(
-            droppable_cache("file 100\nfile_mapped 80\nfile_dirty 80\n"),
-            0
-        );
-        // An older kernel's file without the fields leaves everything held.
-        assert_eq!(droppable_cache("anon 4096\n"), 0);
-        fs::write(group.path().join("memory.stat"), "anon 4096\n").unwrap();
-        assert_eq!(
-            Cgroup::at(group.path()).memory_held().unwrap(),
-            8_589_553_664
-        );
-    }
-
-    #[test]
-    fn cache_added_between_the_two_reads_leaves_nothing_held_out() {
-        const MIB: u64 = 1 << 20;
-        // 512 MiB held when `memory.current` is read; 1 GiB of clean cache
-        // arrives before `memory.stat` is.
-        let stat = format!(
-            "anon {}\nfile {}\nkernel {}\nsock 0\nshmem 0\nfile_mapped 0\n\
-             file_dirty 0\nfile_writeback 0\n",
-            500 * MIB,
-            1024 * MIB,
-            12 * MIB
-        );
-        assert_eq!(held_memory(512 * MIB, &stat), 512 * MIB);
-        // Read at the same moment, the two agree.
-        assert_eq!(held_memory(1536 * MIB, &stat), 512 * MIB);
-        // Cache dropped between the reads is in the total but not in the
-        // file, and only counts more as held.
-        assert_eq!(held_memory(1600 * MIB, &stat), 576 * MIB);
-        // Mapped, shared and unwritten cache is named as held too, at most
-        // the cache there is.
-        let busy = format!(
-            "anon {}\nfile {}\nshmem {}\nfile_mapped {}\nfile_dirty {}\n",
-            100 * MIB,
-            300 * MIB,
-            200 * MIB,
-            100 * MIB,
-            50 * MIB
-        );
-        assert_eq!(held_memory(0, &busy), 400 * MIB);
-    }
-
-    #[test]
-    fn reads_traffic_from_proc_io() {
-        let counters = "rchar: 1000\nwchar: 234\nsyscr: 7\nsyscw: 3\nread_bytes: 4096\n\
-                        write_bytes: 0\ncancelled_write_bytes: 0\n";
-        assert_eq!(parse_io_bytes(counters).unwrap(), 1234);
-        assert!(parse_io_bytes("rchar: 5\n").is_err());
-    }
-}
+mod tests;

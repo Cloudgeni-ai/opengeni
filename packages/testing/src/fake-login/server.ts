@@ -5,6 +5,7 @@ import { renderSVG } from "uqr";
 import { FakeMailbox, handleFakeMailMcp, type MailMessage } from "./mailbox";
 import {
   OTP_SPLIT_SCRIPT,
+  PASSKEY_AUTOFILL_SCRIPT,
   PASSKEY_LOGIN_SCRIPT,
   PASSKEY_REGISTER_SCRIPT,
   captchaParentScript,
@@ -816,6 +817,7 @@ export async function startFakeLoginServer(
           publicKeyJwk: verified.publicKeyJwk,
           alg: verified.alg,
           signCount: verified.signCount,
+          backupEligibility: verified.backupEligibility,
           userHandle: account.userHandle,
           username: user,
           createdAt: iso(),
@@ -848,6 +850,18 @@ export async function startFakeLoginServer(
 <label for="username">Username (optional)</label><input id="username" name="username" type="text" autocomplete="username webauthn">
 <button type="button" id="passkey-login">Sign in with a passkey</button><p id="passkey-status" hidden></p>`,
           script: PASSKEY_LOGIN_SCRIPT,
+        }),
+      );
+    }
+    if (path === "/passkey/autofill" && method === "GET") {
+      return html(
+        page({
+          title: "Sign in",
+          user,
+          body: `<h1>Sign in</h1><p id="autofill-state">Checking passkey autofill</p>
+<form method="get" action="/password"><label for="username">Username</label><input id="username" name="username" type="text" autocomplete="username webauthn">
+<button type="submit">Next</button></form><p id="passkey-status" hidden></p>`,
+          script: PASSKEY_AUTOFILL_SCRIPT,
         }),
       );
     }

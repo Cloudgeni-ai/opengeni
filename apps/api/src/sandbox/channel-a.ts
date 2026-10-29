@@ -30,6 +30,7 @@ import { githubAppBotIdentity } from "@opengeni/github";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
+  signalBackgroundCommandWakes,
   getSandboxSessionEnvelope,
   touchLeaseHolder,
   markWarmLeaseInstanceLost,
@@ -57,6 +58,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { isRetryableControllerTransport } from "../controller-data-plane";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -104,6 +106,8 @@ import {
   getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
+  backgroundCommandWakeSender,
+  type BackgroundCommandWakeSignal,
   type ChannelAMachineAuthority,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
@@ -114,6 +118,9 @@ export type ChannelAServices = {
   bus: EventBus;
   objectStorage?: ObjectStorage | null;
   observability?: Observability | undefined;
+  /** Wakes a session waiting on a background command a request settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: BackgroundCommandWakeSignal | null | undefined;
 };
 
 export type ChannelAOperation =
@@ -145,6 +152,11 @@ export type ChannelAOperation =
   | "browser.download.save"
   | "browser.recording.save"
   | "browser.attach"
+  /** The control plane renewing an agent-held browser's idle hold. It has no
+   * request grant: it reaches the controller as the person who most recently
+   * started a turn of the holding session, with that person's own machine
+   * access, and only keeps what already runs (see `channelAMachineAuthority`). */
+  | "browser.hold"
   | "computer.create"
   | "computer.end"
   | "computer.read"
@@ -486,13 +498,6 @@ export function shouldEvictChannelAHandleAfterError(
   );
 }
 
-function isRetryableControllerTransport(error: unknown): boolean {
-  return (
-    error instanceof BrowserControlTransportError ||
-    (error instanceof BrowserControlRequestError && error.retryable)
-  );
-}
-
 function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
   if (cacheKind === "read") establishedReadHandleCache.delete(key);
   if (cacheKind === "process") establishedProcessHandleCache.delete(key);
@@ -653,6 +658,11 @@ export async function withFormerConnectedMachine<T>(
  * but not the per-chat permission. Otherwise a browser opened by a chat that
  * has since gone idle, or ended from another chat, could never be stopped and
  * would keep its processes alive on the person's machine.
+ *
+ * Renewing a browser's idle hold (`browser.hold`) has no grant at all: the
+ * control plane sends it after the agent's attempt may have ended, as the
+ * person who started that session's latest turn, so it uses that person's own
+ * access. It only keeps a running browser from its idle release.
  */
 async function channelAMachineAuthority(
   db: Database,
@@ -918,6 +928,7 @@ async function withChannelAOperation<T>(
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
           ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          wakeSessionWorkflow: services.wakeSessionWorkflow,
         },
         {
           accountId,
@@ -1062,6 +1073,10 @@ async function withChannelAOperation<T>(
                   payload: { sandboxId: live.instanceId },
                 },
               ]).catch(() => undefined);
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
               mappedError = new ApiHttpError(409, {
                 code: "conflict",
                 message: "sandbox instance was lost; retry to restore it",
@@ -1169,7 +1184,12 @@ async function withChannelAOperation<T>(
             type: "sandbox.box.lost",
             payload: { sandboxId: live.instanceId },
           },
-        ]);
+        ]).finally(() =>
+          signalBackgroundCommandWakes(
+            marked.backgroundCommandWakes,
+            backgroundCommandWakeSender(services.wakeSessionWorkflow),
+          ),
+        );
       }
       throw new ApiHttpError(409, {
         code: "conflict",
@@ -1272,6 +1292,7 @@ async function withChannelAOperation<T>(
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
           ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          wakeSessionWorkflow: services.wakeSessionWorkflow,
         },
         {
           accountId,

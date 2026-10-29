@@ -37,9 +37,9 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(policy: HostPolicy) -> Self {
+    fn new(policy: &HostPolicy) -> Self {
         Self {
-            host: Host::new(policy).unwrap(),
+            host: Host::new(*policy).unwrap(),
             now: At::ZERO,
         }
     }
@@ -136,7 +136,7 @@ fn notices(actions: &[Action], id: u128) -> Vec<Notice> {
 
 #[test]
 fn an_idle_sandbox_pauses_gets_protected_in_memory_and_leaves_disk_after_days() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     // A VM found running has its balloon let go: nothing is asked of it.
     let actions = rig.add(1, State::RUNNING, recommended());
     assert!(
@@ -193,7 +193,7 @@ fn an_idle_sandbox_pauses_gets_protected_in_memory_and_leaves_disk_after_days() 
 
 #[test]
 fn a_sandbox_found_on_disk_keeps_its_idle_time() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.at(secs(40 * DAY));
     // Archived and dropped 29 days ago: a day from forgetting its memory.
     let archived = state(Level::Remote, Durability::Remote, true);
@@ -225,7 +225,7 @@ fn a_sandbox_found_on_disk_keeps_its_idle_time() {
 /// taken before the restart, wakes: nothing starts forgetting its memory.
 #[test]
 fn a_found_sandbox_handed_over_with_its_holds_wakes_instead_of_forgetting() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.at(secs(100 * DAY));
     let mut out = Vec::new();
     rig.host.handle_all(
@@ -252,7 +252,7 @@ fn a_found_sandbox_handed_over_with_its_holds_wakes_instead_of_forgetting() {
 
 #[test]
 fn waking_a_protected_paused_sandbox_resumes_it_and_the_next_idle_period_saves_again() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Remote), recommended());
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(
@@ -271,7 +271,7 @@ fn waking_a_protected_paused_sandbox_resumes_it_and_the_next_idle_period_saves_a
 
 #[test]
 fn touch_cancels_a_sleep_step_in_flight() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     let (step, op) = only_start(&rig.tick_at_deadline());
     assert_eq!(step, Step::Pause);
@@ -305,8 +305,96 @@ fn touch_cancels_a_sleep_step_in_flight() {
 }
 
 #[test]
+fn an_idle_pause_declined_while_a_command_runs_leaves_a_let_go_balloon_alone() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    let id = SandboxId(1);
+    let actions = rig.add(1, State::RUNNING, recommended());
+    let [
+        Action::Balloon {
+            bytes: 0, request, ..
+        },
+    ] = actions[..]
+    else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(
+        rig.send(Input::BalloonSet {
+            sandbox: id,
+            request
+        }),
+        []
+    );
+    // A command runs on in the background: each time the sandbox has been
+    // idle long enough, its guest declines the pause before it begins and
+    // counts as busy. Its balloon, let go already, is not set again.
+    for round in 1..=3 {
+        let (step, op) = only_start(&rig.tick_at_deadline());
+        assert_eq!(step, Step::Pause);
+        assert_eq!(rig.now, At::from_duration(secs(10 * round)));
+        let mut actions = Vec::new();
+        rig.host.handle_all(
+            rig.now,
+            [
+                Input::Finished {
+                    sandbox: id,
+                    op,
+                    outcome: Outcome::Cancelled,
+                    wrote: false,
+                },
+                Input::Busy { sandbox: id },
+            ],
+            &mut actions,
+        );
+        assert_eq!(actions, [], "round {round}");
+        assert_eq!(rig.state(1), State::RUNNING);
+    }
+    // Once the command ends, the next idle period pauses it as usual.
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Pause);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1).level, Level::Paused);
+    // Woken, the same VM's balloon is still known let go.
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    assert_eq!(
+        rig.finish(1, op, Outcome::Done),
+        [Action::Notify {
+            sandbox: id,
+            notice: Notice::State(State::RUNNING),
+        }]
+    );
+}
+
+#[test]
+fn a_pause_that_began_while_a_balloon_was_set_has_it_let_go_again() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    rig.add(1, State::RUNNING, recommended());
+    // The balloon setting asked when the VM was found is not confirmed:
+    // the pause may or may not have let it go, so it is asked again.
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Pause);
+    let actions = rig.send(Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Cancelled,
+        wrote: false,
+    });
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::Balloon {
+                sandbox: SandboxId(1),
+                bytes: 0,
+                ..
+            }
+        )),
+        "{actions:?}"
+    );
+}
+
+#[test]
 fn a_wake_during_a_safety_copy_cancels_it_and_resumes() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Local), recommended());
     rig.at(secs(120));
     let (step, op) = only_start(&rig.send(Input::Tick));
@@ -325,7 +413,7 @@ fn a_wake_during_a_safety_copy_cancels_it_and_resumes() {
 
 #[test]
 fn a_sleep_step_that_finishes_despite_cancel_is_undone() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     let (_, op) = only_start(&rig.tick_at_deadline());
     rig.at(secs(11));
@@ -338,7 +426,7 @@ fn a_sleep_step_that_finishes_despite_cancel_is_undone() {
 
 #[test]
 fn restore_falls_back_to_boot_when_the_memory_image_is_lost() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, saved(), recommended());
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(step, Step::Restore);
@@ -350,7 +438,7 @@ fn restore_falls_back_to_boot_when_the_memory_image_is_lost() {
 #[test]
 fn wakes_respect_limits_and_priority() {
     let limits = StepLimits::default().with(Step::Restore, 2);
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         limits,
         ..HostPolicy::default()
     });
@@ -388,7 +476,7 @@ fn wakes_respect_limits_and_priority() {
 #[test]
 fn an_unthrottled_wake_frees_its_place_but_keeps_its_sandbox() {
     let limits = StepLimits::default().with(Step::Restore, 1);
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         limits,
         ..HostPolicy::default()
     });
@@ -458,7 +546,7 @@ fn lent(actions: &[Action]) -> Vec<LoanId> {
 #[test]
 fn loans_share_a_limit_and_wait_behind_sandboxes() {
     let limits = StepLimits::default().with(Step::Boot, 1);
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         limits,
         ..HostPolicy::default()
     });
@@ -506,7 +594,7 @@ fn loans_share_a_limit_and_wait_behind_sandboxes() {
 
 #[test]
 fn holds_keep_a_sandbox_awake_and_their_expiry_counts_as_activity() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     rig.send(Input::Hold {
         sandbox: SandboxId(1),
@@ -526,7 +614,7 @@ fn holds_keep_a_sandbox_awake_and_their_expiry_counts_as_activity() {
 /// idle one at the next input.
 #[test]
 fn a_suspended_host_decides_nothing_of_its_own_but_still_removes() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     rig.add(2, State::RUNNING, recommended());
     rig.host.suspend(true);
@@ -554,7 +642,7 @@ fn a_suspended_host_decides_nothing_of_its_own_but_still_removes() {
 
 #[test]
 fn releasing_the_last_hold_starts_the_idle_clock() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     rig.send(Input::Hold {
         sandbox: SandboxId(1),
@@ -573,7 +661,7 @@ fn releasing_the_last_hold_starts_the_idle_clock() {
 
 #[test]
 fn releasing_a_hold_taken_before_a_restart_still_counts_as_activity() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     // A new host agent knows nothing of the holds the old one took.
     rig.add(1, State::RUNNING, recommended());
     rig.at(secs(5));
@@ -586,7 +674,7 @@ fn releasing_a_hold_taken_before_a_restart_still_counts_as_activity() {
 
 #[test]
 fn transient_failures_back_off_exponentially() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, saved(), recommended());
     let (_, op) = only_start(&rig.touch(1));
     let actions = rig.finish(1, op, Outcome::Failed(Failure::Transient));
@@ -602,12 +690,13 @@ fn transient_failures_back_off_exponentially() {
 }
 
 fn pressured_rig() -> Rig {
-    Rig::new(HostPolicy {
+    Rig::new(&HostPolicy {
         memory: Some(MemoryPolicy {
             low_watermark: 8 * GIB,
             high_watermark: 9 * GIB,
             compressed_percent: 30,
             balloon_grace: Duration::from_secs(2),
+            outgrowth: None,
         }),
         ..HostPolicy::default()
     })
@@ -702,7 +791,7 @@ fn memory_pressure_saves_an_unprotected_sandbox_before_ending_its_process() {
 
 #[test]
 fn reclaimable_memory_counts_only_idle_paused_sandboxes_with_a_current_copy() {
-    let mut rig = Rig::new(HostPolicy {
+    let mut rig = Rig::new(&HostPolicy {
         admission: Some(Admission {
             budget: 64 * GIB,
             buffer: 0,
@@ -735,7 +824,7 @@ fn reclaimable_memory_counts_only_idle_paused_sandboxes_with_a_current_copy() {
 
 #[test]
 fn removing_a_sandbox_cancels_its_step_and_frees_the_slot_when_it_ends() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, saved(), recommended());
     let (_, op) = only_start(&rig.touch(1));
     let actions = rig.send(Input::Remove {
@@ -761,7 +850,7 @@ fn removing_a_sandbox_cancels_its_step_and_frees_the_slot_when_it_ends() {
 
 #[test]
 fn a_lost_process_without_a_copy_means_booting_from_disk_next_time() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     let actions = rig.send(Input::Lost {
         sandbox: SandboxId(1),
@@ -773,7 +862,7 @@ fn a_lost_process_without_a_copy_means_booting_from_disk_next_time() {
 
 #[test]
 fn a_lost_process_with_a_current_copy_loses_nothing() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Remote), recommended());
     let actions = rig.send(Input::Lost {
         sandbox: SandboxId(1),
@@ -792,7 +881,7 @@ fn a_lost_process_with_a_current_copy_loses_nothing() {
 
 #[test]
 fn a_process_exit_during_a_successful_save_keeps_the_memory_image() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Volatile), recommended());
     let (step, op) = only_start(&rig.at(secs(30)).send(Input::Tick));
     assert_eq!(step, Step::Save);
@@ -809,7 +898,7 @@ fn a_process_exit_during_a_successful_save_keeps_the_memory_image() {
 
 #[test]
 fn a_process_exit_during_a_failed_save_loses_the_programs() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Volatile), recommended());
     let (_, op) = only_start(&rig.at(secs(30)).send(Input::Tick));
     rig.send(Input::Lost {
@@ -822,7 +911,7 @@ fn a_process_exit_during_a_failed_save_loses_the_programs() {
 
 #[test]
 fn adding_corrects_an_impossible_state() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(
         1,
         state(Level::Running, Durability::Remote, true),
@@ -843,14 +932,14 @@ fn adding_corrects_an_impossible_state() {
 
 #[test]
 fn a_never_sleeping_sandbox_has_no_deadline() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, SleepPolicy::NEVER);
     assert_eq!(rig.host.next_deadline(), None);
 }
 
 #[test]
 fn a_sleep_request_drains_a_sandbox_to_object_storage_and_it_still_wakes() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Volatile), SleepPolicy::NEVER);
     let mut actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
@@ -929,7 +1018,7 @@ fn a_sandbox_that_cannot_be_saved_still_wakes_and_runs() {
 
 #[test]
 fn a_running_vm_found_unsavable_is_never_saved() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Volatile), recommended());
     let actions = rig.send(Input::Unsavable {
         sandbox: SandboxId(1),
@@ -956,7 +1045,7 @@ fn a_running_vm_found_unsavable_is_never_saved() {
 
 #[test]
 fn a_sleep_request_waits_for_holds_and_a_touch_cancels_it() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, SleepPolicy::NEVER);
     rig.send(Input::Hold {
         sandbox: SandboxId(1),
@@ -994,7 +1083,7 @@ fn a_sleep_request_waits_for_holds_and_a_touch_cancels_it() {
 
 #[test]
 fn letting_go_ends_every_hold_so_a_sleep_request_goes_ahead_at_once() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, SleepPolicy::NEVER);
     for hold in [HoldId(1), HoldId(2)] {
         rig.send(Input::Hold {
@@ -1035,7 +1124,7 @@ fn letting_go_ends_every_hold_so_a_sleep_request_goes_ahead_at_once() {
 
 #[test]
 fn letting_go_ends_a_wake_still_retrying_so_a_sleep_request_goes_ahead() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Volatile), SleepPolicy::NEVER);
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(step, Step::Resume);
@@ -1068,7 +1157,7 @@ fn letting_go_ends_a_wake_still_retrying_so_a_sleep_request_goes_ahead() {
 
 #[test]
 fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     let busy = Input::Busy {
         sandbox: SandboxId(1),
@@ -1105,7 +1194,7 @@ fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
 
 #[test]
 fn readings_taken_together_are_all_applied_before_any_timer_fires() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());
     rig.add(2, State::RUNNING, recommended());
     // Both reach their pause threshold just as one sweep finds both busy.
@@ -1121,7 +1210,7 @@ fn readings_taken_together_are_all_applied_before_any_timer_fires() {
 
 #[test]
 fn a_refused_or_cancelled_resume_keeps_the_saved_copy() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Local), recommended());
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(step, Step::Resume);
@@ -1155,7 +1244,7 @@ fn a_refused_or_cancelled_resume_keeps_the_saved_copy() {
 
 #[test]
 fn a_resume_that_breaks_down_stops_trusting_the_saved_copy() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Local), recommended());
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(step, Step::Resume);
@@ -1167,7 +1256,7 @@ fn a_resume_that_breaks_down_stops_trusting_the_saved_copy() {
 
 #[test]
 fn a_resume_retried_after_a_refusal_runs_and_saves_afresh() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Local), recommended());
     let (_, op) = only_start(&rig.touch(1));
     rig.finish(1, op, Outcome::Failed(Failure::Transient));
@@ -1189,7 +1278,7 @@ fn a_resume_retried_after_a_refusal_runs_and_saves_afresh() {
 
 #[test]
 fn a_resume_that_fails_with_its_process_gone_falls_back_on_what_is_trusted() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Remote), recommended());
     rig.add(2, paused(Durability::Local), recommended());
     let (_, first) = only_start(&rig.touch(1));
@@ -1213,7 +1302,7 @@ fn a_resume_that_fails_with_its_process_gone_falls_back_on_what_is_trusted() {
 
 #[test]
 fn a_sleep_request_made_during_a_wake_applies_after_it() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, saved(), SleepPolicy::NEVER);
     let hold = Input::Hold {
         sandbox: SandboxId(1),
@@ -1253,7 +1342,7 @@ fn a_sleep_request_made_during_a_wake_applies_after_it() {
 
 #[test]
 fn a_sleep_request_made_while_a_wake_passes_a_deeper_level_survives_it() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(
         1,
         state(Level::Remote, Durability::Remote, true),
@@ -1304,7 +1393,7 @@ fn a_sleep_request_made_while_a_wake_passes_a_deeper_level_survives_it() {
 
 #[test]
 fn a_sleep_request_made_while_a_sleep_step_gives_way_to_a_wake_applies_after_it() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Local), SleepPolicy::NEVER);
     let request = Input::Sleep {
         sandbox: SandboxId(1),
@@ -1358,7 +1447,7 @@ fn a_sleep_request_made_while_a_sleep_step_gives_way_to_a_wake_applies_after_it(
 
 #[test]
 fn a_refused_resume_that_loses_its_records_keeps_the_vm_but_trusts_no_copy() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(1, paused(Durability::Remote), recommended());
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(step, Step::Resume);
@@ -1379,7 +1468,7 @@ fn a_refused_resume_that_loses_its_records_keeps_the_vm_but_trusts_no_copy() {
 
 #[test]
 fn a_refused_restore_that_loses_its_records_boots_fresh_from_disk() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(
         1,
         state(Level::Archived, Durability::Remote, true),
@@ -1413,7 +1502,7 @@ fn a_refused_restore_that_loses_its_records_boots_fresh_from_disk() {
 
 #[test]
 fn a_refused_restore_that_keeps_its_local_record_retries_from_the_local_copy() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(&HostPolicy::default());
     rig.add(
         1,
         state(Level::Archived, Durability::Remote, true),

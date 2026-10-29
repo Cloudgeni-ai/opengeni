@@ -17,8 +17,10 @@ import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
+import { useOptionalBrowserAccounts } from "@opengeni/react/accounts";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
+  apiErrorFacts,
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
@@ -36,17 +38,23 @@ import {
   type OrganizationAdminResource,
 } from "@opengeni/react/app/lib/organization-admin";
 import type {
+  OrganizationInferenceResidency,
   OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
 } from "@opengeni/react/app/types";
 
 import { useOrganizationDirectory } from "./organization-directory";
+import {
+  useBrowserAccountSignInAgain,
+  useSignOutSignInAgain,
+  type SignInAgain,
+} from "./sign-in-again";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats and automations, full access for
-   agent sessions, how long a removed person's data is kept, and recovery
-   (owners, managed sign-in only).
+   Organization settings > Security & data: EU-only inference, Only me chats and
+   automations, full access for agent sessions, how long a removed person's data
+   is kept, and recovery (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
 
 export function OrganizationSecurityPage() {
@@ -54,10 +62,21 @@ export function OrganizationSecurityPage() {
   const appContext = useAppContext();
   const client = appContext.client;
   const managedPeople = directory.managedSession && !directory.singleUser;
-  // Members see only Recovery: they may be recovery contacts.
+  // Members see Data residency and Recovery: they may be recovery contacts.
   const administrator = directory.canAdminister;
   return (
     <SectionStack>
+      {managedPeople ? (
+        // Every member sees it: it decides which models and features they can use.
+        <Section title="Data residency">
+          <ResidencyRowForThisBrowser
+            client={client}
+            identity={directory.identity}
+            canTurnOn={administrator}
+            onChanged={appContext.refreshWorkspaceConfig}
+          />
+        </Section>
+      ) : null}
       {managedPeople && administrator ? (
         <Section title="Chats and automations">
           <PrivateChatsRow
@@ -178,6 +197,210 @@ function RowLoadFailure({
       {userErrorTextWithoutReference(error)}
     </ErrorMessage>
   );
+}
+
+/* ------------------------------------------------------- EU-only inference */
+
+const RESIDENCY_DESCRIPTION = "Models and features run only in the EU. Others are switched off.";
+
+type ResidencyRowProps = {
+  client: Pick<
+    OpenGeniBrowserClient,
+    "getOrganizationInferenceResidency" | "updateOrganizationInferenceResidency"
+  >;
+  identity: OrganizationAdminIdentity;
+  canTurnOn: boolean;
+  /** After a change: the open workspace's models and features change with it. */
+  onChanged?: (() => void) | undefined;
+};
+
+/** The row with this browser's way of signing in again (browser accounts or sign-out). */
+function ResidencyRowForThisBrowser(props: ResidencyRowProps) {
+  return useOptionalBrowserAccounts() ? (
+    <BrowserAccountResidencyRow {...props} />
+  ) : (
+    <SignOutResidencyRow {...props} />
+  );
+}
+
+function BrowserAccountResidencyRow(props: ResidencyRowProps) {
+  return <InferenceResidencyRow {...props} signInAgain={useBrowserAccountSignInAgain()} />;
+}
+
+function SignOutResidencyRow(props: ResidencyRowProps) {
+  return <InferenceResidencyRow {...props} signInAgain={useSignOutSignInAgain()} />;
+}
+
+/** Turning EU-only off needs a sign-in from the last few minutes. */
+function reauthenticationRequired(error: unknown): boolean {
+  const details = (error as { details?: { code?: unknown } } | null)?.details;
+  return (
+    apiErrorFacts(error).status === 403 &&
+    details?.code === "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED"
+  );
+}
+
+/**
+ * EU-only inference, organization-wide. Any member sees it; owners and admins
+ * turn it on; it is offered off only when the server says so (`canTurnOff`:
+ * an owner or admin in a browser), behind a confirmation. Without a recent
+ * sign-in the confirmation says so and offers signing in again.
+ */
+export function InferenceResidencyRow({
+  client,
+  identity,
+  canTurnOn,
+  onChanged,
+  signInAgain,
+}: ResidencyRowProps & {
+  /** Signs in again when turning off needs a recent sign-in. */
+  signInAgain: SignInAgain;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "inference-residency");
+  const [value, setValue] = useState<OrganizationInferenceResidency | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+  /** The server's reason when turning off needs a recent sign-in, shown in the confirmation. */
+  const [signInNeeded, setSignInNeeded] = useState<string | null>(null);
+  const [signInError, setSignInError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    setError(null);
+    try {
+      const next = await client.getOrganizationInferenceResidency(identity.organizationId);
+      if (owns(operation)) setValue(next);
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, client, identity.organizationId, owns]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /**
+   * "saved", "failed" (the toast says why) or "sign_in" (turning off needs a
+   * recent sign-in; the confirmation says so).
+   */
+  const save = useCallback(
+    async (
+      current: OrganizationInferenceResidency,
+      euOnly: boolean,
+    ): Promise<"saved" | "failed" | "sign_in"> => {
+      const operation = claim("mutation");
+      setPending(euOnly);
+      try {
+        const saved = await client.updateOrganizationInferenceResidency(identity.organizationId, {
+          euOnly,
+          expectedVersion: current.version,
+          operationId: crypto.randomUUID(),
+        });
+        if (!owns(operation)) return "failed";
+        setValue(saved);
+        onChanged?.();
+        toast.success(euOnly ? "EU-only inference is on" : "EU-only inference is off");
+        return "saved";
+      } catch (saveError) {
+        if (!owns(operation)) return "failed";
+        if (reauthenticationRequired(saveError)) {
+          setSignInNeeded(
+            apiErrorFacts(saveError).serverMessage ?? "Sign in again to turn EU-only off.",
+          );
+          return "sign_in";
+        }
+        // Stale version, or a mode where it can't change: show what's true now.
+        if (isOrganizationConflict(saveError)) await load();
+        toast.error("Couldn't change EU-only inference", {
+          description: residencyChangeErrorText(saveError),
+        });
+        return "failed";
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, load, onChanged, owns],
+  );
+
+  if (error && value === null) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load EU-only inference."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (value === null) return <SettingRowSkeleton />;
+
+  const euOnly = pending ?? value.euOnly;
+  const changeable = value.euOnly ? value.canTurnOff : canTurnOn;
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="EU-only inference"
+        description={RESIDENCY_DESCRIPTION}
+        control={
+          <Switch
+            aria-label="EU-only inference"
+            checked={euOnly}
+            pending={pending !== null}
+            disabled={!changeable}
+            disabledReason={
+              value.euOnly
+                ? "Only an owner or admin can turn this off, in a browser."
+                : "Only owners and admins can change this."
+            }
+            onCheckedChange={(next) => {
+              if (next) void save(value, true);
+              else {
+                setSignInNeeded(null);
+                setSignInError(null);
+                setConfirmOff(true);
+              }
+            }}
+          />
+        }
+      />
+      <FormDialog
+        open={confirmOff}
+        onOpenChange={setConfirmOff}
+        size="sm"
+        title="Turn off EU-only inference?"
+        description="Models and features outside the EU become available again."
+        error={signInError ?? undefined}
+        submitLabel={signInNeeded ? "Sign in again" : "Turn off"}
+        pendingLabel="Turning off…"
+        tone={signInNeeded ? "default" : "destructive"}
+        initialFocus="cancel"
+        onSubmit={async () => {
+          if (signInNeeded) {
+            // From the click itself, so the sign-in window may open. Once
+            // signed in, Turn off is offered again.
+            setSignInError(null);
+            signInAgain(
+              () => setSignInNeeded(null),
+              (message) => setSignInError(message),
+            );
+            return false;
+          }
+          return (await save(value, false)) !== "sign_in";
+        }}
+        onSubmitted={() => setConfirmOff(false)}
+      >
+        {/* A step to take, not a failure. */}
+        {signInNeeded && !signInError ? <Notice tone="info">{signInNeeded}</Notice> : null}
+      </FormDialog>
+    </SettingRowGroup>
+  );
+}
+
+/** 503: the deployment doesn't take changes yet. Otherwise the usual advice. */
+function residencyChangeErrorText(error: unknown): string {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 503 ? "It can't be changed yet." : userErrorText(error);
 }
 
 /* ----------------------------------------------- Only me chats and automations */
@@ -415,7 +638,7 @@ export function PrivateChatsRow({
 
 type AgentAccessChoice = "sessionAdminAccessAllowed" | "chatActionsAllowed";
 
-export function AgentAdminAccessRow({
+function AgentAdminAccessRow({
   client,
   identity,
 }: {

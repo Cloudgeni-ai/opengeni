@@ -1,5 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
-import { isCodexTransportError, type CodexUsageHeaderSnapshot } from "@opengeni/codex";
+import {
+  isCodexTransportError,
+  parseCodexReportedUsage,
+  type CodexReportedUsage,
+} from "@opengeni/codex";
 import {
   createCodexCreditGuard,
   CodexIncludedUsageExhaustedError,
@@ -7,12 +11,12 @@ import {
 import { classifyCodexCredentialFailure } from "../src/activities/agent-turn/errors";
 
 const now = Date.parse("2030-01-01T00:00:00Z");
-function headers(primary = 20, secondary = 40, at = now): CodexUsageHeaderSnapshot {
+function headers(primary = 20, secondary = 40, at = now): CodexReportedUsage {
   return {
-    primaryUsedPercent: primary,
-    secondaryUsedPercent: secondary,
-    primaryResetAt: new Date(now + 3_600_000),
-    secondaryResetAt: new Date(now + 7_200_000),
+    windows: [
+      { usedPercent: primary, resetAt: new Date(now + 3_600_000) },
+      { usedPercent: secondary, resetAt: new Date(now + 7_200_000) },
+    ],
     checkedAt: new Date(at),
   };
 }
@@ -64,7 +68,10 @@ describe("Codex extra credit protection", () => {
     await guard.assertKnownUsageAllowsDispatch();
     guard.observe(headers(99.9, 99.9));
     await guard.assertKnownUsageAllowsDispatch();
-    guard.observe({ ...headers(), primaryUsedPercent: Number.NaN, checkedAt: new Date(now + 1) });
+    guard.observe({
+      windows: [{ usedPercent: Number.NaN, resetAt: null }],
+      checkedAt: new Date(now + 1),
+    });
     await guard.assertKnownUsageAllowsDispatch();
     expect(canSpendCredits).not.toHaveBeenCalled();
   });
@@ -78,6 +85,45 @@ describe("Codex extra credit protection", () => {
         CodexIncludedUsageExhaustedError,
       );
     }
+  });
+
+  test("a weekly-only account's exhausted window refuses the next dispatch", async () => {
+    // Weekly-only plans report one identified window (and sometimes an
+    // unidentified second slot), so no labeled snapshot exists for them.
+    for (const reported of [
+      { "x-codex-primary-used-percent": "100", "x-codex-primary-limit-window-seconds": "604800" },
+      {
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-limit-window-seconds": "604800",
+        "x-codex-primary-reset-after-seconds": "3600",
+        "x-codex-secondary-used-percent": "0",
+      },
+      { "x-codex-primary-used-percent": "12", "x-codex-secondary-used-percent": "100" },
+    ]) {
+      const usage = parseCodexReportedUsage(new Headers(reported));
+      expect(usage).not.toBeNull();
+      const guard = createCodexCreditGuard({ canSpendCredits: async () => false });
+      await guard.assertKnownUsageAllowsDispatch();
+      guard.observe(usage!);
+      await expect(guard.assertKnownUsageAllowsDispatch()).rejects.toBeInstanceOf(
+        CodexIncludedUsageExhaustedError,
+      );
+    }
+  });
+
+  test("a weekly-only account below its allowance keeps dispatching", async () => {
+    const usage = parseCodexReportedUsage(
+      new Headers({
+        "x-codex-primary-used-percent": "66",
+        "x-codex-primary-limit-window-seconds": "604800",
+        "x-codex-secondary-used-percent": "0",
+      }),
+    );
+    const canSpendCredits = mock(async () => false);
+    const guard = createCodexCreditGuard({ canSpendCredits });
+    guard.observe(usage!);
+    await guard.assertKnownUsageAllowsDispatch();
+    expect(canSpendCredits).not.toHaveBeenCalled();
   });
 
   test("the refusal is a quota decision carrying the latest reset, not a transport error", async () => {

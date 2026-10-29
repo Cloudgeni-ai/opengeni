@@ -187,6 +187,17 @@ describe("browser model text", () => {
     ]);
   });
 
+  test("a notice about the tab follows its tab line", () => {
+    const notice =
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+    expect(
+      browserObservationText({ ...formObservation(), notice })
+        .split("\n")
+        .slice(0, 3),
+    ).toEqual(['Tab T1: "Checkout" https://shop.example/checkout', notice, "Viewport 1280x720"]);
+    expect(browserObservationText(formObservation())).not.toContain("reloaded");
+  });
+
   test("says when no accessibility view is available", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),
@@ -335,6 +346,19 @@ describe("browser model text", () => {
       }),
     ).toBe(
       "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headless on a Connected Machine\nThis browser uses the machine's network directly.\nNo tabs are open.",
+    );
+    // A headed browser is reported as its controller launched it: one shown
+    // offscreen says it has no window, one in a window (or from a controller
+    // that does not report it) keeps the plain headed line.
+    const headed = { ...session, headless: false };
+    expect(browserOpenText({ session: { ...headed, display: "offscreen" }, targets: [] })).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headed, offscreen with no window, on a Connected Machine\nNo tabs are open.",
+    );
+    expect(browserOpenText({ session: { ...headed, display: "window" }, targets: [] })).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headed on a Connected Machine\nNo tabs are open.",
+    );
+    expect(browserOpenText({ session: headed, targets: [] })).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headed on a Connected Machine\nNo tabs are open.",
     );
     expect(browserTabsText({ browserSessionId: session.id, targets: [target] })).toBe(
       `BrowserSession ${session.id} has 1 tab:\nTab T1 selected: "Checkout" https://shop.example/checkout`,

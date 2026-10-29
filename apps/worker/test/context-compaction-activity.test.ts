@@ -9,12 +9,15 @@ import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
+  applyContextCompaction,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   createSessionGoal,
+  ensureManagedAccessForUser,
+  forkSessionContent,
   getActiveSessionHistoryItems,
   getActiveSessionHistoryItemsPaged,
   getLatestRunState,
@@ -37,13 +40,14 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   CompactionNeededError,
   AnthropicRequestSizeError,
   CompactionProviderResponseError,
   createProductionAgentRuntime,
   EmptyCompactionSummaryError,
+  RETAINED_REPLY_TURN_FIELD,
   SUMMARY_PREFIX,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -56,6 +60,8 @@ import {
   isContextWindowExceeded,
   isExactContextLengthExceeded,
   maybeCompactContext,
+  settleFailedContextCompactionLandmark,
+  type CompactionSummarizer,
 } from "../src/activities/context-compaction";
 
 async function claimCompactionForAttempt(
@@ -245,6 +251,565 @@ describe("standalone context compaction execution", () => {
       expect(providerCalls).toBe(1);
     });
   }
+
+  for (const mode of ["portable", "remote_v2"] as const) {
+    test(`${mode} pairs retained requests with their own turn's reply and keeps their turn ids`, async () => {
+      // A managed owner, so the retained answer can also be a message fork point.
+      const userId = `turn-replies-${crypto.randomUUID()}`;
+      const subjectId = `user:${userId}`;
+      await shared.admin`insert into auth_users(id, name, email)
+        values (${userId}, 'Turn reply owner', ${`${userId}@example.test`})`;
+      const access = await ensureManagedAccessForUser(client.db, {
+        userId,
+        email: `${userId}@example.test`,
+        name: "Turn reply owner",
+      });
+      const grant = access.workspaceGrants.find(
+        (value) => value.workspaceId === access.defaultWorkspaceId,
+      )!;
+      const workspaceId = grant.workspaceId!;
+      await shared.admin`insert into session_tenancy_activations(account_id, activation_version, inventory_digest, parity_digest, activated_by)
+        values (${grant.accountId}, 1, ${"7".repeat(64)}, ${"8".repeat(64)}, 'turn-replies-test')
+        on conflict (account_id) do nothing`;
+      const suffix = crypto.randomUUID();
+      const session = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        visibility: "workspace_shared",
+        initialMessage: "",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        subjectId,
+        model: "scripted-compactor",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      const [finished] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db
+          .insert(schema.sessionTurns)
+          .values({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `session-${session.id}`,
+            status: "completed",
+            source: "user",
+            prompt: "What did we decide about the cache key?",
+            position: 0,
+            resources: [],
+            tools: [],
+            model: "scripted-compactor",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+          })
+          .returning(),
+      );
+      const message = (role: string, text: string) =>
+        role === "assistant"
+          ? { type: "message", role, content: [{ type: "output_text", text }] }
+          : { type: "message", role, content: text };
+      await withWorkspaceRls(client.db, workspaceId, async (db) => {
+        await db.insert(schema.sessionHistoryItems).values(
+          [
+            // Rows an older compaction rewrote without a turn.
+            [null, message("user", "Legacy request")],
+            [null, message("assistant", "Legacy answer")],
+            [finished!.id, message("user", "What did we decide about the cache key?")],
+            [finished!.id, message("assistant", "We kept one key per session.")],
+          ].map(([turnId, item], position) => ({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            turnId: turnId as string | null,
+            position,
+            item: item as Record<string, unknown>,
+          })),
+        );
+      });
+      // The finished turn's answer as the timeline shows it (a fork point).
+      const answerEventId = crypto.randomUUID();
+      await shared.admin`insert into session_events
+        (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        select ${answerEventId}, ${grant.accountId}, ${workspaceId}, ${session.id},
+          ${finished!.id}, coalesce(max(sequence), 0) + 1, 'agent.message.completed',
+          ${shared.admin.json({ text: "We kept one key per session." })}
+        from session_events where session_id = ${session.id}`;
+      await shared.admin`update sessions set last_sequence = (
+          select max(sequence) from session_events where session_id = ${session.id})
+        where id = ${session.id}`;
+      const update = await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `turn-replies:${suffix}`,
+        summary: "Continue the migration",
+        payload: {
+          type: "agent_message",
+          operationId: crypto.randomUUID(),
+          text: "Continue the migration.",
+        },
+      });
+      if (!update.added) throw new Error("Agent-message input was not inserted");
+      const attemptId = crypto.randomUUID();
+      const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+      // The running turn's own request and mid-turn text (layout A shape).
+      const appendToRunningTurn = (items: Array<Record<string, unknown>>) =>
+        withWorkspaceRls(client.db, workspaceId, async (db) => {
+          const [{ max } = { max: 0 }] = await db
+            .select({ max: sql<number>`max(${schema.sessionHistoryItems.position})` })
+            .from(schema.sessionHistoryItems)
+            .where(eq(schema.sessionHistoryItems.sessionId, session.id));
+          await db.insert(schema.sessionHistoryItems).values(
+            items.map((item, index) => ({
+              accountId: grant.accountId,
+              workspaceId,
+              sessionId: session.id,
+              turnId: turn.id,
+              position: Math.floor(Number(max)) + 1 + index,
+              item,
+            })),
+          );
+        });
+      await appendToRunningTurn([
+        message("user", "Run the migration"),
+        message("assistant", `Migration applied to staging. ${"detail ".repeat(4_000)}`),
+      ]);
+      const compact = () =>
+        maybeCompactContext(
+          client.db,
+          testSettings({ contextWindowTokens: 250_000 }),
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            turnId: turn.id,
+            executionGeneration: turn.executionGeneration,
+            attemptId,
+          },
+          null,
+          async () => `Checkpoint ${crypto.randomUUID()}`,
+          {
+            force: true,
+            codexCompactionMode: mode,
+            isCodexSubscriptionTurn: mode === "remote_v2",
+            requestRemoteCompactionV2: async () => ({
+              type: "compaction",
+              encrypted_content: `checkpoint-${crypto.randomUUID()}`,
+            }),
+          },
+        );
+      const retained = async () =>
+        (await getActiveSessionHistoryItemsPaged(client.db, workspaceId, session.id))
+          .filter(
+            (row) =>
+              row.item.type === "message" &&
+              (row.item.role === "user" || row.item.role === "assistant") &&
+              !String(JSON.stringify(row.item.content)).includes("Checkpoint"),
+          )
+          .map((row) => ({
+            turnId: row.turnId,
+            replyTurn: row.item[RETAINED_REPLY_TURN_FIELD] ?? null,
+            role: row.item.role,
+            text:
+              typeof row.item.content === "string"
+                ? row.item.content
+                : (row.item.content as Array<{ text: string }>).map((part) => part.text).join(""),
+          }));
+      const expected = [
+        { turnId: null, replyTurn: null, role: "user", text: "Legacy request" },
+        {
+          turnId: finished!.id,
+          replyTurn: null,
+          role: "user",
+          text: "What did we decide about the cache key?",
+        },
+        // The reply copy's row has no turn id; its turn is recorded on the item.
+        {
+          turnId: null,
+          replyTurn: finished!.id,
+          role: "assistant",
+          text: "We kept one key per session.",
+        },
+        { turnId: turn.id, replyTurn: null, role: "user", text: "Run the migration" },
+      ];
+      expect((await compact()).compacted).toBe(true);
+      expect(await retained()).toEqual(expected);
+      // A second compaction reads the preserved turn ids back from the
+      // database and keeps the same single pairing.
+      await appendToRunningTurn([
+        message("assistant", `Still migrating. ${"progress ".repeat(4_000)}`),
+      ]);
+      expect((await compact()).compacted).toBe(true);
+      expect(await retained()).toEqual(expected);
+      const batch = (
+        await getActiveSessionHistoryItemsPaged(client.db, workspaceId, session.id)
+      ).find(
+        (row) => row.item.role === "system" && String(row.item.content).includes(update.update.id),
+      );
+      expect(batch?.turnId).toBe(turn.id);
+      // Forking at the finished turn's answer still finds exactly one reply
+      // row of that turn and copies the history live then, after both
+      // compactions retained a copy of the answer.
+      const fork = await forkSessionContent(client.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId: session.id,
+        actorSubjectId: subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        sourceEventId: answerEventId,
+        operationKey: crypto.randomUUID(),
+      });
+      const forked = await shared.admin<Array<{ item: Record<string, unknown> }>>`
+        select item from session_history_items
+        where session_id = ${fork.sessionId} order by position`;
+      expect(
+        forked.map(({ item }) =>
+          typeof item.content === "string"
+            ? item.content
+            : (item.content as Array<{ text: string }>).map((part) => part.text).join(""),
+        ),
+      ).toEqual([
+        "Legacy request",
+        "Legacy answer",
+        "What did we decide about the cache key?",
+        "We kept one key per session.",
+      ]);
+    });
+  }
+
+  /**
+   * Two finished turns (A, B), each a request and its answer, plus `leading`
+   * rows before them, then a running compaction turn that received an
+   * agent message. Returns the scope for compacting inside the running turn.
+   */
+  async function finishedTurnsFixture(
+    leading: (turnA: string) => Array<{
+      turnId: string | null;
+      item: Record<string, unknown>;
+      providerArtifactInvalidatedAt?: Date;
+    }>,
+  ) {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Turn alignment compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Turn alignment compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const [turnA, turnB] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .insert(schema.sessionTurns)
+        .values(
+          ["First question", "Second question"].map((prompt, position) => ({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `session-${session.id}`,
+            status: "completed" as const,
+            source: "user" as const,
+            prompt,
+            position,
+            resources: [],
+            tools: [],
+            model: "scripted-compactor",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
+            sandboxBackend: "none" as const,
+          })),
+        )
+        .returning(),
+    );
+    const message = (role: string, text: string) =>
+      role === "assistant"
+        ? { type: "message", role, content: [{ type: "output_text", text }] }
+        : { type: "message", role, content: text };
+    const rows = [
+      ...leading(turnA!.id),
+      { turnId: turnA!.id, item: message("user", "First question") },
+      // Bulky tool work that compaction drops, so the rebuild is smaller.
+      {
+        turnId: turnA!.id,
+        item: { type: "function_call", callId: "evidence", name: "inspect", arguments: "{}" },
+      },
+      {
+        turnId: turnA!.id,
+        item: {
+          type: "function_call_result",
+          callId: "evidence",
+          output: "completed evidence ".repeat(4_000),
+        },
+      },
+      { turnId: turnA!.id, item: message("assistant", "First answer") },
+      { turnId: turnB!.id, item: message("user", "Second question") },
+      { turnId: turnB!.id, item: message("assistant", "Second answer") },
+    ];
+    await withWorkspaceRls(client.db, workspaceId, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        rows.map((row, position) => ({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: row.turnId,
+          position,
+          item: row.item,
+          ...(row.providerArtifactInvalidatedAt
+            ? {
+                providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt,
+                providerArtifactInvalidationReason: "encrypted_content_rejected",
+                providerArtifactInvalidatedByAttemptId: crypto.randomUUID(),
+              }
+            : {}),
+        })),
+      );
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `turn-alignment:${suffix}`,
+      summary: "Continue",
+      payload: { type: "agent_message", operationId: crypto.randomUUID(), text: "Continue." },
+    });
+    if (!update.added) throw new Error("Agent-message input was not inserted");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      turnId: turn.id,
+      executionGeneration: turn.executionGeneration,
+      attemptId,
+    };
+    const retained = async () =>
+      (await getActiveSessionHistoryItemsPaged(client.db, workspaceId, session.id))
+        .filter(
+          (row) =>
+            row.item.type === "message" &&
+            (row.item.role === "user" || row.item.role === "assistant") &&
+            !String(JSON.stringify(row.item.content)).includes("Checkpoint"),
+        )
+        .map((row) => ({
+          turnId: row.turnId,
+          replyTurn: row.item[RETAINED_REPLY_TURN_FIELD] ?? null,
+          text:
+            typeof row.item.content === "string"
+              ? row.item.content
+              : (row.item.content as Array<{ text: string }>).map((part) => part.text).join(""),
+        }));
+    const expected = [
+      { turnId: turnA!.id, replyTurn: null, text: "First question" },
+      { turnId: null, replyTurn: turnA!.id, text: "First answer" },
+      { turnId: turnB!.id, replyTurn: null, text: "Second question" },
+      { turnId: null, replyTurn: turnB!.id, text: "Second answer" },
+    ];
+    return { grant, workspaceId, session, turnA: turnA!, turnB: turnB!, scope, retained, expected };
+  }
+
+  for (const mode of ["portable", "remote_v2"] as const) {
+    test(`${mode} keeps turn ids aligned when a rejected provider artifact row is dropped`, async () => {
+      // Projection drops a rejected compaction row, so turn ids must follow
+      // rows, not list positions; otherwise every later request would take
+      // the turn of the row before it and borrow another turn's reply.
+      const fixture = await finishedTurnsFixture((turnA) => [
+        {
+          turnId: turnA,
+          item: { type: "compaction", encrypted_content: "rejected-checkpoint" },
+          providerArtifactInvalidatedAt: new Date(),
+        },
+      ]);
+      const outcome = await maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        fixture.scope,
+        null,
+        async () => "Checkpoint of the rejected-artifact session",
+        {
+          force: true,
+          codexCompactionMode: mode,
+          isCodexSubscriptionTurn: mode === "remote_v2",
+          requestRemoteCompactionV2: async () => ({
+            type: "compaction",
+            encrypted_content: `checkpoint-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      expect(outcome.compacted).toBe(true);
+      expect(await fixture.retained()).toEqual(fixture.expected);
+    });
+  }
+
+  test("portable byte-budget cut keeps turn ids aligned with the summarized prefix", async () => {
+    const fixture = await finishedTurnsFixture(() => []);
+    // The running turn's open tool batch does not fit the byte budget, so it
+    // is deferred and only the earlier prefix is summarized and rebuilt.
+    await withWorkspaceRls(client.db, fixture.workspaceId, async (db) => {
+      const [{ max } = { max: 0 }] = await db
+        .select({ max: sql<number>`max(${schema.sessionHistoryItems.position})` })
+        .from(schema.sessionHistoryItems)
+        .where(eq(schema.sessionHistoryItems.sessionId, fixture.session.id));
+      await db.insert(schema.sessionHistoryItems).values(
+        [
+          { type: "function_call", callId: "deferred-call", name: "inspect", arguments: "{}" },
+          { type: "function_call_result", callId: "deferred-call", output: "OVERSIZED-OUTPUT" },
+        ].map((item, index) => ({
+          accountId: fixture.grant.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.session.id,
+          turnId: fixture.scope.turnId,
+          position: Math.floor(Number(max)) + 1 + index,
+          item,
+        })),
+      );
+    });
+    const summarize: CompactionSummarizer = async (_settings, input) => {
+      expect(JSON.stringify(input)).not.toContain("OVERSIZED-OUTPUT");
+      return "Checkpoint of the summarized prefix";
+    };
+    summarize.measureInputBytes = async (_settings, input) =>
+      JSON.stringify(input).includes("OVERSIZED-OUTPUT") ? Number.MAX_SAFE_INTEGER : 1;
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      fixture.scope,
+      null,
+      summarize,
+      { force: true, codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(await fixture.retained()).toEqual(fixture.expected);
+    const active = await getActiveSessionHistoryItemsPaged(
+      client.db,
+      fixture.workspaceId,
+      fixture.session.id,
+    );
+    // The deferred batch follows the checkpoint and stays unattributed.
+    expect(active.slice(-2).map((row) => [row.item.type, row.turnId])).toEqual([
+      ["function_call", null],
+      ["function_call_result", null],
+    ]);
+  });
+
+  test("applyContextCompaction keeps only this session's turn ids and rejects misaligned ids", async () => {
+    const fixture = await finishedTurnsFixture(() => []);
+    const other = await finishedTurnsFixture(() => []);
+    // A finished turn of a sibling session in the same workspace, so only the
+    // session filter (not workspace scoping) can keep its id out.
+    const sibling = await createSession(client.db, {
+      accountId: fixture.grant.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const [siblingTurn] = await withWorkspaceRls(client.db, fixture.workspaceId, (db) =>
+      db
+        .insert(schema.sessionTurns)
+        .values({
+          accountId: fixture.grant.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: sibling.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${sibling.id}`,
+          status: "completed",
+          source: "user",
+          prompt: "Sibling question",
+          position: 0,
+          resources: [],
+          tools: [],
+          model: "scripted-compactor",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        })
+        .returning(),
+    );
+    const input = {
+      accountId: fixture.grant.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      turnId: fixture.scope.turnId,
+      expectedExecutionGeneration: fixture.scope.executionGeneration,
+      expectedAttemptId: fixture.scope.attemptId,
+      summaryItem: { type: "message", role: "user", content: "Checkpoint" },
+    };
+    const replacementItems = [
+      "own finished turn",
+      "running turn",
+      "sibling session's turn",
+      "other workspace's turn",
+      "malformed id",
+      "upper-cased id",
+      "no id",
+    ].map((text) => ({ type: "message", role: "user", content: text }));
+    await expect(
+      applyContextCompaction(client.db, {
+        ...input,
+        replacementItems,
+        replacementTurnIds: [fixture.turnA.id],
+      }),
+    ).rejects.toThrow("align");
+    const applied = await applyContextCompaction(client.db, {
+      ...input,
+      replacementItems,
+      replacementTurnIds: [
+        fixture.turnA.id,
+        fixture.scope.turnId,
+        siblingTurn!.id,
+        other.turnA.id,
+        "not-a-uuid'; select 1; --",
+        fixture.turnB.id.toUpperCase(),
+        null,
+      ],
+    });
+    expect(applied.applied).toBe(true);
+    const active = await getActiveSessionHistoryItemsPaged(
+      client.db,
+      fixture.workspaceId,
+      fixture.session.id,
+    );
+    expect(active.slice(0, replacementItems.length).map((row) => row.turnId)).toEqual([
+      fixture.turnA.id,
+      fixture.scope.turnId,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+  });
 
   test("does not touch durable history when provider accounting is below threshold", async () => {
     const inaccessibleDb = new Proxy(
@@ -595,6 +1160,17 @@ describe("standalone context compaction execution", () => {
           effectiveContextWindowTokens: 250_000,
           autoCompactLimitTokens: 225_000,
           hostedWebSearch: false,
+          // The summarizer's route; its claim is recorded on the usage event.
+          residency: {
+            geography: "eu",
+            deploymentType: "self_hosted",
+            regions: [],
+            evidence: {
+              source: "operator_declaration",
+              reference: "compactor on internal-host-1",
+              verifiedAt: null,
+            },
+          },
         },
       }),
       buildAgent: forbid,
@@ -665,9 +1241,11 @@ describe("standalone context compaction execution", () => {
           sourceKey: "chatcmpl-compaction",
           inputTokens: 1_234,
           outputTokens: 56,
+          processingResidency: { geography: "eu", deploymentType: "self_hosted", regions: [] },
         }),
       }),
     ]);
+    expect(JSON.stringify(events)).not.toContain("internal-host-1");
   });
 
   test("uses the injected summarizer when model resolution is unavailable", async () => {
@@ -2887,6 +3465,157 @@ describe("standalone context compaction execution", () => {
         (row) => row.item,
       ),
     ).toEqual(originalItems);
+  });
+
+  async function codexCompactedSession() {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Codex model switch test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Codex model switch test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "codex/gpt-5.4",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      frozenCodexCompactionMode: "remote_v2",
+    });
+    const conversation = [
+      { type: "message", role: "user", content: "original question" },
+      { type: "message", role: "assistant", content: "original answer" },
+      { type: "message", role: "user", content: "latest ask" },
+    ];
+    await withWorkspaceRls(client.db, workspaceId, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        conversation.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, workspaceId, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    // Codex remote compaction left an opaque checkpoint only Codex can read.
+    expect(
+      await applyContextCompaction(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        replacementItems: [{ type: "message", role: "user", content: "latest ask" }],
+        summaryItem: { type: "compaction", encrypted_content: "opaque-codex-checkpoint" },
+        eventPayload: { trigger: "auto", implementation: "responses_compaction_v2" },
+      }),
+    ).toMatchObject({ applied: true });
+
+    return { grant, workspaceId, session, scope };
+  }
+
+  test("switching a Codex remote_v2 chat to another model rebuilds its context from the stored transcript", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
+    const summarized: string[] = [];
+    const summarize: CompactionSummarizer = async (_settings, input) => {
+      summarized.push(JSON.stringify(input));
+      return "Rebuilt for the new model";
+    };
+    // The turn runs portable on the new model. No force: the Codex checkpoint
+    // alone makes the rebuild unconditional.
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      scope,
+      null,
+      summarize,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(summarized).toHaveLength(1);
+    expect(summarized[0]).toContain("original question");
+    expect(summarized[0]).toContain("original answer");
+    expect(summarized[0]).not.toContain("opaque-codex-checkpoint");
+
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "portable",
+    );
+    expect(await isSessionCompactionRequested(client.db, workspaceId, session.id)).toBe(false);
+    const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    expect(active.some((row) => row.item.type === "compaction")).toBe(false);
+    expect(JSON.stringify(active.map((row) => row.item))).toContain("Rebuilt for the new model");
+    const events = await listSessionEvents(client.db, workspaceId, session.id, {
+      after: 0,
+      limit: 100,
+    });
+    const switchEvents = events.filter(
+      (event) =>
+        (event.type === "session.context.compaction.started" ||
+          event.type === "session.context.compacted") &&
+        (event.payload as Record<string, unknown>).implementation === "portable_model_switch",
+    );
+    expect(switchEvents.map((event) => event.type)).toEqual([
+      "session.context.compaction.started",
+      "session.context.compacted",
+    ]);
+  });
+
+  test("a model switch whose rebuild does not apply fails instead of keeping the Codex checkpoint", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
+    // The rebuilt context would not fit the new model, so nothing is installed.
+    const tooLarge: CompactionSummarizer = async () => "summary ".repeat(200_000);
+    await expect(
+      maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        scope,
+        null,
+        tooLarge,
+        { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+      ),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    // The chat keeps Codex mode and its checkpoint, so the next turn on another
+    // model asks for the rebuild again.
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "remote_v2",
+    );
+    const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    expect(active.some((row) => row.item.type === "compaction")).toBe(true);
+    // The turn's failure handler settles "Compacting…" once; the rebuild
+    // itself recorded no skip, so the timeline shows exactly one.
+    await settleFailedContextCompactionLandmark(client.db, scope, {
+      clearRequestedCompaction: true,
+    });
+    const events = await listSessionEvents(client.db, workspaceId, session.id, {
+      after: 0,
+      limit: 200,
+    });
+    expect(
+      events.filter((event) => event.type === "session.context.compaction.skipped"),
+    ).toHaveLength(1);
   });
 
   test("remote v2 retries one exact overflow with only tool-result bodies projected", async () => {

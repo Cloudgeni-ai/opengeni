@@ -81,6 +81,8 @@ export function useForgetLastSession(subjectId: string, workspaceId: string): vo
  * When the Back link itself brought the person to a gone session, calls
  * `leave` (open a new session instead of a not-found page) and returns true
  * so the route can skip that page. Transient load failures change nothing.
+ * A chat shown inside another view (the Site view) is not the session route:
+ * with `enabled: false` it neither remembers nor leaves.
  */
 export function useSessionRouteMemory(input: {
   subjectId: string;
@@ -90,17 +92,20 @@ export function useSessionRouteMemory(input: {
   loadError: unknown;
   restoredSessionId: string | undefined;
   leave: () => void;
+  enabled?: boolean | undefined;
 }): boolean {
   const { subjectId, workspaceId, sessionId, openedSessionId, loadError, leave } = input;
+  const enabled = input.enabled !== false;
   const opened = openedSessionId === sessionId;
   const unavailable =
     !opened && (isApiErrorStatus(loadError, 404) || isApiErrorStatus(loadError, 403));
-  const leaving = unavailable && input.restoredSessionId === sessionId;
+  const leaving = enabled && unavailable && input.restoredSessionId === sessionId;
   useEffect(() => {
+    if (!enabled) return;
     const memoryId = lastSessionMemoryId(subjectId, workspaceId);
     if (opened) rememberLastSessionId(memoryId, sessionId);
     else if (unavailable) forgetLastSessionId(memoryId, sessionId);
-  }, [opened, sessionId, subjectId, unavailable, workspaceId]);
+  }, [enabled, opened, sessionId, subjectId, unavailable, workspaceId]);
   useEffect(() => {
     if (leaving) leave();
   }, [leave, leaving]);

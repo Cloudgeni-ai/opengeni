@@ -60,7 +60,6 @@ const legacyBrowserUnusedMethods = [
   "listFiles",
   "listGoalRevisionPage",
   "listGoalRevisions",
-  "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
   // The organization account page reads usage from the account overview, so
@@ -75,7 +74,6 @@ const legacyBrowserUnusedMethods = [
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
   "undoGovernedLearningActivation",
-  "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
   // The session agent-configuration panel (web milestone M5) adopts this.
   "verifyPersonalGitHubRepositorySelections",
@@ -183,16 +181,10 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
-// Dictation is recorded as a recording since #6022; the resumable transcription
-// recording methods are deprecated and stay only for existing SDK callers.
-const deprecatedTranscriptionRecordingMethods = [
-  "createTranscriptionRecording",
-  "discardTranscriptionRecording",
-  "finalizeTranscriptionRecording",
-  "getTranscriptionRecording",
-  "processNextTranscriptionRecordingSegment",
-  "uploadTranscriptionRecordingChunk",
-];
+// Chat share links: the public share page reads a link without the SDK (no
+// credentials, no SDK bundle for someone without an account), and listing a
+// person's links is offered to the agent and SDK callers, not a web screen yet.
+const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
 
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
@@ -270,7 +262,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
-        ...deprecatedTranscriptionRecordingMethods,
+        ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );

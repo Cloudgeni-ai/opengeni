@@ -59,12 +59,14 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
       [
         "./browser-storage",
         "./allowance-refusal",
+        "./timeline-order",
         "./learning-refusal",
         "./usage-allowances",
         "./session-usage-limits",
         "./session-usage-limit-refusal",
         "./secret-use-approval-question",
         "./vault-provider-wire",
+        "./values",
       ],
     ],
     [
@@ -73,6 +75,7 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
         "./site",
         "./browser",
         "./allowance-refusal",
+        "./timeline-order",
         "./learning-refusal",
         "./session-usage-limits",
         "./secret-use-approval",

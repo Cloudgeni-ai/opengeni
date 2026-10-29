@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   BROWSER_NAMESPACE_DNS,
   BROWSER_SHARED_NETWORK_NOTICE,
@@ -156,3 +159,80 @@ try {
   await rm(root, { recursive: true, force: true });
 }
 `;
+
+test.skipIf(process.platform !== "linux")(
+  "the isolated Chrome stderr drain retains the exact final bytes after completion",
+  async () => {
+    const root = await mkdtemp("/tmp/og-isolated-stderr-");
+    const fifo = join(root, "stderr.fifo");
+    const log = join(root, "stderr.log");
+    const done = join(root, "stderr.done");
+    const browser = join(root, "chrome");
+    const profile = join(root, "profile");
+    const tail = Bun.which("gnutail") ?? Bun.which("tail");
+    expect(tail).not.toBeNull();
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      await mkdir(profile);
+      expect(spawnSync("mkfifo", ["-m", "600", fifo]).status).toBe(0);
+      await writeFile(
+        browser,
+        [
+          "#!/bin/sh",
+          "printf 'DevTools listening on ws://127.0.0.1:41234/devtools/browser/fixture\\n' >&2",
+          "i=0",
+          'while [ "$i" -lt 256 ]; do',
+          '  printf "%01024d" "$i" >&2',
+          "  i=$((i + 1))",
+          "done",
+          "printf 'END_MARKER\\n' >&2",
+          "",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      const script = isolatedChromeLaunch({
+        tools,
+        cdpPort: 41234,
+        executable: browser,
+        fixedArguments: [],
+        trailingArguments: [],
+        stderrFifo: fifo,
+        stderrLog: log,
+        stderrDone: done,
+        tail: tail!,
+        stderrBytes: 65_536,
+      });
+      const launched = Bun.spawn(
+        ["/bin/sh", "-c", script, "fixture", "--user-data-dir=" + profile],
+        {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "pipe",
+        },
+      );
+      child = launched;
+      const timer = setTimeout(() => launched.kill("SIGKILL"), 5_000);
+      const [exit, stderr] = await Promise.all([
+        launched.exited,
+        new Response(launched.stderr).text(),
+      ]).finally(() => clearTimeout(timer));
+      expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+      for (let attempt = 0; attempt < 100 && !(await Bun.file(done).exists()); attempt += 1) {
+        await Bun.sleep(10);
+      }
+      // Completion is observed after the reader exits, not just when the marker appears.
+      expect(await Bun.file(done).exists()).toBe(true);
+      const expected =
+        Array.from({ length: 256 }, (_, i) => String(i).padStart(1024, "0")).join("") +
+        "END_MARKER\n";
+      expect(await readFile(log, "utf8")).toBe(expected.slice(-65_536));
+      expect(await readFile(join(profile, "DevToolsActivePort"), "utf8")).toBe(
+        "41234\n/devtools/browser/fixture",
+      );
+    } finally {
+      child?.kill("SIGKILL");
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  10_000,
+);

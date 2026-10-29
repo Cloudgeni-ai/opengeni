@@ -22,6 +22,8 @@
 
 import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
+import { backgroundCommandWakeSender } from "@opengeni/core";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 import {
   effectiveSandboxLifecycle,
   sandboxProviderMaxRemainingLifetimeMs,
@@ -35,6 +37,7 @@ import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
+  signalBackgroundCommandWakes,
   beginSandboxRematerialization,
   sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
@@ -108,6 +111,7 @@ import {
   persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The durable identity of a turn holding a shared sandbox lease.
@@ -182,6 +186,9 @@ export type SandboxResumeServices = {
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
   /** Live fanout for background commands a provider loss settled. */
   bus?: EventBus | null;
+  /** Wakes a session waiting on a background command this resume settles as
+   * lost. Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
   /** One turn's journal, background-command ledger and metering, bound onto a
    * compute box's agent session before the turn receives it. Other backends
    * ignore it. */
@@ -280,7 +287,7 @@ export class SandboxProvisionStageError extends Error {
     public readonly stage: SandboxProvisionFailureStage,
     public readonly source: unknown,
   ) {
-    super(source instanceof Error ? source.message : String(source), { cause: source });
+    super(errorMessage(source), { cause: source });
   }
 }
 
@@ -2272,6 +2279,10 @@ async function resumeBoxForTurnOnce(
           instanceId: live.instanceId,
           leaseEpoch: marked.lease.leaseEpoch,
         });
+        await signalBackgroundCommandWakes(
+          marked.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
+        );
         throw new SandboxLeaseInstanceLostError(
           ids.sandboxGroupId,
           marked.lease.leaseEpoch,

@@ -5,6 +5,7 @@ import {
   getWorkspaceGrant,
   requireTeamsConversationProof,
   namedSubjectHasLiveWorkspaceAuthority,
+  resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
   type TeamsConversationProof,
 } from "@opengeni/db";
@@ -16,7 +17,8 @@ import { requireDeploymentAllowsOnlyMe } from "./organization-privacy";
 /** Internal Teams message admission, distinct from cookie-based tenancy mutation.
  * Only the authenticated ingress writer can produce the matching durable inbox.
  * This grants admission of that exact message/session, never visibility mutation,
- * forks, approval authority or personal-workspace inheritance.
+ * forks or approval authority. A 1:1 route may hold its session in the sender's
+ * own Personal workspace; every other route stays in the installation's.
  */
 export async function authorizeTeamsConversationAdmission(
   deps: Pick<AppDependencies, "db" | "settings">,
@@ -69,10 +71,47 @@ export async function authorizeTeamsConversationAdmission(
     }
     if (
       !source.personal &&
+      !source.groupAudience &&
       (!source.channelId ||
         !deps.settings.teamsBotAllowedChannelIds.includes(`${source.tenantId}:${source.channelId}`))
     ) {
       throw new HTTPException(403, { message: "teams_channel_disabled" });
+    }
+    // A session outside the installation's workspace is only ever the 1:1
+    // sender's own chat in their Personal workspace, and they must still be
+    // able to use the installation's workspace, where their Teams link lives.
+    const elsewhere = source.installationWorkspaceId !== accepted.workspaceId;
+    if (
+      elsewhere &&
+      (!source.personal ||
+        source.groupAudience ||
+        !(await namedSubjectHasLiveWorkspaceAuthority(db, {
+          ...accepted,
+          workspaceId: source.installationWorkspaceId,
+        })))
+    ) {
+      throw new HTTPException(403, { message: "teams_actor_access_revoked" });
+    }
+    if (source.groupAudience) {
+      if (
+        !deps.settings.teamsBotAllowedGroupChatIds.includes(
+          `${source.tenantId}:${source.conversationId}`,
+        )
+      )
+        throw new HTTPException(403, { message: "teams_group_disabled" });
+      for (const member of source.groupAudience) {
+        const memberGrant = await getWorkspaceGrant(db, member.subjectId, accepted.workspaceId);
+        if (
+          !memberGrant ||
+          memberGrant.accountId !== accepted.accountId ||
+          !(await namedSubjectHasLiveWorkspaceAuthority(db, {
+            ...accepted,
+            subjectId: member.subjectId,
+          }))
+        )
+          throw new HTTPException(403, { message: "teams_group_audience_changed" });
+        requirePermission(memberGrant, "sessions:read");
+      }
     }
     const audience = await getSessionAuthorityProjection(
       db,
@@ -88,7 +127,11 @@ export async function authorizeTeamsConversationAdmission(
     ) {
       throw new HTTPException(403, { message: "teams_session_audience_changed" });
     }
-    const liveGrant = await getWorkspaceGrant(db, accepted.subjectId, accepted.workspaceId);
+    // The sender's own Personal workspace grant comes from their active
+    // membership pointer; it has no workspace membership row.
+    const liveGrant = elsewhere
+      ? await resolveNamedManagedPersonalWorkspaceGrant(db, accepted)
+      : await getWorkspaceGrant(db, accepted.subjectId, accepted.workspaceId);
     if (!liveGrant || liveGrant.accountId !== accepted.accountId) {
       throw new HTTPException(403, { message: "teams_actor_access_revoked" });
     }
@@ -97,12 +140,18 @@ export async function authorizeTeamsConversationAdmission(
       throw new HTTPException(403, { message: "teams_actor_access_revoked" });
     }
     if (!input.privateCreate) return;
-    // This capability deliberately has no Personal-workspace exception.
     const policy = await getPrivateSessionCreatePolicy(db, {
       workspaceId: input.workspaceId,
       actorSubjectId: grant.subjectId,
     });
-    if (policy.personalWorkspace || !policy.platformAvailable || !policy.organizationEnabled) {
+    // In the sender's own Personal workspace an Only me chat needs no
+    // organization setting for shared workspaces, as anywhere else there. A
+    // Personal workspace is reachable only through a 1:1 route that names it.
+    if (
+      policy.personalWorkspace !== elsewhere ||
+      !policy.platformAvailable ||
+      (!policy.personalWorkspace && !policy.organizationEnabled)
+    ) {
       throw new HTTPException(403, { message: "teams_private_sessions_unavailable" });
     }
     await requireDeploymentAllowsOnlyMe(

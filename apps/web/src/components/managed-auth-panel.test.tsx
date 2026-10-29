@@ -248,3 +248,284 @@ test("a tab opened before an operator paused sign-ups switches to the paused vie
     host.remove();
   }
 });
+
+test("a team invitation for an unapproved address says the invitation alone can't help", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const setField = async (selector: string, value: string) => {
+    const input = host.querySelector<HTMLInputElement>(selector);
+    if (!input) return;
+    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+    await act(async () => {
+      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
+        target: { value },
+      });
+    });
+  };
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          initialMode="signup"
+          invitation={{ organizationName: "Acme Labs", targetEmail: "new@example.test" }}
+          onSubmit={async () => {
+            throw new AuthApiError(
+              403,
+              "SIGNUP_EMAIL_NOT_ALLOWED",
+              null,
+              "signup email not allowed",
+            );
+          }}
+        />,
+      ),
+    );
+    await setField("#managed-auth-name", "New Person");
+    await setField("#managed-auth-email", "new@example.test");
+    await setField('input[type="password"]', "long-enough-password");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    const notice = host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]');
+    expect(notice).not.toBeNull();
+    expect(notice!.textContent).toContain("Ask for your email to be allowed");
+    expect(notice!.textContent).toContain(
+      "an invitation to Acme Labs doesn't approve new@example.test on its own",
+    );
+    expect(notice!.textContent).toContain(
+      "Ask whoever runs this service to allow new@example.test",
+    );
+    expect(notice!.textContent).not.toContain("open the invitation link from your email");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+function withPasskeyBrowser<T>(run: () => Promise<T>): Promise<T> {
+  const scope = globalThis as unknown as Record<string, unknown>;
+  const previous = scope.PublicKeyCredential;
+  scope.PublicKeyCredential = function PublicKeyCredential() {};
+  if (!navigator.credentials) {
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: { get: async () => null, create: async () => null },
+    });
+  }
+  return run().finally(() => {
+    scope.PublicKeyCredential = previous;
+  });
+}
+
+test("signs in with a passkey and explains a dismissed prompt without blaming the person", async () =>
+  withPasskeyBrowser(async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const calls: Array<{ mode: string; input: unknown }> = [];
+    let dismiss = true;
+    const button = (name: string) =>
+      Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            passkeySignIn
+            onPasskeySubmit={async (mode, input) => {
+              calls.push({ mode, input });
+              if (dismiss) throw new DOMException("The operation was cancelled", "NotAllowedError");
+            }}
+            onSubmit={async () => {
+              throw new Error("must not use a password");
+            }}
+          />,
+        ),
+      );
+      await act(async () => button("Sign in with a passkey")!.click());
+      expect(calls).toEqual([{ mode: "signin", input: undefined }]);
+      expect(host.textContent).toContain("No passkey was used.");
+      dismiss = false;
+      await act(async () => button("Sign in with a passkey")!.click());
+      expect(calls).toHaveLength(2);
+      expect(host.textContent).not.toContain("No passkey was used.");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  }));
+
+test("creates an account with only a name and a passkey, and offers sign-in for a known passkey", async () =>
+  withPasskeyBrowser(async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const calls: Array<{ mode: string; input: unknown }> = [];
+    const button = (name: string) =>
+      Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name);
+    const submit = () =>
+      act(async () =>
+        host
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            initialMode="signup"
+            passkeySignIn
+            passkeySignUp
+            onPasskeySubmit={async (mode, input) => {
+              calls.push({ mode, input });
+              throw new AuthApiError(
+                409,
+                "PASSKEY_ALREADY_REGISTERED",
+                null,
+                "This passkey already belongs to an account; sign in with it",
+              );
+            }}
+            onSubmit={async () => {
+              throw new Error("must not use email");
+            }}
+          />,
+        ),
+      );
+      expect(host.querySelector("#managed-auth-email")).not.toBeNull();
+      await act(async () => button("Create account with a passkey")!.click());
+      // Name only: no email address or password is asked for.
+      expect(host.querySelector("#managed-auth-email")).toBeNull();
+      expect(host.querySelector('input[type="password"]')).toBeNull();
+      expect(host.querySelector("#managed-auth-name")).not.toBeNull();
+      await submit();
+      expect(calls).toHaveLength(0);
+      expect(host.textContent).toContain("Enter your name.");
+      const input = host.querySelector<HTMLInputElement>("#managed-auth-name")!;
+      const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+      await act(async () => {
+        (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[
+          propsKey
+        ]!.onChange({ target: { value: "  Ada Lovelace  " } });
+      });
+      await submit();
+      expect(calls).toEqual([{ mode: "signup", input: { name: "Ada Lovelace" } }]);
+      expect(host.textContent).toContain("This passkey already belongs to an account here.");
+      await act(async () => button("Sign in")!.click());
+      expect(button("Sign in with a passkey")).toBeDefined();
+      await act(async () => button("Sign up")!.click());
+      await act(async () => button("Create account with a passkey")!.click());
+      await act(async () => button("Use email instead")!.click());
+      expect(host.querySelector("#managed-auth-email")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  }));
+
+test("offers no passkeys where the deployment or the browser can't use them", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          passkeySignIn
+          passkeySignUp
+          onPasskeySubmit={async () => undefined}
+          onSubmit={async () => undefined}
+        />,
+      ),
+    );
+    // This test browser has no WebAuthn.
+    expect(host.textContent).not.toContain("passkey");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("an address that is not approved for the service gets who to ask, not a retry", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const attempts: string[] = [];
+  const setField = async (selector: string, value: string) => {
+    const input = host.querySelector<HTMLInputElement>(selector)!;
+    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+    await act(async () => {
+      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
+        target: { value },
+      });
+    });
+  };
+  const button = (name: string) =>
+    Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name);
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          initialMode="signup"
+          socialProviders={["google"]}
+          onSocialSubmit={async () => undefined}
+          onSubmit={async (_mode, input) => {
+            attempts.push(input.email);
+            throw new AuthApiError(
+              403,
+              "SIGNUP_EMAIL_NOT_ALLOWED",
+              null,
+              "signup email not allowed",
+            );
+          }}
+        />,
+      ),
+    );
+    await setField("#managed-auth-name", "New Person");
+    await setField("#managed-auth-email", "new@example.test");
+    await setField('input[type="password"]', "long-enough-password");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(attempts).toEqual(["new@example.test"]);
+    expect(
+      host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]'),
+    ).not.toBeNull();
+    expect(host.textContent).toContain(
+      "new@example.test isn't on this service's list of approved email addresses.",
+    );
+    expect(host.textContent).toContain("Ask whoever runs this service to allow your email address");
+    expect(host.textContent).not.toContain("Couldn't create account");
+    expect(host.textContent).not.toContain("try again");
+    // Nothing to resubmit: no form fields, submit button or provider buttons.
+    expect(host.querySelector('button[type="submit"]')).toBeNull();
+    expect(host.querySelector("#managed-auth-email")).toBeNull();
+    expect(host.textContent).not.toContain("Google");
+
+    await act(async () => button("Use a different email")!.click());
+    expect(host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]')).toBeNull();
+    expect(host.querySelector<HTMLInputElement>("#managed-auth-email")!.value).toBe("");
+    expect(host.querySelector('button[type="submit"]')).not.toBeNull();
+
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await setField("#managed-auth-email", "other@example.test");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(attempts).toEqual(["new@example.test", "other@example.test"]);
+    await act(async () => button("Sign in to an existing account")!.click());
+    expect(host.querySelector('[data-testid="managed-auth-signup-email-not-allowed"]')).toBeNull();
+    expect(host.querySelector('input[autocomplete="current-password"]')).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

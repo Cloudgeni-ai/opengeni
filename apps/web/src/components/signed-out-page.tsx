@@ -1,4 +1,13 @@
-import { ActivityIcon, BoxesIcon, CloudIcon, PaletteIcon } from "lucide-react";
+import {
+  ActivityIcon,
+  BoxesIcon,
+  CloudIcon,
+  EraserIcon,
+  MessageSquareTextIcon,
+  PaletteIcon,
+  Table2Icon,
+  type LucideIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
@@ -10,13 +19,45 @@ import {
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 
-// Copy follows the public landing page (opengeni.ai): its headline, its lead
-// sentence and the platform features it names.
-const highlights = [
-  { icon: CloudIcon, text: "Durable sessions that keep working, even when you close your laptop" },
-  { icon: BoxesIcon, text: "Tools and sandboxes, with approvals and permissions" },
-  { icon: ActivityIcon, text: "Observability out of the box" },
-];
+type Pitch = {
+  headline: string;
+  emphasis: string;
+  lead: string;
+  highlights: { icon: LucideIcon; text: string }[];
+};
+
+/** Which audience the panel beside the sign-in form speaks to. */
+export type SignedOutPitch = "product" | "excel";
+
+const pitches: Record<SignedOutPitch, Pitch> = {
+  // Copy follows the public landing page (opengeni.ai): its headline, its lead
+  // sentence and the platform features it names.
+  product: {
+    headline: "Agents in your product.",
+    emphasis: "Infrastructure out of the box.",
+    lead: "Build AI products without building the infrastructure from scratch.",
+    highlights: [
+      {
+        icon: CloudIcon,
+        text: "Durable sessions that keep working, even when you close your laptop",
+      },
+      { icon: BoxesIcon, text: "Tools and sandboxes, with approvals and permissions" },
+      { icon: ActivityIcon, text: "Observability out of the box" },
+    ],
+  },
+  // The sign-in window the Excel add-in opens: the person is working in a
+  // workbook, so the panel says what the add-in does there, in plain words.
+  excel: {
+    headline: "Your Opengeni agents,",
+    emphasis: "right inside Excel.",
+    lead: "Sign in to connect the add-in. Then ask in plain words and watch the agent work in your open workbook.",
+    highlights: [
+      { icon: Table2Icon, text: "Builds tables, formulas and summaries in your sheets" },
+      { icon: EraserIcon, text: "Cleans up messy data and formats sheets" },
+      { icon: MessageSquareTextIcon, text: "Explains what is in a workbook" },
+    ],
+  },
+};
 
 /** Operator-configured legal documents; absent unless the deployment publishes them. */
 export type SignedOutLegalLinks = {
@@ -28,13 +69,17 @@ export type SignedOutLegalLinks = {
 export function SignedOutPage({
   children,
   legalLinks,
+  pitch = "product",
   supportEmail,
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
+  /** Defaults to the product pitch; "excel" when the Excel add-in opened sign-in. */
+  pitch?: SignedOutPitch | undefined;
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;
 }) {
+  const { headline, emphasis, lead, highlights } = pitches[pitch];
   const legal = [
     { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
     { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
@@ -45,7 +90,11 @@ export function SignedOutPage({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
-        <header className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10">
+        <header
+          data-signed-out-column
+          data-window-drag
+          className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10"
+        >
           <div className="flex items-center gap-2.5 text-fg">
             <BrandMark className="w-[31px]" />
             <Wordmark className="text-[23px]" />
@@ -62,21 +111,20 @@ export function SignedOutPage({
             </DropdownMenuContent>
           </DropdownMenu>
         </header>
-        <div className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14">
+        <div
+          data-signed-out-column
+          className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14"
+        >
           <div className="grid items-center gap-10 min-[721px]:grid-cols-[minmax(0,1fr)_minmax(0,390px)] min-[721px]:gap-16">
             <section aria-labelledby="signed-out-heading" className="min-w-0">
               <h1
                 id="signed-out-heading"
                 className="font-display text-[40px] leading-[1.08] font-medium tracking-[-1.5px] text-balance min-[721px]:text-[48px] min-[721px]:tracking-[-2px]"
               >
-                Agents in your product.{" "}
-                <em className="font-serif text-[1.18em] leading-none font-normal">
-                  Infrastructure out of the box.
-                </em>
+                {headline}{" "}
+                <em className="font-serif text-[1.18em] leading-none font-normal">{emphasis}</em>
               </h1>
-              <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">
-                Build AI products without building the infrastructure from scratch.
-              </p>
+              <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
               <ul className="mt-8 space-y-4">
                 {highlights.map(({ icon: Icon, text }) => (
                   <li key={text} className="flex items-start gap-3 text-sm text-fg">
@@ -94,7 +142,10 @@ export function SignedOutPage({
           </div>
         </div>
         <footer className="border-t border-border">
-          <div className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
+          <div
+            data-signed-out-column
+            className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10"
+          >
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <Wordmark className="text-[15px] text-fg-muted" />
               {legal.length > 0 ? (

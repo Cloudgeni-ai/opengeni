@@ -1,5 +1,146 @@
 # @opengeni/react-native
 
+## 5.5.1
+
+### Minor Changes
+
+- e473f84: Products that embed meetings get the workspace's own choices without extra wiring, and a meetings-only phone app no longer gets call setup.
+
+  - The recorder on `MeetingsListPage` (web) and `MeetingsList` (React Native) starts with the live transcript on when the workspace's `recordings.liveTranscript` setting says so. `GET /v1/workspaces/:workspaceId/recording-models` now returns `liveTranscript`, and `useRecordingModels` returns it too (undefined until the server answers, or from an older server). A host's own `liveTranscriptDefault` still wins; before, a host that passed none always started with it off, and a phone app had no way to follow the setting at all.
+  - The Expo config plugin sets up calls only when asked: `["@opengeni/react-native", { "recording": true }]` now adds just the background recording setup, without the `voip` background mode, the `INStartCallIntent` activity or the generated Siri and Shortcuts intent. Add `call` to set up calls as well, or pass `"call": false` to leave them out of any entry. The plugin without options still sets up calls, as before.
+  - On phones, "No sound is reaching the microphone" no longer appears during ordinary pauses. It now shows only when a recording has delivered digital silence since it started or resumed, which is what a muted, blocked or broken microphone delivers; a microphone that has picked up any sound is working, however long the pause.
+
+### Patch Changes
+
+- c866336: Connecting a computer that isn't connected yet is now an obvious action in the in-chat Connected Machine card. The card ends with an **Another computer** row whose **Connect** opens the connect flow, instead of a small link under everything else, and no listed machine gets the primary button just because it is the only one online. Screen control and the Chrome extension rows show only for the machine this chat runs on, so steps about a machine the person may not mean no longer compete with choosing or connecting the right one. Without a host connect callback, the embedded card's **Connect another computer** opens in place as a disclosure that says the steps happen on the other computer.
+
+  On the web, the shared `ThisComputerCard` keeps **Connect another computer** as a secondary action beside a connected computer when the host supplied a connect path (`onConnect`, `downloads`, `openAppUrl` or `downloadUrl`). On the phone, `useNativeInChatConnect` accepts an optional `shareConversation` callback; with it, the computer offer explains that a computer connects from the computer itself and offers **Share link to this chat**.
+
+- a4b57e6: In-chat connection requests now read the same to the person and to the agent, and the sign-in window ends cleanly in embedded chats. When the person in the chat can't connect the requested integration from the card (their access doesn't allow it), `capability_authorization_request` now tells the agent so, instead of the generic "posted for confirmation" message, so it no longer asks them to use a card that can't help them. Results for people who can connect are unchanged. The card and the server share one rule for this decision (`inChatCapabilitySetup` in contracts), and the server applies it to the same access the person's chat has: what their sign-in could do when they sent the turn's message, or their latest message in that chat for a turn the platform started for them, such as a wake-up, a child's result or a goal continuation (an embed token narrows it, and their own workspace counts without a membership). Without such a message it falls back to their membership (`readTurnSenderAccess` in db). The console's chat card uses the same rule, so it no longer offers Connect to a member the agent was told can't connect.
+
+  In-chat connect cards also start sign-in with a new optional `finishInPopup: true` flag on `POST /v1/workspaces/:workspaceId/connect/attempts`. The provider's callback then lands on a small server page that closes the sign-in window (or tells the person they can close it) instead of loading a second copy of the host page in the popup. Without the flag the return URL behaves as before. Against an older server that rejects the unknown field, `ConnectController.begin` starts again without it, so sign-in keeps working and returns to the host page as before. Browser cards set it, because they sign in through a popup. Phone cards don't, because the system sign-in browser returns to the app.
+
+  Reviewed catalog integrations no longer carry an "MCP server" label on their connection cards and dialogs, on the web and on the phone. They read as the service itself, with its name and provider. Servers someone added by hand, and registry entries nobody reviewed, keep the label (`showsMcpServerLabel` in `@opengeni/react/in-chat-connect-model`).
+
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [c866336]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [133a221]
+- Updated dependencies [729329e]
+- Updated dependencies [2483f32]
+- Updated dependencies [cc59c02]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [1cc657b]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [52a0439]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [5ea8c5c]
+- Updated dependencies [a56e1ea]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/react@5.5.0
+
+## 5.4.2
+
+### Minor Changes
+
+- 3a2f020: Chat messages now render math. Inline and display TeX written with `$…$`, `$$…$$`, `\(…\)` or `\[…\]` is typeset with KaTeX on the web and as SVG (MathJax's TeX font, no WebView) in the native timeline, instead of showing as source with its backslashes stripped. Single dollars follow Pandoc's rule, so prices such as `$5 and $10` stay text, and code spans and fenced code are never touched. The math renderer loads on the first message that contains math: KaTeX is a separate lazy chunk on the web, and the native MathJax engine is evaluated only on first use. Invalid TeX shows its source instead of breaking the message. The shared delimiter handling is exported as `@opengeni/react/markdown-math` (`prepareMathMarkdown`, `mayContainMath`).
+- 0408d62: When an agent asks for a connection in chat, the phone app now shows the same connect card as the web chat instead of a dead-end "needs to be reconnected" note. OAuth opens the system sign-in browser and returns to the conversation; key-based setup uses the native secure field; the card follows the setup's saved state, and the agent continues once the connection is ready. A first connection no longer says "reconnect". The card choice, setup state and sign-in window handling now live in renderer-neutral modules that the web and native cards share (`@opengeni/react/in-chat-connect-model`). Native approvals show app actions as the readable confirmation card the web shows, a settled approval shows a check instead of a warning, and question cards render their Markdown, help text and option descriptions as on the web. React Native's `AbortController` gains the standard abort reason and `signal.throwIfAborted()` when the runtime lacks them, which the connect flow relies on.
+- 6a280a7: New `@opengeni/react-native/meetings` entry, so an app can add meetings to its phone app with the same screens the Opengeni app uses. `MeetingRecorderProvider` holds one recorder above the screens (recording keeps going while the person moves around the app or locks the phone), `MeetingsList` is the meetings page with the recorder on top, and `useMeetingView` gives one meeting's transcript plus the actions for the host's own header menu. They read the client and workspace from `OpenGeniProvider`, take an `externalRef` to scope a list (and new recordings) to something in the host, and every label comes from the shared Opengeni catalog under `native.meetings.*`, so hosts translate them like the rest.
+- 70623d6: Phone apps can walk people through starting a voice call with a spoken phrase of their own, such as "Hey Opengeni". iPhone (iOS 18 and later) runs a Siri request when the person says a phrase they taught it under Settings › Accessibility › Vocal Shortcuts; apps cannot create those phrases themselves. The new `WakePhraseGuide` shows the three steps, copies the Siri request that starts the app's call shortcut ("Talk to <name>" by default, so it must match one of the call plugin's phrases), and opens Settings. `wakePhraseSetupAvailable()` says whether the phone supports it. The Opengeni phone app offers it in Settings as Set up "Hey Opengeni". The guide's text uses new `native.realtime.wakePhrase.*` message keys.
+
+### Patch Changes
+
+- d30a243: The live transcript preview can stream to gpt-4o-transcribe and gpt-4o-mini-transcribe on OpenAI or Azure OpenAI, so a deployment that keeps audio in one region (for example Azure in the EU) can offer it. `OPENGENI_RECORDING_LIVE_TRANSCRIPTION` (`provider/model`) names the deployment's live model; with `OPENGENI_SPEECH_TO_TEXT_PINNED`, the preview goes only to the pinned provider or this model, while meetings and dictation stay on the pin. Live sessions use the new `openai.realtime` protocol: the grant carries a short-lived client secret (`token`) and a `webrtcUrl`. A browser recorder sends a copy of each track over WebRTC, muted while paused and after Stop; React Native streams PCM over a WebSocket signed in with a header. `createLiveTranscriber` takes `mediaTrack`, `RTCPeerConnection`, `fetch`, `now` and `webSocketHeaders`, and the transcriber has `setPaused`. Audio held while connecting is resampled when the session's rate differs. The Azure OpenAI voice input provider can sign in with the deployment's own Microsoft Entra identity when its endpoint or deployment is named for voice input and it has no key.
+- 454ca0a: A transcript that failed because its model's provider has no key now names the model and that provider ("Scribe v2 needs ElevenLabs, which isn't connected…"), on the web and on phones, instead of saying that no transcription provider is connected. It suggests trying another model only when the deployment offers more than one, and for a provider the deployment itself pays for it points to whoever runs the deployment rather than to Organization settings. `transcriptErrorText` takes an optional third argument with the model's and provider's names, and optionally its `funding` and whether the deployment is `pinned`.
+- 454ca0a: A meeting recording no longer stops when the person switches to another workspace. The recorder stays with the workspace the recording started in until it stops, then moves to the workspace shown. On the web and in the desktop app the recorder is also kept through a dropped connection or an update. After Stop, a recording made in another workspace opens in its own workspace. `MeetingRecorderProvider`'s `onOpenMeeting` now also receives the meeting's workspace ID. `useMeetingRecorder()` returns the recorder's `workspaceId` and `openMeeting`, and `createMeetingRecorderStore` takes an optional second argument that opens a meeting in its workspace. `MeetingRecorderProvider` takes an optional `scope`, such as the signed-in person's id, for a host that mounts it above sign-in: a new value ends a recording at once, and null means nobody is signed in, so nothing records and a desktop "Record" request is not kept for whoever signs in next. The console passes the signed-in person, so signing out or another person signing in ends a recording at once. `MeetingRecorderStore`'s new `workspaceId` and `openMeeting` members are optional, so stores made by hand still type-check.
+- 627bcd6: Meetings started without a title show a local, readable title instead of the server's UTC stand-in. `meetingTitle` is exported from `@opengeni/react/recordings`.
+- 2a29ac1: Meetings say less, more plainly. Explanations of how things work inside (versions, model words, where audio is kept, "pieces of audio") are gone; each state says the one thing that matters and what to do. While recording in the desktop app the panel just says what it records, and an unnamed meeting started on the web is named after when it starts ("Meeting, Oct 26, 12:15") instead of getting the server's "Recording 2026-10-26 11:15 UTC".
+
+  Form dialogs, confirm dialogs and detail sheets read their default Cancel, Close, Loading and Working… text from the host's messages (`formDialog.*`), so a translated product no longer shows them in English.
+
+- a8b429e: Meeting model prices now show only where the workspace pays them. `GET /recording-models` returns `usdPerHour` for a model on the workspace's own key, and for a deployment's model only where its use is charged in credits; otherwise it is null. The recorder's live transcript switch, on web and phone, then says nothing about cost instead of "Uses extra transcription credit", so people whose deployment covers transcription no longer see a provider's list price.
+- 26c3bc6: Meetings no longer say "Uploading" while a meeting is recorded or after Stop. Audio uploads while it records, so a meeting's page opened from Take notes now shows the recording's clock with Pause and Stop, and after Stop it reads Transcribing on the page and in the list. A paused recording reads Paused in the list, and the recorder's own line after Stop reads "Saving the rest of the audio." on web and phones. A meeting still being recorded elsewhere reads In progress; only a lost connection or a refused upload is called out. Adds `meetingHereStatus` to `@opengeni/react/recordings`; the list label for a recording in progress uses the new `meetings.recordings.inProgress` key instead of `meetings.recordings.uploading`, the recorder's `meetings.recorderPanel.uploadingCountPiecesOfAudio` and `finishingTheUpload` keys become `meetings.recorderPanel.savingTheRestOfTheAudio`, and the meeting page's unused `meetings.detailPage.uploading*` and `stillUploading` keys are removed. Hosts that translate the catalog should rename their `meetings.recordings.uploading` translation to `meetings.recordings.inProgress`, add `savingTheRestOfTheAudio` and drop the removed keys.
+- 8a9e320: The meetings list and meeting screens from `@opengeni/react-native/meetings` now let iOS keep their content clear of the navigation bar, tab bar and home indicator (`contentInsetAdjustmentBehavior="automatic"`), so they also work under a translucent header. `bottomInset` is now only extra space, such as Android's bottom safe-area inset.
+- de51e66: `MeetingsList` takes `onRefresh`, called when the person pulls the list, comes back to the screen or returns to the app, so a host's own state shown there (such as whether recording is on) refreshes with it.
+- 9e0569f: `MeetingRecorderProvider` from `@opengeni/react-native/meetings` now runs its recorder beside the screens instead of around them. A new `storeScope` or workspace starts a fresh recorder without remounting everything below it, so an app can switch account or organization without a `key` that resets its navigation. The live snapshot only re-renders the components that read it, not the whole app several times a second while recording. `workspaceId` may be `null` while the app is still finding it.
+- 6c11af5: Recording on Android 13 and later asks to post notifications right after the microphone is allowed, so the ongoing "Recording audio" notification shows, and the `recording` config plugin declares the permission. The notification and status bar now show a microphone instead of the app icon, which Android draws as a blank disc.
+- Updated dependencies [931325b]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [3a2f020]
+- Updated dependencies [58d272f]
+- Updated dependencies [768b175]
+- Updated dependencies [801743c]
+- Updated dependencies [cb5f4d7]
+- Updated dependencies [01188c9]
+- Updated dependencies [415c32b]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [ebf148a]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [454ca0a]
+- Updated dependencies [de7087a]
+- Updated dependencies [454ca0a]
+- Updated dependencies [a2ae2ce]
+- Updated dependencies [cb15454]
+- Updated dependencies [627bcd6]
+- Updated dependencies [a5a9336]
+- Updated dependencies [0da62e3]
+- Updated dependencies [2a29ac1]
+- Updated dependencies [a8b429e]
+- Updated dependencies [627bcd6]
+- Updated dependencies [26c3bc6]
+- Updated dependencies [4e83a4d]
+- Updated dependencies [464f57b]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [d3d8ccf]
+- Updated dependencies [0408d62]
+- Updated dependencies [8be9be2]
+- Updated dependencies [b18d187]
+- Updated dependencies [7bb67e3]
+- Updated dependencies [936d9e0]
+- Updated dependencies [5f332c1]
+- Updated dependencies [69a05bd]
+- Updated dependencies [6a280a7]
+- Updated dependencies [24b71c6]
+- Updated dependencies [d8ae831]
+- Updated dependencies [1320698]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [f1579d6]
+- Updated dependencies [30b9cd2]
+- Updated dependencies [a48504a]
+- Updated dependencies [70623d6]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/sdk@5.4.0
+  - @opengeni/react@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

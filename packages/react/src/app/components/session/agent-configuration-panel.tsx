@@ -49,7 +49,6 @@ import {
   type AgentCapabilityDraft,
 } from "../../lib/agent-capabilities";
 import { chatLearningScope } from "../../lib/chat-learning-scope";
-import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { sessionUsageLimitCapability } from "../../lib/session-usage-limit";
 import { cn } from "../../lib/utils";
@@ -117,10 +116,7 @@ export function AgentConfigurationPanel(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRegion = useRef<HTMLDivElement>(null);
-  const learningScope = chatLearningScope(
-    session,
-    isPersonalWorkspace(workspace, context.managedSelfContext),
-  );
+  const learningScope = chatLearningScope(session);
   // This chat's Agent learning: shown inside Skills and Knowledge, saved with them.
   const learning = useLearningSettings({
     workspaceId: session.workspaceId,

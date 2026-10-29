@@ -13,7 +13,8 @@
 //   - swap back to the group box routes there again (heterogeneous, single-active).
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Tool } from "@openai/agents";
+import { Agent, run as runAgent, type Tool } from "@openai/agents";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { wrapChannelABoxWithRouting } from "@opengeni/core";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -229,6 +230,28 @@ async function claimTestConnection(input: {
     where id = ${input.enrollmentId}
   `;
   return connectionInstanceId;
+}
+
+/** The tool block one provider request carries when the runtime's own shell
+ *  capability (with the lean exec_command schema the model really sees) is
+ *  bound to this sandbox session. */
+async function requestShellTools(proxy: object): Promise<string> {
+  const capability = buildAgentCapabilities(settings, [], {}).find(
+    (candidate) => candidate.type === "shell",
+  )!;
+  const model = new ScriptedModel("done");
+  await runAgent(
+    new Agent({
+      name: "turn",
+      model,
+      tools: capability
+        .clone()
+        .bind(proxy as never)
+        .tools(),
+    }),
+    "hi",
+  );
+  return JSON.stringify(model.requests[0]!.tools);
 }
 
 /** A fake established GROUP box whose exec returns a fixed marker — the default
@@ -2125,6 +2148,200 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     expect((await proxy.exec({ cmd: "echo again" })).stdout).toBe("lazy-real");
     expect(provisions).toBe(1);
   });
+
+  test("a lazy box sends the same shell tools whether or not it was resolved before binding", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-lazy-tools') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy-tools') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId: a!.id,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "compute",
+    });
+    const environment = { HOME: "/workspace" };
+    const manifest = buildManifest(settings, [], environment);
+    // The compute box, like every Connected Machine session, runs commands
+    // without stdin: its live session answers supportsPty() false.
+    const box = fakeGroupBox("compute-real");
+    Object.assign(box.session as object, {
+      supportsPty: () => false,
+      execCommand: async () => "ok",
+    });
+    const turnBox = () =>
+      wrapLazyTurnBoxWithRouting(
+        { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
+        { workspaceId, sessionId: session.id, environment },
+        {
+          client: { backendId: "compute" },
+          backendId: "compute",
+          agentDefaultManifest: manifest,
+          provisioner: { get: async () => ({ established: { ...box, backendId: "compute" } }) },
+        },
+      ).session as { exec: (args: unknown) => Promise<unknown> };
+    // A plain turn binds before anything touches the box.
+    const lazyTools = await requestShellTools(turnBox());
+    // A turn with an attached file (or a resumed box) resolves the box first.
+    const resolved = turnBox();
+    await resolved.exec({ cmd: "true" });
+    const resolvedTools = await requestShellTools(resolved);
+
+    expect(resolvedTools).toBe(lazyTools);
+    expect(lazyTools).not.toContain("write_stdin");
+  });
+
+  test("moving a chat to a Connected Machine and back changes its shell tools once per move", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-placement-tools') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-placement-tools') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "modal",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
+    });
+    const connectionInstanceId = await claimTestConnection({
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    const bus = busWithAgent(workspaceId, enrollment.id, connectionInstanceId, "the-laptop");
+    const environment = { HOME: "/workspace" };
+    const manifest = buildManifest(settings, [], environment);
+    // The Modal home offers stdin; the Connected Machine runs commands without it.
+    const home = fakeGroupBox("modal-home");
+    Object.assign(home.session as object, {
+      supportsPty: () => true,
+      execCommand: async () => "ok",
+      writeStdin: async () => "ok",
+    });
+    const routeIds = { workspaceId, sessionId: session.id, environment };
+    const services = { db, settings, bus: bus as never, opJournal: testOpJournal };
+    // A home turn binds lazily (what an on-demand turn does).
+    const homeTurn = () =>
+      wrapLazyTurnBoxWithRouting(services, routeIds, {
+        client: { backendId: "modal" },
+        backendId: "modal",
+        agentDefaultManifest: manifest,
+        provisioner: { get: async () => ({ established: home }) },
+      }).session as { exec: (args: unknown) => Promise<unknown> };
+    // A turn whose pointer names the machine is machine-primary: the worker
+    // establishes the machine session and pins it in the routing proxy.
+    const machineTurn = async () => {
+      const pointer = await readActiveSandbox(db, workspaceId, session.id);
+      const established = await establishSelfhostedTurnSession(services, {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        controlWorkspaceId: workspaceId,
+        agentId: enrollment.id,
+        connectionInstanceId,
+        workspaceRoot: "/home/user/project",
+        opStream: true,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+          updatedAt: null,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+        epoch: pointer!.activeEpoch,
+        environment,
+        workingDir: null,
+      });
+      return wrapTurnBoxWithRouting(
+        services,
+        {
+          ...routeIds,
+          pinnedSelfhosted: { sandboxId: machine.id, epoch: pointer!.activeEpoch },
+          defaultIsHome: false,
+        },
+        established,
+      ).session as { exec: (args: unknown) => Promise<unknown> };
+    };
+    // Each turn is checked both ways: bound before anything touches the box
+    // (a plain message) and resolved first (an attached file, a resumed box).
+    const turnTools = async (
+      open: () => Promise<{ exec: (args: unknown) => Promise<unknown> }>,
+    ) => {
+      const plain = await requestShellTools(await open());
+      const resolvedFirst = await open();
+      await resolvedFirst.exec({ cmd: "true" });
+      expect(await requestShellTools(resolvedFirst)).toBe(plain);
+      return plain;
+    };
+
+    const sequence: string[] = [];
+    sequence.push(await turnTools(async () => homeTurn()));
+    sequence.push(await turnTools(async () => homeTurn()));
+    const toMachine = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: 0,
+    });
+    expect(toMachine.swapped).toBe(true);
+    sequence.push(await turnTools(machineTurn));
+    sequence.push(await turnTools(machineTurn));
+    const toHome = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: toMachine.pointer!.activeEpoch,
+    });
+    expect(toHome.swapped).toBe(true);
+    sequence.push(await turnTools(async () => homeTurn()));
+
+    const [homeTools, , machineTools] = sequence;
+    expect(homeTools).toContain('"name":"write_stdin"');
+    expect(machineTools).not.toContain("write_stdin");
+    expect(sequence).toEqual([homeTools, homeTools, machineTools, machineTools, homeTools]);
+  }, 60_000);
 });
 
 describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", () => {

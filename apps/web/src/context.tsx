@@ -1,4 +1,5 @@
 import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
+import { SiteToolConsentProvider } from "@opengeni/react/app/lib/site-tool-consent";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -16,7 +17,7 @@ import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, LockIcon } from "lucide-react";
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -30,13 +31,18 @@ import {
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
+  signInPasskey,
   signOutManaged,
   signUpEmail,
+  signUpPasskey,
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
+import { useBrowserActorGeneration } from "@/components/browser-actor-generation";
+import { ConsoleMeetingRecorderProvider } from "@/components/meetings/recorder-provider";
 import { SecureContextWarning } from "@/components/secure-context-warning";
+import type { SignedOutPitch } from "@/components/signed-out-page";
 import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
@@ -147,6 +153,8 @@ const webAppStateHost: AppStateHost = {
   signUpEmail,
   signOutManaged,
   startManagedSocialSignIn,
+  signInPasskey,
+  signUpPasskey,
   configureManagedActorEpoch,
   getStoredAccessKey,
   setStoredAccessKey,
@@ -165,16 +173,27 @@ export function RootRouteComponent() {
     select: (state) => Object.keys(state.location.search).length > 0,
   });
   const analyticsSearch = useRouterState({ select: (state) => state.location.searchStr });
-  // Public surfaces render ahead of auth/config gates. `/reset-password` is
-  // always public; DEV visual harnesses are public and need no session.
+  // The Excel add-in opens sign-in in an Office dialog at
+  // /native-sign-in?platform=office; speak to Excel users there.
+  const signedOutPitch = useRouterState({
+    select: (state): SignedOutPitch =>
+      /^\/native-sign-in\/?$/.test(state.location.pathname) &&
+      new URLSearchParams(state.location.searchStr).get("platform") === "office"
+        ? "excel"
+        : "product",
+  });
+  // Public surfaces render ahead of auth/config gates. `/reset-password` and
+  // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
+      pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
+    pathname.startsWith("/share/") ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
     pathname === EXCEL_ADDIN_PATH ||
@@ -201,11 +220,14 @@ export function RootRouteComponent() {
     managedEmailVerificationRequired,
     managedNewSignupsEnabled,
     managedSocialProviders,
+    managedPasskeySignIn,
+    managedPasskeySignUp,
     browserAccountsConfigured,
     browserAccountsEnabled,
     handleManagedAuth,
     handleManagedSessionSetSignup,
     handleManagedSocialAuth,
+    handleManagedPasskeyAuth,
     handleManagedSignOut,
     handleBrowserActorTransition,
     completeOrganizationOnboarding,
@@ -217,6 +239,10 @@ export function RootRouteComponent() {
     setCreditRequired,
     mutationBusy,
   } = useAppState(webAppStateHost, { bootstrapSuspended: isPublicDevHarness });
+  // Keys the meeting recorder on the browser-accounts actor (see below).
+  const [browserActorGeneration, handleRecordedBrowserActorTransition] = useBrowserActorGeneration(
+    handleBrowserActorTransition,
+  );
   // "Add AI agents to my product" left its developer setup step unfinished
   // (reload, closed tab, another device): show it again until it is done.
   const [developerSetupRevision, setDeveloperSetupRevision] = useState(0);
@@ -268,7 +294,11 @@ export function RootRouteComponent() {
   ) : managedAuthRequired && !authSession ? (
     <DesktopSignedOutRecovery>
       <Suspense fallback={<LoadingPanel />}>
-        <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
+        <SignedOutPage
+          legalLinks={clientConfig?.legal}
+          pitch={signedOutPitch}
+          supportEmail={clientConfig?.supportEmail}
+        >
           {browserAccountsEnabled ? (
             <BrowserAccountsSignedOutPanel
               presentation="embedded"
@@ -309,6 +339,9 @@ export function RootRouteComponent() {
               }
               socialProviders={managedSocialProviders}
               onSocialSubmit={handleManagedSocialAuth}
+              passkeySignIn={managedPasskeySignIn}
+              passkeySignUp={managedPasskeySignUp}
+              onPasskeySubmit={handleManagedPasskeyAuth}
             />
           )}
         </SignedOutPage>
@@ -386,6 +419,7 @@ export function RootRouteComponent() {
         )}
         modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
+        activeName={authSession?.user.name ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={completeOrganizationOnboarding}
       />
@@ -400,6 +434,7 @@ export function RootRouteComponent() {
           )}
           modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
+          activeName={authSession?.user.name ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
@@ -442,7 +477,9 @@ export function RootRouteComponent() {
   ) : (
     <AppContext.Provider value={appContext}>
       <ArchiveConfirmationProvider>
-        <Outlet />
+        <SiteToolConsentProvider>
+          <Outlet />
+        </SiteToolConsentProvider>
         <CreditRequiredGate
           creditRequired={creditRequired}
           setCreditRequired={setCreditRequired}
@@ -455,6 +492,32 @@ export function RootRouteComponent() {
     </AppContext.Provider>
   );
 
+  // A meeting being recorded keeps going while the person moves between
+  // pages and workspaces, and while a dropped connection or an update shows
+  // the waiting panel: the recorder lives above all of them. It ends at once
+  // when they sign out or someone else signs in (the person below). With
+  // browser accounts it also stays above the accounts loading gate, so
+  // re-signing in or adding an account keeps it, and it is keyed on the
+  // accounts actor, so switching account or signing out remounts it at once.
+  const recorderPerson = managedAuthRequired
+    ? authSession === undefined
+      ? undefined
+      : (authSession?.user.id ?? null)
+    : keyAuthRequired && !hasAccessKey
+      ? null
+      : (accessContext?.subjectId ?? undefined);
+  const recordSurface = (surface: ReactNode, key?: number) => (
+    <ConsoleMeetingRecorderProvider
+      key={key}
+      workspaceId={routedWorkspace?.id ?? null}
+      person={recorderPerson}
+      fallbackWorkspaceId={defaultWorkspaceId}
+      client={client}
+    >
+      {surface}
+    </ConsoleMeetingRecorderProvider>
+  );
+
   const actorFencedSurface =
     browserAccountsEnabled && !isPublicAuthRoute ? (
       <Suspense fallback={<LoadingPanel />}>
@@ -463,20 +526,25 @@ export function RootRouteComponent() {
             clientConfig?.managedAuthSessionSetMode === "dual" && Boolean(authSession)
           }
           mutationBusy={mutationBusy}
-          onActorTransition={handleBrowserActorTransition}
+          onActorTransition={handleRecordedBrowserActorTransition}
         >
-          <BrowserAccountsLoadingGate>{applicationSurface}</BrowserAccountsLoadingGate>
+          {recordSurface(
+            <BrowserAccountsLoadingGate>{applicationSurface}</BrowserAccountsLoadingGate>,
+            browserActorGeneration,
+          )}
         </BrowserAccountsRuntime>
       </Suspense>
-    ) : (
+    ) : isPublicAuthRoute ? (
       applicationSurface
+    ) : (
+      recordSurface(applicationSurface)
     );
 
   return (
     // Fixed app canvas: never let the document scroll. Page surfaces own
     // overflow via ContentPage / session panes. `min-h-screen` used to let
     // main grow past the viewport when a child mis-owned scroll.
-    <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
+    <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice

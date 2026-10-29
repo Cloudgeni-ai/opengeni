@@ -16,8 +16,12 @@
 //! could order it below or above the notices before it. The host's
 //! `activity` question is answered with the count Opengeni's agent
 //! registers (see [`crate::agent`]), and its `sync` request with
-//! [`SYNCED`] once the guest's disks hold what it wrote; any other line is
-//! not answered.
+//! [`SYNCED`] once the guest's disks hold what it wrote and the root file
+//! system has given back the space its files freed. Its `shrink` request
+//! ([`Shrink`]), made when the host is short of memory and the sandbox
+//! holds more than it requested, is answered with [`shrunk_answer`] once
+//! the guest dropped its file cache and ended what it had to; any other
+//! line is not answered.
 
 use crate::cmdline::valid_sandbox;
 
@@ -106,8 +110,83 @@ pub fn answer(seeded: bool) -> &'static [u8] {
 pub const STALE: &[u8] = b"stale\n";
 
 /// The guest's answer to `sync`, which the host sends before it saves the
-/// guest's disks: everything written to them is on them.
+/// guest's disks: everything written to them is on them, and the free
+/// space the guest trimmed is no longer held for it.
 pub const SYNCED: &[u8] = b"synced\n";
+
+/// A parsed `shrink` request (ADR 24):
+///
+/// ```text
+/// shrink free=<bytes> keep=<bytes>
+/// ```
+///
+/// Free `free` bytes of memory for the host: drop the file cache, then end
+/// the processes the out-of-memory killer would end first, one at a time,
+/// but stop once no more than `keep` bytes are in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shrink {
+    pub free: u64,
+    pub keep: u64,
+}
+
+impl Shrink {
+    /// Parses one line, without its newline; `None` for any other line or
+    /// one missing either amount.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let mut words = line.split_whitespace();
+        if words.next()? != "shrink" {
+            return None;
+        }
+        let (mut free, mut keep) = (None, None);
+        for field in words {
+            let (key, value) = field.split_once('=').unwrap_or((field, ""));
+            match key {
+                "free" => free = value.parse().ok(),
+                "keep" => keep = value.parse().ok(),
+                _ => {}
+            }
+        }
+        Some(Self {
+            free: free?,
+            keep: keep?,
+        })
+    }
+}
+
+/// Most process names an answer to `shrink` lists.
+const MAX_NAMES: usize = 8;
+
+/// The guest's answer to `shrink`: `freed` bytes more are free than before,
+/// `spent` says nothing is left that it may end, and `ended` names what it
+/// ended (each name cut to the kernel's 15 characters, anything but
+/// letters, digits, `.`, `_` and `-` replaced, and at most [`MAX_NAMES`]
+/// listed; `ended=` counts them all).
+#[must_use]
+pub fn shrunk_answer(freed: u64, spent: bool, ended: &[String]) -> String {
+    let names: Vec<String> = ended
+        .iter()
+        .take(MAX_NAMES)
+        .map(|name| {
+            name.chars()
+                .take(15)
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    format!(
+        "shrunk freed={freed} spent={} ended={} names={}\n",
+        u8::from(spent),
+        ended.len(),
+        names.join(",")
+    )
+}
 
 /// The latest order applied; notices below it are stale.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -201,6 +280,47 @@ mod tests {
         assert_eq!(answer(true), b"ok seeded\n");
         assert_eq!(answer(false), b"ok\n");
         assert_eq!(STALE, b"stale\n");
+    }
+
+    #[test]
+    fn reads_a_shrink_and_answers_what_it_ended() {
+        assert_eq!(
+            Shrink::parse("shrink free=1048576 keep=4294967296 later=field"),
+            Some(Shrink {
+                free: 1 << 20,
+                keep: 4 << 30
+            })
+        );
+        for line in [
+            "shrink",
+            "shrink free=1",
+            "shrink keep=1",
+            "shrink free=x keep=1",
+            "shrunk free=1 keep=1",
+            "activity",
+        ] {
+            assert_eq!(Shrink::parse(line), None, "{line:?}");
+        }
+        assert_eq!(
+            shrunk_answer(
+                5 << 20,
+                false,
+                &[
+                    "cc1plus".into(),
+                    "node /x".into(),
+                    "a-very-long-process-name".into()
+                ]
+            ),
+            "shrunk freed=5242880 spent=0 ended=3 names=cc1plus,node__x,a-very-long-pro\n"
+        );
+        assert_eq!(
+            shrunk_answer(0, true, &[]),
+            "shrunk freed=0 spent=1 ended=0 names=\n"
+        );
+        let many: Vec<String> = (0..20).map(|n| format!("p{n}")).collect();
+        let line = shrunk_answer(1, false, &many);
+        assert!(line.contains(" ended=20 "), "{line}");
+        assert!(line.len() < MAX_LINE, "{line}");
     }
 
     #[test]

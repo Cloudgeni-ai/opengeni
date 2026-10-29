@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
@@ -52,9 +53,7 @@ export function assertToolGatewayCatalogSize(catalog: ToolGatewayCatalogValue): 
 }
 
 function assertCatalogSize(catalog: ToolGatewayCatalogValue): void {
-  if (
-    new TextEncoder().encode(JSON.stringify(catalog)).byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES
-  ) {
+  if (Buffer.byteLength(JSON.stringify(catalog), "utf8") > ATTEMPT_TOOL_CATALOG_MAX_BYTES) {
     throw new ToolGatewayCatalogTooLargeError();
   }
 }
@@ -62,11 +61,13 @@ function assertCatalogSize(catalog: ToolGatewayCatalogValue): void {
 function canonicalJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalJsonValue);
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => compareCanonicalStrings(left, right))
-        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+      compareCanonicalStrings(left, right),
     );
+    // These pairs are private copies. Reuse them rather than allocating a
+    // second pair array for every object in a potentially large tool schema.
+    for (const entry of entries) entry[1] = canonicalJsonValue(entry[1]);
+    return Object.fromEntries(entries);
   }
   return value;
 }

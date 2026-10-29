@@ -11,10 +11,6 @@ path uses a separate per-environment OAuth App, callback, encrypted Connection,
 and GitHub user identity. Neither credential may satisfy the other's authority
 checks.
 
-PR Review likewise uses a separately registered, workspace-owned
-provider app. It never inherits this platform App or a personal GitHub
-connection. See [`pr-review.md`](pr-review.md).
-
 ## Status contract
 
 `GET /v1/workspaces/:workspaceId/github/app` and the
@@ -280,6 +276,9 @@ OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 
 The generated App configures `<baseUrl>/v1/github/oauth/callback` and requests
 **Members: read** so GitHub can expose active organization-owner membership.
+Its webhook goes to `<OPENGENI_WEBHOOK_BASE_URL>/v1/webhooks/github` when that
+is set (a console reachable only on a private network), else to
+`<baseUrl>/v1/webhooks/github`.
 Existing organization installations must approve the added permission before
 organization-owner self-service can succeed; unavailable proof fails closed.
 

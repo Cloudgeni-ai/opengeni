@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import type { BrowserPasskeyCredential, BrowserPasskeySyncRequest } from "@opengeni/contracts";
-import { BrowserPasskeyManager, VIRTUAL_AUTHENTICATOR_OPTIONS } from "../src/passkeys";
+import {
+  BrowserPasskeyManager,
+  PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT,
+  VIRTUAL_AUTHENTICATOR_OPTIONS,
+} from "../src/passkeys";
 
 type Call = { method: string; params: Record<string, unknown>; sessionId: string | undefined };
 type StoredCredential = { credentialId: string; signCount: number; privateKey: string };
@@ -25,6 +29,11 @@ class FakeCdp {
     this.calls.push({ method, params: { ...params }, sessionId });
     const store = sessionId ? this.authenticators.get(sessionId) : undefined;
     switch (method) {
+      case "Page.enable":
+        return {} as T;
+      case "Page.addScriptToEvaluateOnNewDocument":
+        if (sessionId === "no-page") throw new Error("Page domain unavailable");
+        return { identifier: "1" } as T;
       case "WebAuthn.enable":
         return {} as T;
       case "WebAuthn.addVirtualAuthenticator":
@@ -144,6 +153,125 @@ test("installs one ctap2.1 internal authenticator per tab holding the desired se
   expect((await sync(null)).authenticators).toBe(1);
   manager.detachConnection(cdp);
   expect((await sync(null)).authenticators).toBe(0);
+});
+
+test.each([
+  { backupEligibility: false, backupState: false },
+  { backupEligibility: true, backupState: false },
+  { backupEligibility: true, backupState: true },
+])("preserves per-credential backup flags on import and counter propagation: %j", async (flags) => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential(flags);
+  await sync([credential]);
+  await manager.attachTarget(cdp, { targetId: "tab-b", sessionId: "b" });
+  cdp.emit("a", "WebAuthn.credentialAsserted", {
+    authenticatorId: "authenticator-a",
+    credential: { credentialId: STANDARD_ID, rpId: credential.rpId, signCount: 5 },
+  });
+  await sync(null);
+  const installs = cdp.calls.filter((call) => call.method === "WebAuthn.addCredential");
+  expect(installs).toHaveLength(3);
+  for (const install of installs) expect(install.params.credential).toMatchObject(flags);
+});
+
+test("refreshes backup state even when the signature counter has not changed", async () => {
+  const { cdp, manager, sync } = setup();
+  await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" });
+  const credential = vaultCredential({ backupEligibility: true, backupState: false });
+  await sync([credential]);
+  cdp.calls.length = 0;
+  await sync([{ ...credential, backupState: true }]);
+  expect(cdp.calls.map((call) => call.method)).toEqual([
+    "WebAuthn.removeCredential",
+    "WebAuthn.addCredential",
+  ]);
+  expect(cdp.calls[1]!.params.credential).toMatchObject({
+    backupEligibility: true,
+    backupState: true,
+    signCount: 4,
+  });
+});
+
+test("withdraws passkey autofill in a tab before its authenticator exists, or gives it none", async () => {
+  const { cdp, manager, sync } = setup();
+  expect(await manager.attachTarget(cdp, { targetId: "tab-a", sessionId: "a" })).toBe(true);
+  // Page script must never see autofill the authenticator would answer unasked,
+  // so the withdrawal is in place before the authenticator is added.
+  expect(cdp.calls.map((call) => call.method)).toEqual([
+    "Page.enable",
+    "Page.addScriptToEvaluateOnNewDocument",
+    "WebAuthn.enable",
+    "WebAuthn.addVirtualAuthenticator",
+  ]);
+  expect(cdp.calls[1]!.params).toEqual({
+    source: PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT,
+    runImmediately: true,
+  });
+  // A tab that cannot take the withdrawal gets no authenticator at all.
+  expect(await manager.attachTarget(cdp, { targetId: "tab-x", sessionId: "no-page" })).toBe(false);
+  expect(cdp.authenticators.has("no-page")).toBe(false);
+  expect((await sync([vaultCredential()])).authenticators).toBe(1);
+  // A cross-origin frame shares its tab's authenticator and gets the same
+  // withdrawal on its own session; one that closed meanwhile is no failure.
+  await manager.withdrawAutofill(cdp, "frame-1");
+  expect(
+    cdp.calls.filter((call) => call.sessionId === "frame-1").map((call) => call.method),
+  ).toEqual(["Page.enable", "Page.addScriptToEvaluateOnNewDocument"]);
+  await manager.withdrawAutofill(cdp, "no-page");
+});
+
+test("the withdrawal reports no passkey autofill and leaves conditional requests unanswered until aborted", async () => {
+  const answered: string[] = [];
+  class Container {
+    get(options: unknown) {
+      answered.push(`get:${(options as { mediation?: string }).mediation ?? "optional"}`);
+      return Promise.resolve("credential");
+    }
+    create(options: unknown) {
+      answered.push(`create:${(options as { mediation?: string }).mediation ?? "optional"}`);
+      return Promise.resolve("credential");
+    }
+  }
+  const Credential = {
+    isConditionalMediationAvailable: async () => true,
+    getClientCapabilities: async () => ({
+      conditionalGet: true,
+      conditionalCreate: true,
+      hybridTransport: true,
+    }),
+  };
+  const scope = { CredentialsContainer: Container, PublicKeyCredential: Credential };
+  new Function("globalThis", PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT)(scope);
+  const credentials = new Container();
+  expect(await Credential.isConditionalMediationAvailable()).toBe(false);
+  expect(await Credential.getClientCapabilities()).toEqual({
+    conditionalGet: false,
+    conditionalCreate: false,
+    hybridTransport: true,
+  });
+  // Requests made in the open still reach the authenticator.
+  expect(await credentials.get({ publicKey: {} })).toBe("credential");
+  expect(await credentials.create({ mediation: "required", publicKey: {} })).toBe("credential");
+  // Conditional ones never do; they settle only when the page aborts them.
+  const controller = new AbortController();
+  let settled = "pending";
+  const pending = credentials.get({
+    mediation: "conditional",
+    publicKey: {},
+    signal: controller.signal,
+  });
+  pending.then(
+    () => (settled = "resolved"),
+    (error: Error) => (settled = `rejected:${error.name}`),
+  );
+  void credentials.create({ mediation: "conditional", publicKey: {} });
+  await Bun.sleep(20);
+  expect(settled).toBe("pending");
+  controller.abort();
+  await Bun.sleep(0);
+  expect(settled).toBe("rejected:AbortError");
+  expect(answered).toEqual(["get:optional", "create:required"]);
 });
 
 test("reports a page registration, shares it with every tab and keeps it until acknowledged", async () => {

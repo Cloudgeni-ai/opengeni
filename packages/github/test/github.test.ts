@@ -19,9 +19,7 @@ import {
   normalizeGitHubAppPrivateKey,
   openPersonalGitHubGitBrokerClaims,
   personalGitHubGitBrokerRouteId,
-  prReviewGitHubAppMissingSettings,
   sealPersonalGitHubGitBrokerClaims,
-  settingsForPrReviewGitHubApp,
   verifyPublicGitHubRepositoryRef,
   verifySignedState,
 } from "../src";
@@ -84,6 +82,49 @@ describe("GitHub app manifest helpers", () => {
     });
     expect(setupCallback.request_oauth_on_install).toBe(false);
     expect(setupCallback.setup_on_update).toBe(true);
+  });
+
+  test("points the App's webhook at the webhook address when the console is not public", () => {
+    const split = buildGitHubAppManifest({
+      appName: "Private console",
+      baseUrl: "https://console.internal.example.com",
+      public: false,
+      includeCiPermissions: false,
+      setupUrl: "https://console.internal.example.com/v1/github/setup",
+      webhookBaseUrl: "https://hooks.example.com:8443/",
+    });
+    expect(split.hook_attributes).toEqual({
+      url: "https://hooks.example.com:8443/v1/webhooks/github",
+      active: true,
+    });
+    expect(split.callback_urls).toEqual([
+      "https://console.internal.example.com/v1/github/oauth/callback",
+    ]);
+    expect(split.setup_url).toBe("https://console.internal.example.com/v1/github/setup");
+
+    const localConsolePublicHooks = buildGitHubAppManifest({
+      appName: "Local console",
+      baseUrl: "http://127.0.0.1:8000",
+      public: false,
+      includeCiPermissions: false,
+      webhookBaseUrl: "https://hooks.example.com",
+    });
+    expect(localConsolePublicHooks.hook_attributes).toEqual({
+      url: "https://hooks.example.com/v1/webhooks/github",
+      active: true,
+    });
+
+    const blankWebhookBase = buildGitHubAppManifest({
+      appName: "Blank",
+      baseUrl: "https://agents.example.com",
+      public: false,
+      includeCiPermissions: false,
+      webhookBaseUrl: " ",
+    });
+    expect(blankWebhookBase.hook_attributes).toEqual({
+      url: "https://agents.example.com/v1/webhooks/github",
+      active: true,
+    });
   });
 
   test("renders env lines with escaped private key", () => {
@@ -458,7 +499,7 @@ describe("GitHub app manifest helpers", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       Response.json(
-        { token: "ghs_prReview", expires_at: "2026-07-14T11:00:00Z" },
+        { token: "ghs_scoped", expires_at: "2026-07-14T11:00:00Z" },
         { status: 201 },
       )) as typeof fetch;
     try {
@@ -467,46 +508,29 @@ describe("GitHub app manifest helpers", () => {
           installationId: 123,
           repositoryIds: [456],
         }),
-      ).resolves.toEqual({ token: "ghs_prReview", expiresAt: "2026-07-14T11:00:00Z" });
+      ).resolves.toEqual({ token: "ghs_scoped", expiresAt: "2026-07-14T11:00:00Z" });
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  test("keeps Opengeni Lens identity separate and narrows its installation token", async () => {
+  test("narrows an installation token to the requested permissions", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const settings = {
-      ...authoritySettings(),
-      githubAppManifestStateSecret: "durable-state-secret",
-      environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
-      prReviewGithubAppId: "98765",
-      prReviewGithubClientId: "lens-client",
-      prReviewGithubClientSecret: "lens-secret",
-      prReviewGithubAppSlug: "opengeni-lens",
-      prReviewGithubWebhookSecret: "lens-webhook-secret",
-      prReviewGithubAppPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-    } as any;
-    expect(prReviewGitHubAppMissingSettings(settings)).toEqual([]);
-    expect(settingsForPrReviewGitHubApp(settings)).toMatchObject({
-      githubAppId: "98765",
-      githubClientId: "lens-client",
-      githubAppSlug: "opengeni-lens",
-    });
 
     let tokenRequest: Record<string, unknown> | null = null;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
       tokenRequest = JSON.parse(String(init?.body));
       return Response.json(
-        { token: "ghs_lens", expires_at: "2026-08-26T12:00:00Z" },
+        { token: "ghs_narrow", expires_at: "2026-08-26T12:00:00Z" },
         { status: 201 },
       );
     }) as typeof fetch;
     try {
       await createGitHubAppInstallationTokenWithSigningSettings(
         {
-          githubAppId: settings.prReviewGithubAppId,
-          githubAppPrivateKey: settings.prReviewGithubAppPrivateKey,
+          githubAppId: "98765",
+          githubAppPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
         },
         {
           installationId: 123,

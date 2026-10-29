@@ -335,7 +335,6 @@ export function ScheduleFormPage({
 function scheduledLearningScope(
   form: ScheduleDraft,
   sessions: Session[],
-  personal: boolean,
 ): "personal" | "workspace" {
   if (
     form.agentLearningBaselineScope &&
@@ -347,7 +346,6 @@ function scheduledLearningScope(
       ? sessions.find((session) => session.id === form.targetSessionId)
       : null;
   return form.knowledgeSource?.destination.kind === "personal" ||
-    personal ||
     target?.tenancy?.visibility === "private" ||
     target?.memoryScope === "user"
     ? "personal"
@@ -371,11 +369,19 @@ function FieldSegmented<Value extends string>(
 
 type EachRun = "new_session_per_run" | "reusable_session" | "existing_session";
 
-type IfStillRunning = "queue" | "skip";
+type IfStillRunning = "steer" | "queue" | "skip";
 
 const IF_STILL_RUNNING_HINT: Record<IfStillRunning, string> = {
+  steer:
+    "The new run reaches the agent at its next step, so it handles both together. Anything else working in the chat, like your own message, still finishes first.",
   queue: "The new run waits, then starts when the previous one finishes.",
   skip: "The new run is skipped. The next one runs as normal.",
+};
+
+const IF_STILL_RUNNING_SUMMARY: Record<IfStillRunning, string> = {
+  steer: "Steer if still running",
+  queue: "Queue if still running",
+  skip: "Skip if still running",
 };
 
 interface FormErrors {
@@ -841,7 +847,7 @@ function AgentScheduleForm({
   };
 
   /* ----- agent learning (edit loads the stored overrides) */
-  const learningScope = scheduledLearningScope(draft, sessions, personal);
+  const learningScope = scheduledLearningScope(draft, sessions);
   const baselineDestinationKey = scheduledLearningDestinationKey(initial);
   const taskId = editing && task ? task.id : undefined;
   const [learningLoading, setLearningLoading] = useState(Boolean(taskId));
@@ -912,6 +918,9 @@ function AgentScheduleForm({
     workspaceTarget?.kind === "machine"
       ? scheduledMachines.find((item) => item.sandboxId === workspaceTarget.targetSandboxId)
       : null;
+  // A personal machine runs only the automations it is chosen on, so an
+  // automation can't follow a workspace default that is one.
+  const defaultIsPersonalMachine = workspaceMachine?.scope === "user";
   const defaultMachineLabel =
     workspaceTarget?.kind === "machine"
       ? (workspaceMachine?.name ?? "Machine unavailable")
@@ -925,7 +934,9 @@ function AgentScheduleForm({
     !fleet.loading &&
     (draft.executionTarget === "workspace_default"
       ? workspaceTarget?.kind === "machine"
-        ? !workspaceMachine || !isMachineComputeSelectable(workspaceMachine.state)
+        ? !workspaceMachine ||
+          defaultIsPersonalMachine ||
+          !isMachineComputeSelectable(workspaceMachine.state)
         : machineOnly
       : draft.executionTarget === "machine" &&
         !scheduledMachines.some(
@@ -943,6 +954,12 @@ function AgentScheduleForm({
       value: "workspace_default",
       label: "Workspace default",
       description: defaultMachineLabel,
+      ...(defaultIsPersonalMachine
+        ? {
+            disabled: true,
+            disabledReason: "It's your own machine, which runs only automations it's chosen on.",
+          }
+        : {}),
     },
     {
       value: "managed",
@@ -995,12 +1012,11 @@ function AgentScheduleForm({
 
   /* ----- summaries */
   const eachRun = draft.runMode as EachRun;
-  const ifStillRunning: IfStillRunning = draft.overlapPolicy === "skip" ? "skip" : "queue";
+  const ifStillRunning: IfStillRunning =
+    draft.overlapPolicy === "skip" ? "skip" : draft.overlapPolicy === "steer" ? "steer" : "queue";
   const learningCustom = Boolean(draft.agentLearning && Object.keys(draft.agentLearning).length);
   // Secrets: shown while this schedule's agent can use secrets.
-  const canListSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const canListSecrets = hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
   const scheduleSecretsOn =
     !inheritsChatSettings &&
     canListSecrets &&
@@ -1015,9 +1031,7 @@ function AgentScheduleForm({
   });
   const secretsSummary = scheduleSecretsOn ? scheduleSecretsSummary(draft.vaultPolicy) : null;
   const advancedSummary = [
-    ...(eachRun === "new_session_per_run"
-      ? []
-      : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
+    ...(eachRun === "new_session_per_run" ? [] : [IF_STILL_RUNNING_SUMMARY[ifStillRunning]]),
     ...(inheritsChatSettings ? [] : [whereLabel]),
     ...(secretsSummary ? [`Secrets: ${secretsSummary}`] : []),
     ...(draft.events.triggers.length > 0 && Number.isFinite(draft.events.maxRunsPerHour)
@@ -1111,7 +1125,7 @@ function AgentScheduleForm({
               now: submitNow,
               agentLearning: learningChanged
                 ? {
-                    scope: scheduledLearningScope(submitted, sessions, personal),
+                    scope: scheduledLearningScope(submitted, sessions),
                     baselineScope: submitted.agentLearningBaselineScope,
                     operationId: crypto.randomUUID(),
                     expectedVersion: submitted.agentLearningVersion!,
@@ -1141,7 +1155,7 @@ function AgentScheduleForm({
         workspaceId,
         createRequestFromDraft(submitted, {
           now: submitNow,
-          learningScope: scheduledLearningScope(submitted, sessions, personal),
+          learningScope: scheduledLearningScope(submitted, sessions),
         }),
       ),
     );
@@ -1194,7 +1208,9 @@ function AgentScheduleForm({
       ? "Only the automation's owner can change it. Duplicate it to make your own."
       : "You need permission to manage automations in this workspace."
     : selectedComputeUnavailable && computeChanged
-      ? "Machine unavailable. Choose another machine or update the workspace default."
+      ? draft.executionTarget === "workspace_default" && defaultIsPersonalMachine
+        ? "The workspace default is your own machine. Choose it under Where it runs to run this automation on it."
+        : "Machine unavailable. Choose another machine or update the workspace default."
       : cantRunHere && computeChanged
         ? "Connect a machine first. This Opengeni server can't run automations without one."
         : pinningAccounts && requiresAccountChoice
@@ -1588,12 +1604,13 @@ function AgentScheduleForm({
                     value={ifStillRunning}
                     onValueChange={(value) =>
                       update({
-                        overlapPolicy: value === "skip" ? "skip" : "allow_concurrent",
+                        overlapPolicy: value === "queue" ? "allow_concurrent" : value,
                       })
                     }
                     options={[
-                      { value: "queue", label: "Queue this run" },
-                      { value: "skip", label: "Skip this run" },
+                      { value: "steer", label: "Steer" },
+                      { value: "queue", label: "Queue" },
+                      { value: "skip", label: "Skip" },
                     ]}
                   />
                 </Field>
@@ -1631,7 +1648,9 @@ function AgentScheduleForm({
                   error={errors.machine}
                   hint={
                     selectedComputeUnavailable
-                      ? "Machine unavailable. Choose a replacement or reconnect it."
+                      ? draft.executionTarget === "workspace_default" && defaultIsPersonalMachine
+                        ? "The workspace default is your own machine. Choose it here to run this automation on it."
+                        : "Machine unavailable. Choose a replacement or reconnect it."
                       : draft.executionTarget === "workspace_default"
                         ? `Currently: ${defaultMachineLabel}. Follows changes to the workspace default.`
                         : undefined

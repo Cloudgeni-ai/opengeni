@@ -9,7 +9,7 @@ export const NATIVE_PUSH_RULES = [
   "reply_ready",
   "failed",
   "agent",
-  // Agent calls (0988): agents working for this person may ring this phone,
+  // Agent calls (1107): agents working for this person may ring this phone,
   // and, with `call_members`, agents of other members of a shared workspace.
   "call",
   "call_members",
@@ -22,7 +22,7 @@ export type NativePushDeviceRow = {
   environment: "development" | "production";
   token: string;
   rules: NativePushRule[];
-  /** iOS PushKit token that agent calls ring (0988). */
+  /** iOS PushKit token that agent calls ring (1107). */
   voipToken: string | null;
   updatedAt: string;
 };
@@ -161,7 +161,7 @@ export type ClaimedNativePushDelivery = {
     urgency?: "normal" | "time_sensitive";
     /** The session event the push is about, so a tap lands on it (0664). */
     sequence?: number;
-    /** A call ring (rule `call`, 0988): the call and when it stops ringing. */
+    /** A call ring (rule `call`, 1107): the call and when it stops ringing. */
     callId?: string;
     ringUntil?: string;
   };

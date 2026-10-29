@@ -41,6 +41,10 @@ process.env.PATH = bin + ":" + process.env.PATH;
 mock.module("node:fs/promises", () => ({
   ...original,
   access: async (path, ...args) => {
+    // Exercise generic-tail fallback even on hosts with separately named GNU tail.
+    if (String(path).endsWith("/gnutail")) {
+      throw Object.assign(new Error("GNU tail absent"), { code: "ENOENT" });
+    }
     if (/^\\/(usr\\/)?bin\\/(mkfifo|tail)$/.test(String(path))) {
       throw Object.assign(new Error("FHS utility absent"), { code: "ENOENT" });
     }

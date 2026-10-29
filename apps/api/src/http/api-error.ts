@@ -10,12 +10,15 @@ import {
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
   WorkspaceControlBusyError,
+  WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
 import {
   ConnectionAccountSelectionError,
+  MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
 } from "@opengeni/core";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
@@ -42,6 +45,18 @@ export class ApiHttpError extends HTTPException {
     this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
   }
+}
+
+/** A missing permission keeps its plain sentence and names the permission in `details`. */
+export function missingPermissionHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof MissingPermissionRefusal)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: error.details,
+  });
 }
 
 export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError | null {
@@ -74,6 +89,26 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
     retryable: false,
     outcomeUnknown: false,
     details,
+  });
+}
+
+/**
+ * Core's "no credits for this model" refusal (a 402 whose cause is the
+ * `insufficient_credits` limit decision) keeps its public `payment_required`
+ * code and gains the stable `details.code: "insufficient_credits"`, so
+ * callers can tell it from other 402s without matching message text.
+ */
+export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof HTTPException) || error.status !== 402) return null;
+  const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
+  if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;
+  if (cause.code !== "insufficient_credits") return null;
+  return new ApiHttpError(402, {
+    code: "payment_required",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "insufficient_credits" },
   });
 }
 
@@ -238,6 +273,38 @@ export function agentConfigHttpError(error: unknown): ApiHttpError | null {
       code: cause.code,
       ...(cause.capability ? { capability: cause.capability } : {}),
     },
+  });
+}
+
+/**
+ * EU-only refusals, rendered as 422 `region_restricted`; retrying can't
+ * change them. Content from an EU-only workspace would reach a workspace that
+ * isn't EU-only, or EU-only inference refused a model-backed feature with no
+ * EU route. The inference refusal also carries `details.code:
+ * "region_restricted"`, the code every availability field reports for it.
+ */
+export function regionRestrictedHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof InferenceRegionRestrictedError) {
+    return new ApiHttpError(422, {
+      code: "region_restricted",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  const cause =
+    error instanceof WorkspaceContentFlowRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof WorkspaceContentFlowRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "region_restricted",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
   });
 }
 

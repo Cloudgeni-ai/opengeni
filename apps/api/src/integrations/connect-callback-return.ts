@@ -16,9 +16,6 @@ const callbacks = new Set([
   "/v1/github/oauth/callback",
   "/v1/github/setup",
   "/v1/github/install/callback",
-  "/v1/pr-review/github/oauth/callback",
-  "/v1/pr-review/github/setup",
-  "/v1/pr-review/github/install/callback",
 ]);
 const locator = z.object({
   accountId: z.string().uuid(),
@@ -44,10 +41,9 @@ export function registerConnectCallbackReturns(app: Hono, deps: ApiRouteDeps) {
     } catch {
       return next();
     }
-    const secret =
-      c.req.path.startsWith("/v1/github/") || c.req.path.startsWith("/v1/pr-review/github/")
-        ? deps.githubStateSecret
-        : deps.settings.integrationsStateSecret?.trim();
+    const secret = c.req.path.startsWith("/v1/github/")
+      ? deps.githubStateSecret
+      : deps.settings.integrationsStateSecret?.trim();
     // Verify at the signed timestamp ONLY for a read of the immutable return
     // destination. Never pass this timestamp to the actual provider callback.
     // Keep recovery useful after a normal provider timeout, without making a

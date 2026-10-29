@@ -35,7 +35,11 @@ export type RuntimePublisherApi = {
   assetBytes(id: number): Promise<Buffer>;
 };
 
-/** Provider-owned event fields are only selectors; re-read the canonical run before any mutation. */
+/**
+ * Provider-owned event fields are only selectors; re-read the canonical run before any mutation.
+ * The workflow is identified by its path: CI sets a run-name, so the run's `name` is its
+ * display title (the landed commit's subject), not "CI".
+ */
 export function validateRuntimeProducer(
   run: any,
   expected: { sourceSha: string; runId: number; runAttempt: number },
@@ -49,7 +53,6 @@ export function validateRuntimeProducer(
     run.head_sha !== expected.sourceSha ||
     run.head_branch !== "main" ||
     run.path !== ".github/workflows/ci.yml" ||
-    run.name !== "CI" ||
     run.event !== "push" ||
     run.status !== "completed" ||
     run.conclusion !== "success" ||
@@ -79,7 +82,7 @@ export async function publishArtifactRuntime(options: {
   const firstRun = await api.get(runPath);
   validateRuntimeProducer(firstRun, options);
   const verifySource = async () => {
-    const comparison = await api.get(`compare/${sourceSha}...main`);
+    const comparison = await api.get(runtimeSourceComparePath(sourceSha));
     if (
       comparison.base_commit?.sha !== sourceSha ||
       comparison.merge_base_commit?.sha !== sourceSha ||
@@ -221,6 +224,18 @@ export async function publishArtifactRuntime(options: {
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Ancestry check against canonical main. Only `status`, `base_commit` and
+ * `merge_base_commit` are read, but GitHub returns the complete changed-file
+ * list (with patches, up to 300 files) on the first page of a comparison, so a
+ * large commit landing on main pushed the plain response past the 1 MiB JSON
+ * bound. Any paginated page after the first omits `files`, and one commit per
+ * page bounds the commit list, while the comparison fields stay identical.
+ */
+export function runtimeSourceComparePath(sourceSha: string): string {
+  return `compare/${sourceSha}...main?per_page=1&page=2`;
 }
 
 export function runtimeDownloadAccept(path: string): string {

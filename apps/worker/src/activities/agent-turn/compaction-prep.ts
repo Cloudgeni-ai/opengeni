@@ -65,6 +65,7 @@ import {
 import {
   createCompactionModelUsageEventState,
   processCompactionModelUsageEvent,
+  servedRouteProcessingResidency,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
@@ -143,6 +144,7 @@ export type CompactionPrepDeps = {
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  portableModelSwitchPending?: ClaimTurnOk["portableModelSwitchPending"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
@@ -287,6 +289,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
+  // The summarizer runs on the turn's route (or the built-in fallback for it).
+  const compactionProcessingResidency = servedRouteProcessingResidency(
+    settings,
+    resolvedModel,
+    turnExecutionPolicy.productModelId,
+  );
   let compactionCreditPolicyRevision: number | undefined;
   // Wire fingerprint of the latest compaction request; its usage callback runs
   // after that request's response, before the next compaction request.
@@ -330,6 +338,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         latestCompactionPromptCacheRequest = null;
         return request;
       },
+      processingResidency: compactionProcessingResidency,
     });
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
@@ -690,6 +699,7 @@ export async function runPostAgentCompaction(
     claimedResult,
     turn,
     session,
+    portableModelSwitchPending = false,
     resolvedModel,
     remotePrefix,
     remoteCompactionRequester,
@@ -892,8 +902,14 @@ export async function runPostAgentCompaction(
   // retry, exactly like Codex. Other failures end this turn honestly.
   // Run before every fresh inference. Approval resumes replay their frozen
   // RunState verbatim and recovering attempts already compacted, if needed,
-  // before the first attempt's model boundary.
-  if (attempt.triggerType === "user.message" || attempt.triggerType === "system.update.delivered") {
+  // before the first attempt's model boundary. A chat moving off Codex remote
+  // compaction rebuilds Codex's checkpoint here whatever triggered the turn,
+  // since no other model can read it.
+  if (
+    attempt.triggerType === "user.message" ||
+    attempt.triggerType === "system.update.delivered" ||
+    portableModelSwitchPending
+  ) {
     let forced = false;
     try {
       // Operator /compact (the slash command) sets a durable request flag;

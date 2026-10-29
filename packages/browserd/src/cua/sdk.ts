@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { InteractionControllerError } from "@opengeni/interaction";
 import { UnsettledCleanupError } from "../cleanup-error";
 import { linuxWorkerLauncher, ownLinuxWorkerGroup } from "./linux-worker";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const compiled = /^(?:\/\$bunfs\/|B:[\\/]~BUN[\\/])/i.test(import.meta.path);
 
@@ -22,7 +23,7 @@ const LINUX_CUA_LIBRARIES: Readonly<Record<string, string>> = {
 export function missingLinuxLibraryError(error: unknown): InteractionControllerError | null {
   const texts: string[] = [];
   for (let current: unknown = error, depth = 0; current && depth < 5; depth += 1) {
-    texts.push(current instanceof Error ? current.message : String(current));
+    texts.push(errorMessage(current));
     current = current instanceof Error ? current.cause : undefined;
   }
   const missing = [

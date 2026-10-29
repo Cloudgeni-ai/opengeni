@@ -1,7 +1,11 @@
 # 14. Requests, limits and admission
 
 Status: Accepted, 2026-10-16. Built. Amended 2026-10-20: processor time is
-booked and guaranteed like memory.
+booked and guaranteed like memory. Amended 2026-10-29 by
+[24](0024-busy-sandboxes-are-slowed-never-frozen.md): a sandbox in use is
+never paused for memory (step 3 of the relief is gone), running VMs are
+compressed where the host allows it, and the VMMs' out-of-memory score
+follows their request.
 
 ## Context
 
@@ -145,14 +149,73 @@ pick a VM.
   ceiling would waste idle processors and slow a
   burst that harms nobody, and the request is a floor, as in Kubernetes
   and Modal.
-- A running VM is never compressed or swapped: `memory.swap.max` and
-  `memory.zswap.max` are 0 from launch, after adoption and before every
-  resume, and open only while the agent compresses a paused VM, with
-  `memory.zswap.writeback` at 0 so nothing reaches the swap device. A host
-  that compresses must have zswap on, or the agent refuses to start.
-  Status shows each VM's zswap traffic and memory pressure; a running VM
-  with zswap stores is a bug.
-- VMMs and pagers run with `oom_score_adj` -900, so the host's
+- On a host without the memory rule of 24 (huge pages, compression off or
+  no swap device), a running VM is never compressed or swapped:
+  `memory.swap.max` and `memory.zswap.max` are 0 from launch, after
+  adoption and before every resume, and open only while the agent
+  compresses a paused VM. `memory.zswap.writeback` is always 0, so nothing
+  reaches the swap device. A host that compresses must have zswap on, or
+  the agent refuses to start. Status shows each VM's zswap traffic and
+  memory pressure; there, a running VM with zswap stores is a bug. With
+  the rule, running VMs are compressed as 24 describes.
+- On 4 KiB pages with relief, the VMs together may hold the host's memory
+  less the high watermark before the kernel slows them down: their parent
+  group's `memory.high`, set as the agent starts (and lifted where it
+  does not apply, so no earlier setting lingers). By default that is the
+  memory capacity, so the host keeps the headroom it was promised. The
+  agent does not wait for the kernel to reclaim down to it: kernels
+  without `O_NONBLOCK` for the file reclaim in the write itself, dirty
+  disk pages included, for as long as that makes progress, and a
+  starting agent waiting on that could run out its lease before renewing
+  it. The write runs on a thread of its own, and the agent waits only
+  until the group shows the new limit (or the write fails), which the
+  kernel records before it starts reclaiming. The agent reads the limit back each time it
+  samples, so `max` written by hand lifts its accounting along with the
+  kernel's slowing. Their
+  VMMs, pagers and the page cache of their disks and images count, as in
+  each VM's own group; the kernel drops that page cache first. Running
+  guests are never swapped, so when sandboxes in use go
+  above their request together faster than relief can save them, the
+  kernel otherwise takes what they reach for from everything else: the
+  agent's memory and code, its guard's, the rest of the host's. The agent
+  then grows too slow to renew its lease or to pause anyone. Measured on a
+  32 GiB host: eight guests growing together took it from 12 GiB
+  available to none in 17 s; balloons had nothing to give, two sandboxes
+  were paused, the lease ran out and the guard ended every VM, and in
+  another run the machine reset. A limit a low watermark short of the
+  host's memory was not enough: beside the VMs the kernel's own memory,
+  page tables and compressed pages took most of a gigabyte, so under
+  350 MiB stayed available, the agent reclaimed its own pages and the
+  lease ran out again. Past the limit a guest waits on its own
+  allocations while the kernel reclaims from the VMs' groups first, and
+  nothing ends. Available memory is never more than the limit leaves (the
+  limit less what the VMs' group holds, droppable page cache left out, as
+  for each VM), so at the limit available memory is below the low
+  watermark and relief is already pausing and saving the sandboxes above
+  their request, until it is back at the high watermark. Not
+  `memory.max`: at it the kernel ends a VM, and slowing VMs down is the
+  better failure, as for `memory.low`. The kernel slows every thread of
+  the VMs that takes more memory at the limit, not only guests: the VMM
+  threads that answer the agent and write snapshots too, and their
+  answers come late. So time a VMM's group waits for memory does not
+  count toward a request's deadline, up to two minutes of it a request,
+  as time it spends frozen does not: counted, a pause past the 10 s a
+  control request may take failed as if the VMM were stuck, and the
+  sandboxes relief was saving lost their running programs instead (three
+  in a run on a 32 GiB host). A VMM stuck while its group waits for good,
+  under a limit of its own its guest keeps pushing against, still fails
+  once those two minutes are spent. A capacity given above the limit
+  is kept but warned about: requests within it could then be slowed at
+  the limit. The VMMs' and pagers' own memory is not booked, so a host
+  booked to its last byte with every guest at its request can reach the
+  limit too, and its guests are then slowed slightly; nothing above
+  request is left for relief to save. On huge pages nothing limits them
+  together: guests take their memory from the pool, which their groups do
+  not count, and every awake sandbox is booked whole. An agent of a
+  release before this leaves a limit an earlier one set in place without
+  counting it; `max` in the group's `memory.high` lifts it.
+- VMMs and pagers run with an `oom_score_adj` that follows their request
+  (24; -900 where nothing limits the VMs together), so the host's
   out-of-memory killer ends nearly anything else first, and the agent with
   -999, so it outlasts the VMs it can bring back. It runs in a service unit
   of its own with a `MemoryMax`; VM cgroups lie outside it. Not -1000:
@@ -188,17 +251,19 @@ pick a VM.
      no confirmation limits or foresees and readings count either way.
      The claim covers the moments in which the guest is expected to
      refill; a guest with statistics just ends it sooner. A sandbox whose let-go is
-     unconfirmed is not ballooned again, but step 3 may still pause and
-     save it, keeping its claim, or give it back its claim if it turns
-     out unsavable and stays awake. Pausing frees nothing, so a claim
+     unconfirmed is not ballooned again, but once idle it may still be
+     paused and saved, keeping its claim, or given back its claim if it
+     turns out unsavable and stays awake. Pausing frees nothing, so a claim
      that ends, for whatever reason, still counts until a reading taken
      after that shows what the guest took; a removed sandbox's claim
      lasts until its VM is ended;
-  3. if that is still not enough, the sandbox furthest above its request
-     is paused and saved, held or not. It loses nothing: once its recorded
-     footprint fits above the high watermark, next to the footprints of
-     those let through before it until a reading shows them, it wakes by
-     itself with its programs. Asking for it meanwhile gets `host_full`.
+  3. (Removed by 24: a sandbox in use above its request was paused and
+     saved here, held or not, which lost CI jobs and connections. Busy
+     sandboxes are now bounded, compressed and shrunk from inside
+     instead.) One an earlier agent paused this way still wakes by itself
+     once its recorded footprint fits above the high watermark, next to
+     the footprints of those let through before it until a reading shows
+     them; asking for it meanwhile gets `host_full`.
   Sandboxes within their request are never touched by any of these.
   A VM's balloon is let go again once it runs after any step and after
   adoption, since a restored image or an earlier agent may have left it
@@ -338,7 +403,10 @@ pick a VM.
   A sandbox's bound comes from its own disk's length, recorded when its
   disk is made, so a base image that changes later does not change what
   older sandboxes book; a new one before its disk exists uses today's
-  base image. A sandbox adopted from the store keeps the length of the
+  base image, grown to the disk length its create asks for (`disk_mib`)
+  where that is longer, and placement books the same length. A claim of a
+  ready clone records the length it lengthened the clone's disk to. A
+  sandbox adopted from the store keeps the length of the
   disk in the copy it claims. An awake VM's
   measurement uses its own disk's length too. A boot also relinks the
   kernel (tens of MiB, replacing the previous copy), which the reserve

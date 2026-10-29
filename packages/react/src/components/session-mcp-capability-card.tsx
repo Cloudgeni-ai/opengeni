@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { browserConnectWindowHost } from "../connect-window-host";
 import { useOpenGeniText } from "../messages/runtime";
 import { useMcpCapabilityConnect } from "./mcp-capability-connect-flow";
+import { showsMcpServerLabel } from "./mcp-server-label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 
 export type SessionMcpCapabilityCardProps = {
@@ -126,8 +127,12 @@ function ScopedCard({
       name={item?.name ?? name}
       subtitle={dialogSubtitle !== undefined ? "" : (item?.providerDomain ?? "")}
       logo={logo ?? logoSrc ?? null}
-      typeLabel={dialogSubtitle ?? t("sessionMcpCapabilityCard.mcpServer")}
-      description={hostDescription || item?.description || rationale}
+      typeLabel={
+        dialogSubtitle ?? (showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : "")
+      }
+      badge={showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : undefined}
+      description={hostDescription || rationale || item?.description || ""}
+      clampDescription={!hostDescription && Boolean(rationale)}
       skill={false}
       expanded={flow.expanded}
       complete={flow.complete}
@@ -169,8 +174,9 @@ function ScopedCard({
           <>
             <p>{hostDescription || item.description || rationale}</p>
             {busy ? (
-              <>
-                <p role="status" className="og-session-capability-progress">
+              <div className="og-session-capability-waiting">
+                <span aria-hidden className="og-session-capability-spinner" />
+                <p role="status">
                   {waiting
                     ? t("sessionMcpCapabilityCard.finishSigningInWithName", { name: item.name })
                     : reconciling
@@ -186,7 +192,7 @@ function ScopedCard({
                     {t("sessionMcpCapabilityCard.stopWaiting")}
                   </button>
                 ) : null}
-              </>
+              </div>
             ) : !connected ? (
               <>
                 {!item.connectionRef && !personalOnly ? (

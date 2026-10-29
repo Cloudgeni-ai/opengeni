@@ -64,6 +64,9 @@ pub(crate) struct Fake {
     /// Corrupts this many of the next uploads in transit.
     pub(crate) corrupt: Mutex<u32>,
     pub(crate) puts: Mutex<u32>,
+    /// Answers this many of the next requests through the XML API with
+    /// 503, as Cloud Storage does while it scales up to a client's rate.
+    pub(crate) unavailable: Mutex<u32>,
     /// When set, every request first waits up to this long, as the seeded
     /// sequence picks, so concurrent callers interleave differently.
     latency: Mutex<Option<(Rng, Duration)>>,
@@ -259,6 +262,13 @@ impl HttpService for Service {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
         let fake = &self.0;
         fake.wait().await;
+        {
+            let mut unavailable = fake.unavailable.lock().unwrap();
+            if *unavailable > 0 {
+                *unavailable -= 1;
+                return Ok(reply(503, "<Code>ServiceUnavailable</Code>"));
+            }
+        }
         let (parts, body) = request.into_parts();
         let name = parts
             .uri

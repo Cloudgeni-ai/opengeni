@@ -322,36 +322,6 @@ export function githubAppMissingSettings(settings: Settings): string[] {
   return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
 }
 
-export function prReviewGitHubAppMissingSettings(settings: Settings): string[] {
-  const required: Record<string, string | undefined> = {
-    OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: settings.githubAppManifestStateSecret,
-    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: settings.environmentsEncryptionKey,
-    OPENGENI_PR_REVIEW_GITHUB_APP_ID: settings.prReviewGithubAppId,
-    OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID: settings.prReviewGithubClientId,
-    OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET: settings.prReviewGithubClientSecret,
-    OPENGENI_PR_REVIEW_GITHUB_APP_SLUG: settings.prReviewGithubAppSlug,
-    OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET: settings.prReviewGithubWebhookSecret,
-    OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY: settings.prReviewGithubAppPrivateKey,
-  };
-  return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
-}
-
-/** Project the separately configured review App onto the ordinary GitHub App
- * authority client. This keeps its OAuth, signing, webhook, and installation
- * identity disjoint from the platform GitHub App while reusing the same
- * personal-owner / organization-owner proof implementation. */
-export function settingsForPrReviewGitHubApp(settings: Settings): Settings {
-  return {
-    ...settings,
-    githubAppId: settings.prReviewGithubAppId,
-    githubClientId: settings.prReviewGithubClientId,
-    githubClientSecret: settings.prReviewGithubClientSecret,
-    githubAppSlug: settings.prReviewGithubAppSlug,
-    githubWebhookSecret: settings.prReviewGithubWebhookSecret,
-    githubAppPrivateKey: settings.prReviewGithubAppPrivateKey,
-  };
-}
-
 export type GitHubAppSigningSettings = Pick<Settings, "githubAppId" | "githubAppPrivateKey">;
 
 function githubAppTokenMissingSettings(settings: GitHubAppSigningSettings): string[] {
@@ -368,8 +338,12 @@ export function buildGitHubAppManifest(input: {
   public: boolean;
   includeCiPermissions: boolean;
   setupUrl?: string;
+  /** Public address GitHub sends webhooks to when it differs from baseUrl
+   * (OPENGENI_WEBHOOK_BASE_URL, for a console that isn't public). */
+  webhookBaseUrl?: string | undefined;
 }): Record<string, unknown> {
   const base = input.baseUrl.replace(/\/+$/, "");
+  const webhookBase = (input.webhookBaseUrl?.trim() || base).replace(/\/+$/, "");
   const permissions: Record<string, string> = {
     metadata: "read",
     contents: "write",
@@ -409,8 +383,8 @@ export function buildGitHubAppManifest(input: {
   };
   // GitHub must be able to reach the receiver, so only a public https
   // deployment gets a webhook; others can add one later in the App settings.
-  if (githubCanDeliverTo(base)) {
-    manifest.hook_attributes = { url: `${base}/v1/webhooks/github`, active: true };
+  if (githubCanDeliverTo(webhookBase)) {
+    manifest.hook_attributes = { url: `${webhookBase}/v1/webhooks/github`, active: true };
     manifest.default_events = events;
   }
   if (input.setupUrl) {

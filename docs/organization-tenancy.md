@@ -470,13 +470,6 @@ else, so each is a broken feature, not an authority hole:
   `resolveCodexAppsCredentialIdForRun`
   (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
   execution.
-- The OAuth-callback grant rechecks over the signed `state.subjectId` in
-  `apps/api/src/integrations/{google-drive,atlassian,fiken,social-oauth}.ts`
-  and `apps/api/src/routes/connections.ts`. The generic MCP and curated API
-  Integration callbacks (`oauth-client` and `provider-oauth`) now resolve the
-  exact signed human's live personal-workspace pointer through the narrow
-  `resolveNamedManagedPersonalWorkspaceGrant` seam; the remaining provider
-  callbacks still deny personal-workspace setup rather than leaking authority.
 - SQL seams without the personal-workspace disjunct: the xAI subscription
   authority views/functions in 0234. Migration 0303 repairs
   `transition_session_visibility` and `fork_session_content` with the exact
@@ -490,6 +483,20 @@ else, so each is a broken feature, not an authority hole:
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
   disjunct.)
+
+The OAuth/install callback re-checks over the signed `state.subjectId` are
+repaired; do not add them back to this list. Every callback (MCP OAuth,
+Integration Definition OAuth, Google Drive, Atlassian, personal GitHub, GitHub
+App Connect, social OAuth, Fiken, and the Slack bot) re-checks its owner
+through `requireConnectOwnerAuthority`, which resolves the exact signed human's
+live personal-workspace pointer through the narrow
+`resolveNamedManagedPersonalWorkspaceGrant` seam. That works only because every
+owner-bound state signs the `personalOwnerVerified` claim through
+`connectOwnerStateFields`, and `ConnectOwner` makes the claim required on every
+re-check. Fiken and the Slack bot once omitted the claim and the legacy social
+callback used a bare `getWorkspaceGrant`; each failed only in Personal
+workspaces. `apps/api/test/connect-owner-state-surface.test.ts` keeps new
+connectors on both paths.
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
@@ -805,6 +812,104 @@ The workspace itself stays: it still anchors the person's own machines,
 browsers and vaults, which keep working from shared workspaces, and existing
 chats, their workers and existing schedules there keep working and stay
 reachable by link.
+
+EU-only inference is an organization setting too
+(`organization_inference_residency` and its append-only
+`organization_inference_residency_events`, migration 1060,
+`/v1/organizations/:organizationId/inference-residency`). Any member can read
+it. Owners and admins, an organization key with administration rights, or an
+agent with the person's `account:admin` can turn it on; only an owner or admin
+signed in to the app in a browser can turn it off, never an agent or API key.
+A request with an `Authorization` header counts as an API key. The runtime
+can only read the setting: every change goes through
+`opengeni_private.update_organization_inference_residency_v1`, which checks
+the actor's live owner/admin membership (or administering key), refuses off
+for anyone but a `user:` person in a browser, and writes the setting and its
+event together; the events table also rejects an off change recorded for any
+other actor. Changes carry the current `version` (stale: `409`) and an
+`operationId`: an exact replay returns the stored result, and the same id with
+a different request is `409`. A request that changes nothing keeps the
+version, so repeating "on" never makes someone else's change stale. 1060
+withholds the runtime's EXECUTE on that
+function for one release (see
+[migrations-expand-contract.md](migrations-expand-contract.md)); until a later
+migration grants it, changes answer `503` and the setting stays off.
+
+Only Opengeni sign-in (managed access) has people in browsers who could turn
+it off, so in local and configured access modes it can't be changed at all
+(`409`); turning it on there could never be undone. Turning it off also needs
+a sign-in from the last five minutes, the same re-authentication changing
+sign-in methods requires (`403` with
+`SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED`). An agent driving the person's
+own signed-in browser then has to sign in again; it still could if the
+browser signs in without the person, for example with a saved password.
+
+Enforcement asks `isWorkspaceEuOnly(db, {accountId, workspaceId})`, which
+today returns the organization's setting for every workspace, Personal ones
+included, so a per-workspace switch can be added there later. It reads the
+workspace's own account in the same scope and throws when the workspace is
+missing, in another account or hidden, so an unreadable setting never reads as
+off.
+
+EU-only content stays in EU-only workspaces. Content from an EU-only workspace
+may reach another workspace only when that workspace is EU-only too; other
+content may go anywhere. `assertWorkspaceContentFlowAllowed` and, for a step
+that carries content both ways, `assertWorkspaceContentExchangeAllowed`
+(`packages/db/src/workspace-content-flow.ts`) check each exact workspace pair
+with `isWorkspaceEuOnly`, read each workspace's organization from the workspace
+itself, and throw when the setting can't be read, so nothing moves. A refusal
+is `WorkspaceContentFlowRefusedError`: HTTP `422 region_restricted`, and a
+plain refusal from MCP tools. A session reaching another workspace of its
+organization is checked before anything runs there and again when the answer
+returns (`apps/api/src/mcp/workspace-content-flow.ts`): session tools given a
+`workspaceId` and `admin_action_call` naming one (by id, or by external
+identity, which an archived session import checks both ways) bring that
+workspace's content back, and anything carrying the session's text (sending, steering, pausing,
+resuming, changes, searches and previews) also takes it there. Another
+organization's workspace is left to its route, which answers it as not
+reachable, so the answer never says whether it exists or how it is set.
+Opengeni's own MCP endpoints can be added to a workspace as a remote MCP
+server and authorized for another organization. The runtime sends the calling
+workspace in a signed `x-opengeni-calling-workspace` header on every request
+to Opengeni itself: its own host however it is spelled (case, trailing dots,
+percent-encoding) and any request carrying an Opengeni API key or MCP OAuth
+token, on any host. The header is opaque (encrypted and authenticated with a
+key derived from the server secret, with a short expiry), so a relay that sees
+it learns no account or workspace id. It sends nothing it can't sign. One
+middleware on every MCP endpoint (`/v1/mcp` and everything under
+`/v1/workspaces/:workspaceId/mcp`, including `/mcp/files` and `/mcp/docs`)
+verifies the header first (a proof Opengeni didn't sign is `403`). Each
+endpoint, right after it authorizes the request, names the workspace or
+organization it reached; any request beyond the handshake (`initialize`,
+`ping` and listing tools, resources and prompts) is then refused with
+`422 region_restricted` before it runs unless content may go both ways
+between the calling workspace and what was reached, because a call can carry
+the calling workspace's content in as well as bring content back. Handshake
+answers are checked one way, after the endpoint answers. An endpoint that
+never named what it reached, or carried a call without the both-ways check,
+has its answer withheld (`503`), as does a check that can't be read. The
+credential is checked where it is bound too, both ways: MCP OAuth consent
+refuses a grant to Opengeni's own client (named by its signed integration
+state, or refused when its callback carries no such state) between a
+workspace and a granted workspace or organization when either side's EU-only
+content may not reach the other, and saving an Opengeni organization or
+personal API key as an MCP credential (capability headers, session MCP
+servers and their rotation, Connect credentials) is refused in a workspace
+that the key's organization's EU-only content may not reach, or whose own
+EU-only content would go to an organization that isn't EU-only. EU-only
+covers Opengeni's own inference and content moving between Opengeni
+workspaces, not outside agents an organization connects itself (organization
+MCP clients, API keys, desktop clients), which send no header and stay
+allowed. That includes a key a person deliberately gives to an agent's own MCP
+client or `curl` inside another workspace's sandbox, or to a proxy that adds
+it: no Opengeni gateway sees that request, so it counts like any outside agent
+the organization connected. Every other scope that spans
+workspaces (organization and personal Knowledge, Skills and Documents,
+Personal workspaces, user- and organization-owned machines and browsers, Slack
+routes, personal-resource grants, Only me meetings opened across the
+organization's workspaces (recordings routes and meeting tools)) is bound to
+one organization, so it always shares one setting today; a per-workspace
+switch must add the pair check there.
 
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
@@ -1141,8 +1246,11 @@ restore) and authors, installs and reviews workspace Skills
 (`documents:manage`). Settings-class powers stay Admin-only:
 `workspace:admin` (workspace settings, instructions, Insights, automations),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
-App), `variable-sets:manage`, `enrollments:manage` (enrolling and sharing
-machines), `capabilities:manage` (integration and plugin install, workspace
+App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
+workspace and organization machines; a signed-in Member connects and changes
+their own Only me machine with `enrollments:read`, see
+[Connected Machines](connected-machines.md#connect-a-machine)),
+`capabilities:manage` (integration and plugin install, workspace
 tool policy) and `secrets:read`. Routes where a newly granted permission would
 otherwise reach workspace-wide configuration check the settings power
 explicitly: workspace-owned model-provider keys and the Slack bot need
@@ -1430,6 +1538,26 @@ checks are unchanged. Any other set is a 42501 denial with its denial fact,
 which the terminal, Files, Git and viewer routes answer as a 403 rather than a
 500.
 
+Disconnects of model subscriptions and connectors are audited in the
+transaction that performs them (`packages/db/src/disconnect-audit.ts`): each
+successful disconnect writes one disconnect `audit_events` row, either
+`subscription_connection.disconnected` (Codex, Claude and SuperGrok accounts,
+workspace or organization) or `connection.disconnected` (workspace
+connections, 1Password and vault-provider connections, social connections,
+GitHub installations, the Teams bot and organization connected agents). The
+existing Slack bot lifecycle record is kept alongside it. The
+row's subject is the acting person or principal, its workspace is null for an
+organization-level removal, and its metadata names the target's provider and
+the `source`: `app` for a person signed in to the app, `api` for API,
+organization or personal keys and service principals, and `agent` for an
+agent attempt (with its session, turn and attempt ids) or an agent acting for
+a person through organization actions. The API derives the source only from
+authenticated provenance (`apps/api/src/http/disconnect-audit-actor.ts`).
+A refused, missing or repeated disconnect writes nothing, metadata never
+carries credentials, and a failed audit insert rolls the disconnect back.
+System revocations (refresh failures, setup rollbacks, deletion cascades) are
+not person-initiated disconnects and are not recorded this way.
+
 Signed object-storage URLs are the remaining deliberately-bounded bearer
 surface: provider-native signing has no revocation, so revocation prevents
 NEW mints immediately (every mint is route-time authorized against live
@@ -1569,7 +1697,7 @@ connection and MCP authority revalidate live membership on every use. Do not
 add a membership lock, or a write whose trigger takes one, to the claim.
 `packages/db/test/claim-organization-membership-fence.test.ts` pins this.
 
-`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
+`packages/db/test/organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load
 probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
 not move (so an application-level `40P01` replay cannot mask a regression), and
@@ -2331,7 +2459,7 @@ this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
 `FOR SELECT` leaves a row-locking lookup blind. See
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
 production-posture regression harness
-`packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`.
+`packages/db/test/owner-migrated-tenancy-cutover.test.ts`.
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>

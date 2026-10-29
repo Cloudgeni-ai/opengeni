@@ -2,7 +2,7 @@
 //! and the hosts' authority: making one and issuing a host's first
 //! certificate where Google Cloud's identity tokens cannot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -199,6 +199,13 @@ struct Serve {
     /// A team's agent gateway, as `team=wss://...`; repeat for more.
     #[arg(long = "team-link", value_parser = parse_team_link)]
     team_links: Vec<(String, String)>,
+    /// What a team's sandboxes may ask to reach of what hosts offer
+    /// (`compute-host --offer`), as `team=offer`; repeat for more. A team
+    /// given none may ask for none. Taking one away refuses new sandboxes
+    /// that ask for it; those made before keep it. Creates through the E2B
+    /// front door, which cannot ask, reach every offer their team is given.
+    #[arg(long = "team-reach", value_parser = parse_team_reach)]
+    team_reach: Vec<(String, String)>,
     /// A Google Cloud managed instance group of hosts to grow, as
     /// `projects/P/zones/Z/instanceGroupManagers/N`.
     #[arg(long)]
@@ -257,8 +264,13 @@ struct Serve {
     #[arg(long, requires = "e2b_tls_cert")]
     e2b_tls_key: Option<PathBuf>,
     /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
-    /// `base=base:2x1024`; repeat for more. Without any, `base` is the
-    /// default image at 2x1024.
+    /// `base=base:2x1024`, or `id=image:VCPUSxMEMORY_MIBxDISK_MIB` for
+    /// sandboxes with a disk of at least `DISK_MIB` (`ci=runner:4x8192x65536`);
+    /// either may end in `,memory-request=MIB` and `,cpu-request=MILLIS`
+    /// for sandboxes guaranteed only that much memory and processor time,
+    /// using more when the host has it free
+    /// (`ci=runner:8x24576x65536,memory-request=8192`). Repeat for more.
+    /// Without any, `base` is the default image at 2x1024.
     #[arg(long = "e2b-template", value_parser = parse_template)]
     e2b_templates: Vec<(String, e2b::Template)>,
 }
@@ -292,20 +304,70 @@ fn parse_team_link(text: &str) -> Result<(String, String), String> {
     Ok((team.to_owned(), url.to_owned()))
 }
 
+fn parse_team_reach(text: &str) -> Result<(String, String), String> {
+    let (team, offer) = text
+        .split_once('=')
+        .ok_or("a team's reach is `team=offer`")?;
+    if !compute_protocol::host::is_offer_name(offer) {
+        return Err(format!(
+            "{offer:?} is not an offer's name: 1 to 63 lowercase letters, digits and inner hyphens"
+        ));
+    }
+    Ok((team.to_owned(), offer.to_owned()))
+}
+
 fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
-    let shape = "a template is `id=image:VCPUSxMEMORY_MIB`";
+    let shape = "a template is `id=image:VCPUSxMEMORY_MIB` or `id=image:VCPUSxMEMORY_MIBxDISK_MIB`, \
+                 then optionally `,memory-request=MIB` and `,cpu-request=MILLIS`";
     let (id, rest) = text.split_once('=').ok_or(shape)?;
-    let (image, size) = rest.rsplit_once(':').ok_or(shape)?;
-    let (vcpus, memory) = size.split_once('x').ok_or(shape)?;
-    Ok((
-        id.to_owned(),
-        e2b::Template {
-            image: image.to_owned(),
-            vcpus: vcpus.parse().map_err(|_| shape)?,
-            memory_mib: memory.parse().map_err(|_| shape)?,
-            disk_mib: 0,
-        },
-    ))
+    let (image, sized) = rest.rsplit_once(':').ok_or(shape)?;
+    let mut options = sized.split(',');
+    let size = options.next().unwrap_or_default();
+    let mut parts = size.split('x');
+    let (Some(vcpus), Some(memory), disk, None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(shape.into());
+    };
+    let disk = disk
+        .map(|disk| {
+            disk.parse::<u32>()
+                .ok()
+                .filter(|disk| (1..=compute_protocol::host::MAX_DISK_MIB).contains(disk))
+                .ok_or_else(|| {
+                    format!(
+                        "{text:?}: DISK_MIB must be between 1 and {}",
+                        compute_protocol::host::MAX_DISK_MIB
+                    )
+                })
+        })
+        .transpose()?;
+    let mut template = e2b::Template {
+        image: image.to_owned(),
+        vcpus: vcpus.parse().map_err(|_| shape)?,
+        memory_mib: memory.parse().map_err(|_| shape)?,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        disk,
+        disk_mib: 0,
+    };
+    for option in options {
+        let (key, value) = option.split_once('=').ok_or(shape)?;
+        let value: u32 = value.parse().map_err(|_| shape)?;
+        let slot = match key {
+            "memory-request" => &mut template.memory_request_mib,
+            "cpu-request" => &mut template.cpu_request_millis,
+            _ => return Err(shape.into()),
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{text:?} names {key} twice"));
+        }
+    }
+    template
+        .config(compute_protocol::host::SleepConfig::default())
+        .validate()
+        .map_err(|why| format!("{text:?}: {why}"))?;
+    Ok((id.to_owned(), template))
 }
 
 /// The service's names in `url`, an `https://` URL, and `extra`.
@@ -405,7 +467,10 @@ impl Serve {
                 .iter()
                 .map(|(id, template)| {
                     let mut template = template.clone();
-                    template.disk_mib = self.disk_mib;
+                    // Each sandbox is booked for the longer of the two.
+                    template.disk_mib = template
+                        .disk
+                        .map_or(self.disk_mib, |disk| self.disk_mib.max(u64::from(disk)));
                     (id.clone(), template)
                 })
                 .collect();
@@ -519,6 +584,16 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
                     .collect::<BTreeMap<_, _>>(),
             ),
             links: args.links()?,
+            reach: args
+                .team_reach
+                .iter()
+                .fold(BTreeMap::new(), |mut reach, (team, offer)| {
+                    reach
+                        .entry(team.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .insert(offer.clone());
+                    reach
+                }),
             ..Settings::default()
         },
         operator: args.operator_team.clone(),
@@ -775,5 +850,69 @@ mod tests {
             config.get_password(),
             Some(&b"two words \\ and ' quote"[..])
         );
+    }
+
+    #[test]
+    fn a_template_may_name_the_disk_its_sandboxes_get() {
+        let (id, template) = parse_template("base=base:2x1024").unwrap();
+        assert_eq!((id.as_str(), template.disk), ("base", None));
+        let (id, template) = parse_template("ci=runner:4x8192x65536").unwrap();
+        assert_eq!(id, "ci");
+        assert_eq!(
+            (template.image.as_str(), template.vcpus, template.memory_mib),
+            ("runner", 4, 8192)
+        );
+        assert_eq!(template.disk, Some(65536));
+        for wrong in [
+            "ci=runner:4x8192x0",
+            "ci=runner:4x8192x99999999",
+            "ci=runner:4x8192x1x2",
+            "ci=runner:4",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
+    }
+
+    #[test]
+    fn a_template_may_guarantee_less_than_its_sandboxes_may_use() {
+        let (_, template) = parse_template("ci=runner:8x24576x65536").unwrap();
+        assert_eq!(
+            (template.memory_request_mib, template.cpu_request_millis),
+            (None, None)
+        );
+        let (_, template) =
+            parse_template("ci=runner:8x24576x65536,memory-request=8192,cpu-request=2000").unwrap();
+        assert_eq!(
+            (template.memory_request_mib, template.cpu_request_millis),
+            (Some(8192), Some(2000))
+        );
+        assert_eq!(template.disk, Some(65536));
+        let config = template.config(compute_protocol::host::SleepConfig::default());
+        assert_eq!(
+            (config.memory_request(), config.cpu_request()),
+            (8192, 2000)
+        );
+        let (_, template) = parse_template("small=base:2x1024,cpu-request=500").unwrap();
+        assert_eq!(
+            (
+                template.disk,
+                template.memory_request_mib,
+                template.cpu_request_millis
+            ),
+            (None, None, Some(500))
+        );
+        for wrong in [
+            // More guaranteed than the sandbox has.
+            "ci=runner:8x8192,memory-request=16384",
+            "ci=runner:2x1024,cpu-request=4000",
+            "ci=runner:2x1024,memory-request=8",
+            "ci=runner:2x1024,memory-request=512,memory-request=256",
+            "ci=runner:2x1024,memory-request",
+            "ci=runner:2x1024,memory-request=lots",
+            "ci=runner:2x1024,disk=4096",
+            "ci=runner:2x1024,",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
     }
 }

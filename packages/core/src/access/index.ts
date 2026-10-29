@@ -59,7 +59,11 @@ import {
 } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
+import { MissingPermissionRefusal } from "./permission-refusal";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
+
+export * from "./permission-refusal";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -894,7 +898,7 @@ export function requireAccountAdminAuthorizationStamp(
     accountGrant.subjectId !== grant.subjectId ||
     !accountGrant.permissions.includes("account:admin")
   ) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   return Object.freeze({
     authorizationId: crypto.randomUUID(),
@@ -917,16 +921,23 @@ export function requireResolvedAccessGrantAuthorization(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): AccessGrant {
-  const { grant } = authorization;
-  if (
-    !resolvedAccessGrantAuthorizations.has(authorization) ||
-    !authorization.contextIntegrity ||
-    authorization.authenticatedSubjectId !== grant.subjectId ||
-    grant.workspaceId !== workspaceId
-  ) {
+  if (!isResolvedAccessGrantAuthorization(authorization, workspaceId)) {
     throw new HTTPException(403, { message: "workspace access authorization is invalid" });
   }
-  return grant;
+  return authorization.grant;
+}
+
+function isResolvedAccessGrantAuthorization(
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): boolean {
+  const { grant } = authorization;
+  return (
+    resolvedAccessGrantAuthorizations.has(authorization) &&
+    authorization.contextIntegrity &&
+    authorization.authenticatedSubjectId === grant.subjectId &&
+    grant.workspaceId === workspaceId
+  );
 }
 
 /**
@@ -974,13 +985,19 @@ export async function requireAccessGrantAuthorization(
   });
 }
 
+/** The refusal of {@link requireWorkspaceSettingsGrant}, a plain sentence. */
+export const WORKSPACE_SETTINGS_REFUSAL =
+  "Only a workspace admin, or the owner of a Personal workspace, can do this.";
+
 /**
  * Settings administration is narrower than workspace administration. The
  * verified owning user may configure their Personal workspace, but
  * never acquires the admin wildcard (and its membership/delegation powers).
  * Delegated owners also need workspace:admin in their verified dispatch/key
  * ceiling: a read-only delegation cannot turn ownership into a settings write.
- * Only use this boundary for workspace configuration, not access management.
+ * Use this boundary for every admin-only workspace surface the owner of a
+ * Personal workspace should keep (configuration, instructions, automations,
+ * Insights), never for access management (members, keys, delegation).
  */
 export async function requireWorkspaceSettingsGrant(
   c: Context,
@@ -989,13 +1006,32 @@ export async function requireWorkspaceSettingsGrant(
 ): Promise<AccessGrant> {
   const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
-  if (hasPermission(grant.permissions, "workspace:admin")) return grant;
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return grant;
+  throw new MissingPermissionRefusal("workspace:admin", {
+    message: WORKSPACE_SETTINGS_REFUSAL,
+  });
+}
+
+/**
+ * Whether this request may change `workspaceId`'s settings, the one decision
+ * {@link requireWorkspaceSettingsGrant} enforces. An accepted message records
+ * the same answer with its turn's app-action access, so the person's own
+ * confirmed chat can change what their own request could, and nothing more.
+ */
+export async function workspaceSettingsAuthorized(
+  deps: Pick<AccessDeps, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<boolean> {
+  if (!isResolvedAccessGrantAuthorization(authorization, workspaceId)) return false;
+  const { grant } = authorization;
+  if (hasPermission(grant.permissions, "workspace:admin")) return true;
   const delegatedHuman = verifiedDelegatedHumanAuthorizations.get(authorization);
   const ownerSettingsCeiling =
     authorization.canonicalManagedHumanSession ||
     verifiedExternalAuthorizations.get(authorization)?.workspaceSettingsCeiling === true ||
     (delegatedHuman !== undefined && delegatedHuman.proof.permissions.includes("workspace:admin"));
-  if (
+  return (
     hasVerifiedOwningUserAuthorization(authorization) &&
     ownerSettingsCeiling &&
     hasPermission(grant.permissions, "workspace:read") &&
@@ -1003,13 +1039,49 @@ export async function requireWorkspaceSettingsGrant(
       accountId: grant.accountId,
       workspaceId,
       subjectId: authorization.authenticatedSubjectId,
-    }))
-  ) {
-    return grant;
+    })) !== null
+  );
+}
+
+/**
+ * Read by the person and, through app actions, by the agent: why a Personal
+ * workspace refuses member changes, and, for someone who can create a chat
+ * share link here, what works instead.
+ */
+export const PERSONAL_WORKSPACE_MEMBERS_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members.";
+export const PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members. To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.";
+
+/**
+ * A member change in a Personal workspace can never succeed, for anyone. Say
+ * so plainly to someone who can use the workspace, instead of a missing
+ * permission that sends them looking for an administrator. Anyone else keeps
+ * the original refusal, so this reveals nothing about other workspaces. The
+ * share link is suggested only to someone who can create one: a signed-in
+ * person, on a server that allows share links.
+ */
+async function refuseMembersInPersonalWorkspace(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<void> {
+  let grant: AccessGrant;
+  try {
+    grant = await requireAccessGrant(c, deps, workspaceId);
+  } catch {
+    return;
   }
-  throw new HTTPException(403, {
-    message: "workspace settings require a workspace administrator or Personal workspace owner",
-  });
+  const workspace = await getWorkspace(deps.db, workspaceId);
+  if (workspace?.kind === "personal") {
+    const canShare =
+      deps.settings.privacyChatShareLinksAllowed !== false && grant.subjectId.startsWith("user:");
+    throw new HTTPException(403, {
+      message: canShare
+        ? PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE
+        : PERSONAL_WORKSPACE_MEMBERS_MESSAGE,
+    });
+  }
 }
 
 /**
@@ -1036,6 +1108,8 @@ export async function requireWorkspaceMemberManagementAuthority(
     };
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    if (permission === "members:manage")
+      await refuseMembersInPersonalWorkspace(c, deps, workspaceId);
     const context = await requireAccessContext(c, deps);
     if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
       throw error;
@@ -1399,19 +1473,7 @@ function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
   if (grant.permissionMode === "explicit") explicitPermissions(grant.permissions);
   if (!hasPermission(grant.permissions, permission)) {
-    if (permission === "variable-sets:use") {
-      throw new HTTPException(403, {
-        message: "missing permission: variable-sets:use (deprecated alias: environments:use)",
-      });
-    }
-    if (permission === "variable-sets:manage") {
-      throw new HTTPException(403, {
-        message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
-      });
-    }
-    throw new HTTPException(403, {
-      message: `missing permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }
 
@@ -1423,9 +1485,7 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
  */
 export function requireLiteralPermission(grant: AccessGrant, permission: Permission): void {
   if (!hasLiteralPermission(grant.permissions, permission)) {
-    throw new HTTPException(403, {
-      message: `missing literal permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }
 
@@ -2075,11 +2135,4 @@ function configuredSubject(c: Context): string {
 function bearerToken(c: Context): string | null {
   const authorization = c.req.header("authorization");
   return authorization?.startsWith(bearerPrefix) ? authorization.slice(bearerPrefix.length) : null;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

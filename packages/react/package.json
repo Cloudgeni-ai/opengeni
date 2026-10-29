@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "5.3.1",
+  "version": "5.5.1",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,6 +33,10 @@
       "types": "./src/desktop.ts",
       "default": "./src/desktop.ts"
     },
+    "./desktop-dictation": {
+      "types": "./src/desktop-dictation.ts",
+      "default": "./src/desktop-dictation.ts"
+    },
     "./sites": {
       "types": "./src/sites.ts",
       "default": "./src/sites.ts"
@@ -40,6 +44,10 @@
     "./native-previews": {
       "types": "./src/native-previews.ts",
       "default": "./src/native-previews.ts"
+    },
+    "./markdown-math": {
+      "types": "./src/markdown-math.ts",
+      "default": "./src/markdown-math.ts"
     },
     "./connect.css": {
       "types": "./styles/connect.d.ts",
@@ -260,6 +268,10 @@
     "./approval-review-model": {
       "types": "./src/approval-review-model.ts",
       "default": "./src/approval-review-model.ts"
+    },
+    "./interactive-answer-model": {
+      "types": "./src/interactive-answer-model.ts",
+      "default": "./src/interactive-answer-model.ts"
     }
   },
   "publishConfig": {
@@ -290,12 +302,15 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
+    "katex": "^0.16.47",
     "lucide-react": "^1.8.0",
     "motion": "^12.0.0",
     "radix-ui": "^1.4.3",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.11.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
     "thinking-orbs": "^0.3.1",

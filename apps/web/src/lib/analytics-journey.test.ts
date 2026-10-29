@@ -31,12 +31,11 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/reset-password/private", "?token=private")).toEqual({ page: "other" });
   });
-  test("labels every workspace page, including agents, variable sets, and environments", () => {
+  test("labels every workspace page, including agents and secrets", () => {
     for (const page of [
       "read-only-chats",
       "agents",
-      "variable-sets",
-      "environments",
+      "secrets",
       "rigs",
       "capabilities",
       "plugins",
@@ -66,6 +65,8 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/device", "?user_code=PRIVATE")).toEqual({ page: "device" });
     expect(journeyPage("/reset-password", "?token=private")).toEqual({ page: "reset-password" });
+    // The share id is the link's credential: only the page kind is reported.
+    expect(journeyPage("/share/PRIVATE_share_id_1234567", "")).toEqual({ page: "shared-chat" });
     expect(journeyPage("/billing", "?checkout=success")).toEqual({ page: "checkout-return" });
     expect(journeyPage("/integrations")).toEqual({ page: "integration-return" });
     const teams = new URL(
@@ -261,20 +262,5 @@ describe("content-free customer journey", () => {
       operation: "dictation",
       properties: { workspace_id: workspace, method: "POST", mode: "direct" },
     });
-    expect(
-      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "POST"),
-    ).toEqual({
-      operation: "dictation",
-      properties: { workspace_id: workspace, method: "POST", mode: "recording" },
-    });
-    expect(
-      journeyOperation(
-        `/v1/workspaces/${workspace}/transcription-recordings/${session}/finalize`,
-        "POST",
-      ),
-    ).toBeNull();
-    expect(
-      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "GET"),
-    ).toBeNull();
   });
 });

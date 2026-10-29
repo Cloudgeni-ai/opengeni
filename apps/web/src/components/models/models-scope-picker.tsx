@@ -56,7 +56,10 @@ export function ModelsScopePicker({
       value: each.id,
       label: each.personal ? "Your Personal workspace" : each.name,
       group: "Workspaces",
-      ...("canManage" in each && !each.canManage && each.id !== current?.id
+      ...("canManage" in each &&
+      !each.canManage &&
+      !("connectOwn" in each && each.connectOwn) &&
+      each.id !== current?.id
         ? { disabled: true, disabledReason: "Only its workspace admins can change its models." }
         : {}),
       leading: each.personal ? (

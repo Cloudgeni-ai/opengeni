@@ -590,6 +590,12 @@ export type ComposerState = {
   stoppingAttempt?: "current" | "previous" | null | undefined;
   sending: boolean;
   canSend: boolean;
+  /**
+   * Something Send needs is still loading (the model list, a saved draft).
+   * While it is, a Send or Enter with a draft waits and sends once it is
+   * ready, instead of doing nothing.
+   */
+  preparing?: boolean | undefined;
   /** Pause the session without deleting its prompt queue. */
   pause: (reason?: string) => Promise<void>;
   pausing: boolean;
@@ -603,6 +609,12 @@ export type ComposerState = {
   draftLoading: boolean;
   draftSaving: boolean;
   draftConflict: Error | null;
+  /**
+   * Save the draft now instead of after the autosave pause, for example
+   * before the page leaves for checkout. Resolves once it is saved or
+   * nothing needed saving.
+   */
+  flushDraft?: (() => Promise<void>) | undefined;
   /** Exact policy owned by this actor/session composer. Null while hydrating. */
   policy?: ComposerPolicy | null | undefined;
   setModel?: ((model: string) => void) | undefined;
@@ -841,6 +853,9 @@ export function useComposer(
   const [error, setError] = useState<Error | null>(null);
   // Background draft reads recover independently of Send/Steer/control failures.
   const [draftReadError, setDraftReadError] = useState<Error | null>(null);
+  // The first read of the saved draft failed and a retry is scheduled: the
+  // draft is still on its way, so an early Send keeps waiting for it.
+  const [draftHydrationRetrying, setDraftHydrationRetrying] = useState(false);
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
   const [draftLoading, setDraftLoading] = useState(Boolean(sessionId) && durableDrafts);
   const [draftSaving, setDraftSaving] = useState(false);
@@ -990,6 +1005,7 @@ export function useComposer(
     setResuming(false);
     setError(null);
     setDraftReadError(null);
+    setDraftHydrationRetrying(false);
     setDraft(null);
     setDraftLoading(Boolean(sessionId) && durableDrafts);
     setDraftSaving(false);
@@ -1127,6 +1143,7 @@ export function useComposer(
       if (!sessionId || !durableDrafts) {
         setDraftLoading(false);
         setDraftReadError(null);
+        setDraftHydrationRetrying(false);
         return;
       }
       let retry = draftReadRetryRef.current;
@@ -1202,6 +1219,7 @@ export function useComposer(
         retry.timer = null;
         // Recovery also counts when the server returns the same draft revision.
         setDraftReadError(null);
+        setDraftHydrationRetrying(false);
         const currentRevision = draftRef.current?.revision ?? -1;
         // Reconnect and client-generation effects can legitimately ask for the
         // draft again. A same-revision response is not new authority: publishing
@@ -1273,10 +1291,12 @@ export function useComposer(
           ) {
             retry.failures += 1;
             scheduleRetry();
+            if (draftRef.current === null) setDraftHydrationRetrying(true);
           } else {
             if (retry.timer !== null) clearTimeout(retry.timer);
             retry.failures = 0;
             retry.timer = null;
+            setDraftHydrationRetrying(false);
           }
         }
       } finally {
@@ -1497,6 +1517,13 @@ export function useComposer(
     },
     [adoptDraftBase, client, durableDrafts, sessionId, targetKey, workspaceId],
   );
+
+  const flushDraft = useCallback(async (): Promise<void> => {
+    if (draftLoading || sending || draftConflict) return;
+    const payload = currentDraftPayload();
+    if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
+    await persistPayload(payload);
+  }, [currentDraftPayload, draftConflict, draftLoading, persistPayload, sending]);
 
   const replaceOptimisticSends = useCallback(
     (
@@ -3153,6 +3180,11 @@ export function useComposer(
         visibleValue.trim().length > 0 ||
         hasReadyResources ||
         annotations.length > 0),
+    // The saved draft is still loading, or its first read is being retried:
+    // an early Send waits for it (the composer bounds how long).
+    preparing: identityMatches
+      ? Boolean(sessionId) && (draftLoading || draftHydrationRetrying)
+      : Boolean(sessionId) && durableDrafts,
     pause,
     pausing: identityMatches ? pausing : false,
     resume,
@@ -3164,6 +3196,7 @@ export function useComposer(
     draftLoading: identityMatches ? draftLoading : Boolean(sessionId) && durableDrafts,
     draftSaving: identityMatches ? draftSaving : false,
     draftConflict: identityMatches ? draftConflict : null,
+    flushDraft,
     policy: identityMatches ? policy : null,
     setModel: updateModel,
     setReasoningEffort: updateReasoningEffort,

@@ -24,7 +24,7 @@ import {
 import { toast } from "../../lib/toast";
 
 import { findPickerRow } from "../../../model-policy";
-import { withLineageAutomationFacts } from "../../../session-list-model";
+import { sessionDisplayTitle, withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
@@ -58,6 +58,12 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/s
 import { TooltipProvider } from "../../../ui/tooltip";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
+import { desktopPlatform } from "../../lib/desktop";
+import {
+  chatHeaderInWindowBar,
+  isSessionRoutePath,
+  useWindowBarRowLeft,
+} from "../../lib/window-bar-row";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { isIntelligenceEffort } from "../../lib/session-tools";
@@ -67,9 +73,9 @@ import { applySessionArchiveProjection } from "../../lib/session-pagination";
 import { notifySessionListChanged } from "../../lib/session-list-invalidation";
 import type { Session } from "../../types";
 import { cn } from "../../lib/utils";
-import { windowControlsInPage } from "../../lib/desktop";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useUiEventTarget } from "../../lib/ui-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("../session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -100,21 +106,14 @@ export function RailBody() {
       data-rail
       className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
     >
-      {/* Native macOS controls sit over this row. Keep it outside the clipped
-          viewport so navigation cannot scroll underneath them. */}
-      {windowControlsInPage ? (
-        <div data-rail-window-controls className="relative z-10 shrink-0 pb-3">
-          <RailHeader showSwitcher={false} />
-        </div>
-      ) : null}
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
-          {!windowControlsInPage ? <RailHeader /> : null}
+          <RailHeader />
 
-          {rail.collapsed || windowControlsInPage ? switcher : null}
+          {rail.collapsed ? switcher : null}
 
           {rail.isMobile && mobileWorkspacePanel ? (
             <>
@@ -270,6 +269,12 @@ export function SessionShell({
   );
 }
 
+/**
+ * In the macOS app a chat's header is the window bar's row, as in native Mac
+ * apps: its title and actions sit beside the traffic lights and the sidebar
+ * toggle, and the canvas, the rounded panel, starts under the bar as on every
+ * other page (the `[data-window-bar-row]` rules in the app's stylesheet).
+ */
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
@@ -278,6 +283,14 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
+  const headerInWindowBar = chatHeaderInWindowBar({
+    platform: desktopPlatform,
+    mobile: rail.isMobile,
+    session: Boolean(context.session),
+    pathname,
+  });
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  useWindowBarRowLeft(canvasRef, headerInWindowBar);
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
@@ -343,7 +356,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
     <TooltipProvider delayDuration={300}>
       <div
         className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
-        // Lets page chrome (the desktop title bar) follow the rail without a
+        // Lets page chrome and host styles follow the rail without a
         // document-wide `:has()` selector.
         data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
       >
@@ -351,6 +364,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         {chatList && !rail.isMobile ? (
           <nav
             aria-label="Primary"
+            data-shell-rail
             data-collapsed={rail.collapsed}
             style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(
@@ -393,7 +407,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         ) : null}
 
         {/* Main canvas. */}
-        <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div
+          ref={canvasRef}
+          data-canvas
+          data-window-bar-row={headerInWindowBar ? "" : undefined}
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        >
           <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             {canvasBanners}
@@ -418,8 +437,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
-  const showSessionActions = Boolean(context.session) && isSessionRoute;
+  const showSessionActions = Boolean(context.session) && isSessionRoutePath(pathname);
   const sharedFeed = useSyncExternalStore(
     context.sessionEventFeedStore.subscribe,
     context.sessionEventFeedStore.getSnapshot,
@@ -551,7 +569,13 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
+        const updated = await requestSessionArchive(
+          context,
+          target,
+          archived,
+          confirmArchive,
+          sessionDisplayTitle(target),
+        );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>
@@ -568,7 +592,7 @@ function SessionRouteHeader({
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       } finally {
         archiveInFlight.current = false;
@@ -609,6 +633,10 @@ function SessionRouteHeader({
       onRename={context.updateSessionTitle}
       onPin={(target, pinned) =>
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
+      }
+      onUpdateProfile={context.updateSessionProfile}
+      onSaveBotTemplate={(request) =>
+        context.client.createBotTemplate(session.workspaceId, request)
       }
       onArchive={onArchive}
       repliesMute={repliesMute}

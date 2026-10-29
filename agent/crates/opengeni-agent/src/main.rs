@@ -54,7 +54,6 @@ mod handover;
 mod instance_lock;
 mod inventory;
 mod job;
-mod legacy;
 mod log_file;
 mod metrics;
 mod ops;
@@ -306,8 +305,8 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         Command::Connect(args) | Command::Enroll(args) => {
             enroll_command(args, &api_url).await.map(|_| ())
         }
-        Command::Connections => list_connections(&api_url),
-        Command::Disconnect(args) => disconnect(&args, &api_url),
+        Command::Connections => list_connections(),
+        Command::Disconnect(args) => disconnect(&args),
         Command::Start(args) => service::ensure_running(&args).map_err(string_err),
         Command::Stop(args) => service::stop(&args).map_err(string_err),
         Command::Status(args) => service::show_status(&args).map_err(string_err),
@@ -348,10 +347,7 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
 ///     promptly, rather than dropping into an invisible device-flow enroll that
 ///     needs a workspace id + a visible TTY and would otherwise appear to hang.
 async fn run_default(api_url: &str) -> anyhow_lite::Result {
-    if config::load_connections(api_url)
-        .map_err(to_boxed)?
-        .is_empty()
-    {
+    if config::load_connections().map_err(to_boxed)?.is_empty() {
         // Not enrolled (or creds unreadable): show how to get started and exit
         // cleanly. Help goes to stderr so a `opengeni-agent | …` pipe is unchanged.
         eprintln!("{}", Cli::command().render_help());
@@ -371,24 +367,18 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 }
 
 /// Prints the non-secret local connection inventory.
-fn list_connections(api_url: &str) -> anyhow_lite::Result {
-    let connections = config::load_connections(api_url).map_err(to_boxed)?;
+fn list_connections() -> anyhow_lite::Result {
+    let connections = config::load_connections().map_err(to_boxed)?;
     if connections.is_empty() {
         println!("No Opengeni connections configured. Run `opengeni-agent connect`.");
         return Ok(());
     }
     println!("Configured Opengeni connections ({}):", connections.len());
     for connection in connections {
-        let origin_note = if connection.legacy_origin {
-            " (legacy origin unverified; reconnect once to confirm)"
-        } else {
-            ""
-        };
         println!(
-            "  {}  {}{}  workspace={}  agent={}",
+            "  {}  {}  workspace={}  agent={}",
             connection.connection_id,
             connection.api_url,
-            origin_note,
             connection.credentials.workspace_id,
             connection.credentials.agent_id
         );
@@ -399,7 +389,7 @@ fn list_connections(api_url: &str) -> anyhow_lite::Result {
             Some(config::AuthenticationState::ReconnectRequired) => println!(
                 "    Reconnect required; automatic retries stopped. Run `{}` or disconnect this saved connection.",
                 supervisor::rejected_bearer_reconnect_command(
-                    if connection.legacy_origin { None } else { Some(&connection.api_url) },
+                    Some(&connection.api_url),
                     &connection.credentials.workspace_id,
                 )
             ),
@@ -411,8 +401,8 @@ fn list_connections(api_url: &str) -> anyhow_lite::Result {
 
 /// Removes one local connection. The running process watches the connection
 /// directory and cleanly takes only this link offline; all others keep serving.
-fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
-    let connections = config::load_connections(api_url).map_err(to_boxed)?;
+fn disconnect(args: &DisconnectArgs) -> anyhow_lite::Result {
+    let connections = config::load_connections().map_err(to_boxed)?;
     let matches: Vec<_> = connections
         .iter()
         .filter(|connection| connection.connection_id.starts_with(&args.connection))
@@ -425,7 +415,7 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
         [connection] => {
             let id = connection.connection_id.clone();
             let api_url = connection.api_url.clone();
-            config::remove_connection(&id, api_url.as_str()).map_err(to_boxed)?;
+            config::remove_connection(&id).map_err(to_boxed)?;
             println!("Disconnected {id} from {api_url}.");
             println!(
                 "The local link stops automatically; remove the offline machine in that workspace if you also want to revoke its enrollment."
@@ -451,13 +441,11 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // A verified self-update may have exec'd this new binary from the exact old
     // generated systemd unit. Refresh that narrowly-proven definition before
     // admission, then let the manager restart us directly in `supervisor`.
-    match service::refresh_managed_service_definition() {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(error) => warn!(
+    if let Err(error) = service::inspect_managed_service_definition() {
+        warn!(
             %error,
-            "could not refresh the managed service definition; continuing without assuming operation-cgroup capability"
-        ),
+            "could not inspect the managed service definition; continuing without assuming operation-cgroup capability"
+        );
     }
 
     // A service manager may start us at the filesystem root (launchd does for a
@@ -529,7 +517,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     }
 
     // Connect if we have no persisted connection yet ("connect-if-needed").
-    let existing_connections = config::load_connections(api_url).map_err(to_boxed)?;
+    let existing_connections = config::load_connections().map_err(to_boxed)?;
     let connections = if existing_connections.is_empty() {
         info!("no connection found; starting device-flow connection");
         let enroll_args = EnrollArgs {
@@ -654,6 +642,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         }
         if let Some(inherited) = inherited {
             supervisor.restore_lost_markers(inherited.lost_markers);
+            supervisor.restore_reply_leases(inherited.reply_leases);
             supervisor.adopt_handed_over(&platform, inherited.ops);
         }
     }
@@ -670,7 +659,6 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // Enrollment commands intentionally do not contend on the process-wide run
     // lock. Reconcile their independent credential files live so adding/removing
     // a workspace never requires restarting this agent or interrupts other links.
-    let watcher_api_url = api_url.to_string();
     let watcher_platform = platform.clone();
     let watcher_connection_instance_id = connection_instance_id.clone();
     let watcher = tokio::spawn(async move {
@@ -680,7 +668,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
                 () = updates_tx.closed() => return,
                 () = tokio::time::sleep(CONNECTION_RELOAD_INTERVAL) => {}
             }
-            match config::load_connections(&watcher_api_url) {
+            match config::load_connections() {
                 Ok(next) if next != current => {
                     let next_links =
                         supervisor_links(&next, &watcher_platform, &watcher_connection_instance_id);
@@ -699,7 +687,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     });
 
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
-    let renewal = tokio::spawn(credential_renewal::run(api_url.to_string()));
+    let renewal = tokio::spawn(credential_renewal::run());
     let supervisor_result = supervisor.run_with_updates(updates_rx).await;
     renewal.abort();
     watcher.abort();
@@ -1001,6 +989,7 @@ fn carry_on_handed_over<P: Platform + 'static>(
     }
     if let Some(inherited) = inherited {
         supervisor.restore_lost_markers(inherited.lost_markers);
+        supervisor.restore_reply_leases(inherited.reply_leases);
         supervisor.adopt_handed_over(platform, inherited.ops);
     }
     supervisor
@@ -1320,11 +1309,7 @@ fn supervisor_links(
                 SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
                     .with_authentication_state(connection.authentication_state)
                     .with_connection_instance_id(connection_instance_id);
-            if connection.legacy_origin {
-                link
-            } else {
-                link.with_api_url(connection.api_url.clone())
-            }
+            link.with_api_url(connection.api_url.clone())
         })
         .collect()
 }

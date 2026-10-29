@@ -10,7 +10,7 @@ import {
   type ConnectNavigation,
   type ConnectOwnership,
 } from "@opengeni/connect";
-import type { CapabilityCatalogItem } from "@opengeni/sdk";
+import { OpenGeniApiError, type CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { ConnectCardMessage } from "../connect-card-message";
@@ -23,9 +23,21 @@ import {
   continueAfterCapabilitySetup,
   sessionCapabilityTools,
 } from "../session-capability-policy";
+import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
 
 const GOOGLE_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
+/** Google's connectors only ever connect a person's own account; the API refuses sharing. */
+const PERSONAL_ONLY_MCP_URLS = new Set([
+  "https://gmailmcp.googleapis.com/mcp/v1",
+  GOOGLE_DRIVE_MCP_URL,
+  "https://calendarmcp.googleapis.com/mcp/v1",
+]);
 const RESTART_STATES = ["failed", "expired", "cancelled"];
+
+function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
+  const url = item?.mcpUrl ?? item?.endpointUrl;
+  return !!url && PERSONAL_ONLY_MCP_URLS.has(url);
+}
 
 /** The OAuth MCP connect card, as a renderer draws it. */
 export type McpCapabilityConnect = {
@@ -100,8 +112,10 @@ export function useMcpCapabilityConnect({
   );
   const view = useConnect(controller);
   const [item, setItem] = useState<CapabilityCatalogItem | null>(null);
-  const personalOnly =
-    configuredPersonalOnly || (item?.mcpUrl ?? item?.endpointUrl) === GOOGLE_DRIVE_MCP_URL;
+  // Nobody else is in this workspace: there is no one to share with, so the
+  // card connects the person's own account without asking.
+  const [alone, setAlone] = useState(false);
+  const personalOnly = configuredPersonalOnly || personalOnlyService(item) || alone;
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -160,13 +174,21 @@ export function useMcpCapabilityConnect({
     }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
       throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisRecommendationIsNotAn"));
+    // Only a choice the card would otherwise ask about needs the workspace's people.
+    const nobodyToShareWith =
+      !resolved.connectionRef && !personalOnly && !personalOnlyService(resolved)
+        ? await workspaceHasNobodyToShareWith(client, workspaceId)
+        : false;
+    if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     setItem(resolved);
+    if (nobodyToShareWith) setAlone(true);
     if (resolved.connectionRef)
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
     else if (
       !item &&
       (personalOnly ||
-        (resolved.mcpUrl ?? resolved.endpointUrl) === GOOGLE_DRIVE_MCP_URL ||
+        nobodyToShareWith ||
+        personalOnlyService(resolved) ||
         resolved.metadata?.defaultConnectionOwnership === "personal")
     )
       setOwnership("personal");
@@ -294,17 +316,31 @@ export function useMcpCapabilityConnect({
         ? previous.subjectScope === "subject"
         : previous.subjectScope !== "subject" && previous.connectionId === connection.id);
     if (!alreadyBound) {
-      await client.enableCapability(workspaceId, capabilityId, {
-        connectionRef:
-          attempt.ownership === "personal"
-            ? { providerDomain: connection.providerDomain, kind: "oauth2", subjectScope: "subject" }
-            : {
-                providerDomain: connection.providerDomain,
-                kind: "oauth2",
-                subjectScope: "workspace",
-                connectionId: connection.id,
-              },
-      });
+      try {
+        await client.enableCapability(workspaceId, capabilityId, {
+          connectionRef:
+            attempt.ownership === "personal"
+              ? {
+                  providerDomain: connection.providerDomain,
+                  kind: "oauth2",
+                  subjectScope: "subject",
+                }
+              : {
+                  providerDomain: connection.providerDomain,
+                  kind: "oauth2",
+                  subjectScope: "workspace",
+                  connectionId: connection.id,
+                },
+        });
+      } catch (failure) {
+        // The account is connected, but turning the integration on here is an
+        // admin's step. Say so: the account is used once an admin turns it on.
+        if (failure instanceof OpenGeniApiError && failure.status === 403)
+          throw new ConnectCardMessage(
+            t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
+          );
+        throw failure;
+      }
       if (!active()) return;
     }
     const enabled = await load(active);
@@ -348,13 +384,10 @@ export function useMcpCapabilityConnect({
       let reserved: ReturnType<ConnectWindowHost["reserve"]>;
       try {
         reserved = windowHost.current.reserve();
-      } catch (failure) {
-        // Opening the sign-in window explains itself (for example, allow popups).
-        throw new ConnectCardMessage(
-          failure instanceof Error
-            ? failure.message
-            : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
-        );
+      } catch {
+        // The browser refused the sign-in window (usually a pop-up blocker);
+        // its own error text is technical and untranslated.
+        throw new ConnectCardMessage(t("connectWindowHost.allowPopups"));
       }
       reservedPopup.current = reserved.close;
       try {
@@ -399,6 +432,9 @@ export function useMcpCapabilityConnect({
           providerId: mcpUrl === GOOGLE_DRIVE_MCP_URL ? "google-drive" : "mcp-oauth",
           ownership,
           returnUrl,
+          // A browser popup ends on a page that closes itself instead of
+          // loading this page a second time; a phone returns to the app.
+          ...(windowHost.current.finishInPopup ? { finishInPopup: true as const } : {}),
           idempotencyKey: startKey.current,
           ...(reconnectAccountId ? { reconnectAccountId } : {}),
         });

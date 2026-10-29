@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactCurrentResponse,
@@ -21,6 +22,7 @@ import {
 } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  createChannel,
   createDb,
   createSession,
   createWorkspaceArtifact,
@@ -963,6 +965,73 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           otherGrant,
           ["artifacts:read"],
           `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/sidebar`,
+          { method: "PUT", body },
+        )
+      ).status,
+    ).toBe(404);
+  }, 60_000);
+
+  test("moves a Site row to another project like a chat, without changing the Site", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Project board",
+            html: "<!doctype html><h1>Project</h1>",
+            idempotencyKey: "project-board",
+          }),
+        })
+      ).json(),
+    );
+    const project = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: `Research ${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const path = `${base}/${site.artifact.id}/channel`;
+    const put = (body: unknown) =>
+      requestAsCanonicalLocalHuman(path, { method: "PUT", body: JSON.stringify(body) });
+    // Made outside a chat, the Site sits in Default; its row is the Site itself.
+    const moved = await put({ fromChannelId: null, channelId: project.id });
+    expect(moved.status).toBe(200);
+    expect(SiteProjectResponse.parse(await moved.json())).toEqual({
+      siteId: site.artifact.id,
+      channelId: project.id,
+      siteMoved: true,
+      movedSessionIds: [],
+    });
+    // Back to Default: removed from the project, still published.
+    expect(
+      SiteProjectResponse.parse(
+        await (await put({ fromChannelId: project.id, channelId: null })).json(),
+      ),
+    ).toMatchObject({ channelId: null, siteMoved: true });
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}`)).json(),
+    );
+    expect(detail.artifact.status).toBe("active");
+
+    expect((await put({ channelId: project.id })).status).toBe(422);
+    expect((await put({ fromChannelId: null, channelId: crypto.randomUUID() })).status).toBe(422);
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Project board" },
+      () => put({ fromChannelId: null, channelId: project.id }),
+    );
+    expect(fromSite.status).toBe(403);
+    // Projects are shared: moving needs sessions:control, as for a chat.
+    const body = JSON.stringify({ fromChannelId: null, channelId: project.id });
+    expect(
+      (await request(grant, ["artifacts:read", "sessions:read"], path, { method: "PUT", body }))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["sessions:control"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/channel`,
           { method: "PUT", body },
         )
       ).status,

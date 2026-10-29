@@ -1,3 +1,11 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
+import {
+  personalWorkspaceExtensionApiIntegrations,
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+  type PersonalWorkspaceExtensionMcpServer,
+} from "./personal-workspace-connectors";
+import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
 import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
@@ -41,21 +49,19 @@ import {
   CODEX_APPS_STARTUP_TIMEOUT_MS,
 } from "@opengeni/codex";
 import {
-  decryptVariableSetValue,
+  decryptEnvironmentValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
   isTransactionHandle,
-  readCodexCutoverDisposition,
   resolveSubscriptionCoreCodexAppsDesignation,
   rlsContextForWorkspace,
   subscriptionCoreCodexAppsRequestAuth,
   type SubscriptionCoreCodexAppsRequestAuth,
-  type CodexCutoverDisposition,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -80,9 +86,11 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { listOwnConnectionMetadata } from "./personal-connection-delegations";
 import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -228,10 +236,75 @@ export async function buildCapabilityCatalog(input: {
       );
     })
     .sort(compareCatalogItems);
+  // A Personal workspace also shows the connectors its owner's "Only me"
+  // connections carry in from the organization's other workspaces.
+  const carried = input.subjectId
+    ? await personalWorkspaceExtensionMcpServers(input.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        accountId: input.accountId,
+        ownServers: [...input.settings.mcpServers, ...runnableMcpServers],
+      })
+    : [];
   return {
-    items,
+    items: carried.length
+      ? (await withPersonalWorkspaceCarriedItems(input.db, items, carried)).sort(
+          compareCatalogItems,
+        )
+      : items,
     installations: catalogInstallations,
   };
+}
+
+/**
+ * Carried connectors are enabled here but managed where their connection was
+ * made: they are labelled with that workspace and offer only inspection, since
+ * this workspace has no installation to configure or disconnect.
+ */
+async function withPersonalWorkspaceCarriedItems(
+  db: Database,
+  items: CapabilityCatalogItem[],
+  carried: readonly PersonalWorkspaceExtensionMcpServer[],
+): Promise<CapabilityCatalogItem[]> {
+  const result = [...items];
+  for (const server of carried) {
+    const index = result.findIndex((item) => item.id === server.capabilityId);
+    if (index >= 0 && result[index]!.enabled) continue;
+    const item =
+      index >= 0
+        ? result[index]!
+        : await getCapabilityCatalogItem(
+            db,
+            server.personalExtension.originWorkspaceId,
+            server.capabilityId,
+          );
+    if (!item || item.kind !== "mcp") continue;
+    const origin = server.personalExtension;
+    const detail = `From ${origin.originWorkspaceName}`;
+    const projected: CapabilityCatalogItem = {
+      ...item,
+      enabled: true,
+      enabledReason: detail,
+      connectionRef: {
+        providerDomain: server.connectionRef.providerDomain,
+        kind: server.connectionRef.kind ?? "oauth2",
+        subjectScope: "subject",
+      },
+      runtime: { ...item.runtime, available: true, mcpServerId: server.id },
+      lifecycle: { status: "ready", readiness: "ready", detail, managedBy: "workspace" },
+      actions: ["inspect"],
+      metadata: {
+        ...item.metadata,
+        personalExtension: {
+          originWorkspaceId: origin.originWorkspaceId,
+          originWorkspaceName: origin.originWorkspaceName,
+        },
+      },
+    };
+    if (index >= 0) result[index] = projected;
+    else result.push(projected);
+  }
+  return result;
 }
 
 /**
@@ -414,7 +487,9 @@ function assertPersonalIntegrationSetupRequest(
   payload: EnableCapabilityRequest,
 ): void {
   if (!isPersonalIntegrationSetupCandidate(item))
-    throw new HTTPException(403, { message: "Only an admin can turn on this integration" });
+    throw new HTTPException(403, {
+      message: `Only an admin can turn on ${item.name}. Ask an admin to turn it on first, then connect your account.`,
+    });
   const ref = payload.connectionRef;
   if (
     !ref ||
@@ -547,6 +622,13 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    await assertMcpCredentialContentFlowAllowed(input.db, {
+      target: { accountId: input.accountId, workspaceId: input.workspaceId },
+      url: item.endpointUrl,
+      headers,
+    });
     if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
     let serverInfo: unknown;
     installationMetadata = {
@@ -572,7 +654,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
       );
     }
   }
@@ -745,7 +827,7 @@ async function resolveMcpCredentialHeaders(
     return Object.fromEntries(
       Object.entries(storedCiphertext).map(([name, value]) => [
         name,
-        decryptVariableSetValue(key, value),
+        decryptEnvironmentValue(key, value),
       ]),
     );
   } catch {
@@ -840,7 +922,7 @@ async function validateMcpCapabilityConnectionRef(
     return normalized;
   }
 
-  let connection = normalized.connectionId
+  let connection: ConnectionMetadata | null = normalized.connectionId
     ? await getConnectionMetadata(
         input.db,
         input.workspaceId,
@@ -867,7 +949,35 @@ async function validateMcpCapabilityConnectionRef(
           candidate.status === "active",
       ) ?? null;
   }
+  if (!connection && subjectScope === "subject") {
+    // A personal account follows its owner: it may have been connected from
+    // another of their workspaces and is still the same, usable connection.
+    const own = await listOwnConnectionMetadata(input.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.grant.subjectId,
+      includeInactive: true,
+    });
+    connection =
+      own.find((candidate) =>
+        normalized.connectionId
+          ? candidate.id === normalized.connectionId
+          : candidate.providerDomain === normalized.providerDomain &&
+            (!normalized.kind || candidate.kind === normalized.kind) &&
+            candidate.status === "active",
+      ) ?? null;
+  }
   if (!connection) {
+    // "Each person signs in": every person's own account is resolved when
+    // they use it, so turning the server on needs no account of the caller's
+    // own. Only for the server's own provider, and only a plain OAuth ref.
+    if (isPerPersonOAuthRefForItem(item, normalized))
+      // Stored as each person's sign-in records it, so their rows match.
+      return {
+        ...normalized,
+        kind: "oauth2",
+        providerDomain: canonicalDomain(normalized.providerDomain),
+      };
     throw new HTTPException(422, {
       message: "connectionRef does not reference a visible active connection",
     });
@@ -901,6 +1011,47 @@ async function validateMcpCapabilityConnectionRef(
     return genericSubjectRef;
   }
   return normalized;
+}
+
+function canonicalDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./u, "");
+}
+
+function hostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A per-person OAuth reference for this exact server: no account id, no
+ * account selection or resources, and the provider is the server itself
+ * (its catalog provider domain or its endpoint host). Each person's own
+ * account for that provider is resolved when they use it.
+ */
+function isPerPersonOAuthRefForItem(
+  item: CapabilityCatalogItem,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.accountSelection ||
+    ref.authoritySource === "host" ||
+    ref.selectedResources
+  )
+    return false;
+  const domain = canonicalDomain(ref.providerDomain);
+  return [item.providerDomain, hostOf(item.mcpUrl ?? item.endpointUrl)].some(
+    (candidate) => typeof candidate === "string" && canonicalDomain(candidate) === domain,
+  );
 }
 
 function authDeferredMcpConnectivity(): Record<string, unknown> {
@@ -1055,7 +1206,7 @@ async function probeStreamableHttpMcpServer(
 }
 
 function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const normalized = message.replace(/\s+/g, " ").trim();
   const endpoint = safeEndpointLabel(endpointUrl);
   if (
@@ -1139,6 +1290,8 @@ export async function settingsWithEnabledCapabilityMcpServers(
      * its RLS scopes must not overlap.
      */
     oneReadAtATime?: boolean;
+    /** The workspace's organization, when the caller knows it (skips a lookup). */
+    accountId?: string;
   },
 ): Promise<Settings> {
   const readApiIntegrations = () =>
@@ -1174,6 +1327,57 @@ export async function settingsWithEnabledCapabilityMcpServers(
       readCodexAppsDesignation(),
     ]);
   }
+  // A Personal workspace also carries its owner's "Only me" connectors from
+  // the organization's other workspaces. Read after the reads above so no RLS
+  // scope overlaps on a caller's transaction.
+  const extensionSubject = personalWorkspaceExtensionSubject(options ?? {});
+  if (extensionSubject) {
+    const accountId =
+      options?.accountId ??
+      (options?.codexApps && !(options.codexApps instanceof Promise)
+        ? options.codexApps.accountId
+        : undefined) ??
+      (await rlsContextForWorkspace(db, workspaceId)).accountId;
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId,
+      workspaceId,
+      subjectId: extensionSubject,
+    });
+    if (origins.length > 0) {
+      enabled = [
+        ...enabled,
+        ...(await personalWorkspaceExtensionMcpServers(db, {
+          workspaceId,
+          subjectId: extensionSubject,
+          accountId,
+          origins,
+          ownServers: [...settings.mcpServers, ...enabled],
+        })),
+      ];
+      const carriedApiIntegrations = await personalWorkspaceExtensionApiIntegrations(db, {
+        workspaceId,
+        subjectId: extensionSubject,
+        accountId,
+        origins,
+        ownIntegrations: apiIntegrations,
+        takenServerIds: [
+          ...settings.mcpServers.map((server) => server.id),
+          ...enabled.map((server) => server.id),
+          ...apiIntegrations.map((integration) => integration.serverId),
+        ],
+      });
+      // A turn acting only through frozen delegations keeps exactly those.
+      apiIntegrations = [
+        ...apiIntegrations,
+        ...(options?.subjectId
+          ? carriedApiIntegrations
+          : apiIntegrationsMatchingDelegations(
+              carriedApiIntegrations,
+              options?.personalConnectionDelegations ?? [],
+            )),
+      ];
+    }
+  }
   apiIntegrations = apiIntegrations.filter((integration) =>
     apiIntegrationIsExecutable(integration, settings, workspaceId),
   );
@@ -1186,6 +1390,23 @@ export async function settingsWithEnabledCapabilityMcpServers(
       workspaceId,
     ),
     codexAppsDesignation !== null,
+  );
+}
+
+/**
+ * Target ids a live fence could still find among a Personal workspace's
+ * carried connectors: connector ids nothing else resolved. Account route ids
+ * (`mcpAccountRouteId`) always arrive beside their canonical connector id, and
+ * Codex Apps resolves on its own, so neither is a candidate.
+ */
+export function carriedConnectorCandidateIds(
+  serverIds: Iterable<string>,
+  resolvedIds: Iterable<string>,
+): string[] {
+  const resolved = new Set(resolvedIds);
+  return [...serverIds].filter(
+    (id) =>
+      !resolved.has(id) && id !== CODEX_APPS_MCP_SERVER_ID && !/^account-[0-9a-f]{64}$/u.test(id),
   );
 }
 
@@ -1225,6 +1446,62 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
   ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
   options.signal?.throwIfAborted();
+  // The fence re-derives a Personal workspace's carried connectors live: a
+  // lost origin membership or removed connection drops them here too. Only a
+  // connector id nothing above resolved can be a carried one, so a fence whose
+  // connectors all resolved here (every shared-workspace fence) reads nothing
+  // more.
+  const unresolved = carriedConnectorCandidateIds(serverIds, [
+    ...[...settings.mcpServers, ...enabled].map((server) => server.id),
+    ...apiIntegrations.map((integration) => integration.serverId),
+  ]);
+  if (unresolved.length > 0) {
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId: options.accountId,
+      workspaceId,
+      subjectId: options.subjectId,
+    });
+    options.signal?.throwIfAborted();
+    if (origins.length > 0) {
+      // Duplicate checks need the workspace's complete own set, not only the
+      // targets; read it only once the workspace is a Personal one.
+      const ownMcp = [
+        ...settings.mcpServers,
+        ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
+      ];
+      enabled.push(
+        ...(
+          await personalWorkspaceExtensionMcpServers(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            ownServers: ownMcp,
+          })
+        ).filter((server) => serverIds.has(server.id)),
+      );
+      options.signal?.throwIfAborted();
+      apiIntegrations.push(
+        ...(
+          await personalWorkspaceExtensionApiIntegrations(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            serverIds: unresolved,
+            takenServerIds: async () => [
+              ...ownMcp.map((server) => server.id),
+              ...enabled.map((server) => server.id),
+              ...(await listInstalledApiIntegrations(db, workspaceId, options.subjectId)).map(
+                (integration) => integration.serverId,
+              ),
+            ],
+          })
+        ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId)),
+      );
+      options.signal?.throwIfAborted();
+    }
+  }
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
       ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
@@ -1351,12 +1628,10 @@ export type CodexAppsDesignationForRun = {
 
 /**
  * What the caller already knows, so the resolver does not read it again: the
- * workspace's organization (skips the workspace lookup) and the organization's
- * Codex cutover disposition (skips the cutover read; a claim has read it).
+ * workspace's organization (skips the workspace lookup).
  */
 export type CodexAppsRunContext = {
   accountId?: string;
-  disposition?: CodexCutoverDisposition | Promise<CodexCutoverDisposition>;
 };
 
 export async function resolveCodexAppsDesignationForRun(
@@ -1364,15 +1639,8 @@ export async function resolveCodexAppsDesignationForRun(
   workspaceId: string,
   known: CodexAppsRunContext = {},
 ): Promise<CodexAppsDesignationForRun | null> {
-  let owner = known.accountId;
-  const accountId = async () =>
-    (owner ??= (await rlsContextForWorkspace(db, workspaceId)).accountId);
-  const disposition =
-    known.disposition !== undefined
-      ? await known.disposition
-      : await readCodexCutoverDisposition(db, await accountId(), workspaceId);
-  if (disposition === "maintenance") return null;
-  const coreAccountId = await accountId();
+  const coreAccountId =
+    known.accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
   const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
     accountId: coreAccountId,
     workspaceId,
@@ -1584,7 +1852,7 @@ async function fetchMcpRegistryPage(
       });
     }
     throw new HTTPException(502, {
-      message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,
+      message: `MCP registry request failed: ${errorMessage(error)}`,
     });
   } finally {
     clearTimeout(timeout);
@@ -2031,13 +2299,19 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
   },
   "microsoft-onedrive": {
     description:
-      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them.",
+      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them. Use SharePoint to find team sites, libraries and lists.",
     category: "productivity",
-    tags: ["onedrive", "sharepoint", "microsoft", "microsoft-365", "office-365"],
+    tags: ["onedrive", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-sharepoint": {
+    description:
+      "Search SharePoint, find team sites, browse document libraries and read files, read or update list items, and look up colleagues in the organization directory, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "productivity",
+    tags: ["sharepoint", "microsoft", "microsoft-365", "office-365"],
   },
   "microsoft-teams": {
     description:
-      "Read the person's teams, channels and chats, and send messages as them, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+      "Read and search the person's teams, channels and chats, send messages as them, and look up colleagues with their role, manager and reports, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
     category: "communication",
     tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
   },

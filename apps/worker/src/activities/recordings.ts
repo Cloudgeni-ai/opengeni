@@ -13,8 +13,11 @@ import {
   recordingSpeakerLabels,
   recordingTextWords,
   RecordingTranscriptionError,
+  transcriptLanguages,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
+  withoutMicrophoneEchoes,
+  withRecorderVoice,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingAlignedWords,
@@ -57,20 +60,24 @@ import {
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
   markRecordingDeleting,
+  memberVoiceprints,
   purgeDeletingRecording,
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
   recordingVoiceChannel,
   setRecordingTrackPrepared,
+  voiceMatchingVoiceprints,
   type Database,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
+  type TrackSpeaker,
+  workspaceMemberDisplayName,
 } from "@opengeni/db";
 import {
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceVoiceInputEnabled,
   DICTATION_RETENTION_MILLISECONDS,
-  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
   WorkspaceVoiceInputSettings,
 } from "@opengeni/contracts";
 import {
@@ -78,6 +85,7 @@ import {
   type Settings,
   type VoiceInputPricing,
 } from "@opengeni/config";
+import { findInferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import {
@@ -98,12 +106,14 @@ import {
   type RecordingPieceFormat,
 } from "./recording-audio";
 import type { ControlActivityServices } from "./types";
+import { startMeetingSummary } from "./meeting-summary";
 import {
   createLocalAligner,
   createLocalDiarizer,
   recordingAlignerConfig,
   recordingSpeakersConfig,
 } from "./recording-speakers";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** One recording's work: a transcript version, or the recording's deletion. */
 export type RecordingWorkInput = {
@@ -132,8 +142,36 @@ export type RecordingTranscriptOutcome = (
   expireAfterMilliseconds?: number;
 };
 
-/** A version lease outlives the longest provider call; retries reclaim it by owner. */
+/**
+ * A version lease outlives a provider call; a retry reclaims it by owner, so
+ * it may be shorter than the activity's 12-hour start-to-close.
+ */
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
+
+const MINUTE_MILLISECONDS = 60_000;
+
+/**
+ * How long one transcript may take from the moment it was asked for, waiting
+ * and every retry included, before it fails as `timed_out`: half an hour plus
+ * three times the audio's length, at most twelve hours. A text-only model's
+ * word alignment runs on the worker's CPU at roughly half the audio's length
+ * per CPU, so an hour-long meeting on a one-CPU worker takes about an hour;
+ * the budget leaves room for that and a lost attempt, and still ends in a
+ * failed state the person can retry rather than "Transcribing" for a day.
+ */
+export function recordingTranscriptBudgetMilliseconds(audioMilliseconds: number): number {
+  return Math.min(
+    12 * 60 * MINUTE_MILLISECONDS,
+    30 * MINUTE_MILLISECONDS + 3 * Math.max(0, audioMilliseconds),
+  );
+}
+
+/**
+ * Names this worker's prepared track files (`track-1.timeline.webm`). Bump it
+ * when the preparation changes what a model or the player hears, so files
+ * made the old way are built again instead of reused.
+ */
+const PREPARED_AUDIO_REVISION = "timeline";
 
 export type RecordingActivityOptions = {
   /** Providers to offer instead of the deployment's own, such as fakes in tests. */
@@ -161,7 +199,20 @@ export type RecordingActivityOptions = {
   dictationSegmenter?: (settings: Settings) => TranscriptionSegmenter;
   /** Credit charges for meetings on deployment-funded models; defaults to voice input billing. */
   billing?: (settings: Settings, db: Database) => TranscriptionBilling;
+  /** Starts the built-in meeting summary once a meeting's transcript is ready. */
+  startMeetingSummary?: typeof startMeetingSummary;
+  /** The clock a transcript's time budget is measured with; defaults to Date.now. */
+  now?: () => number;
+  /** Saves a made transcript; defaults to the database. Tests make it fail. */
+  saveTranscript?: typeof completeRecordingTranscriptVersion;
+  /**
+   * The waits between attempts to save a transcript that is already
+   * charged; defaults to one, two and four seconds.
+   */
+  saveRetryDelaysMilliseconds?: readonly number[];
 };
+
+const SAVE_RETRY_DELAYS_MILLISECONDS = [1_000, 2_000, 4_000] as const;
 
 /** The workspace's own key for the provider, else its organization's. */
 async function loadRecordingProviderApiKey(
@@ -265,10 +316,17 @@ export async function transcribeTrack(input: {
             mimeType: rendered.mimeType,
             fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
           }));
+    // Each piece is its own provider request: a subscription provider sends
+    // one request identity at most once, so pieces must not share it.
+    const scope =
+      input.request.scope && !whole
+        ? { ...input.request.scope, requestId: `${input.request.scope.requestId}:p${index}` }
+        : input.request.scope;
     const result = await measureRecordingStage("transcribe", () =>
       input.provider.transcribe(
         {
           ...input.request,
+          ...(scope ? { scope } : {}),
           audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
         },
         input.credentials,
@@ -479,6 +537,23 @@ export function createRecordingActivities(
     });
     if (!leased) return { outcome: "skipped" };
     const job = leased;
+    // The whole transcript, retries included, has a time budget scaled to the
+    // audio's length. Past it the version fails as timed_out, with a retry,
+    // instead of reading Transcribing for as long as attempts keep starting.
+    const now = options.now ?? Date.now;
+    const deadline =
+      Date.parse(job.version.createdAt) +
+      recordingTranscriptBudgetMilliseconds(job.recording.durationMilliseconds);
+    const budget = new AbortController();
+    const budgetTimer = setTimeout(
+      () => budget.abort(new PermanentRecordingFailure("timed_out")),
+      Math.max(0, Math.min(deadline - now(), 2_147_483_647)),
+    );
+    /** Temporal's cancellation, or the budget running out, whichever comes first. */
+    const jobSignal = (): AbortSignal => {
+      const temporal = cancellation();
+      return temporal ? AbortSignal.any([temporal, budget.signal]) : budget.signal;
+    };
     // A dictation is kept only long enough for its owner to take the text.
     const expiry =
       job.recording.purpose === "dictation"
@@ -528,13 +603,29 @@ export function createRecordingActivities(
     };
     let finished: RecordingTranscriptOutcome | null = null;
     let retryCode = "unknown";
+    // Set once the transcript is being charged and saved. From then on the
+    // budget waits for that to end, so a charged transcript is never failed.
+    let finishing = false;
     try {
-      finished = await withRecordingUsage(usage, transcribeClaimed);
+      finished = await withRecordingUsage(usage, () => {
+        const work = transcribeClaimed();
+        // The losing side of the race must not become an unhandled rejection.
+        work.catch(() => undefined);
+        // A step that doesn't listen for the abort still can't outlast the budget.
+        const outOfTime = new Promise<RecordingTranscriptOutcome>((resolve, reject) => {
+          const timedOut = () =>
+            (finishing ? work : fail("timed_out", budget.signal.reason)).then(resolve, reject);
+          if (budget.signal.aborted) timedOut();
+          else budget.signal.addEventListener("abort", timedOut, { once: true });
+        });
+        return Promise.race([work, outOfTime]);
+      });
       return finished;
     } catch (error) {
       if (error instanceof ApplicationFailure && error.type) retryCode = error.type;
       throw error;
     } finally {
+      clearTimeout(budgetTimer);
       reportRecordingProcessing(
         observability,
         {
@@ -556,8 +647,44 @@ export function createRecordingActivities(
       );
     }
 
+    /**
+     * The built-in meeting summary. A failure is only logged: the meeting
+     * keeps its transcript and shows "No notes yet", and its owner can still
+     * ask an agent to write them.
+     */
+    async function summarize(): Promise<void> {
+      try {
+        // Choosing the model can ask Codex upstream: keep the activity alive.
+        const outcome = await withHeartbeat(async () =>
+          (options.startMeetingSummary ?? startMeetingSummary)(await services(), {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            ownerSubjectId: input.ownerSubjectId,
+          }),
+        );
+        observability.info("meeting summary", {
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          versionId: input.versionId,
+          ...(outcome.started
+            ? { started: true, sessionId: outcome.sessionId, model: outcome.model }
+            : { started: false, reason: outcome.reason }),
+        });
+      } catch (error) {
+        observability.warn("meeting summary not started", {
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          versionId: input.versionId,
+          ...(error instanceof Error ? { error: error.message.slice(0, 1_000) } : {}),
+        });
+      }
+    }
+
     async function transcribeClaimed(): Promise<RecordingTranscriptOutcome> {
       try {
+        if (now() >= deadline) throw new PermanentRecordingFailure("timed_out");
         if (!objectStorage) throw new PermanentRecordingFailure("storage_unavailable");
         if (job.recording.purpose === "dictation") {
           return await transcribeDictation(objectStorage, job);
@@ -586,6 +713,16 @@ export function createRecordingActivities(
         if (!found.spec.capabilities.wordTimestamps && !aligner) {
           throw new PermanentRecordingFailure("model_unavailable");
         }
+        // EU-only: a provider without an EU route never receives the audio,
+        // and the job never moves to another provider.
+        if (
+          !(await deployment.regionAllowed(job.version.providerId, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }))
+        ) {
+          throw new PermanentRecordingFailure("region_restricted");
+        }
         const resolved = await deployment.credentials(job.version.providerId, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -607,7 +744,7 @@ export function createRecordingActivities(
         const plans = planRecordingTracks(job.recording.tracks);
         const capabilities = found.spec.capabilities;
         const requested = job.version.options;
-        const signal = cancellation();
+        const signal = jobSignal();
         const trackWords: RecordingTrackWords[] = [];
         let providerDiarized = false;
         let ourDiarized = false;
@@ -646,15 +783,15 @@ export function createRecordingActivities(
                 track.durationMilliseconds - offsetMilliseconds,
               ),
               signal,
+              store: true,
             }),
           );
           telemetry.preparedBytes += audio.storedBytes;
           heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
           // The model's own diarization is still requested when it has one, so
           // a failure of ours falls back to it.
-          const diarize = plan.diarize && capabilities.diarization;
+          const diarize = capabilities.diarization;
           const useOurs =
-            plan.diarize &&
             ourDiarizer !== null &&
             (requested.diarizer === "ours" || !capabilities.diarization || recognizeVoices);
           const trackAudio = {
@@ -673,7 +810,10 @@ export function createRecordingActivities(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               subjectId: input.ownerSubjectId,
-              requestId: `${input.versionId}:${plan.trackNumber}`,
+              // Each attempt asks afresh: a provider never sends a request
+              // identity twice, so reusing the last attempt's would refuse
+              // every retry after a lost worker or a provider failure.
+              requestId: `${input.versionId}:a${job.attempt}:${plan.trackNumber}`,
             },
           };
           const onPiece = (piece: number) =>
@@ -690,7 +830,7 @@ export function createRecordingActivities(
                     recordingId: input.recordingId,
                     versionId: input.versionId,
                     trackNumber: plan.trackNumber,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: errorMessage(error),
                   });
                   return null;
                 })
@@ -724,14 +864,37 @@ export function createRecordingActivities(
           audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
           trackWords.push({
             trackNumber: plan.trackNumber,
-            fixedLabel: plan.fixedLabel,
+            recorder: plan.recorderLabel ? { label: plan.recorderLabel, speaker: null } : null,
             words: shiftWords(words, offsetMilliseconds),
           });
         }
-        const segments = buildRecordingSegments(trackWords);
+        // With voice recognition on, the person recording's remembered voice
+        // picks theirs among the voices on their own microphone.
+        const ownerVoices =
+          recognizeVoices && trackWords.some((track) => track.recorder)
+            ? await memberVoiceprints(db, {
+                workspaceId: input.workspaceId,
+                memberSubjectId: input.ownerSubjectId,
+              })
+            : [];
+        const resolvedTracks = withoutMicrophoneEchoes(trackWords, job.recording.tracks).map(
+          (track) => {
+            const ours = trackVoices.find((voices) => voices.trackNumber === track.trackNumber);
+            const matched =
+              track.recorder && ours && ownerVoices.length > 0
+                ? voiceMatchingVoiceprints({
+                    voices: ours.result.voices,
+                    model: ours.result.voiceModel,
+                    known: ownerVoices,
+                  })
+                : null;
+            return withRecorderVoice(track, matched);
+          },
+        );
+        const segments = buildRecordingSegments(resolvedTracks);
         const voices: RecordingSpeakerVoice[] = [];
         if (recognizeVoices) {
-          const labels = recordingSpeakerLabels(trackWords);
+          const labels = recordingSpeakerLabels(resolvedTracks);
           for (const { trackNumber, source, result } of trackVoices) {
             for (const voice of result.voices) {
               const label = labels.get(trackNumber)?.get(voice.speaker);
@@ -764,7 +927,33 @@ export function createRecordingActivities(
           segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),
         ).size;
         telemetry.providerCostUsd = costUsdMicros === null ? null : costUsdMicros / 1_000_000;
-        return await measureRecordingStage("finish", async () => {
+        // A microphone beside computer or tab audio is the person recording's.
+        const recorderLabels = plans.flatMap((plan) =>
+          plan.recorderLabel ? [plan.recorderLabel] : [],
+        );
+        const trackSpeakers: TrackSpeaker[] = [];
+        if (recorderLabels.length > 0) {
+          const displayName = await workspaceMemberDisplayName(db, {
+            workspaceId: input.workspaceId,
+            subjectId: input.ownerSubjectId,
+          }).catch((error: unknown) => {
+            // Without a name a person can still say "It's me".
+            observability.warn("couldn't read the recording owner's name", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              error: errorMessage(error),
+            });
+            return null;
+          });
+          for (const label of recorderLabels) {
+            trackSpeakers.push({ label, memberSubjectId: input.ownerSubjectId, displayName });
+          }
+        }
+        const stage = await measureRecordingStage("finish", async () => {
+          // Past the budget the version has failed: work that kept going
+          // regardless is neither charged nor saved.
+          budget.signal.throwIfAborted();
+          finishing = true;
           const creditCostMicros = charge
             ? await settleMeetingCredits({
                 billing: billingFor(settings, db),
@@ -775,11 +964,11 @@ export function createRecordingActivities(
                 attribution: job.creditAttribution ?? { kind: "unknown" },
               })
             : null;
-          const completed = await completeRecordingTranscriptVersion(db, {
+          const completed = await saveCharged({
             ...actor,
             versionId: input.versionId,
             processingOwner: input.processingOwner,
-            languages: [...languages],
+            languages: transcriptLanguages(requested.language, languages),
             diarized: diarization === "provider" || diarization === "ours",
             diarization,
             costUsdMicros,
@@ -793,13 +982,26 @@ export function createRecordingActivities(
               text: segment.text,
               words: segment.words,
             })),
+            trackSpeakers,
             voices,
           });
           telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;
-          return completed ? { outcome: "complete" } : { outcome: "skipped" };
+          return completed ? ({ outcome: "complete" } as const) : ({ outcome: "skipped" } as const);
         });
+        if (stage.outcome === "complete") await summarize();
+        return stage;
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
+        // Out of time: whatever the abort broke, the reason is the budget.
+        // Once it is being charged and saved it is never failed for time.
+        // The save is retried here, so only a database that stays down past
+        // those retries leaves it to Temporal; past the budget that retry
+        // fails it as timed_out. The charge is settled once by its source id.
+        if (budget.signal.aborted && !finishing) return await fail("timed_out", error);
+        // EU-only refused the route before any audio was sent; a retry gets
+        // the same answer, and the job never moves to another provider.
+        if (findInferenceRegionRestrictedError(error))
+          return await fail("region_restricted", error);
         if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
         if (error instanceof RecordingAudioError) {
           if (error.code === "missing_chunk") {
@@ -843,7 +1045,7 @@ export function createRecordingActivities(
       const { service, segmenter } = dictationFor(settings, db);
       const track = claimed.recording.tracks[0];
       const chunks = claimed.chunks.filter((chunk) => chunk.trackNumber === track?.trackNumber);
-      const signal = cancellation();
+      const signal = jobSignal();
       const segments: Array<{
         startMilliseconds: number;
         endMilliseconds: number;
@@ -873,12 +1075,13 @@ export function createRecordingActivities(
             offsetMilliseconds,
             knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
             signal,
+            store: false,
           }),
         );
         telemetry.preparedBytes += audio.storedBytes;
         if (!(await segmenter.available())) throw new PermanentRecordingFailure("unavailable");
         const providerSegmentSeconds = Math.min(
-          TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+          TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
           service.limits().maxDurationSeconds,
         );
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
@@ -910,7 +1113,16 @@ export function createRecordingActivities(
                   audio: piece.bytes,
                   mimeType: piece.mimeType,
                   durationSeconds: piece.durationMilliseconds / 1_000,
-                  requestId: `${input.versionId}:${piece.segmentNumber}`,
+                  // The language the dictation was started in; detected when none.
+                  ...(claimed.version.options.language
+                    ? { language: claimed.version.options.language }
+                    : {}),
+                  // The person's vocabulary, for a model that takes it.
+                  ...(claimed.version.options.keyterms?.length
+                    ? { keyterms: claimed.version.options.keyterms }
+                    : {}),
+                  // A fresh request per attempt; billing stays per piece below.
+                  requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
                   ...(signal ? { signal } : {}),
                   preferredProvider: pinned ?? voiceInput?.preferredProvider,
                   fallbackEnabled: voiceInput?.fallbackEnabled,
@@ -968,7 +1180,7 @@ export function createRecordingActivities(
           ...actor,
           versionId: input.versionId,
           processingOwner: input.processingOwner,
-          languages: [...languages],
+          languages: transcriptLanguages(claimed.version.options.language, languages),
           diarized: false,
           diarization: "none",
           // The list price, like a meeting's; a version charged in credits
@@ -1036,11 +1248,42 @@ export function createRecordingActivities(
         clearInterval(timer);
       }
     }
+
+    /**
+     * Saves a transcript that is already charged. A brief database error
+     * is retried here, since repeating the save is safe (it is guarded by the
+     * version's state and owner): a Temporal retry past the budget would fail
+     * the charged version as timed_out instead.
+     */
+    async function saveCharged(
+      version: Parameters<typeof completeRecordingTranscriptVersion>[1],
+    ): ReturnType<typeof completeRecordingTranscriptVersion> {
+      const save = options.saveTranscript ?? completeRecordingTranscriptVersion;
+      const delays = options.saveRetryDelaysMilliseconds ?? SAVE_RETRY_DELAYS_MILLISECONDS;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await save(db, version);
+        } catch (error) {
+          if (error instanceof RecordingNotFoundError || attempt >= delays.length) throw error;
+          observability.warn("saving a charged meeting transcript failed; trying again", {
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            attempt: attempt + 1,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          });
+          await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+        }
+      }
+    }
   }
 
   /**
    * The track's prepared file: reused when an earlier version made it,
    * otherwise built from the chunks and stored for playback and re-runs.
+   * Without `store` it is only built: a dictation's text is waited for, its
+   * audio is never played back here, and the dictation is deleted soon
+   * after, so a slow or busy object store doesn't hold up the text.
    */
   async function preparedTrackAudio(input: {
     db: Database;
@@ -1059,6 +1302,7 @@ export function createRecordingActivities(
     offsetMilliseconds: number;
     knownDurationMilliseconds: number;
     signal: AbortSignal | undefined;
+    store: boolean;
   }): Promise<{
     bytes: Uint8Array;
     mimeType: string;
@@ -1070,12 +1314,22 @@ export function createRecordingActivities(
     const container = recordingAudioContainer(input.mimeType);
     if (!container) throw new PermanentRecordingFailure("invalid_audio");
     const format = preparedAudioFormat(container);
-    const existing = await getRecordingTrackPreparedObject(input.db, {
-      ...input.actor,
+    // Files made before tracks kept their timeline (holes closed up when a
+    // model decoded them) have the old name and are built again.
+    const objectKey = recordingPreparedTrackObjectKey({
+      workspaceId: input.actor.workspaceId,
       recordingId: input.recordingId,
       trackNumber: input.trackNumber,
+      extension: `${PREPARED_AUDIO_REVISION}.${format.extension}`,
     });
-    if (existing) {
+    const existing = input.store
+      ? await getRecordingTrackPreparedObject(input.db, {
+          ...input.actor,
+          recordingId: input.recordingId,
+          trackNumber: input.trackNumber,
+        })
+      : null;
+    if (existing?.objectKey === objectKey) {
       const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
       if (stored && stored.bytes.byteLength === existing.bytes) {
         return {
@@ -1097,12 +1351,7 @@ export function createRecordingActivities(
       readChunk: async (chunk) =>
         (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
     });
-    const objectKey = recordingPreparedTrackObjectKey({
-      workspaceId: input.actor.workspaceId,
-      recordingId: input.recordingId,
-      trackNumber: input.trackNumber,
-      extension: prepared.extension,
-    });
+    if (!input.store) return { ...prepared, storedBytes: 0 };
     await input.objectStorage.putObject({
       key: objectKey,
       contentType: prepared.mimeType,
@@ -1123,6 +1372,10 @@ export function createRecordingActivities(
       if (error instanceof RecordingNotFoundError)
         await input.objectStorage.deleteObject(objectKey);
       throw error;
+    }
+    // The file this one replaces, made under an older name.
+    if (existing && existing.objectKey !== objectKey) {
+      await input.objectStorage.deleteObject(existing.objectKey).catch(() => undefined);
     }
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }

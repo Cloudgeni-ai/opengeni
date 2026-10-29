@@ -1071,6 +1071,7 @@ describe("productLabelForModelId", () => {
     expect(productLabelForModelId("gpt-5.6-terra")).toBe("GPT-5.6 Terra");
     expect(productLabelForModelId("gpt-6-astra")).toBe("GPT-6 Astra");
     expect(productLabelForModelId("codex/gpt-6-astra")).toBe("GPT-6 Astra");
+    expect(productLabelForModelId("codex/gpt-6.1-terra")).toBe("GPT-6.1 Terra");
     expect(productLabelForModelId("gpt-5.4-mini")).toBe("GPT-5.4 Mini");
   });
 });
@@ -1084,6 +1085,8 @@ describe("productShortLabelForModelId", () => {
     expect(productShortLabelForModelId("gpt-6-sol")).toBe("6 Sol");
     expect(productShortLabelForModelId("gpt-6-luna")).toBe("6 Luna");
     expect(productShortLabelForModelId("codex/gpt-6-astra")).toBe("6 Astra");
+    expect(productShortLabelForModelId("codex/gpt-6.1-sol")).toBe("6.1 Sol");
+    expect(productShortLabelForModelId("gpt-6.1-terra")).toBe("6.1 Terra");
     expect(productShortLabelForModelId("grok-4.7")).toBe("4.7");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });
@@ -1616,6 +1619,19 @@ describe("normalized model definitions", () => {
     }
   });
 
+  test("preserves optional hosted-search context and binds it to execution identity", () => {
+    const baseline = definitionFor();
+    expect(baseline).not.toHaveProperty("hostedWebSearchContextSize");
+    for (const size of ["low", "medium", "high"] as const) {
+      const model = definitionFor({ modelOverrides: { hostedWebSearchContextSize: size } });
+      expect(model.hostedWebSearchContextSize).toBe(size);
+      expect(model.definitionVersion).not.toBe(baseline.definitionVersion);
+    }
+    expect(() =>
+      definitionFor({ modelOverrides: { hostedWebSearchContextSize: "tiny" } }),
+    ).toThrow();
+  });
+
   const policyInput = {
     modelId: "acme/model",
     requestedModelId: null,
@@ -1623,6 +1639,19 @@ describe("normalized model definitions", () => {
     reasoningEffort: "medium",
     reasoningSource: "continuation",
   } as const;
+
+  test("a context-size change never silently rewrites an accepted turn's search tool", () => {
+    const accepted = resolveTurnExecutionPolicyV1(settingsFor(), policyInput);
+    const changed = settingsFor({ modelOverrides: { hostedWebSearchContextSize: "low" } });
+    expect(() => assertTurnExecutionPolicyMatchesConfigV1(changed, accepted, policyInput)).toThrow(
+      TurnExecutionPolicyDefinitionMismatchError,
+    );
+    const next = resolveTurnExecutionPolicyV1(changed, policyInput);
+    expect(next.definitionVersion).not.toBe(accepted.definitionVersion);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(changed, next, policyInput),
+    ).not.toThrow();
+  });
 
   test("keeps the automatic-compaction default out of the executable identity", () => {
     // Workspace and organization compaction preferences already replace this

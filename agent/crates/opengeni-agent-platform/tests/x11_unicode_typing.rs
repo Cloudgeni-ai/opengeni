@@ -1,7 +1,7 @@
 //! Live X11 proof that desktop typing reaches a real text widget for text the
 //! keyboard layout cannot type (design BR-5): `ÆØÅ–π密` and a non-Latin
-//! password typed into a GTK entry through both XTEST delivery paths, with the
-//! temporary spare-keycode bindings restored afterwards.
+//! password typed into a GTK entry through both XTEST delivery paths. The
+//! spare-keycode bindings last for the session and are restored when it ends.
 //!
 //! # Why it is environment-gated
 //!
@@ -190,7 +190,7 @@ Gtk.main()
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn non_latin_text_reaches_a_gtk_entry_and_the_keymap_is_restored() {
+    async fn non_latin_text_reaches_a_gtk_entry_and_the_keymap_is_restored_when_the_session_ends() {
         if std::env::var("OPENGENI_X11_TYPING_E2E").as_deref() != Ok("1") {
             eprintln!("SKIP: set OPENGENI_X11_TYPING_E2E=1 and run on a private Xvfb");
             return;
@@ -204,7 +204,11 @@ Gtk.main()
         // Whole-desktop XTEST delivery (connected-machine and viewer input).
         desktop.inject(&text_input(TEXT)).await.expect("type text");
         assert_eq!(fixture.text_eventually(TEXT), TEXT);
-        assert_eq!(core_keymap(&display), keymap_before, "keymap restored");
+        assert_ne!(
+            core_keymap(&display),
+            keymap_before,
+            "glyphs stay bound for the session"
+        );
         eprintln!("desktop path typed {TEXT:?}");
 
         // Exact-window guarded delivery (managed desktops through the native
@@ -220,7 +224,6 @@ Gtk.main()
             .map_err(|failure| failure.error)
             .expect("type password into the exact window");
         assert_eq!(fixture.text_eventually(PASSWORD), PASSWORD);
-        assert_eq!(core_keymap(&display), keymap_before, "keymap restored");
         eprintln!("exact-window path typed {PASSWORD:?}");
 
         // Named chords keep their exact-window route proof: select all, then
@@ -238,6 +241,7 @@ Gtk.main()
         }
         assert_eq!(fixture.text_eventually(TEXT), TEXT);
 
+        let keymap_bound = core_keymap(&display);
         // More distinct glyphs than spare keycodes: refused before any key,
         // with the keymap and the entry untouched (the browserd driver then
         // pastes the text).
@@ -248,7 +252,7 @@ Gtk.main()
             "{refusal:?}"
         );
         assert_eq!(fixture.command("dump"), TEXT);
-        assert_eq!(core_keymap(&display), keymap_before, "keymap untouched");
+        assert_eq!(core_keymap(&display), keymap_bound, "keymap untouched");
 
         // Leave the acceptance text visible for the screenshot.
         assert_eq!(fixture.command("clear"), "");
@@ -263,6 +267,10 @@ Gtk.main()
             std::fs::write(&path, frame.png).expect("write screenshot");
             eprintln!("screenshot: {}", path.display());
         }
+        // A refused batch changed nothing; typing reused the session's bindings.
+        assert_eq!(core_keymap(&display), keymap_bound, "keymap untouched");
+        drop(window);
+        drop(desktop);
         assert_eq!(core_keymap(&display), keymap_before, "keymap restored");
     }
 }

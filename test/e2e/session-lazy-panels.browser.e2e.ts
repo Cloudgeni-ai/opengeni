@@ -281,7 +281,7 @@ describe("production session conditional loading", () => {
             });
             await choice.focus();
             await page.keyboard.press("Space");
-            await page.getByRole("button", { name: "Send answers", exact: true }).focus();
+            await page.getByRole("button", { name: "Send answer", exact: true }).focus();
             await page.keyboard.press("Enter");
             await page.waitForFunction(() => !document.querySelector("[data-human-input-surface]"));
             expect(state.answers).toEqual([

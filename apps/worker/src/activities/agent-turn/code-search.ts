@@ -1,5 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { decisionModelConfiguration, type Settings } from "@opengeni/config";
+import { decisionModelConfiguration, decisionModelTarget, type Settings } from "@opengeni/config";
 import { DecisionUnavailableError, DecisionRequestError } from "@opengeni/decisions";
 import {
   CODE_SEARCH_TOOL_DESCRIPTION,
@@ -26,6 +26,8 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observability-metrics";
 import { configuredDecisionModel, type WorkerDecisionSettings } from "./decision-model";
+import { sideFeatureRouteRunnable } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * One breaker per worker process. Repeated decision-provider outages (including an exhausted
@@ -251,7 +253,7 @@ export function createCodeSearchAttemptToolDefinition(input: {
             })
             .catch((error: unknown) => {
               input.observability.warn("code_search usage record failed", {
-                error: error instanceof Error ? error.message : String(error),
+                error: errorMessage(error),
               });
             });
         }
@@ -288,6 +290,8 @@ export function codeSearchToolDefinitions(input: {
   const config = decisionModelConfiguration(input.settings, true);
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
   if (!input.enabled || !config || input.backend === "none") return [];
+  // EU-only inference: no code_search without an EU decision model.
+  if (!sideFeatureRouteRunnable(input.settings, decisionModelTarget(config))) return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }

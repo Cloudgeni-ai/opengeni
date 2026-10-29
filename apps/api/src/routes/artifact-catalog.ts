@@ -33,6 +33,7 @@ import {
   getSessionAuthorityProjections,
   isWorkspaceArtifactVisible,
   listArtifactCatalogCandidates,
+  listSessionTreeIds,
   nestedPostgresSqlState,
   updateArtifactPin,
   withSessionRlsActorContext,
@@ -178,6 +179,8 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
       message: "Invalid artifact catalog query",
     });
     const query = parsed;
+    if (query.includeSubSessions && !query.sourceSessionId)
+      throw new HTTPException(422, { message: "includeSubSessions needs a sourceSessionId" });
     const artifactsAllowed = hasPermission(grant.permissions, "artifacts:read");
     const filesAllowed = hasPermission(grant.permissions, "files:read");
     if (!artifactsAllowed && !filesAllowed)
@@ -258,6 +261,17 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
     return withSessionRlsActorContext(actor, async () => {
       if (query.sourceSessionId && !(await canReadSession(query.sourceSessionId)))
         throw new HTTPException(404, { message: "Session not found" });
+      // A chat and its sub-sessions in one read, so a client never lists the
+      // catalog once per sub-session. Only sessions this caller may read count.
+      let sourceSessionIds: string[] | undefined;
+      if (query.sourceSessionId && query.includeSubSessions) {
+        const tree = (await listSessionTreeIds(deps.db, workspaceId, query.sourceSessionId)) ?? [
+          query.sourceSessionId,
+        ];
+        prepareSourceDecisions(tree);
+        const readable = await Promise.all(tree.map(canReadSession));
+        sourceSessionIds = tree.filter((_id, index) => readable[index]);
+      }
       const secret = resolveFirstPartyDelegationSecret(deps.settings);
       if (!secret)
         throw new HTTPException(503, { message: "Artifact catalog cursor signing is unavailable" });
@@ -298,6 +312,7 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
             siteViewer,
             snapshotAt,
             ...(after ? { after } : {}),
+            ...(sourceSessionIds ? { sourceSessionIds } : {}),
             limit: CANDIDATE_BATCH,
           },
         );

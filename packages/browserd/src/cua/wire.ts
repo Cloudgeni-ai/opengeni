@@ -67,6 +67,9 @@ export const WindowState = z.object({
   pid: id,
   window_id: id,
   snapshot_id: z.string().max(256).optional(),
+  // macOS: the app is Chromium-based and takes AXPress on any page node,
+  // though it lists the action on none of them.
+  web_content_takes_press: z.boolean().optional(),
   capture_id: z.string().max(256).optional(),
   window_bounds: Rect.optional(),
   elements: z.array(Element).max(2000).default([]),
@@ -113,13 +116,27 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // Background keys refused before any was sent: another window of the app
   // (a sheet, a dialog) has the keyboard focus.
   window_not_key: "invalid_action",
+  // Background keys refused before any was sent: the app named no focused
+  // window, so where they would go is unknown.
+  key_focus_unknown: "invalid_action",
   // Background input refused before anything was sent: the addressed element
   // could not be proven to be in the addressed window.
   element_outside_target_window: "invalid_action",
+  // Input refused before anything was sent: the window is no longer one of
+  // its app's windows on screen (an earlier action closed or hid it, or it is
+  // on another Space).
+  off_space_or_ax_unresolved: "invalid_action",
+  // A step's lookup stopped before anything was sent: the window it names is
+  // closed or no longer on screen, so its element will never appear.
+  window_not_on_screen: "invalid_action",
   // Pointer or key input refused before anything was sent: the element is in
   // a bubble or popover attached to the window, which takes accessibility
   // actions only.
   element_in_attached_window: "invalid_action",
+  // Pointer or key input refused before anything was sent: the element is an
+  // item of a menu the app has open over the window, which takes
+  // accessibility actions only.
+  element_in_open_menu: "invalid_action",
   // A value write the control did not apply: it holds what it held before
   // (macOS set_value, effect not_applied).
   write_not_applied: "driver_failed",
@@ -130,6 +147,9 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // A web <select> whose menu would bring the browser in front; nothing was
   // sent, and set_value chooses its options.
   select_menu_would_raise_window: "unsupported",
+  // An option of a dropdown with no text to choose it by, which a press in
+  // the background could open the menu with; nothing was sent.
+  popup_option_without_text: "unsupported",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
@@ -164,6 +184,9 @@ const RunStepsReport = z.object({
         hint: z.unknown().optional(),
         /** The window-change report lines of the step's action. */
         window_changes: z.array(z.string().max(65_536)).max(16).optional(),
+        /** What the step's tool could confirm about its effect: "unverifiable"
+         * is input it sent with nothing confirming the app took it. */
+        effect: z.string().max(64).optional(),
         /** The element the step's lookup found. `stand_in` is set when no
          * element had the role named and the one element of a role pressed
          * alike with that exact name was used: its own role and label. */
@@ -186,7 +209,14 @@ export type RunStepsStandIn = { step: number; role: string; name: string };
 
 /** How a CUA run_steps batch ended. */
 export type RunStepsOutcome =
-  | { kind: "completed"; windowChanges: string; standIns: RunStepsStandIn[] }
+  | {
+      kind: "completed";
+      windowChanges: string;
+      standIns: RunStepsStandIn[];
+      /** The steps, by index in the call, whose input CUA sent with nothing
+       * confirming the app took it. */
+      unconfirmed: number[];
+    }
   | {
       kind: "stopped";
       /** The actions that completed before the one the batch stopped at. */
@@ -252,6 +282,9 @@ export async function runSteps(
       kind: "completed",
       windowChanges: (report.steps.at(-1)?.window_changes ?? []).join("\n"),
       standIns: standIns(total),
+      unconfirmed: report.steps.flatMap((step, index) =>
+        step.effect === "unverifiable" ? [index] : [],
+      ),
     };
   }
   const index = report.failed_step;
@@ -317,6 +350,15 @@ function cuaFailureReason(result: ToolResult, data: Record<string, unknown>): st
  * `"caller-settles"` is a mutation whose tool reports success in its own
  * result (launch_app's pid) rather than an action disposition: failures are
  * still ambiguous, and the caller decides whether a result proves completion. */
+/** Whether CUA delivered a call without confirming its effect: raw input,
+ * which no app acknowledges. */
+export function deliveredUnconfirmed(call: {
+  data: Record<string, unknown>;
+  result: ToolResult;
+}): boolean {
+  return (call.data.effect ?? call.result.action?.effect) === "unverifiable";
+}
+
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
   name: string,

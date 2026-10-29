@@ -13,9 +13,12 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
+  BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -116,6 +119,7 @@ import {
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
+import { isRecord } from "@opengeni/contracts/values";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
@@ -225,6 +229,8 @@ export type BrowserControlFrame = {
   mediaType: "image/jpeg" | "image/png";
   metadataHeader: string;
   metadata: BrowserFrameMetadata;
+  /** Set when a full-page capture could not keep every scrollbar's space. */
+  inexactScrollbars?: true;
 };
 
 export type BrowserControlScreenshotOptions = {
@@ -293,11 +299,16 @@ export type PlacementBrowserSessionReference = {
 };
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
-  observation: BrowserObservationValue;
+  /** Null when a session continued in the person's own browser with none of
+   * its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservationValue | null;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
   notice?: string;
+  /** How a headed managed browser shows on its machine as launched: in a
+   * native window, or offscreen with none. An older controller omits it. */
+  display?: "window" | "offscreen";
 };
 
 export type PlacementComputerSessionReference = {
@@ -794,7 +805,7 @@ export class BrowserControlClient {
     try {
       data = await this.requestJson({
         method: "POST",
-        path: "/v1/browser-sessions",
+        path: `/v1/browser-sessions?${BROWSER_SESSION_NO_OBSERVATION_PARAMETER}=1`,
         token: this.adminToken,
         body: {
           ...reference,
@@ -833,9 +844,10 @@ export class BrowserControlClient {
     }
     return {
       ...returnedReference,
-      observation: BrowserObservation.parse(data.observation),
+      observation: data.observation === null ? null : BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
+      ...creationDisplay(data.display),
     };
   }
 
@@ -909,6 +921,40 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
     }
+  }
+
+  /**
+   * Tells the controller that the agent session using this browser is still
+   * working or deliberately waiting, so its idle release keeps the browser
+   * running at least until `until` (capped by the controller; a hold only
+   * extends). Advisory: it never launches, recovers or counts as a use of the
+   * browser. Returns whether the controller holds the browser; false when it
+   * no longer runs this exact generation or predates holds (an older agent or
+   * controller image, which keeps its plain idle release).
+   */
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+    const binding = parseReference(reference);
+    let data: unknown;
+    try {
+      data = await this.requestJson({
+        method: "POST",
+        path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
+        token: this.adminToken,
+        body: {
+          controllerGeneration: binding.controllerGeneration,
+          until: until.toISOString(),
+        },
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return false;
+      throw error;
+    }
+    if (!isRecord(data) || typeof data.held !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed wait hold receipt",
+      );
+    }
+    return data.held;
   }
 
   async endComputerSession(
@@ -2159,11 +2205,16 @@ export class BrowserControlSessionClient {
     return response;
   }
 
-  async selectTarget(targetId: string): Promise<BrowserObservationValue> {
+  /** notices: the caller is the agent and receives (and so uses up) any
+   * notice about the tab; see BROWSER_OBSERVATION_NOTICES_PARAMETER. */
+  async selectTarget(
+    targetId: string,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.targetPath(targetId, "select"),
+        path: withObservationNotices(this.targetPath(targetId, "select"), options),
         token: this.controlToken,
         body: {},
       }),
@@ -2182,11 +2233,14 @@ export class BrowserControlSessionClient {
     return data.map((target) => BrowserTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<BrowserObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
-        path: this.targetPath(targetId, "observation"),
+        path: withObservationNotices(this.targetPath(targetId, "observation"), options),
         token: this.viewToken,
       }),
     );
@@ -2312,7 +2366,10 @@ export class BrowserControlSessionClient {
     );
   }
 
-  async action(command: BrowserActionCommandValue): Promise<BrowserActionReceiptValue> {
+  async action(
+    command: BrowserActionCommandValue,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserActionReceiptValue> {
     const parsed = BrowserActionCommand.parse(command);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
@@ -2328,9 +2385,12 @@ export class BrowserControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate resolved targets or notes ignore these
-            // parameters.
-            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+            // Controllers that predate resolved targets, notes or notices
+            // ignore these parameters.
+            path: withObservationNotices(
+              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+              options,
+            ),
             token: this.controlToken,
             body: parsed,
             timeoutMs,
@@ -2405,7 +2465,7 @@ export class BrowserControlSessionClient {
     return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("passkeys/sync"),
+        path: this.path("passkeys/sync?backupFlags=1"),
         token: this.controlToken,
         body: parsed,
       }),
@@ -2590,8 +2650,9 @@ export class ComputerControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate role stand-ins ignore this parameter.
-            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
+            // Controllers that predate role stand-ins or unconfirmed input
+            // ignore these parameters.
+            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1&${COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER}=1`,
             token: this.controlToken,
             body: parsed,
             timeoutMs,
@@ -2899,7 +2960,15 @@ function browserControlFrame(
   ) {
     throw new BrowserControlProtocolError("browser frame evidence does not match its request");
   }
-  return { data, mediaType, metadataHeader, metadata };
+  return {
+    data,
+    mediaType,
+    metadataHeader,
+    metadata,
+    ...(get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+      ? { inexactScrollbars: true as const }
+      : {}),
+  };
 }
 
 function computerControlFrame(
@@ -3161,6 +3230,12 @@ function creationNotice(value: unknown): { notice?: string } {
   if (typeof value !== "string") return {};
   const notice = value.replace(/\s+/gu, " ").trim();
   return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
+}
+
+/** The launched display is a report, not authority: anything but a known
+ * value is dropped, as from an older controller that sends none. */
+function creationDisplay(value: unknown): { display?: "window" | "offscreen" } {
+  return value === "window" || value === "offscreen" ? { display: value } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {
@@ -4169,6 +4244,15 @@ function requireBoundedText(
   return value;
 }
 
+/** Whether a request returns BrowserObservation.notice to its caller, the
+ * agent; other callers neither receive nor use one up. */
+export type BrowserObservationNoticeRequest = { notices?: boolean };
+
+function withObservationNotices(path: string, options: BrowserObservationNoticeRequest): string {
+  if (!options.notices) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}${BROWSER_OBSERVATION_NOTICES_PARAMETER}=1`;
+}
+
 function boundedUrl(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value) > 16_384) {
     throw new BrowserControlProtocolError("browser URL is invalid");
@@ -4311,8 +4395,4 @@ function parseHttpStatus(value: string): number {
     throw new BrowserControlProtocolError("HTTP status is invalid");
   }
   return status;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

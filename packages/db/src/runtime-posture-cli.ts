@@ -2,6 +2,7 @@ import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
   assertRuntimeDatabasePosture,
   createDb,
+  databasePasswordFileOptions,
   FORCE_RLS_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
@@ -18,6 +19,7 @@ const client = createDb(settings.databaseUrl, {
   ...(searchPath ? { searchPath } : {}),
   rlsStrategy: settings.rlsStrategy,
   max: 1,
+  ...databasePasswordFileOptions(settings),
 });
 
 try {

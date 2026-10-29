@@ -42,6 +42,13 @@
       "sourceUrl": "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/outlook_48x1.svg",
       "sourceLicense": "Microsoft Outlook mark; nominative integration use",
       "modifications": "None; byte-identical copy of the file previously hotlinked."
+    },
+    {
+      "integration": "sharepoint",
+      "file": "sharepoint.svg",
+      "sourceUrl": "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/sharepoint_48x1.svg",
+      "sourceLicense": "Microsoft SharePoint mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the vendor file."
     }
   ]
 }

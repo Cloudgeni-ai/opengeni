@@ -4,6 +4,7 @@ import {
   telemetryScheduler,
   type TelemetryScheduler,
 } from "./telemetry-scheduler";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type MaintenanceStartResult = "started" | "already_running";
 
@@ -109,7 +110,7 @@ export function startMaintenanceCadences(input: {
       probeFailed = true;
       input.observability.warn("maintenance cadence work check failed; starting the job anyway", {
         job: cadence.job,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     try {
@@ -118,7 +119,7 @@ export function startMaintenanceCadences(input: {
     } catch (error) {
       input.observability.warn("maintenance cadence could not start its workflow", {
         job: cadence.job,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return record(cadence.job, "start_failed");
     }

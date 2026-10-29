@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   managedAuthRequiresEmailVerification,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthSignupEmailNotAllowed,
   managedAuthSocialSignupOptions,
   managedAuthUserCreateAdmission,
   managedAuthUserCreateOverride,
@@ -72,6 +73,21 @@ describe("managed auth email verification posture", () => {
         "credential",
       ),
     ).toBe(false);
+  });
+
+  test("only passkey sign-up may create an account with a reserved .invalid address", () => {
+    const settings = { environment: "production", managedAuthRequireEmailVerification: false };
+    const placeholder = { id: "user-1", email: "user-1@passkey.invalid", emailVerified: true };
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "credential")).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        settings,
+        { ...placeholder, email: "someone@Example.INVALID" },
+        "credential",
+      ),
+    ).toBe(false);
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "google")).toBe(false);
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "passkey")).not.toBe(false);
   });
 
   test("rejects an unverified social identity before creating its managed user", () => {
@@ -271,6 +287,21 @@ describe("managed user allowlist", () => {
       ).toBeUndefined();
     });
   }
+
+  test("names an unlisted address as the reason, but not while sign-ups are paused", () => {
+    const settings = { allowedUserEmails: ["staff@example.com"] };
+    expect(managedAuthSignupEmailNotAllowed(settings, "outsider@example.com")).toBe(true);
+    expect(managedAuthSignupEmailNotAllowed(settings, " STAFF@example.com")).toBe(false);
+    expect(
+      managedAuthSignupEmailNotAllowed({ allowedUserEmails: undefined }, "anyone@x.test"),
+    ).toBe(false);
+    expect(
+      managedAuthSignupEmailNotAllowed(
+        { ...settings, managedAuthNewSignupsEnabled: false },
+        "outsider@example.com",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("paused new account sign-ups", () => {

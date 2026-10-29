@@ -1,8 +1,8 @@
 //! Sandbox images built from OCI images (ADR 19) under the host agent and
 //! real Firecracker: `compute-guest` as PID 1, envd answering through the
 //! gateway port, each sandbox's own environment and token across sleep,
-//! templates and reboots, the image's command under its user, and a clean
-//! shutdown.
+//! templates and reboots, the image's command under its user, a clean
+//! shutdown, and sandboxes that borrow memory on a host short of it.
 //!
 //! Runs as root when `COMPUTE_TEST_LAB` names a lab directory (see the lab
 //! test) and `COMPUTE_TEST_GUEST` the directory `guest/build.sh` made. The
@@ -32,6 +32,7 @@ use compute_host::protocol::{
 use tokio::time::{Instant, sleep};
 
 mod envd;
+mod memory;
 #[path = "../support/required.rs"]
 mod required;
 #[path = "../support/state.rs"]
@@ -160,7 +161,11 @@ impl Host {
         state::private_dir(&root);
         let socket = root.join("agent.sock");
         let log = std::fs::File::create(root.join("agent.log")).unwrap();
+        // A test that needs one profile names it in `extra`; the others
+        // run on the one the gate picked.
         let profile = std::env::var("COMPUTE_TEST_PROFILE")
+            .ok()
+            .filter(|_| !extra.contains(&"--memory-profile"))
             .map(|name| vec!["--memory-profile".to_owned(), name])
             .unwrap_or_default();
         let child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
@@ -323,8 +328,24 @@ impl Drop for Host {
                 );
             }
             if let Ok(vms) = std::fs::read_dir(CGROUP) {
-                for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
-                    let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
+                let vms: Vec<PathBuf> = vms
+                    .flatten()
+                    .map(|vm| vm.path())
+                    .filter(|vm| vm.is_dir())
+                    .collect();
+                for vm in &vms {
+                    let _ = std::fs::write(vm.join("cgroup.kill"), "1");
+                }
+                // The next test's VMs take the same names and taps, which
+                // are busy until these processes are gone.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while std::time::Instant::now() < deadline
+                    && vms.iter().any(|vm| {
+                        std::fs::read_to_string(vm.join("cgroup.events"))
+                            .is_ok_and(|events| events.contains("populated 1"))
+                    })
+                {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
             }
             let _ = std::fs::remove_dir_all(&self.root);
@@ -589,6 +610,147 @@ async fn templates_give_each_sandbox_its_own_environment_and_token() {
     host.finish().await;
 }
 
+/// Bytes the host's file `disk` takes on its file system.
+fn allocated(disk: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(disk).unwrap().blocks() * 512
+}
+
+/// A sandbox may ask for a longer disk than its image's, and its guest's
+/// root file system takes all of it: booted cold, it grows as it boots;
+/// restored from a template, it grows once its VM is told the disk's new
+/// length, before it first runs. It keeps the size across a save. The
+/// disk's new end takes host disk only as the guest writes there: growing
+/// leaves the new inode tables unwritten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_that_asks_for_a_longer_disk_has_all_of_it() {
+    const ASKED_MIB: u32 = 8192;
+    let Some((lab, guest)) = setup() else {
+        return;
+    };
+    let image = image(&lab, &guest, ALPINE);
+    let host = Host::start(
+        &lab,
+        "grow",
+        &image,
+        &["--template-ready-port", "54", "--template", "1x512"],
+    )
+    .await;
+    let config = SandboxConfig::new(1, 512, SleepConfig::default()).with_disk_mib(ASKED_MIB);
+    // Created at once, before the template is ready, one boots cold.
+    let (cold, warm) = (id(1), id(2));
+    host.create_as(cold, config.clone()).await.unwrap();
+    host.wait_until("a ready template", |status| {
+        status
+            .templates
+            .iter()
+            .any(|template| template.state == TemplateState::Ready)
+    })
+    .await;
+    host.create_as(warm, config).await.unwrap();
+    let mut results = serde_json::Map::new();
+    for (n, sandbox) in [cold, warm].into_iter().enumerate() {
+        let token = format!("token-grow-{n}");
+        init(&host.client, sandbox, &[], &token).await;
+        let root = Envd::new(&host.client, sandbox)
+            .with_token(&token)
+            .with_user("root");
+        let size = root_size_reaching(&root, ASKED_MIB * 9 / 10).await;
+        let disk = host
+            .root
+            .join("state/vm/firecracker")
+            .join(sandbox.to_string())
+            .join("root/disk.ext4");
+        assert_eq!(
+            std::fs::metadata(&disk).unwrap().len(),
+            u64::from(ASKED_MIB) << 20
+        );
+        let took = allocated(&disk).saturating_sub(allocated(&image));
+        eprintln!(
+            "grow: sandbox {n} sees {size} MiB, its disk took {} MiB more than its image",
+            took >> 20
+        );
+        assert!(took < 64 << 20, "growing took {} MiB", took >> 20);
+        results.insert(
+            format!("sandbox-{n}"),
+            serde_json::json!({ "root_mib": size, "host_mib_beyond_image": took >> 20 }),
+        );
+    }
+    assert_eq!(
+        Host::steps(&host.status().await, "boot"),
+        1,
+        "one cold, one from the template"
+    );
+
+    host.sleep_to(warm, LevelName::Saved).await;
+    let root = Envd::new(&host.client, warm)
+        .with_token("token-grow-1")
+        .with_user("root");
+    root_size_reaching(&root, ASKED_MIB * 9 / 10).await;
+    save_results("guest-disk-size", &serde_json::Value::Object(results));
+    host.finish().await;
+}
+
+/// The size of the root file system `root`'s sandbox sees, in MiB, once
+/// it is at least `mib`; fails if it does not get there in 30 s.
+async fn root_size_reaching(root: &Envd<'_>, mib: u32) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let df = root.run("df -Pk / | tail -n 1").await.unwrap().stdout;
+        let kib: u32 = df
+            .split_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse().ok())
+            .unwrap_or_else(|| panic!("df said {df:?}"));
+        if kib / 1024 >= mib {
+            return kib / 1024;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "its root file system stayed at {} MiB",
+            kib / 1024
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// What a sandbox's files free comes back to the host when it sleeps,
+/// with nobody asking for it: the guest trims its disk before the pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sleeping_sandbox_gives_back_what_its_files_freed() {
+    const PROBE: u64 = 64 << 20;
+    let Some((lab, guest)) = setup() else {
+        return;
+    };
+    let image = image(&lab, &guest, ALPINE);
+    let host = Host::start(&lab, "trim", &image, &[]).await;
+    let sandbox = id(0);
+    host.create(sandbox, 1, 512).await;
+    init(&host.client, sandbox, &[], "token-trim").await;
+    let root = Envd::new(&host.client, sandbox)
+        .with_token("token-trim")
+        .with_user("root");
+    let disk = host.vm_dir().join("root/disk.ext4");
+    root.run("dd if=/dev/urandom of=/root/probe bs=1M count=64 2>/dev/null && sync")
+        .await
+        .unwrap();
+    let written = allocated(&disk);
+    root.run("rm /root/probe").await.unwrap();
+    host.sleep_to(sandbox, LevelName::Paused).await;
+    let asleep = allocated(&disk);
+    eprintln!(
+        "trim: the disk took {} MiB with a 64 MiB file, {} MiB asleep once it was deleted",
+        written >> 20,
+        asleep >> 20
+    );
+    assert!(
+        written.saturating_sub(asleep) >= PROBE * 3 / 4,
+        "the pause gave back only {} of 64 MiB",
+        written.saturating_sub(asleep) >> 20
+    );
+    host.finish().await;
+}
+
 /// A copy of the alpine image whose config is `config`, as
 /// `<name>.ext4`, and the config's file beside it.
 fn command_image(lab: &Path, guest: &Path, name: &str, config: &serde_json::Value) -> PathBuf {
@@ -625,6 +787,27 @@ async fn exists(envd: &Envd<'_>, path: &str) -> bool {
         .await
         .unwrap();
     ran.stdout.trim() == "yes"
+}
+
+/// Waits for the guest in the VM directory `vm`, told to stop, to shut
+/// down cleanly and its VM to end.
+async fn ended_cleanly(vm: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let console = vm.join("console.log");
+    loop {
+        let log = std::fs::read_to_string(&console).unwrap_or_default();
+        if log.contains("reboot: Restarting system") {
+            assert!(log.contains("compute-guest: shutting down"), "{log}");
+            assert!(!log.contains("Kernel panic"), "{log}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the guest never ended: {log}");
+        sleep(Duration::from_millis(100)).await;
+    }
+    while firecrackers() > 0 {
+        assert!(Instant::now() < deadline, "the VM never ended");
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The image's command runs once the sandbox has its own init, as `docker
@@ -687,23 +870,8 @@ async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
 
     // Told to stop, as a power button or the host would.
     let _ = root.run("rm /tmp/command-ran; kill -TERM 1").await;
-    let deadline = Instant::now() + Duration::from_secs(60);
     let vm = host.vm_dir();
-    let console = vm.join("console.log");
-    loop {
-        let log = std::fs::read_to_string(&console).unwrap_or_default();
-        if log.contains("reboot: Restarting system") {
-            assert!(log.contains("compute-guest: shutting down"), "{log}");
-            assert!(!log.contains("Kernel panic"), "{log}");
-            break;
-        }
-        assert!(Instant::now() < deadline, "the guest never ended: {log}");
-        sleep(Duration::from_millis(100)).await;
-    }
-    while firecrackers() > 0 {
-        assert!(Instant::now() < deadline, "the VM never ended");
-        sleep(Duration::from_millis(100)).await;
-    }
+    ended_cleanly(&vm).await;
     let checked = Command::new("e2fsck")
         .args(["-f", "-n"])
         .arg(vm.join("root/disk.ext4"))
@@ -728,6 +896,56 @@ async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
     }
     host.finish().await;
     let _ = std::fs::remove_file(&image);
+}
+
+/// A sandbox may replace `/sbin/init`, as installing systemd's package
+/// does, and its disk still boots as the same sandbox: the host names the
+/// guest's init, so the image's never runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_whose_packages_replaced_its_init_still_boots_from_its_disk() {
+    let Some((lab, guest)) = setup() else {
+        return;
+    };
+    let (name, _, workdir) = ALPINE;
+    let image = image(&lab, &guest, ALPINE);
+    let host = Host::start(&lab, "init", &image, &[]).await;
+    let sandbox = id(6);
+    host.create(sandbox, 1, 512).await;
+    Envd::new(&host.client, sandbox)
+        .wait_healthy(Duration::from_secs(120))
+        .await;
+    init(&host.client, sandbox, &[("FOO", name)], "token-init").await;
+    let root = Envd::new(&host.client, sandbox)
+        .with_token("token-init")
+        .with_user("root");
+    // An init that is not ours: it never answers the host.
+    let replaced = root
+        .run(
+            "rm -f /sbin/init && \
+             printf '#!/bin/sh\\necho image-init-ran >/dev/console\\nexec sleep 100000\\n' \
+               >/sbin/init && chmod 755 /sbin/init && sync && head -1 /sbin/init",
+        )
+        .await
+        .unwrap();
+    assert_eq!(replaced.stdout, "#!/bin/sh\n", "{replaced:?}");
+
+    let _ = root.run("kill -TERM 1").await;
+    let vm = host.vm_dir();
+    ended_cleanly(&vm).await;
+
+    root.wait_healthy(Duration::from_secs(120)).await;
+    assert_own(&host, sandbox, "token-init", name, workdir).await;
+    let booted = root
+        .run("readlink /proc/1/exe; head -1 /sbin/init")
+        .await
+        .unwrap();
+    assert_eq!(
+        booted.stdout, "/opengeni/init\n#!/bin/sh\n",
+        "our init runs and the sandbox keeps its own file: {booted:?}"
+    );
+    let log = std::fs::read_to_string(vm.join("console.log")).unwrap_or_default();
+    assert!(!log.contains("image-init-ran"), "{log}");
+    host.finish().await;
 }
 
 /// A warm template of an image with a command never runs the command:
