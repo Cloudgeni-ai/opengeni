@@ -20,6 +20,7 @@
 
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 import { mintStreamToken, STREAM_TOKEN_DEFAULT_TTL_SECONDS } from "./stream-token";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The provider-resolved endpoint for an exposed port. Mirrors the SDK's
  *  `ExposedPortEndpoint` (host/port/tls/query/...) WITHOUT importing the
@@ -306,7 +307,7 @@ export async function exposeStreamPort(
     endpoint = await s.resolveExposedPort(port);
   } catch (error) {
     throw new StreamPortUnavailableError(
-      `provider failed to resolve the stream port ${port}: ${error instanceof Error ? error.message : String(error)}`,
+      `provider failed to resolve the stream port ${port}: ${errorMessage(error)}`,
       error,
     );
   }

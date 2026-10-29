@@ -109,9 +109,15 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
+    // The status row and the composer region share one gutter (narrower when
+    // the chat sits in a panel beside a Site).
     expect(route).toContain(
-      'className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6"',
+      'const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";',
     );
+    expect(route).toContain(
+      'className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}',
+    );
+    expect(route.match(/\bgutter,\n\s+readOnlyArchive && "hidden"/g)).toHaveLength(1);
     // The wait status is a chip in SessionChrome, not a separate banner row.
     expect(route).not.toContain("<LazySessionWaitStatus");
   });
@@ -590,5 +596,26 @@ describe("session control surface architecture", () => {
 
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
+  });
+
+  // A Codex remote-compaction chat whose ChatGPT plan was disconnected used to
+  // show "Connect a model" with nothing to pick: the picker and the
+  // unavailable-model replacement were limited to Codex models.
+  test("a Codex chat's picker and model replacement offer every model", async () => {
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const picker = route.slice(
+      route.indexOf("<ModelPicker"),
+      route.indexOf("/>", route.indexOf("<ModelPicker")),
+    );
+    expect(picker).toContain("rows={modelCatalog.rows}");
+    expect(picker).not.toContain("codexOnly");
+    const replacement = route.slice(
+      route.indexOf("unavailableModelReplacement({"),
+      route.indexOf("})", route.indexOf("unavailableModelReplacement({")),
+    );
+    expect(replacement).toContain("rows: modelCatalog.rows");
+    expect(replacement).not.toContain("codexOnly");
+    const mobile = await source("../../mobile/app/session/[id].tsx");
+    expect(mobile).not.toContain("codexOnly");
   });
 });

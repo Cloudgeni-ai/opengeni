@@ -1,6 +1,7 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
+import { FeatureUnavailableReason } from "./inference-residency";
 import {
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
@@ -206,6 +207,8 @@ export const VideoGenerationFundingOption = /* @__PURE__ */ defineSchema(() =>
       description: z.string().min(1).max(256),
       available: primitives.boolean,
       unavailableReason: z.string().min(1).max(256).nullable(),
+      /** `region_restricted` when EU-only inference switched this source off. */
+      unavailableCode: FeatureUnavailableReason.optional(),
     })
     .strict()
     .superRefine((value, ctx) => {
@@ -299,8 +302,51 @@ export const VideoGenerationRejectedResult = /* @__PURE__ */ defineSchema(() =>
 );
 export type VideoGenerationRejectedResult = z.infer<typeof VideoGenerationRejectedResult>;
 
+export const VideoGenerationUnavailableCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "video_generation_off",
+    "video_generation_unfunded",
+    "video_generation_unsupported",
+    "insufficient_credits",
+    "generation_limit_reached",
+    "video_storage_full",
+  ]),
+);
+export type VideoGenerationUnavailableCode = z.infer<typeof VideoGenerationUnavailableCode>;
+
+/**
+ * Video generation can't run right now (off, unpaid, unsupported here, or
+ * refused by credits or limits): no operation or provider request was
+ * created. `turnOn`, when present, is the exact app action call that turns
+ * video on for this workspace, built from live state.
+ */
+export const VideoGenerationUnavailableResult = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
+      status: z.literal("unavailable"),
+      code: VideoGenerationUnavailableCode,
+      message: z.string().min(1).max(1024),
+      operationCreated: z.literal(false),
+      turnOn: z
+        .object({
+          id: z.literal("updateVideoGenerationPolicy"),
+          pathParameters: z.object({ workspaceId: z.string().min(1).max(128) }).strict(),
+          body: UpdateVideoGenerationPolicyRequest,
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+);
+export type VideoGenerationUnavailableResult = z.infer<typeof VideoGenerationUnavailableResult>;
+
 export const VideoGenerationToolResult = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("status", [VideoGenerationAcceptedReceipt, VideoGenerationRejectedResult]),
+  z.discriminatedUnion("status", [
+    VideoGenerationAcceptedReceipt,
+    VideoGenerationRejectedResult,
+    VideoGenerationUnavailableResult,
+  ]),
 );
 export type VideoGenerationToolResult = z.infer<typeof VideoGenerationToolResult>;
 

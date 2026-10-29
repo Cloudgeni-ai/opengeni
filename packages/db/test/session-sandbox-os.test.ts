@@ -46,7 +46,6 @@ function baseSession() {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    environmentId: null,
     firstPartyMcpPermissions: null,
     firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
     toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },

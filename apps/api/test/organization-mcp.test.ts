@@ -787,11 +787,6 @@ describe("organization MCP action inputs", () => {
         `async (c) => parseRequestBody(SaveWorkspaceSkillRequest, { id: c.req.param("id") })`,
       ]).body,
     ).toEqual([]);
-    expect(
-      routeInputs([
-        `async (c) => { throw routeRetired("POST /v1/workspaces/:workspaceId/knowledge/entries/search", "moved"); }`,
-      ]).retired,
-    ).toBe("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   });
 
   test("the route source reader names the permission a route checks before anything else", () => {
@@ -941,6 +936,24 @@ describe("organization MCP action inputs", () => {
     ).toBeUndefined();
   });
 
+  test("a workspace settings route needs workspace:admin, so it isn't offered to someone without it", () => {
+    const gate = (...sources: string[]) => routeInputs(sources).permission;
+    expect(
+      gate(`async (c) => {
+        const workspaceId = c.req.param("workspaceId");
+        const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+        return c.json(await save(grant));
+      }`),
+    ).toBe("workspace:admin");
+    expect(
+      gate(`async (c) => {
+        if (c.req.query("dry")) return c.json({});
+        await requireWorkspaceSettingsGrant(c, deps, c.req.param("workspaceId"));
+      }`),
+    ).toBeUndefined();
+    expect(byId("updateVideoGenerationPolicy").permission).toBe("workspace:admin");
+  });
+
   test("every hand-named request schema is still needed", () => {
     for (const rule of ACTION_REQUEST_SCHEMAS) {
       const routes = registeredApiRoutes().filter((route) => rule.pattern.test(routeKey(route)));
@@ -970,38 +983,6 @@ describe("organization MCP action inputs", () => {
         queryParameters?: string[];
       };
       expect(list.queryParameters).toEqual(["limit", "offset", "sessionId"]);
-    } finally {
-      await client.close();
-    }
-  });
-});
-
-describe("organization MCP retired actions", () => {
-  const retiredEntries = ACTION_CATALOG.filter((entry) => entry.retired);
-
-  test("are the retired search routes, never found and never run", async () => {
-    expect(retiredEntries.map(routeKey).sort()).toEqual([
-      "POST /v1/workspaces/:workspaceId/document-bases/:baseId/search",
-      "POST /v1/workspaces/:workspaceId/knowledge/search",
-    ]);
-    const { client, call, seen } = await connect(person(full));
-    try {
-      const page = searchActions({ query: "knowledge search", limit: 50, offset: 0 });
-      for (const entry of retiredEntries)
-        expect(page.actions.map((action) => action.id)).not.toContain(entry.id);
-      expect(page.actions.map((action) => action.id)).toContain("listKnowledgeEntries");
-      for (const entry of retiredEntries) {
-        for (const [tool, args] of [
-          ["opengeni_action_describe", { id: entry.id }],
-          ["opengeni_action_call", { id: entry.id, pathParameters: { workspaceId } }],
-        ] as const) {
-          expect(await call(tool, args)).toEqual({
-            isError: true,
-            value: `${entry.id} was removed. Use the listKnowledgeEntries action (POST /v1/workspaces/:workspaceId/knowledge/entries/search) instead; describe it for its input.`,
-          });
-        }
-      }
-      expect(seen).toHaveLength(0);
     } finally {
       await client.close();
     }

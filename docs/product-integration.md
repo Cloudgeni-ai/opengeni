@@ -135,7 +135,10 @@ workspace: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective
 grant there) and `GET /v1/config/client`. The user's own inbox also passes:
 `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved
 workspace's items, and `GET`/`PUT /v1/inbox/settings` (keep settings
-read-only with `authorizeMutation` if your product owns them). Everything
+read-only with `authorizeMutation` if your product owns them). So does
+`GET /v1/billing/checkout/{id}`, read for the resolved workspace's
+organization only and only if the user may read its billing, so a credits
+payment page opened in the chat confirms there once paid. Everything
 else is a 404. An external user has an inbox like an Opengeni member: their
 sessions' questions, approvals, paused goals and agent notifications land
 there, and the stock app shows it, so a product needs no notification
@@ -1255,6 +1258,27 @@ and its resolver also applies to `Markdown` rendered by a custom
 `renderMessageText`. `OpenGeniLinkProvider` sets a resolver for a whole
 subtree. An unresolved target renders as text marked unavailable, never as a
 broken link, and the Site tool row hides its Open action.
+
+#### Interactive answers
+
+When an agent offers concrete options to choose from, the bundled `visualize`
+Skill has it write an `opengeni-ui` fence: one JSON object with the options,
+the fields to compare and whether the person may pick. The conversation draws
+it natively (no frame, no script) as cards, a sortable table and an optional
+bar chart, and picking sends one ordinary user message such as
+`Compare these in detail: A and B`.
+
+`SessionConversation` and the React Native `NativeSessionScreen` wire this up
+themselves: the pick goes through the composer's Send, and the answer is read
+only when the session has ended or is an imported archive. What a person
+picked or sent is remembered per browser in `localStorage`; on React Native,
+pass `answerStore` (any `{ get, set }` such as AsyncStorage) to keep it across
+launches. A custom `MessageTimeline` wraps itself in
+`InteractiveAnswerProvider` with `send`, `scope` (the session id), `store` and
+`readOnly`; without `send`, options can still be filtered and compared but not
+picked. The renderer-neutral parser and selection logic are in
+`@opengeni/react/interactive-answer-model`. Older clients and other channels
+show the fence as a JSON code block.
 
 Your product's own links are separate from Opengeni objects. When your
 instructions or tools teach the agent to link your records and pages, for

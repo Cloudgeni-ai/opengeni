@@ -6,6 +6,7 @@ export * from "./mcp-manifest";
 export * from "./mcp-icons";
 export * from "./mcp-bridge";
 export * from "./openapi";
+export * from "./operation-titles";
 export * from "./integration-definitions";
 export * from "./integration-presentations";
 export * from "./revision";

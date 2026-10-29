@@ -15,6 +15,7 @@ import type {
 import type {
   EstablishedSandboxSession,
   InputWaitRequest,
+  InteractionRequestTargetReader,
   OpenGeniRuntime,
   RunCredentialCommandSession,
   SelfhostedSession,
@@ -177,6 +178,8 @@ export type EventingState = {
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
   inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
+  /** Reads the target an interaction_request_human pause names, as it is now. */
+  interactionRequestTargetReader: InteractionRequestTargetReader | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
@@ -187,10 +190,9 @@ export type EventingState = {
   modelVisibleSkillIds: ReadonlySet<string> | null;
 };
 
-/** Rig telemetry (M3): set once the session loads; empty string for a rig-less
- * turn (mirrors variableSetId). Read by the activity span's finally block. */
+/** Rig telemetry: set once the session loads; empty string for a rig-less
+ * turn. Read by the activity span's finally block. */
 export type WorkspaceRefState = {
-  variableSetId: string;
   rigId: string;
   rigVersionId: string;
 };
@@ -373,6 +375,7 @@ export function createTurnContext(input: {
       turnStartedPublished: false,
       stream: undefined,
       inputWaitReplyGuard: null,
+      interactionRequestTargetReader: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
@@ -382,7 +385,6 @@ export function createTurnContext(input: {
       modelVisibleSkillIds: null,
     },
     workspaceRefs: {
-      variableSetId: "",
       rigId: "",
       rigVersionId: "",
     },

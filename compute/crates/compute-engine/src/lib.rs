@@ -222,6 +222,16 @@ pub trait Engine: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Bytes of memory its VMs may still take together, if the engine
+    /// limits what they hold together: the limit less what they hold now,
+    /// page cache the host can drop at once left out as in
+    /// [`Engine::resident_bytes`]. A new guest gets no more than this
+    /// however much the host has free, so the host counts it as the most
+    /// that is available. `None` where nothing limits them together.
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(None)
+    }
+
     /// Bytes of host memory the VM holds right now; with huge-page guest
     /// memory, the huge pages it holds. Page cache the host can drop at
     /// once, such as what its disk writes and saved images leave, is not
@@ -332,6 +342,24 @@ pub trait Engine: Send + Sync + 'static {
             "set_memory_limit",
             "this engine cannot change a VM's memory limit",
         ))
+    }
+
+    /// Tells the guest of `vm`, started from `spec`, how long each of its
+    /// writable drives is now: their files grew since it last learned
+    /// that, at its boot or in the state it was restored from. A paused
+    /// guest learns it when it next runs. Engines whose drives cannot
+    /// change length report an error, and the VM keeps the drives it had.
+    fn resize_drives(
+        &self,
+        vm: &Self::Vm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let _ = (vm, spec);
+        std::future::ready(Err(EngineError::new(
+            ErrorKind::Transient,
+            "resize_drives",
+            "this engine cannot change a drive's length",
+        )))
     }
 
     /// Resolves once the VM process has ended for any reason, including

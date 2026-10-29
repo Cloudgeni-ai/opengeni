@@ -11,6 +11,7 @@ import type {
   WorkerOptions,
   WorkerTuner,
 } from "@temporalio/worker";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const MIB = 1024 * 1024;
 
@@ -488,9 +489,7 @@ function readCgroupText(path: string): string | null {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error(
-      `Unable to read present cgroup memory controller file ${path}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `Unable to read present cgroup memory controller file ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }

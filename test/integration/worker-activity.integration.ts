@@ -118,6 +118,7 @@ import { latestStatus } from "@opengeni/testing/assertions";
 import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { testSettings } from "@opengeni/testing/settings";
+import { errorMessage } from "@opengeni/contracts/values";
 
 async function setSessionStatus(
   db: Database,
@@ -1499,7 +1500,7 @@ describe("worker activities integration", () => {
         workflowRunId: crypto.randomUUID(),
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
 
     expect(message).toContain("Malformed turn execution policy metadata");

@@ -35,9 +35,9 @@ import {
 } from "react";
 import { Linking, Pressable, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
+import { DecisionActions, DecisionButton, DecisionCard } from "./decision-card";
 import { Icon, type NativeIconName } from "./icon";
 import { useInlineInputFocus } from "./inline-input-focus";
-import { withAlpha } from "./primitives";
 import { SecureValueInput } from "./secret-field";
 import { defaultSecretFieldMessages, secretInputTraits } from "./secret-field-model";
 import { Selector } from "./selector";
@@ -78,6 +78,12 @@ export interface NativeInChatConnectOptions {
    * storage), so setup picks up again after the app was closed mid-sign-in.
    */
   attemptHints?: ConnectAttemptHints | undefined;
+  /**
+   * Share a link to this conversation (for example through the system share
+   * sheet). A computer connects from the computer itself, so with this a
+   * request to connect one says so and offers the link to open there.
+   */
+  shareConversation?: (() => void) | undefined;
 }
 
 function requireHttps(url: string): void {
@@ -170,6 +176,9 @@ export function useNativeInChatConnect({
   return useCallback(
     (item: AuthNeededItem) => {
       const host = latest.current;
+      // A computer connects from the computer itself, never from this phone.
+      if (item.capability?.id === "api:connected-machine")
+        return <NativeAuthNeededRow item={item} onShareConversation={host?.shareConversation} />;
       if (!client || !host || !chatConnections) return <NativeAuthNeededRow item={item} />;
       const key = `${workspaceId}:${sessionId}:${item.id}`;
       // A failed read says nothing about this person's access: offer to try
@@ -234,16 +243,7 @@ function NativeConnectLoadFailed({ item, onRetry }: { item: AuthNeededItem; onRe
   const { theme, c } = useText();
   const name = authNeededPresentation(t, item).provider;
   return (
-    <View
-      style={{
-        borderRadius: theme.radius.lg,
-        borderWidth: 1,
-        borderColor: c.border,
-        backgroundColor: c["surface-1"],
-        padding: 14,
-        gap: 10,
-      }}
-    >
+    <DecisionCard settled style={{ padding: 16, gap: 12 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
         <Mark name={name} />
         <Text
@@ -256,13 +256,16 @@ function NativeConnectLoadFailed({ item, onRetry }: { item: AuthNeededItem; onRe
       <Line icon="circle-alert" role="status">
         {t("native.timeline.inChatConnect.couldNotLoad")}
       </Line>
-      <Button
-        icon="rotate-ccw"
-        label={t("sessionIntegrationCapabilityCard.retry")}
-        onPress={onRetry}
-        style={{ alignSelf: "flex-start" }}
+      <DecisionActions
+        primary={
+          <DecisionButton
+            icon="rotate-ccw"
+            label={t("sessionIntegrationCapabilityCard.retry")}
+            onPress={onRetry}
+          />
+        }
       />
-    </View>
+    </DecisionCard>
   );
 }
 
@@ -274,14 +277,14 @@ function useText() {
   return {
     theme,
     c,
-    body: { ...fontStyle(theme), fontSize: theme.size.sm, lineHeight: 20, color: c.fg },
+    body: { ...fontStyle(theme), fontSize: theme.size.base, lineHeight: 20, color: c.fg },
     muted: {
       ...fontStyle(theme),
-      fontSize: theme.size.sm,
+      fontSize: theme.size.base,
       lineHeight: 20,
       color: c["fg-muted"],
     },
-    small: { ...fontStyle(theme), fontSize: theme.size.xs, lineHeight: 16, color: c["fg-subtle"] },
+    small: { ...fontStyle(theme), fontSize: theme.size.sm, lineHeight: 17, color: c["fg-muted"] },
     label: { ...fontStyle(theme, 500), fontSize: theme.size.sm, lineHeight: 18, color: c.fg },
   };
 }
@@ -300,17 +303,17 @@ function Mark({ name }: { name: string }) {
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       style={{
-        width: 40,
-        height: 40,
+        width: 36,
+        height: 36,
         borderRadius: theme.radius.md,
         borderWidth: 1,
         borderColor: c.border,
-        backgroundColor: c["surface-2"],
+        backgroundColor: c["surface-1"],
         alignItems: "center",
         justifyContent: "center",
       }}
     >
-      <Text style={{ ...fontStyle(theme, 600), fontSize: 13, color: c["fg-muted"] }}>
+      <Text style={{ ...fontStyle(theme, 600), fontSize: 12, color: c["fg-muted"] }}>
         {monogram(name)}
       </Text>
     </View>
@@ -322,6 +325,7 @@ function Line({
   tone = "muted",
   icon,
   role,
+  lines,
 }: {
   children: ReactNode;
   tone?: "body" | "muted" | "small" | "error" | "waiting";
@@ -331,6 +335,8 @@ function Line({
    * step that failed.
    */
   role?: "status" | "alert" | undefined;
+  /** Cap the line count (the agent's reason on a connect card). */
+  lines?: number | undefined;
 }) {
   const text = useText();
   const color =
@@ -344,6 +350,7 @@ function Line({
     <Text
       accessibilityRole={role === "alert" ? "alert" : undefined}
       accessibilityLiveRegion={role === "alert" ? "assertive" : role ? "polite" : undefined}
+      numberOfLines={lines}
       style={{ ...base, ...(color ? { color } : {}), flexShrink: 1 }}
     >
       {children}
@@ -360,12 +367,15 @@ function Line({
   );
 }
 
-/** The web capability card at phone width: who it is, why, and one clear action. */
+/**
+ * The web capability card at phone width, on the shared decision card: who it
+ * is, why the agent asks, and one clear action.
+ */
 function CapabilityFrame({
   name,
   subtitle,
-  typeLabel,
   description,
+  clampDescription = false,
   complete,
   completeLabel,
   note,
@@ -373,8 +383,11 @@ function CapabilityFrame({
 }: {
   name: string;
   subtitle?: string | undefined;
+  /** The connection's kind, for hosts that show it elsewhere; the card shows none. */
   typeLabel: string;
   description?: string | undefined;
+  /** The description is the agent's reason: at most two lines, so the action stays in view. */
+  clampDescription?: boolean | undefined;
   complete: boolean;
   completeLabel?: string | undefined;
   note?: string | undefined;
@@ -384,17 +397,11 @@ function CapabilityFrame({
   const text = useText();
   const { theme, c } = text;
   return (
-    <View style={{ gap: 6 }}>
-      <View
+    <View style={{ gap: 8 }}>
+      <DecisionCard
+        settled={complete}
         accessibilityLabel={t("sessionCapabilityFrame.nameSetup", { name })}
-        style={{
-          borderRadius: theme.radius.lg,
-          borderWidth: 1,
-          borderColor: c.border,
-          backgroundColor: c["surface-1"],
-          padding: 14,
-          gap: 12,
-        }}
+        style={{ padding: 16, gap: 12 }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
           <Mark name={name} />
@@ -402,7 +409,12 @@ function CapabilityFrame({
             <Text
               accessibilityRole="header"
               numberOfLines={2}
-              style={{ ...fontStyle(theme, 600), fontSize: theme.size.md, color: c.fg }}
+              style={{
+                ...fontStyle(theme, 600),
+                fontSize: theme.size.md,
+                lineHeight: 21,
+                color: c.fg,
+              }}
             >
               {name}
             </Text>
@@ -412,31 +424,19 @@ function CapabilityFrame({
               </Text>
             ) : null}
           </View>
-          {complete ? (
-            <Icon name="check" size={18} color={c.accent} />
-          ) : !typeLabel ? null : (
-            <View
-              style={{
-                borderRadius: theme.radius.full,
-                borderWidth: 1,
-                borderColor: c.border,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-              }}
-            >
-              <Text style={{ ...text.small, color: c["fg-muted"] }}>{typeLabel}</Text>
-            </View>
-          )}
+          {complete ? <Icon name="check" size={18} color={c["status-idle"]} /> : null}
         </View>
         {complete ? (
           <Line tone="body" role="status">
             {completeLabel ?? t("sessionCapabilityFrame.connectedAvailableInThisConversation")}
           </Line>
         ) : description ? (
-          <Line tone="body">{description}</Line>
+          <Line tone="body" lines={clampDescription ? 2 : undefined}>
+            {description}
+          </Line>
         ) : null}
         {children}
-      </View>
+      </DecisionCard>
       {!complete && note ? (
         <View style={{ paddingHorizontal: 4 }}>
           <Line tone="small">{note}</Line>
@@ -446,7 +446,7 @@ function CapabilityFrame({
   );
 }
 
-/** "You choose what to authorize" beside the card's one primary action. */
+/** The card's one solid action, with "You choose what to authorize" under it. */
 function PrimaryAction({
   label,
   onPress,
@@ -460,21 +460,23 @@ function PrimaryAction({
 }) {
   const t = useOpenGeniText();
   return (
-    <View style={{ gap: 10 }}>
-      <Line tone="small" icon="shield-check">
-        {t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
-      </Line>
-      <Button
-        icon="plug"
-        variant="primary"
-        size="form"
-        label={label}
-        busy={busy}
-        disabled={disabled}
-        onPress={onPress}
-        style={{ alignSelf: "stretch" }}
-      />
-    </View>
+    <DecisionActions
+      style={{ marginTop: 4 }}
+      primary={
+        <DecisionButton
+          kind="primary"
+          label={label}
+          busy={busy}
+          disabled={disabled}
+          onPress={onPress}
+        />
+      }
+      lead={
+        <Line tone="small" icon="shield-check">
+          {t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
+        </Line>
+      }
+    />
   );
 }
 
@@ -697,7 +699,7 @@ function ScopedConnectSetup({
 }: NativeConnectSetupProps) {
   const t = useOpenGeniText();
   const text = useText();
-  const flow = useConnectSetupFlow(controller, { onAuthorize });
+  const flow = useConnectSetupFlow(controller, { onAuthorize, inChat: true });
   const { view, attempt } = flow;
   // Typed values live in this ref until submit, never in React state.
   const values = useRef(new Map<string, string>());
@@ -1000,6 +1002,7 @@ export function NativeIntegrationCapabilityCard({
       name={name}
       typeLabel={t("sessionIntegrationCapabilityCard.integration")}
       description={rationale}
+      clampDescription
       complete={connected}
       completeLabel={t("sessionIntegrationCapabilityCard.connected")}
       note={t("sessionIntegrationCapabilityCard.note")}
@@ -1043,7 +1046,7 @@ export function NativeIntegrationCapabilityCard({
             <NativeConnectSetup
               controller={flow.controller}
               authorizeLabel={
-                flow.signInClosed
+                flow.signInClosed || error
                   ? t("connectSetup.trySigningInAgain")
                   : t("sessionIntegrationCapabilityCard.signIn")
               }
@@ -1060,7 +1063,7 @@ export function NativeIntegrationCapabilityCard({
               onStop={flow.stopWaiting}
             />
           ) : null}
-          {!busy && !waiting && (flow.restartable || error || (flow.signInClosed && !attempt)) ? (
+          {!busy && !waiting && (flow.restartable || ((error || flow.signInClosed) && !attempt)) ? (
             <Button
               icon="rotate-ccw"
               variant="primary"
@@ -1143,7 +1146,8 @@ export function NativeMcpCapabilityCard({
       name={title}
       subtitle={item?.providerDomain ?? ""}
       typeLabel={showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : ""}
-      description={item?.description || rationale}
+      description={rationale || item?.description || undefined}
+      clampDescription={Boolean(rationale)}
       complete={flow.complete}
       note={t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")}
     >
@@ -1301,6 +1305,7 @@ export function NativePreparedMcpSetupCard({
       subtitle={proposal.endpointUrl}
       typeLabel={t("sessionMcpCapabilityCard.mcpServer")}
       description={proposal.rationale}
+      clampDescription
       complete={false}
       note={t("preparedMcpSetup.note")}
     >
@@ -1408,10 +1413,13 @@ export function NativeAuthNeededRow({
   item,
   setupUnavailable = false,
   openUrl,
+  onShareConversation,
 }: {
   item: AuthNeededItem;
   setupUnavailable?: boolean | undefined;
   openUrl?: ((url: string) => void) | undefined;
+  /** For a computer request: share this chat's link to open on that computer. */
+  onShareConversation?: (() => void) | undefined;
 }) {
   const t = useOpenGeniText();
   const text = useText();
@@ -1419,60 +1427,79 @@ export function NativeAuthNeededRow({
   const presentation = authNeededPresentation(t, item, { setupUnavailable });
   if (item.capability?.id === "api:connected-machine") {
     return (
-      <View
-        style={{
-          borderRadius: theme.radius.lg,
-          borderWidth: 1,
-          borderColor: c.border,
-          backgroundColor: c["surface-1"],
-          padding: 14,
-          gap: 4,
-        }}
-      >
-        <Text style={text.label}>{t("thisComputer.card.name")}</Text>
-        <Line>{t("thisComputer.card.hostSetupUnavailable")}</Line>
-      </View>
+      <DecisionCard settled={!onShareConversation} style={{ padding: 16, gap: 12 }}>
+        <View style={{ gap: 4 }}>
+          <Text
+            style={{
+              ...fontStyle(theme, 600),
+              fontSize: theme.size.md,
+              lineHeight: 21,
+              color: c.fg,
+            }}
+          >
+            {t("thisComputer.card.name")}
+          </Text>
+          <Line>
+            {onShareConversation
+              ? t("thisComputer.card.connectOnThatComputer")
+              : t("thisComputer.card.hostSetupUnavailable")}
+          </Line>
+        </View>
+        {onShareConversation ? (
+          <DecisionActions
+            primary={
+              <DecisionButton
+                icon="share-2"
+                label={t("thisComputer.card.shareConversation")}
+                onPress={onShareConversation}
+              />
+            }
+          />
+        ) : null}
+      </DecisionCard>
     );
   }
   const link = presentation.authorizationUrl;
   return (
-    <View style={{ gap: 6 }}>
-      <View
-        accessibilityRole="summary"
-        style={{
-          borderRadius: theme.radius.lg,
-          borderWidth: 1,
-          borderColor: presentation.unavailable ? c.border : withAlpha(c["status-waiting"], 0.35),
-          backgroundColor: c["surface-1"],
-          padding: 14,
-          gap: 12,
-        }}
-      >
+    <View style={{ gap: 8 }}>
+      <DecisionCard settled={!link} style={{ padding: 16, gap: 12 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
           <Mark name={presentation.provider} />
           <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-            <Text style={{ ...fontStyle(theme, 600), fontSize: theme.size.md, color: c.fg }}>
+            <Text
+              accessibilityRole="header"
+              style={{
+                ...fontStyle(theme, 600),
+                fontSize: theme.size.md,
+                lineHeight: 21,
+                color: c.fg,
+              }}
+            >
               {presentation.title}
             </Text>
-            <Line>{presentation.reasonLine}</Line>
             {presentation.providerLine ? (
               <Line tone="small">{presentation.providerLine}</Line>
             ) : null}
-            {presentation.variablesLine ? (
-              <Line tone="small">{presentation.variablesLine}</Line>
-            ) : null}
           </View>
         </View>
+        <Line tone="body" lines={2}>
+          {presentation.reasonLine}
+        </Line>
+        {presentation.variablesLine ? <Line tone="small">{presentation.variablesLine}</Line> : null}
         {link ? (
-          <Button
-            icon={presentation.missing ? "plug" : "rotate-ccw"}
-            variant="primary"
-            size="form"
-            label={presentation.actionLabel}
-            onPress={() => (openUrl ? openUrl(link) : void Linking.openURL(link))}
+          <DecisionActions
+            style={{ marginTop: 4 }}
+            primary={
+              <DecisionButton
+                kind="primary"
+                icon={presentation.missing ? undefined : "rotate-ccw"}
+                label={presentation.actionLabel}
+                onPress={() => (openUrl ? openUrl(link) : void Linking.openURL(link))}
+              />
+            }
           />
         ) : null}
-      </View>
+      </DecisionCard>
       {presentation.footnote ? (
         <View style={{ paddingHorizontal: 4 }}>
           <Line tone="small">{presentation.footnote}</Line>

@@ -19,9 +19,14 @@ export function workspaceDefaultMachine(
   return null;
 }
 
-/** Fresh composer defaults precede remembered project choices; saved drafts stay explicit. */
+/**
+ * Fresh composer defaults precede remembered project choices; saved drafts stay
+ * explicit. The person's own default ("Your default machine", sent only when
+ * usable) comes before the workspace default.
+ */
 export function initialWorkspaceMachineCompute(input: {
   settings: Record<string, unknown> | undefined;
+  memberTarget?: WorkspaceDefaultMachine | null | undefined;
   options: Pick<
     import("@opengeni/sdk").NewSessionDraftOptions,
     "targetSandboxId" | "sandboxBackend" | "workingDir"
@@ -29,7 +34,7 @@ export function initialWorkspaceMachineCompute(input: {
   fallback: import("./session-create").SessionDraft["compute"];
   backend: import("@opengeni/sdk").SandboxBackend | undefined;
 }): import("./session-create").SessionDraft["compute"] {
-  const target = workspaceDefaultMachine(input.settings);
+  const target = input.memberTarget ?? workspaceDefaultMachine(input.settings);
   if (
     !target ||
     input.options.targetSandboxId ||

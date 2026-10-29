@@ -2,7 +2,7 @@
 //! the lifecycle it records, and sandbox traffic through the guest's
 //! gateway.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{
-    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, host_status, sandbox_status, until,
+    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, TEAM, captured_from, host_status,
+    sandbox_status, until,
 };
 
 /// What the fake guest saw.
@@ -147,7 +148,16 @@ struct Levels {
 /// A host whose sandboxes run on connects and wakes, sleep as asked,
 /// keep holds, report all of it in their status, and run the fake guest.
 async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>) {
-    let host = fleet.host("h1").await;
+    host_offering(fleet, seen, &[]).await
+}
+
+/// As [`host`], for a host that offers sandboxes `offers`.
+async fn host_offering(
+    fleet: &Fleet,
+    seen: &Arc<Seen>,
+    offers: &[&str],
+) -> (FakeHost, Arc<Mutex<Levels>>) {
+    let host = fleet.host_offering("h1", offers).await;
     let levels = Arc::new(Mutex::new(Levels::default()));
     let state = Arc::clone(&levels);
     host.behave(move |envelope| {
@@ -305,6 +315,210 @@ async fn fleet_with_guest() -> (Fleet, FakeHost, Arc<Mutex<Levels>>, Arc<Seen>, 
     let (host, levels) = host(&fleet, &seen).await;
     let door = Door::start(&fleet).await;
     (fleet, host, levels, seen, door)
+}
+
+/// A template that names a disk size gives each of its sandboxes a disk
+/// that long, and reports it; one that names none leaves the disk to the
+/// image.
+#[tokio::test]
+async fn a_template_with_a_disk_size_gives_its_sandboxes_that_disk() {
+    let fleet = Fleet::start().await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host(&fleet, &seen).await;
+    let mut settings = Settings::default();
+    settings.templates.insert(
+        "ci".into(),
+        Template {
+            image: "base".into(),
+            vcpus: 2,
+            memory_mib: 1024,
+            memory_request_mib: None,
+            cpu_request_millis: None,
+            disk: Some(64 << 10),
+            disk_mib: 64 << 10,
+        },
+    );
+    let door = Door::start_with(&fleet, settings).await;
+    for (template, disk) in [("ci", Some(64 << 10)), ("base", None)] {
+        let sandbox = door.create(json!({"templateID": template})).await;
+        let id: Id = sandbox["sandboxID"].as_str().unwrap().parse().unwrap();
+        let created = host
+            .seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config),
+                _ => None,
+            })
+            .expect("the host was asked to create it");
+        assert_eq!(created.disk_mib, disk, "{template}");
+        let (status, detail) = door.get(&format!("/sandboxes/{id}")).await;
+        assert_eq!(status, 200, "{detail}");
+        if let Some(disk) = disk {
+            assert_eq!(detail["diskSizeMB"], disk, "{detail}");
+        }
+    }
+}
+
+/// A template may guarantee its sandboxes less memory and processor time
+/// than they may use, so a host runs more of them at once; a snapshot of
+/// one of its sandboxes guarantees the sandboxes started from it the same.
+#[tokio::test]
+async fn a_template_and_its_snapshots_guarantee_what_it_names() {
+    let fleet = Fleet::start().await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host(&fleet, &seen).await;
+    let mut settings = Settings::default();
+    settings.templates.insert(
+        "ci".into(),
+        Template {
+            image: "base".into(),
+            vcpus: 2,
+            memory_mib: 1024,
+            memory_request_mib: Some(256),
+            cpu_request_millis: Some(500),
+            disk: None,
+            disk_mib: 4096,
+        },
+    );
+    let door = Door::start_with(&fleet, settings).await;
+    let created = |of: Id| {
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create { id, config, .. } if id == of => Some(config),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let sandbox = door
+        .create(json!({"templateID": "ci", "timeout": 120}))
+        .await;
+    let source: Id = sandbox["sandboxID"].as_str().unwrap().parse().unwrap();
+    let config = created(source);
+    assert_eq!(
+        (config.vcpus, config.memory_mib),
+        (2, 1024),
+        "it may use all of its shape"
+    );
+    assert_eq!(
+        (config.memory_request_mib, config.cpu_request_millis),
+        (Some(256), Some(500))
+    );
+    let (status, snapshot) = door
+        .post(
+            &format!("/sandboxes/{source}/snapshots"),
+            json!({"name": "warm", "memory": false}),
+        )
+        .await;
+    assert_eq!(status, 201, "{snapshot}");
+    let from = door
+        .create(json!({"templateID": "warm", "timeout": 120}))
+        .await;
+    let config = created(from["sandboxID"].as_str().unwrap().parse().unwrap());
+    assert_eq!(config.image, Some(captured_from(source)));
+    assert_eq!(
+        (
+            config.vcpus,
+            config.memory_mib,
+            config.memory_request_mib,
+            config.cpu_request_millis
+        ),
+        (2, 1024, Some(256), Some(500))
+    );
+    let plain = door.create(json!({"templateID": "base"})).await;
+    let config = created(plain["sandboxID"].as_str().unwrap().parse().unwrap());
+    assert_eq!(
+        (config.memory_request_mib, config.cpu_request_millis),
+        (None, None),
+        "one that names none guarantees all of it"
+    );
+}
+
+/// E2B's API cannot name what a sandbox reaches of what hosts offer, so
+/// the front door's creates reach every offer their team is given, and
+/// those of a team given none reach none.
+#[tokio::test]
+async fn an_e2b_create_reaches_the_offers_its_team_is_given() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.reach = BTreeMap::from([(
+            TEAM.to_owned(),
+            BTreeSet::from(["builds".to_owned(), "previews".to_owned()]),
+        )]);
+    })
+    .await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host_offering(&fleet, &seen, &["builds", "previews"]).await;
+    let door = Door::start(&fleet).await;
+    let reach_of = |id: &Value| -> Vec<String> {
+        let id: Id = id.as_str().unwrap().parse().unwrap();
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config.reach),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let given = door.create(json!({"templateID": "base"})).await;
+    assert_eq!(reach_of(&given["sandboxID"]), ["builds", "previews"]);
+    let (status, other) = door
+        .call(
+            reqwest::Method::POST,
+            "/v2/sandboxes",
+            OTHER_KEY,
+            Some(json!({"templateID": "base"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{other}");
+    assert_eq!(reach_of(&other["sandboxID"]), Vec::<String>::new());
+}
+
+/// A sandbox killed at its timeout is never resumed, so it is not
+/// checkpointed while it runs; one that pauses at its timeout is, like any
+/// fleet sandbox. Both sleep the fleet's way otherwise.
+#[tokio::test]
+async fn only_e2b_sandboxes_that_pause_at_their_timeout_are_checkpointed() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.sleep.checkpoint_every_ms = Some(600_000);
+    })
+    .await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host_offering(&fleet, &seen, &[]).await;
+    let door = Door::start(&fleet).await;
+    let sleep_of = |id: &Value| {
+        let id: Id = id.as_str().unwrap().parse().unwrap();
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config.sleep),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let killed = sleep_of(&door.create(json!({"templateID": "base"})).await["sandboxID"]);
+    let paused = sleep_of(
+        &door
+            .create(json!({"templateID": "base", "autoPause": true}))
+            .await["sandboxID"],
+    );
+    assert_eq!(killed.checkpoint_every_ms, None);
+    assert_eq!(paused.checkpoint_every_ms, Some(600_000));
+    assert_eq!(
+        killed.pause_after_ms, paused.pause_after_ms,
+        "both still sleep when idle"
+    );
 }
 
 #[tokio::test]
@@ -832,6 +1046,9 @@ async fn pauses_that_cannot_finish_do_not_hold_up_later_timeouts() {
             image: "base".into(),
             vcpus: 1,
             memory_mib: 256,
+            memory_request_mib: None,
+            cpu_request_millis: None,
+            disk: None,
             disk_mib: 1024,
         },
     );
@@ -1196,4 +1413,96 @@ async fn the_front_door_serves_https_for_the_api_and_sandbox_host_names() {
             .await
             .is_err()
     );
+}
+
+/// E2B's snapshots are templates saved from sandboxes: only of their
+/// filesystem, a running sandbox paused for one and resumed after, listed
+/// a page at a time, and started from by id or name.
+#[tokio::test]
+async fn a_filesystem_snapshot_is_a_template_creates_start_from() {
+    let (_fleet, host, _levels, _seen, door) = fleet_with_guest().await;
+    let sandbox = door
+        .create(json!({"templateID": "base", "timeout": 120}))
+        .await;
+    let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    let snapshots = format!("/sandboxes/{id}/snapshots");
+
+    let (status, refused) = door.post(&snapshots, json!({})).await;
+    assert_eq!(status, 400, "one with memory, as the SDK asks: {refused}");
+    let (status, first) = door
+        .post(&snapshots, json!({"name": "warm", "memory": false}))
+        .await;
+    assert_eq!(status, 201, "{first}");
+    assert_eq!(first["names"], json!(["warm"]));
+    let (_, detail) = door.get(&format!("/sandboxes/{id}")).await;
+    assert_eq!(detail["state"], "running", "resumed after");
+    let (status, second) = door.post(&snapshots, json!({"memory": false})).await;
+    assert_eq!(status, 201, "{second}");
+    assert_eq!(second["names"], json!([]));
+
+    let mut ids = [
+        first["snapshotID"].as_str().unwrap(),
+        second["snapshotID"].as_str().unwrap(),
+    ];
+    ids.sort_unstable();
+    let page = |after: Option<&str>| {
+        let path = after.map_or_else(
+            || "/snapshots?limit=1".to_owned(),
+            |after| format!("/snapshots?limit=1&nextToken={after}"),
+        );
+        door.http
+            .get(format!("http://{}{path}", door.address))
+            .header("x-api-key", KEY)
+            .send()
+    };
+    let answered = page(None).await.unwrap();
+    let next = answered.headers()["x-next-token"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let listed: Value = answered.json().await.unwrap();
+    assert_eq!(listed[0]["snapshotID"], ids[0]);
+    assert_eq!(next, ids[0]);
+    let answered = page(Some(&next)).await.unwrap();
+    assert!(
+        answered.headers().get("x-next-token").is_none(),
+        "the last page"
+    );
+    let listed: Value = answered.json().await.unwrap();
+    assert_eq!(listed[0]["snapshotID"], ids[1]);
+    let (_, listed) = door
+        .get(&format!("/snapshots?sandboxID={id}&name=warm"))
+        .await;
+    assert_eq!(listed, json!([first.clone()]));
+    let (_, listed) = door.get("/snapshots?name=cold").await;
+    assert_eq!(listed, json!([]));
+
+    let created = door
+        .create(json!({"templateID": "warm", "timeout": 120}))
+        .await;
+    let from: Id = created["sandboxID"].as_str().unwrap().parse().unwrap();
+    let config = host
+        .seen()
+        .into_iter()
+        .find_map(|seen| match seen.envelope.request {
+            Request::Create { id, config, .. } if id == from => Some(config),
+            _ => None,
+        })
+        .expect("the host was asked to create it");
+    assert_eq!(config.image, Some(captured_from(id.parse().unwrap())));
+
+    let unnamed = second["snapshotID"].as_str().unwrap();
+    for (key, status) in [("warm", 204), ("warm", 404), (unnamed, 204), ("base", 400)] {
+        let (deleted, _) = door
+            .call(
+                reqwest::Method::DELETE,
+                &format!("/templates/{key}"),
+                KEY,
+                None,
+            )
+            .await;
+        assert_eq!(deleted, status, "deleting {key}");
+    }
+    let (_, listed) = door.get("/snapshots").await;
+    assert_eq!(listed, json!([]));
 }

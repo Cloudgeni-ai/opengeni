@@ -69,12 +69,14 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { buildFilesMcpServer } from "../mcp/files";
 import { userContentResponseHeaders, userContentSignedGetUrlOptions } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
+import { requireCallingWorkspaceContentExchange } from "../mcp/workspace-content-flow";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
   buildWorkspaceToolGatewayMcpServer,
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -162,6 +164,11 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw error;
     }
     const { grant } = access;
+    // Another Opengeni workspace calling: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentExchange(deps.db, c.req.raw, {
+      workspaceId: grant.workspaceId,
+    });
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
@@ -351,7 +358,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             fileId: upload.file.id,
             uploadId: upload.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           },
         );
         throw new HTTPException(status, { message });

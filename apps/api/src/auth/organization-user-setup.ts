@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type { ManagedEmailTransport } from "@opengeni/core";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const encoder = new TextEncoder();
 export type OrganizationUserSetupEmailTokenTransport = "fragment" | "query";
@@ -276,11 +277,6 @@ function requiredPublicBaseUrl(settings: Settings): string {
     throw new Error("OPENGENI_PUBLIC_BASE_URL is required for organization user setup");
   }
   return settings.publicBaseUrl;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return hex(new Uint8Array(digest));
 }
 
 function hex(bytes: Uint8Array): string {

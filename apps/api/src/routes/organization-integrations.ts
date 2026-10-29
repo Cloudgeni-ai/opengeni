@@ -22,6 +22,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
   isVerifiedDelegatedHumanAuthorization,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   createOrganizationWebhook,
@@ -73,7 +74,7 @@ export function requireOrganizationIntegrationAdmin(
       candidate.accountId === organizationId && candidate.subjectId === context.subjectId,
   );
   if (!grant) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+    throw new MissingPermissionRefusal("account:admin");
   }
   if (context.subjectId.startsWith("api_key:")) {
     requireOrganizationApiKeyControlPermission(context, organizationId);
@@ -87,7 +88,7 @@ export function requireOrganizationIntegrationAdmin(
     }
   } else {
     if (!grant.permissions.includes("account:admin"))
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+      throw new MissingPermissionRefusal("account:admin");
     if (
       !authorization ||
       !(

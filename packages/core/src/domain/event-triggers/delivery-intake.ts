@@ -17,15 +17,15 @@ import {
  * receives HTTP deliveries (webhook endpoints and apps) and by replay.
  */
 
-export type DeliveryReadingSettings = Pick<Settings, "githubAppSlug" | "prReviewGithubAppSlug">;
+export type DeliveryReadingSettings = Pick<Settings, "githubAppSlug">;
 
 export function sha256Hex(body: Uint8Array | string): string {
   return createHash("sha256").update(body).digest("hex");
 }
 
-/** Logins of this deployment's own GitHub Apps, whose events are Opengeni's. */
+/** Logins of this deployment's own GitHub App, whose events are Opengeni's. */
 export function deploymentGitHubOwnLogins(settings: DeliveryReadingSettings): Set<string> {
-  return githubOwnLogins([settings.githubAppSlug, settings.prReviewGithubAppSlug]);
+  return githubOwnLogins([settings.githubAppSlug]);
 }
 
 function readSourceDelivery(

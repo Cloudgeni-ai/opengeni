@@ -7,6 +7,7 @@ import {
   workspacePackages,
   type WorkspacePackage,
 } from "../publishable-workspaces";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type WorkspaceGraph = {
   packages: WorkspacePackage[];
@@ -189,6 +190,7 @@ export function transitiveDependencies(
 
 export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
   const projects = [
+    "scripts/batcher",
     "scripts/ci",
     "scripts/operator",
     "scripts/public-api",
@@ -434,7 +436,7 @@ function testShardWeights(
     return {
       mode: "source-bytes",
       weights: null,
-      reason: error instanceof Error ? error.message : String(error),
+      reason: errorMessage(error),
       profileSha256: null,
     };
   }

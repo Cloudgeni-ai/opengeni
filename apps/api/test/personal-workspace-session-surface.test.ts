@@ -49,7 +49,8 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerExternalIdentityLinkRoutes } from "../src/routes/external-identity-links";
 import { registerConnectRoutes } from "../src/routes/connect";
 
-import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { missingPermissionMessage, requireConnectOwnerAuthority } from "@opengeni/core";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const delegationSecret = `personal-ws-session-surface-${crypto.randomUUID()}`;
@@ -338,13 +339,6 @@ async function saveDraftDirectly(
   );
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 async function seedSession(human: ManagedHuman, workspaceId: string): Promise<string> {
   if (!client) throw new Error("test database unavailable");
   const session = await createSession(client.db, {
@@ -556,6 +550,7 @@ describe("managed-human session surface inside their own personal workspace", ()
       accountId: human.accountId,
       workspaceId: human.legacyWorkspaceId,
       subjectId: `api_key:${key.id}`,
+      personalOwnerVerified: false,
     };
     await client.db.transaction((tx) => requireConnectOwnerAuthority(tx, scope));
     const personal = await human.app.request(`${base}/attempts`, {
@@ -1578,7 +1573,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       },
     );
     expect(posted.status).toBe(403);
-    expect(await posted.text()).toContain("api_keys:manage");
+    expect(await posted.text()).toContain(missingPermissionMessage("api_keys:manage"));
     expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
   }, 180_000);
 

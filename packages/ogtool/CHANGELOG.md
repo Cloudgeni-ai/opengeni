@@ -1,5 +1,69 @@
 # @opengeni/ogtool
 
+## 5.5.1
+
+### Patch Changes
+
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [f980186]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/codemode@5.5.0
+  - @opengeni/contracts@5.5.0
+
+## 5.4.2
+
+### Patch Changes
+
+- 3383bdb: A Code Mode call that fails after it started still settles as an unknown outcome, but it now keeps the error the Opengeni API (or the SDK's transport check) reported, with its reference, instead of only the generic text. A browser action or tab change that the API answers with an error therefore says what went wrong from Code Mode too, as a direct call does. Other thrown errors keep the generic text. `ogtool call --save-image` (and the native `codemode call`) print an error result as the call's answer instead of reporting a completed call whose image could not be saved.
+- 1d5c8f3: `ogtool call` reads its arguments from a file with `@path` or from stdin with `-`, the same forms the native `codemode call` accepts, so large arguments no longer have to fit in one command-line argument.
+- Updated dependencies [931325b]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [9db3491]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [a8b429e]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [30b9cd2]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/codemode@5.4.0
+
 ## 5.3.1
 
 ### Patch Changes

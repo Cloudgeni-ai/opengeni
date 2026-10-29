@@ -864,6 +864,10 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Record<string, unknown>> = [];
   events: StreamEvent[] = [];
   sequence = 0;
+  // The extension worker's event stream, as newer extensions name it.
+  stream: string | undefined = undefined;
+  // Commands the stopped worker held fail as the agent fails them.
+  private failHeld: ((failure: Error) => void) | null = null;
   failingPolls = 0;
   pollFailure: Error = new AttachedBrowserBridgeError("timeout", "poll timed out", true);
   heldInput: Promise<void> | null = null;
@@ -873,6 +877,22 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
   push(method: string, params: Record<string, unknown> = {}): void {
     this.sequence += 1;
     this.events.push({ sequence: this.sequence, tabId: "7", sessionId: null, method, params });
+  }
+
+  /** Chrome stopped the extension's worker and started a new one: its event
+   * buffer starts again under a new stream, while Chrome kept the tab and its
+   * debugger attachment. The old worker's unanswered commands fail. */
+  restartWorker(stream: string): void {
+    this.failHeld?.(
+      new AttachedBrowserBridgeError(
+        "resource_unavailable",
+        "attached browser is unavailable",
+        true,
+      ),
+    );
+    this.stream = stream;
+    this.sequence = 0;
+    this.events = [];
   }
 
   /** Chrome emitted more events than the extension retains. */
@@ -904,7 +924,15 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
       case "debugger.detach":
         return { detached: true } as T;
       case "debugger.command":
-        if (payload.method === "Input.dispatchMouseEvent" && this.heldInput) await this.heldInput;
+        if (payload.method === "Input.dispatchMouseEvent" && this.heldInput) {
+          const failure = await Promise.race([
+            this.heldInput.then(() => null),
+            new Promise<Error>((resolveFailure) => {
+              this.failHeld = resolveFailure;
+            }),
+          ]);
+          if (failure) throw failure;
+        }
         if (payload.method === "Page.navigate" && this.heldNavigation) {
           await this.heldNavigation;
           throw new AttachedBrowserBridgeError("bridge_failed", "navigation reply lost", true);
@@ -924,6 +952,7 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
           events: page,
           cursor: page.at(-1)?.sequence ?? this.sequence,
           truncated: this.events.length > 0 && after < first - 1,
+          ...(this.stream === undefined ? {} : { stream: this.stream }),
         } as T;
       }
       default:
@@ -1084,6 +1113,86 @@ describe("attached Chrome event stream recovery", () => {
       await expect(
         connection.send("Target.attachToTarget", { targetId: "7" }),
       ).rejects.toMatchObject({ code: "resource_unavailable", retryable: false });
+    } finally {
+      releaseInput();
+      connection.close();
+    }
+  });
+
+  test("resynchronizes when a new extension worker's buffer reaches the old cursor", async () => {
+    const bridge = new StreamBridge();
+    bridge.stream = "worker-1";
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    try {
+      const first = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+      });
+      const seen: string[] = [];
+      connection.on("Network.requestWillBeSent", () => seen.push("old"), first.sessionId);
+      bridge.push("Network.requestWillBeSent");
+      bridge.push("Network.requestWillBeSent");
+      await eventually(() => seen.length === 2, "the first worker's events");
+      const detached: Array<Record<string, unknown>> = [];
+      connection.on("Target.detachedFromTarget", (event) => detached.push(event.params));
+      // The new worker's buffer is back at the same sequence before the next
+      // poll: numbers alone do not show that anything in between was lost.
+      bridge.restartWorker("worker-2");
+      bridge.push("Page.frameNavigated", { frame: { id: "unseen" } });
+      bridge.push("Page.frameNavigated", { frame: { id: "unseen" } });
+      await eventually(() => detached.length > 0, "the resynchronized detach");
+      expect(detached).toEqual([
+        { sessionId: first.sessionId, targetId: "7", reason: "event_stream_resynchronized" },
+      ]);
+      const second = await eventuallyAttach(connection);
+      const navigated = new Promise<Record<string, unknown>>((resolveEvent) => {
+        connection.on("Page.frameNavigated", (event) => resolveEvent(event.params), second);
+      });
+      bridge.push("Page.frameNavigated", { frame: { id: "fresh" } });
+      await expect(navigated).resolves.toEqual({ frame: { id: "fresh" } });
+    } finally {
+      connection.close();
+    }
+  });
+
+  test("uses a tab again once a new extension worker replaced the one that held its input", async () => {
+    const bridge = new StreamBridge();
+    bridge.stream = "worker-1";
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    let releaseInput = () => {};
+    bridge.heldInput = new Promise<void>((resolveInput) => {
+      releaseInput = resolveInput;
+    });
+    try {
+      const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+      });
+      const click = connection
+        .send("Input.dispatchMouseEvent", { type: "mousePressed" }, { sessionId })
+        .catch((error: unknown) => error);
+      await eventually(
+        () =>
+          bridge.commands.some(
+            (command) =>
+              command.type === "debugger.command" && command.method === "Input.dispatchMouseEvent",
+          ),
+        "the click",
+      );
+      // Chrome stops the worker holding the click: whether it reached the
+      // page is unknown, and nothing of it can arrive later.
+      const detached = new Promise<void>((resolveEvent) => {
+        connection.on("Target.detachedFromTarget", () => resolveEvent());
+      });
+      bridge.restartWorker("worker-2");
+      expect(await click).toBeInstanceOf(Error);
+      await detached;
+      const again = await eventuallyAttach(connection);
+      expect(again).not.toBe(sessionId);
     } finally {
       releaseInput();
       connection.close();

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { toast } from "./toast";
 
 import { useAppContext } from "../app-context";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type InboxState = {
   data: ListInboxResponse | null;
@@ -272,7 +273,7 @@ export function useSessionRepliesMute(session: {
       .catch((error: unknown) => {
         const what = scope === "schedule" ? "this automation's replies" : "replies";
         toast.error(next ? `Couldn't mute ${what}.` : `Couldn't unmute ${what}.`, {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       })
       .finally(() => setBusy(false));

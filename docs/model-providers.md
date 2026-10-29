@@ -351,8 +351,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `withOrganizationDirectCredential` in `packages/config/src/index.ts`,
 `packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
-`loadOrganizationModelProviderCredential`), migration
-`packages/db/drizzle/0898_organization_direct_openai_model_providers.sql`,
+`loadOrganizationModelProviderCredential`),
 `settingsWithOrganizationProviderCredentials` in
 `packages/core/src/model-provider-credentials.ts`,
 `apps/api/src/routes/organization-model-providers.ts`, and the organization
@@ -473,7 +472,7 @@ managed-provider slice of a catalog document:
   "opperModels": [
     {
       "upstreamModelId": "aws/claude-opus-5-5",
-      "label": "Claude Opus 5.5 (EU)",
+      "label": "Claude Opus 5.5",
       "shortLabel": "Opus 5.5",
       "capabilities": { "...": "complete V1 capabilities" },
       "contextWindowTokens": 1000000,
@@ -627,8 +626,8 @@ continuation can still resolve its retained definition. Re-adding the same slug
 creates a fresh row identity; stale mutations against an older generation
 cannot affect the replacement.
 Fresh session admission, an explicit follow-up switch from another model, a new
-or materially reaccepted scheduled task, automation trigger, or PR-review
-repository binding, and a fresh generated-session scheduled occurrence recheck
+or materially reaccepted scheduled task, and a fresh generated-session scheduled
+occurrence recheck
 the active row under the custom-model shared transaction lock in the same commit
 that inserts the session, accepts the turn, writes the task/trigger/binding, or
 accepts the occurrence. A committed keyed session shell or exact producer
@@ -1096,11 +1095,13 @@ Reviewed 2026-10-05 against Opper's catalogue
 (`GET https://api.opper.ai/v3/compat/models`; each entry's `opper.reasoning`
 lists supported efforts and `opper.capabilities` its inputs) and probed live end
 to end. The starter pins an EU-resident route so Opper never pools it onto a
-non-EU provider:
+non-EU provider. Its label doesn't say EU: EU status comes from the route's
+residency record (see [eu-only-inference.md](eu-only-inference.md)), never from
+a name.
 
 | Product              | Upstream route (Opper id) | Served by / inference                           | Context / max output | Opper list price (per 1M): input / cached input / cache write / output | Opengeni debit |
 | -------------------- | ------------------------- | ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------- | -------------- |
-| Claude Opus 5.5 (EU) | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
+| Claude Opus 5.5      | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
 
 Product ids are `opper/aws/claude-opus-5-5` and `workspace-opper/aws/claude-opus-5-5`.
 Effective context is the raw window minus Opper's max output (872,000);
@@ -1815,7 +1816,7 @@ first match wins:
    on a covered model. With no funded selectable model, new work falls back
    to the next step. See [promotional coverage](scoped-promotional-credits.md).
    `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
-   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
+   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `medium`, clamped to the
    highest effort the model supports at or below it) configure it. An explicit
    `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
    catalog or boot fails. The unset built-in value, and any value checked
@@ -1826,8 +1827,8 @@ first match wins:
    already a funded selectable credits-billed model, it keeps the deployment effort,
    except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
    `credits`) when it is the credits default model itself, so a deployment
-   whose default is `gpt-6-luna` still starts credit holders on extra high
-   reasoning.
+   whose default is `gpt-6-luna` still starts credit holders on the credits
+   default effort.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a
@@ -2112,8 +2113,9 @@ Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
 Insights comparisons use `configuredModelListPricingSchedules` and
-`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, Grok, and
-Claude rates live only in `reviewedModelListPricing`, not debit defaults. These
+`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, GPT-6.1
+Terra, Grok, and Claude rates live only in `reviewedModelListPricing`, not debit
+defaults. These
 project reviewed upstream rates
 onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
 product routes without adding comparison-only prices to debit authority or
@@ -2173,6 +2175,9 @@ the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
 5% cache-read rate and the exclusive 272K long-context boundary; native Grok
 4.5–4.7 comparison schedules preserve the established inclusive 200K boundary.
 Gateway's separate greater-than-200K schedule must not replace the native one.
+GPT-6.1 Terra was reviewed on 2026-10-27 against the same OpenAI pricing page:
+half of GPT-6.1 Sol's Standard rates, with the same 5% cache-read rate and
+exclusive 272K whole-request boundary, and no Ultrafast tier.
 The reviewed native Claude models have no
 long-context premium. Claude 1-hour native cache writes use 2x base input,
 rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant

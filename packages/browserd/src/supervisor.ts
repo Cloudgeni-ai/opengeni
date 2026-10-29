@@ -174,6 +174,7 @@ import {
   type BrowserRelaunchReason,
   type StoppedBrowserTab,
 } from "./stopped-browser-tabs";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const DEFAULT_MAX_SESSIONS = 64;
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -680,7 +681,7 @@ export class BrowserSupervisor {
       } catch (error) {
         console.warn("browserd.idle_release_failed", {
           browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       } finally {
         if (this.ending.get(browserSessionId) === ending) this.ending.delete(browserSessionId);
@@ -731,7 +732,7 @@ export class BrowserSupervisor {
       ledgers = await readAttachedTabLedgers(this.rootDirectory);
     } catch (error) {
       console.warn("browserd.attached_leftover_release_failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return [];
     }
@@ -797,7 +798,7 @@ export class BrowserSupervisor {
         this.attachedLeftoverWarnings.add(browserSessionId);
         console.warn("browserd.attached_leftover_release_failed", {
           browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
       return false;
@@ -813,7 +814,7 @@ export class BrowserSupervisor {
       records = await readDetachedBrowserRecords(this.rootDirectory);
     } catch (error) {
       console.warn("browserd.detached_release_failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return [];
     }
@@ -857,7 +858,7 @@ export class BrowserSupervisor {
         waiting += 1;
         console.warn("browserd.detached_release_failed", {
           browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       } finally {
         if (this.releasingDetached.get(browserSessionId) === release)
@@ -3519,7 +3520,7 @@ export class BrowserSupervisor {
     } catch (error) {
       console.warn("browserd.stopped_tabs_record_failed", {
         browserSessionId: runtime.options.browserSessionId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -3585,7 +3586,7 @@ export class BrowserSupervisor {
       } catch (error) {
         console.warn("browserd.detached_record_failed", {
           browserSessionId: runtime.options.browserSessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }

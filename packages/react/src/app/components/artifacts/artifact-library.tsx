@@ -78,7 +78,7 @@ import {
   type ArtifactView,
 } from "../../lib/artifact-library-view";
 import { cn } from "../../lib/utils";
-import type { ArtifactReturnSearch } from "../../lib/routes";
+import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
@@ -330,10 +330,13 @@ function useArtifactOpen({
     onSelect
       ? onSelect(item)
       : item.kind === "site"
-        ? // A Site opens in the Site view, with its chat beside it.
+        ? // A Site opens in the Site view, with its chat beside it. From the
+          // Artifacts page it carries that page's query, so the Site view's
+          // Back returns to the page as it was.
           void navigate({
             to: "/workspaces/$workspaceId/sites/$siteId",
             params: { workspaceId, siteId: item.id },
+            ...(browseSearch ? { search: siteViewArtifactsReturn(browseSearch) } : {}),
           })
         : void navigate({
             to: artifactRoute(item.kind),
@@ -399,10 +402,11 @@ function useArtifactOpen({
     link: onSelect
       ? null
       : {
-          href:
-            browseSearch && item.kind !== "site"
-              ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
-              : artifactPath(workspaceId, item, sessionId),
+          href: browseSearch
+            ? `${artifactPath(workspaceId, item)}${stringifySearch(
+                item.kind === "site" ? siteViewArtifactsReturn(browseSearch) : browseSearch,
+              )}`
+            : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();

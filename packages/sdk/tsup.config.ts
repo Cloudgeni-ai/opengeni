@@ -46,8 +46,6 @@ export default defineConfig({
     "src/insights-usage.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
-    "src/automations.ts",
-    "src/pr-review.ts",
     "src/organization-private-session-settings.ts",
     "src/organization-integration-policy.ts",
     "src/organization-user-setup.ts",
@@ -86,5 +84,6 @@ export default defineConfig({
     "@opengeni/contracts/secret-use-approval-question",
     "@opengeni/contracts/tool-review-presentation",
     "@opengeni/contracts/message-time-zone",
+    "@opengeni/contracts/values",
   ],
 });

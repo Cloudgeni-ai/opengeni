@@ -24,6 +24,7 @@ import {
   settleSessionUsageReceipt,
   toPostgresLosslessJson,
   type Database,
+  type UsageEventProcessingResidency,
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
@@ -81,6 +82,12 @@ export type ModelUsageSettlementInput = {
   turnId?: string | null;
   turnAttemptId?: string | null;
   latencyMode?: LatencyMode;
+  /**
+   * Where the route that served the response processed it (its residency
+   * claim, never evidence), recorded on the usage events. Callers without a
+   * `model_call_facts` row (the standalone model-call API) pass it here.
+   */
+  processingResidency?: UsageEventProcessingResidency;
   /** Non-secret correlation fields added to the credit debit metadata. */
   debitMetadata?: Record<string, unknown>;
   /** Best-effort metrics hook after a committed debit. */
@@ -166,6 +173,7 @@ export async function settleModelUsage(
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.turnAttemptId ? { turnAttemptId: input.turnAttemptId } : {}),
+    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
   };
   const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
   const inputTokens = sanitizedUsage.inputTokens ?? 0;

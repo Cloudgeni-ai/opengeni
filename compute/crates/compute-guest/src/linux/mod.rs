@@ -2,6 +2,7 @@
 //! them going.
 
 mod agent;
+mod disk;
 mod guest;
 mod supervise;
 mod sys;
@@ -67,11 +68,14 @@ pub fn run() -> ! {
         log(&format!("ctrl-alt-del: {error}"));
     }
     system::mount_basics();
+    disk::keep_root_grown();
     agent::clear_activity();
     let args = BootArgs::parse(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
     system::network(args.network.as_ref());
     if let Some(sandbox) = &args.sandbox {
         system::boot_identity(sandbox);
+    } else {
+        system::boot_unowned();
     }
     let image: ImageConfig = fs::read(config::CONFIG_PATH)
         .ok()

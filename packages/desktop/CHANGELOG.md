@@ -1,5 +1,71 @@
 # @opengeni/desktop
 
+## 5.5.1
+
+### Minor Changes
+
+- 9180cf8: Dictation from anywhere in the desktop app: press a shortcut in any app, speak, press it again (or hold it while speaking), and the text is typed where the cursor is. Each shortcut can have its own language; on macOS a shortcut can be modifier keys alone (Control and Fn by default).
+
+  - `@opengeni/desktop/dictation`: the main-process controller (`createDesktopDictation`, `Dictation`), which watches the shortcuts, shows a small progress window at the bottom of the screen, and types the text by pasting it and putting the clipboard back (macOS with Accessibility, Windows through PowerShell, Linux through xdotool, wtype or ydotool), or only copies it. It keeps the last 50 texts on the computer. `words` puts its small window in the app's language (`ENGLISH_DICTATION_WORDS` by default), and `language` sets what the first shortcut hears until the person picks another (it detects the language by default); the status names problems by code (`shortcutErrors[].problem`, `paste.blocker`) for the page to translate. `handleDictationIpc` answers the page; `@opengeni/desktop/preload/dictation` exports `exposeDictation()`, which defines `window.opengeniDictation` for apps that aren't the Opengeni desktop shell.
+  - `@opengeni/react/desktop-dictation`: `DesktopDictationHost` records and transcribes for the shortcut on a signed-in page with the workspace's voice input, so each dictation is an ordinary dictation recording (a failed one offers Retry, a dismissed one stays saved for the composer). `DesktopDictationSettings` is the stock settings UI and `useDesktopDictation` the hook under it; `desktopShortcutLabel` and `acceleratorFromKey` name and record shortcuts.
+  - `useVoiceInput` takes `recover: false` for a host that dictates somewhere else, and returns `release()`, which lets go of the current dictation without deleting it.
+  - `@opengeni/sdk/desktop-bridge`: the `dictation` capability, the `DesktopDictation*` types, `getDesktopDictation()` and `DESKTOP_DICTATION_GLOBAL`.
+
+- 1908715: Dictation listens for a vocabulary, and dictation from anywhere keeps each dictation's speech to play and transcribe again.
+
+  - A dictation recording's `transcription` takes `keyterms` as well as `language`. The worker passes them to the voice input model when it takes keyterms: ElevenLabs Scribe and Azure Speech as keyterms, OpenAI and Azure OpenAI as the prompt (their text models now report `keyterms: true`, so meetings on them listen for keyterms too).
+  - `useVoiceInput` takes `keyterms` and `onAudio`, which hands over each dictation's microphone audio with its text, and returns `transcribe(blob)` to transcribe audio kept earlier as a new dictation.
+  - `@opengeni/sdk/recordings`: `uploadRecordingAudio()` uploads finished audio as a one-track recording.
+  - `@opengeni/desktop/dictation`: settings gain `vocabulary`, `retryShortcut` (transcribes the last dictation again and types it) and `cancelShortcut`; the status reports `actionShortcutErrors`. The history keeps each dictation's speech on the computer (private to the person, deleted with the history), and `historyAudio(id)` and `transcribeAgain(id)` play and re-transcribe it. While dictation is on, the app opens at login.
+  - `DesktopDictationSettings` offers the vocabulary, the retry and cancel shortcuts, and Play and Transcribe again on each recent dictation.
+
+- cc59c02: The desktop app asks whether to record a call on a card of its own in the top right corner of the screen, instead of in a system notification. Focus and Do Not Disturb hid the notification, so a person in a call often never saw the question. The card shows above full-screen apps on every desktop and space, never takes the keyboard from the call, and has two buttons: Record and Not now (or Stop recording and Keep recording when the recorded call ends). A question to record goes away after 45 seconds unless the pointer is on it; a question to stop stays until answered. Closing or ignoring a question no longer holds back the next call's. Each question and its outcome is written, with the call app's id and the time only, to `meeting-detection.log` in the app's logs folder.
+
+  Any Electron app that shows Opengeni's meetings can now offer this too. `@opengeni/desktop/meeting-detection` exports `createMeetingDetection` and `handleMeetingDetectionIpc` (with the card's words, so an app can show them in its own language), and `@opengeni/desktop/preload/meeting-detection` exports `exposeMeetingDetection()`, which defines `window.opengeniMeetingDetection`. The meeting recorder uses it when the Opengeni desktop bridge is absent (`getDesktopMeetingDetection` in `@opengeni/sdk/desktop-bridge`). A choice now waits up to a minute for the page to listen, so choosing Record while the window is closed still starts recording once it opens, and Stop recording goes to the page that records.
+
+### Patch Changes
+
+- Updated dependencies [fa7516a]
+- Updated dependencies [f23588a]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [1908715]
+- Updated dependencies [cc59c02]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [8382bdb]
+- Updated dependencies [a18a2e2]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/agent-host@5.5.0
+
+## 5.4.2
+
+### Patch Changes
+
+- a671e98: Recording computer audio no longer fails while macOS asks for permission. The first time a meeting recording includes computer audio, macOS asks for System Audio Recording permission and the capture waits for the answer. The app used to give up after 10 seconds, so anyone who took longer to answer saw "Recording computer audio stopped unexpectedly". The audio capture helper now says when macOS is asking (`{"event":"awaiting_permission"}`), and the app waits for the answer however long it takes, as the microphone prompt does. When the person chooses Don't Allow, the start now fails as not allowed instead of recording only silence. Both fixes need the audio capture helper from this release; with an older helper, nothing changes.
+- 3d298e6: On Windows, a desktop app run from source now uses its own app ID (the packaged ID plus `.dev`). Sharing the installed app's ID left two Start-menu shortcuts with one ID, so Windows could show the installed app's notifications under "Electron" and open the development build when one was clicked.
+- 415c32b: Any Electron app that shows Opengeni's meetings can now record the computer's audio, which includes the other people in a call, as its own track, the way the Opengeni desktop app does. `@opengeni/desktop/system-audio` exports `handleSystemAudioIpc` and `systemAudioHelperName` next to `SystemAudioCaptures`, and its `channels` option is now optional. `@opengeni/desktop/preload/system-audio` exports `exposeSystemAudio()`, which defines `window.opengeniSystemAudio`. The meeting recorder uses that global when the Opengeni desktop bridge is absent (`getDesktopSystemAudio` in `@opengeni/sdk/desktop-bridge`). Each desktop release attaches the helper binaries (`opengeni-audio-capture-<os>-<arch>`), and `SHA256SUMS` covers them. Inside an Electron app that can't record computer audio, the recorder no longer offers a browser tab's audio, because Electron has no share picker of its own and choosing it only failed.
+- 4641312: Turning on Computer use in a second workspace no longer fails with "this machine was first connected as a personal machine from another workspace". When the computer's existing connection was made without screen control, the app now turns screen control on for that connection (where it was made) and lets agents in the new workspace use it, instead of setting the computer up anew, which the server refuses for a person's own computer. On the server, a personal computer that was removed can now be connected again from any workspace its owner uses; before, it could only come back in the workspace it was first connected from.
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [4488c59]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [415c32b]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [d30a243]
+- Updated dependencies [de7087a]
+- Updated dependencies [a2ae2ce]
+- Updated dependencies [96502c5]
+- Updated dependencies [4641312]
+- Updated dependencies [1320698]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+  - @opengeni/sdk@5.4.0
+  - @opengeni/agent-host@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

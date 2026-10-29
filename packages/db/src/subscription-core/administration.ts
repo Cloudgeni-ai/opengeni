@@ -23,7 +23,6 @@ import { withLosslessContentWriteVersion } from "../lossless-json";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
 import {
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
   subscriptionConnectionEffectiveLastError,
   subscriptionConnectionEffectiveStatus,
@@ -41,36 +40,6 @@ import {
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./provider";
-
-/**
- * `core`: the provider's cutover is enabled. `maintenance`: a missing or
- * disabled row; callers fail closed.
- */
-export type SubscriptionCoreCutoverDisposition = "core" | "maintenance";
-
-export async function readSubscriptionCoreCutoverDisposition(
-  db: Database,
-  provider: SubscriptionCoreProvider,
-  accountId: string,
-  /**
-   * The caller's workspace, when it has one. The cutover row needs only the
-   * account scope, but a caller inside a shared request transaction (whose
-   * sibling queries run concurrently) must not have its workspace setting
-   * changed underneath them, so the nested scope keeps the same workspace.
-   */
-  workspaceId: string | null = null,
-): Promise<SubscriptionCoreCutoverDisposition> {
-  const state = await withRlsContext(
-    db,
-    { accountId, workspaceId },
-    async (tx) =>
-      await readSubscriptionProviderCutoverState(tx, {
-        accountId,
-        provider: subscriptionCoreProviderId(provider),
-      }),
-  );
-  return state === "enabled" ? "core" : "maintenance";
-}
 
 /** A wake the caller delivers after its mutation committed. */
 export type SubscriptionCoreWake = {
@@ -361,8 +330,8 @@ export async function readSubscriptionCoreWorkspacePool(
 /**
  * The viewing person's own personal connections of this provider (no
  * credential material), through the owner-only reader. Requires the
- * workspace RLS context on `tx`; sets the subject. Empty for anyone else, for
- * a workspace the person may not use, or without an enabled cutover.
+ * workspace RLS context on `tx`; sets the subject. Empty for anyone else or
+ * for a workspace the person may not use.
  */
 export async function listSubscriptionCorePersonalConnectionRowsInTransaction(
   tx: Database,
@@ -1392,7 +1361,7 @@ export async function setSubscriptionCoreWorkspaceSource(
     if (!written) {
       throw provider.errors.sourceRefused(
         "forbidden",
-        `missing permission to change this workspace's ${provider.adapter.displayName} source`,
+        `You don't have permission to change this workspace's ${provider.adapter.displayName} source.`,
       );
     }
     return {

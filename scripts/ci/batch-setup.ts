@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** Unknown installer failures are operational holds, not speculative PR blame.
  * Bun's explicit frozen-lockfile mismatch is a deterministic source verdict. */
@@ -46,10 +47,7 @@ if (import.meta.main) {
       await fixture.release();
     } else throw new Error("usage: batch-setup.ts install|postgres");
   } catch (error) {
-    console.error(
-      "Batch setup could not complete:",
-      error instanceof Error ? error.message : String(error),
-    );
+    console.error("Batch setup could not complete:", errorMessage(error));
     process.exit(75);
   }
 }

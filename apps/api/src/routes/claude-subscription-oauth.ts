@@ -16,7 +16,7 @@ import {
 } from "../claude-subscription-oauth";
 import { managedCookieHuman, requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
-import { claudeCoreRoute, requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
+import { requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
 import { parseRequestBody } from "../http/request-body";
 
 export function registerClaudeSubscriptionOAuthRoutes(
@@ -90,11 +90,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
       message: "Sign in to Opengeni to connect Claude.",
     });
   }
-  /**
-   * Require the Claude cutover receipt at start and completion alike.
-   */
-  async function oauthCore(c: Context, inputScope: ClaudeOAuthScope) {
-    await claudeCoreRoute(deps, async () => inputScope.accountId);
+  async function oauthCore(c: Context) {
     return { connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null };
   }
   for (const organization of [false, true]) {
@@ -108,26 +104,30 @@ export function registerClaudeSubscriptionOAuthRoutes(
       );
       if (!payload.success || (organization && payload.data.scope !== "workspace"))
         throw new HTTPException(422, { message: "Choose where to connect this Claude account." });
-      // The runtime first: on the core a private account is authorized in
-      // the owner's Personal workspace and refused (403) anywhere else,
-      // before any Claude sign-in.
-      const core = await oauthCore(c, inputScope);
+      // The runtime first: on the core a private account lives in the
+      // owner's Personal workspace. The person signs in from wherever they
+      // are in the organization; the account is written there.
+      const core = await oauthCore(c);
       if (payload.data.scope === "user")
         await requireClaudeCorePersonalWorkspace(deps, {
           accountId: inputScope.accountId,
-          workspaceId: inputScope.workspaceId,
           subjectId: inputScope.actorSubjectId,
         });
-      if (!organization)
-        await requireSubscriptionScopeMutation(
-          c,
-          deps,
-          inputScope.workspaceId!,
-          payload.data.scope,
-          "Claude",
-          "personal_workspace",
-        );
-      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data, core));
+      const place = organization
+        ? null
+        : (
+            await requireSubscriptionScopeMutation(
+              c,
+              deps,
+              inputScope.workspaceId!,
+              payload.data.scope,
+              "Claude",
+              "own_personal_workspace",
+            )
+          ).workspaceId;
+      return c.json(
+        await startClaudeSubscriptionOAuth(deps, inputScope, payload.data, core, place),
+      );
     });
     app.post(`${path}/complete`, async (c) => {
       const inputScope = await scope(c, organization);
@@ -136,22 +136,25 @@ export function registerClaudeSubscriptionOAuthRoutes(
         await c.req.json().catch(() => null),
         { status: 422, message: "Enter the authorization code from Claude." },
       );
-      const core = await oauthCore(c, inputScope);
+      const core = await oauthCore(c);
       return c.json(
         await completeClaudeSubscriptionOAuth(
           deps,
           inputScope,
           payload,
           async (poolScope) => {
-            if (!organization)
-              await requireSubscriptionScopeMutation(
-                c,
-                deps,
-                inputScope.workspaceId!,
-                poolScope ?? "workspace",
-                "Claude",
-                "personal_workspace",
-              );
+            const place = organization
+              ? null
+              : (
+                  await requireSubscriptionScopeMutation(
+                    c,
+                    deps,
+                    inputScope.workspaceId!,
+                    poolScope ?? "workspace",
+                    "Claude",
+                    "own_personal_workspace",
+                  )
+                ).workspaceId;
             const fresh = await scope(c, organization, true);
             if (
               fresh.accountId !== inputScope.accountId ||
@@ -161,6 +164,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
               throw new HTTPException(403, {
                 message: "Your access changed during Claude sign-in. Start again.",
               });
+            return place;
           },
           fetchImpl,
           core,

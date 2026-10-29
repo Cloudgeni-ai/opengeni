@@ -6,6 +6,7 @@ import {
   type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  ErrorEnvelope,
   isReadOnlyPermissionSet,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -25,6 +26,10 @@ import {
 } from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
 import { actionDescription } from "./mcp/action-descriptions";
+import {
+  stampActionAuditProvenance,
+  type ActionAuditProvenance,
+} from "./http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -77,6 +82,16 @@ export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
     entry.path === "/v1/workspaces/:workspaceId" ||
     entry.path.startsWith("/v1/workspaces/:workspaceId/")
   );
+}
+
+/** Whether a 403 body is the billing routes' refusal for a missing billing:manage. */
+async function refusedForBillingManage(response: Response): Promise<boolean> {
+  try {
+    const envelope = ErrorEnvelope.safeParse(await response.clone().json());
+    return envelope.success && envelope.data.error.details?.permission === "billing:manage";
+  } catch {
+    return false;
+  }
 }
 
 /** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
@@ -178,6 +193,11 @@ export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
 
 export type OrganizationActionContext = {
   caller: OrganizationMcpCaller;
+  /**
+   * Who acts for the person (an agent session with admin access, a connected
+   * agent, a personal key), for audit records. Trusted server state only.
+   */
+  auditProvenance?: ActionAuditProvenance;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
   /** The web app's public origin, when configured; serves the PNG icon. */
@@ -237,8 +257,8 @@ function words(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Actions an MCP caller can complete: browser-only and retired ones are left out. */
-const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly && !entry.retired);
+/** Actions an MCP caller can complete: browser-only ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
 const DESCRIPTIONS = new Map(
   CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
 );
@@ -331,7 +351,6 @@ export function describeActionResult(id: string): CallToolResult {
   const entry = findAppAction(id);
   if (!entry) return failure(`No action "${id}". Search for it first.`);
   if (entry.browserOnly) return browserOnly(entry);
-  if (entry.retired) return retired(entry);
   return json(describeAction(entry));
 }
 
@@ -358,16 +377,35 @@ export function describeAction(entry: ActionCatalogEntry) {
 export async function callOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
+  options: {
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+    /**
+     * A fixed refusal shown instead of the route's own 403 when that 403 is a
+     * missing billing:manage permission, for the caller's surface. Other 403s
+     * keep the route's answer.
+     */
+    billingForbidden?: string | undefined;
+  } = {},
 ): Promise<CallToolResult> {
   const outcome = await runOrganizationAction(context, input);
-  return "refused" in outcome
-    ? outcome.refused
-    : await toolResult(
-        outcome.response,
-        outcome.entry,
-        input.query,
-        outcome.externalPerson === true,
-      );
+  // Refusals decided before any request, including everything someone who
+  // uses Opengeni through another product can't reach, come first and are
+  // never reworded here.
+  if ("refused" in outcome) return outcome.refused;
+  if (
+    options.billingForbidden &&
+    outcome.externalPerson !== true &&
+    outcome.response.status === 403 &&
+    (await refusedForBillingManage(outcome.response))
+  ) {
+    await outcome.response.body?.cancel();
+    return failure(options.billingForbidden);
+  }
+  return await toolResult(outcome.response, outcome.entry, input.query, {
+    externalPerson: outcome.externalPerson === true,
+    note: options.note,
+  });
 }
 
 /**
@@ -385,7 +423,6 @@ export async function runOrganizationAction(
   const entry = findAppAction(input.id);
   if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
   if (entry.browserOnly) return { refused: browserOnly(entry) };
-  if (entry.retired) return { refused: retired(entry) };
   const reads = entry.method === "GET" || entry.method === "HEAD";
   const externalWorkspace = externalPersonWorkspace(context.caller);
   if (context.caller.kind === "person" && context.caller.subjectId.startsWith("external_user:")) {
@@ -463,6 +500,7 @@ export async function runOrganizationAction(
         workspaceScope: context.caller.access.workspaceScope,
       });
     }
+    if (context.auditProvenance) stampActionAuditProvenance(request, context.auditProvenance);
   }
   return {
     response: await context.dispatch(request),
@@ -475,7 +513,12 @@ async function toolResult(
   response: Response,
   entry: ActionCatalogEntry,
   query: z.infer<typeof OrganizationActionCallInput>["query"],
-  externalPerson: boolean,
+  options: {
+    /** The caller uses Opengeni through another product: no app page to send them to. */
+    externalPerson: boolean;
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+  },
 ): Promise<CallToolResult> {
   const status = response.status;
   const location = response.headers.get("location");
@@ -512,7 +555,7 @@ async function toolResult(
     if (truncated && !trimmed)
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
-  if ((status === 401 || status === 403) && externalPerson) {
+  if ((status === 401 || status === 403) && options.externalPerson) {
     result.hint = EXTERNAL_PERSON_REFUSED_HINT;
   } else if (
     (status === 401 || status === 403) &&
@@ -520,6 +563,7 @@ async function toolResult(
   ) {
     result.hint = "This action has to be done by the person in the Opengeni app in a browser.";
   }
+  if (options.note && status < 400) result.note = options.note;
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
     ...(status >= 400 ? { isError: true } : {}),
@@ -652,14 +696,6 @@ function json(value: unknown): CallToolResult {
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
     `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
-  );
-}
-
-/** A removed action: name the action that replaced it instead of calling it. */
-function retired(entry: ActionCatalogEntry): CallToolResult {
-  const replacement = entry.retired ? findAppAction(entry.retired) : undefined;
-  return failure(
-    `${entry.id} was removed. Use ${replacement ? `the ${replacement.id} action (${entry.retired})` : entry.retired} instead; describe it for its input.`,
   );
 }
 

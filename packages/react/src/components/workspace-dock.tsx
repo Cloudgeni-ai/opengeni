@@ -1,10 +1,14 @@
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -105,6 +109,41 @@ function getLayoutStorage(): LayoutStorage {
 const useDockLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 /**
+ * A panel's claim on the dock's expand: given while the panel shows its own
+ * expand (a Site's full window), so the dock does not offer a second,
+ * look-alike one beside it.
+ */
+const PanelExpandContext = createContext<((claimed: boolean) => void) | null>(null);
+
+/**
+ * Call from a panel's content while it shows its own expand control. The
+ * dock then hides its Maximize for that panel, so the panel has one expand
+ * action; the other panels keep the dock's. A maximized dock still shows
+ * Restore. Outside a dock this does nothing.
+ */
+export function useWorkspacePanelOwnsExpand(owns: boolean): void {
+  const claim = useContext(PanelExpandContext);
+  useDockLayoutEffect(() => {
+    if (!claim || !owns) return;
+    claim(true);
+    return () => claim(false);
+  }, [claim, owns]);
+}
+
+function PanelExpandScope({
+  tabId,
+  onClaim,
+  children,
+}: {
+  tabId: string;
+  onClaim: (tabId: string, claimed: boolean) => void;
+  children: ReactNode;
+}) {
+  const claim = useMemo(() => (claimed: boolean) => onClaim(tabId, claimed), [onClaim, tabId]);
+  return <PanelExpandContext.Provider value={claim}>{children}</PanelExpandContext.Provider>;
+}
+
+/**
  * The dock stops being a side column at this width and becomes a full-screen
  * overlay — matches the app's rail-drawer breakpoint (the single `isMobile`
  * source). The package can't read app context, so it detects the width itself.
@@ -161,6 +200,18 @@ export function WorkspaceDock({
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [internalTab, setInternalTab] = useState(tabs[0]?.id ?? "");
+  // Panels showing their own expand, by tab: counted, so two claims in one
+  // panel never cancel each other.
+  const [expandClaims, setExpandClaims] = useState<Readonly<Record<string, number>>>({});
+  const claimExpand = useCallback((tabId: string, claimed: boolean) => {
+    setExpandClaims((previous) => {
+      const count = Math.max(0, (previous[tabId] ?? 0) + (claimed ? 1 : -1));
+      const next = { ...previous };
+      if (count === 0) delete next[tabId];
+      else next[tabId] = count;
+      return next;
+    });
+  }, []);
   const collapsed = collapsedProp ?? internalCollapsed;
   // The host header remains the stable reopen action. The open panel also owns
   // a local Hide workspace action so a user never has to hunt elsewhere to
@@ -394,6 +445,7 @@ export function WorkspaceDock({
         </div>
         <div
           data-workspace-surface
+          data-window-layer
           role="dialog"
           aria-modal="true"
           aria-label={msg("workspaceDock.workspace")}
@@ -413,6 +465,7 @@ export function WorkspaceDock({
             tabs={tabs}
             current={current}
             onTab={setTab}
+            onExpandClaim={claimExpand}
             leading={mobileLeadingControl}
             accessory={headerAccessory}
             controls={
@@ -443,28 +496,48 @@ export function WorkspaceDock({
     );
   }
 
+  // A panel with its own expand (a Site's full window) is the one expand
+  // there; a maximized dock still offers Restore.
+  const showMaximize = maximized || !expandClaims[current];
   const dockChrome = (
     <DockChrome
       tabs={tabs}
       current={current}
       onTab={setTab}
+      onExpandClaim={claimExpand}
       // On the desktop dock the status and window controls sit under the
       // panel tabs, so every panel starts at the top with its own header.
       chromePlacement="rail"
       accessory={headerAccessory}
       controls={
         <>
-          <ChromeButton
-            onClick={() => setMaximized((m) => !m)}
-            title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
-            label={maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")}
-          >
-            {maximized ? (
-              <Minimize2Icon className="size-3.5" />
-            ) : (
-              <Maximize2Icon className="size-3.5" />
-            )}
-          </ChromeButton>
+          {showMaximize ? (
+            <ChromeButton
+              onClick={(event) => {
+                // Restoring a panel that owns its expand removes this button;
+                // keep keyboard focus in the dock instead of dropping it.
+                if (maximized && expandClaims[current]) {
+                  const next =
+                    (event.currentTarget.nextElementSibling as HTMLElement | null) ??
+                    rootRef.current?.querySelector<HTMLElement>(
+                      '[role="tab"][aria-selected="true"]',
+                    );
+                  requestAnimationFrame(() => next?.focus());
+                }
+                setMaximized((m) => !m);
+              }}
+              title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
+              label={
+                maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")
+              }
+            >
+              {maximized ? (
+                <Minimize2Icon className="size-3.5" />
+              ) : (
+                <Maximize2Icon className="size-3.5" />
+              )}
+            </ChromeButton>
+          ) : null}
           {hostControlled && !showCollapseControl ? null : (
             <ChromeButton
               onClick={collapse}
@@ -526,6 +599,7 @@ export function WorkspaceDock({
               layout changes must never destroy an editor buffer or terminal view. */}
           <div
             data-workspace-surface
+            data-window-layer={maximized || undefined}
             role={maximized ? "dialog" : undefined}
             aria-modal={maximized ? true : undefined}
             aria-label={maximized ? msg("workspaceDock.workspace") : undefined}
@@ -565,7 +639,7 @@ function ChromeButton({
   label,
   children,
 }: {
-  onClick: () => void;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   title: string;
   label: string;
   children: ReactNode;
@@ -587,6 +661,7 @@ function DockChrome({
   tabs,
   current,
   onTab,
+  onExpandClaim,
   leading,
   chromePlacement = "header",
   accessory,
@@ -595,6 +670,8 @@ function DockChrome({
   tabs: WorkspaceTab[];
   current: string;
   onTab: (id: string) => void;
+  /** A panel's content shows (or stops showing) its own expand. */
+  onExpandClaim: (tabId: string, claimed: boolean) => void;
   /** Host navigation at the start of mobile overlay chrome. */
   leading?: ReactNode | undefined;
   /**
@@ -784,7 +861,11 @@ function DockChrome({
                   hidden={!selected}
                   role="tabpanel"
                 >
-                  {shouldMount ? tab.content : null}
+                  {shouldMount ? (
+                    <PanelExpandScope tabId={tab.id} onClaim={onExpandClaim}>
+                      {tab.content}
+                    </PanelExpandScope>
+                  ) : null}
                 </div>
               );
             })

@@ -4,7 +4,7 @@
 use anyhow::{Context as _, bail};
 use compute_engine::MemoryProfile;
 
-use crate::meminfo_field;
+use crate::policy::meminfo_field;
 
 /// Everything here, in order: the host's checks, then the process's own
 /// settings. `compress` is whether the agent compresses paused VMs.

@@ -10,12 +10,11 @@
  * `NNNN_y.sql` first. `--next` picks the first ordinal free on both the local
  * ledger and the base ref, renames the SQL and its `migration-NNNN-*.test.ts`
  * companions, rewrites every reference (tracked and untracked text files),
- * re-pins the release schema contract hashes, and formats touched files.
+ * and formats touched files.
  * Nothing is committed; review `git status`/`git diff` and commit yourself.
  *
  * Migration content is never modified except for its own bare ordinal mentions
- * (drain messages, comments); the release contract's per-migration and chain
- * hash pins are re-pinned from the resulting bytes.
+ * (drain messages, comments).
  */
 import { existsSync, readdirSync } from "node:fs";
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -23,17 +22,16 @@ import { dirname, join } from "node:path";
 import {
   MIGRATIONS_DIR,
   MIGRATION_TESTS_DIR,
-  RELEASE_CONTRACT_TEST,
   companionTestFiles,
   formatOrdinal,
   isRewritableTextPath,
   listMigrationFiles,
   nextFreeOrdinal,
-  parseHashMismatch,
   parseLsTree,
   planRenumber,
   resolveMigration,
 } from "./migration-ordinals";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type Args = {
   selector: string;
@@ -41,7 +39,6 @@ type Args = {
   next: boolean;
   base: string;
   dryRun: boolean;
-  refreshContract: boolean;
   also: string[];
   allowGap: boolean;
 };
@@ -51,7 +48,7 @@ function usage(message?: string): never {
   console.error(
     [
       "usage: bun scripts/renumber-migration.ts <ordinal|basename> (--next | --to NNNN)",
-      "         [--base <ref>] [--dry-run] [--no-refresh-release-contract]",
+      "         [--base <ref>] [--dry-run]",
       "",
       "  --next        first ordinal free on both the local ledger and --base (default origin/main)",
       "  --to NNNN     explicit target ordinal (must be free on both sides and above every",
@@ -60,8 +57,6 @@ function usage(message?: string): never {
       "  --dry-run     print the plan without renaming or writing",
       "  --also <path> also rewrite bare ordinal mentions in this file (repeatable); use it for",
       "                docs/changesets that name the migration by number only",
-      "  --no-refresh-release-contract",
-      "                skip re-pinning scripts/release-schema-contract.test.ts hashes",
     ].join("\n"),
   );
   process.exit(2);
@@ -74,7 +69,6 @@ function parseArgs(argv: readonly string[]): Args {
     next: false,
     base: process.env.OPENGENI_MIGRATION_BASE_REF ?? "origin/main",
     dryRun: false,
-    refreshContract: true,
     also: [],
     allowGap: false,
   };
@@ -82,7 +76,6 @@ function parseArgs(argv: readonly string[]): Args {
     const value = argv[index]!;
     if (value === "--next") args.next = true;
     else if (value === "--dry-run") args.dryRun = true;
-    else if (value === "--no-refresh-release-contract") args.refreshContract = false;
     else if (value === "--allow-gap") args.allowGap = true;
     else if (value === "--to") {
       const target = argv[++index];
@@ -147,52 +140,6 @@ async function repoTextFiles(root: string): Promise<Map<string, string>> {
     files.set(path, bytes.toString("utf8"));
   }
   return files;
-}
-
-async function runContractTest(root: string): Promise<{ ok: boolean; output: string }> {
-  const child = Bun.spawn(["bun", "test", "--timeout", "120000", RELEASE_CONTRACT_TEST], {
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  const code = await child.exited;
-  return { ok: code === 0, output: `${stdout}\n${stderr}` };
-}
-
-/**
- * Re-pins the contract test by re-running it and substituting only exact
- * SHA-256 Expected/Received pairs, one per iteration, until it is green.
- */
-async function refreshReleaseContract(root: string): Promise<string[]> {
-  const path = join(root, RELEASE_CONTRACT_TEST);
-  const applied: string[] = [];
-  for (let iteration = 0; iteration < 16; iteration += 1) {
-    const result = await runContractTest(root);
-    if (result.ok) return applied;
-    const mismatch = parseHashMismatch(result.output);
-    if (!mismatch) {
-      throw new Error(
-        `${RELEASE_CONTRACT_TEST} fails for a reason other than a hash pin; inspect it manually:\n${result.output.slice(-4000)}`,
-      );
-    }
-    const text = await readFile(path, "utf8");
-    if (!text.includes(mismatch.expected)) {
-      throw new Error(
-        `${RELEASE_CONTRACT_TEST} expects ${mismatch.expected} but that literal is not in the file`,
-      );
-    }
-    const occurrences = text.split(mismatch.expected).length - 1;
-    await writeFile(path, text.split(mismatch.expected).join(mismatch.received));
-    applied.push(
-      `${mismatch.expected.slice(0, 12)}… -> ${mismatch.received.slice(0, 12)}… (${occurrences} occurrence${occurrences === 1 ? "" : "s"})`,
-    );
-  }
-  throw new Error(`${RELEASE_CONTRACT_TEST} still red after 16 hash substitutions`);
 }
 
 async function main(): Promise<void> {
@@ -284,11 +231,6 @@ async function main(): Promise<void> {
   }
 
   const touched = [...new Set([...plan.renames.map((r) => r.to), ...plan.contents.keys()])];
-  if (args.refreshContract && existsSync(join(root, RELEASE_CONTRACT_TEST))) {
-    const applied = await refreshReleaseContract(root);
-    for (const line of applied) console.log(`  repin  ${RELEASE_CONTRACT_TEST} ${line}`);
-    if (applied.length > 0) touched.push(RELEASE_CONTRACT_TEST);
-  }
   const formatTargets = touched.filter((path) => /\.(ts|tsx|js|mjs|json|md)$/.test(path));
   if (formatTargets.length > 0) {
     // Use the repository's own formatter binary; never resolve one from the
@@ -319,6 +261,6 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

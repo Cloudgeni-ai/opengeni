@@ -5,6 +5,10 @@ import { useOpenGeniText } from "../messages/runtime";
 import { machineDisplayName } from "../sandbox-label-model";
 import {
   personalMachineCopy,
+  runSavedMessageOnMachine,
+  savedMessageApprovedMachines,
+  sessionAdmissionApprovedElsewhere,
+  sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
   sessionAdmissionMachineChangedCopy,
   sessionAdmissionNeedsDifferentMachine,
@@ -221,6 +225,17 @@ export type SessionAdmissionNoticeProps = {
   /** The machine picker offered when the saved message needs a different machine. */
   machineAction?: ReactNode | undefined;
   /**
+   * The person's machines, to find the one a saved message was approved for
+   * (`machineAccess.queuedTurnApprovedMachines`). Omit where they aren't read.
+   */
+  machines?: readonly MachineView[] | undefined;
+  /**
+   * Move the chat to a machine (by sandbox id) without sending anything.
+   * Offered as "Run it on …" when the saved message was approved for that
+   * machine; the notice rechecks once the move is confirmed.
+   */
+  onMoveToMachine?: ((sandboxId: string) => Promise<boolean>) | undefined;
+  /**
    * As the machine's owner, let the agent continue with other people's
    * waiting updates (`machineAccess.waitingWork`): continue, then recheck a
    * blocked chat and refresh. Omit where the host cannot.
@@ -243,6 +258,8 @@ export function SessionAdmissionNotice({
   onRecheck,
   machineAccess,
   machineAction,
+  machines,
+  onMoveToMachine,
   onContinueWaitingWork,
 }: SessionAdmissionNoticeProps) {
   const t = useOpenGeniText();
@@ -250,23 +267,28 @@ export function SessionAdmissionNotice({
   const pending = useRef(false);
   const [checking, setChecking] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [moveFailure, setMoveFailure] = useState<string | null>(null);
   const [blockedMachine, setBlockedMachine] = useState<{
     sandboxId: string;
     blockedAt: string | undefined;
   } | null>(null);
   const reason = sessionAdmissionReason(session);
   const machineBlocked = sessionAdmissionNeedsDifferentMachine(reason, machineAccess);
+  const approvedElsewhere = sessionAdmissionApprovedElsewhere(reason, machineAccess);
   const blockedAt = session.admissionBlock?.blockedAt;
   const machineSandboxId = machineAccess?.sandboxId;
+  // Remember the machine the message couldn't run on, so after the chat moves
+  // the notice says the machine changed and offers the recheck.
+  const blockedHere = machineBlocked || approvedElsewhere;
   useEffect(() => {
-    if (machineBlocked && machineSandboxId) {
+    if (blockedHere && machineSandboxId) {
       setBlockedMachine((previous) =>
         previous?.sandboxId === machineSandboxId && previous.blockedAt === blockedAt
           ? previous
           : { sandboxId: machineSandboxId, blockedAt },
       );
     }
-  }, [machineBlocked, machineSandboxId, blockedAt]);
+  }, [blockedHere, machineSandboxId, blockedAt]);
   // Other people's messages waiting for the machine's owner never block the
   // chat; they are explained beside whatever else the chat shows.
   const waitingMessages = machineAccess?.waitingMessages?.length ? (
@@ -292,9 +314,9 @@ export function SessionAdmissionNotice({
   }
   if (!reason) return waitingMessages;
   const machineChanged =
-    reason.reason === "database_claim_rejected" &&
-    reason.permissionDenied &&
-    !machineBlocked &&
+    ((reason.reason === "database_claim_rejected" && reason.permissionDenied) ||
+      reason.reason === "personal_resource_grant_required") &&
+    !blockedHere &&
     blockedMachine !== null &&
     blockedMachine.blockedAt === blockedAt &&
     blockedMachine.sandboxId !== session.activeSandboxId;
@@ -308,6 +330,7 @@ export function SessionAdmissionNotice({
     pending.current = true;
     setChecking(true);
     setFailed(false);
+    setMoveFailure(null);
     try {
       await onRecheck();
     } catch {
@@ -316,6 +339,61 @@ export function SessionAdmissionNotice({
       pending.current = false;
       setChecking(false);
     }
+  }
+
+  // Move back to the machine the saved message was approved for, then recheck
+  // once. The same pending state as a recheck: while it runs, whatever the
+  // notice shows next (the reads land one by one) stays busy.
+  async function runOnMachine(sandboxId: string) {
+    if (pending.current || busy || paused || !canControl || !onMoveToMachine) return;
+    pending.current = true;
+    setChecking(true);
+    setFailed(false);
+    setMoveFailure(null);
+    try {
+      setMoveFailure(
+        await runSavedMessageOnMachine({
+          sandboxId,
+          attach: onMoveToMachine,
+          recheck: onRecheck,
+          failedMove: t("sessionAdmission.machineChangeFailed"),
+        }),
+      );
+    } catch {
+      setFailed(true);
+    } finally {
+      pending.current = false;
+      setChecking(false);
+    }
+  }
+
+  if (approvedElsewhere && machineAccess) {
+    return (
+      <>
+        <ApprovedElsewhereNotice
+          access={machineAccess}
+          machines={machines ?? []}
+          canControl={canControl}
+          canMove={onMoveToMachine !== undefined}
+          paused={paused}
+          busy={busy}
+          running={checking}
+          refreshRequired={refreshRequired}
+          failure={
+            moveFailure ??
+            (failed
+              ? refreshRequired
+                ? t("sessionAdmission.refreshFailed")
+                : t("sessionAdmission.recheckFailed")
+              : null)
+          }
+          machineAction={machineAction}
+          onRefresh={() => void recheck()}
+          onRun={(sandboxId) => void runOnMachine(sandboxId)}
+        />
+        {waitingMessages}
+      </>
+    );
   }
 
   return (
@@ -369,6 +447,93 @@ export function SessionAdmissionNotice({
       </Notice>
       {waitingMessages}
     </>
+  );
+}
+
+/**
+ * The person's own saved message was approved for another of their machines,
+ * so it can't start where the chat runs now and no recheck would help. Names
+ * both machines and offers the one action that starts it: move the chat back
+ * and recheck. Sending it again here goes through the queue, which already
+ * offers removing it.
+ */
+function ApprovedElsewhereNotice({
+  access,
+  machines,
+  canControl,
+  canMove,
+  paused,
+  busy,
+  running,
+  refreshRequired,
+  failure,
+  machineAction,
+  onRefresh,
+  onRun,
+}: {
+  access: SessionMachineAccess;
+  machines: readonly MachineView[];
+  canControl: boolean;
+  canMove: boolean;
+  paused: boolean;
+  busy: boolean;
+  running: boolean;
+  refreshRequired: boolean;
+  failure: string | null;
+  machineAction?: ReactNode | undefined;
+  onRefresh: () => void;
+  onRun: (sandboxId: string) => void;
+}) {
+  const t = useOpenGeniText();
+  const descriptionId = useId();
+  const target = savedMessageApprovedMachines(access, machines)[0] ?? null;
+  const copy = sessionAdmissionApprovedElsewhereCopy(t, access, target);
+  return (
+    <Notice tone="waiting" title={copy.title}>
+      <div id={descriptionId} role="status" aria-live="polite">
+        <p>{copy.body}</p>
+        <p className="mt-1">{copy.next}</p>
+      </div>
+      {refreshRequired ? (
+        <>
+          <p className="mt-2">{t("sessionAdmission.refreshRequiredNote")}</p>
+          {canControl ? (
+            <Button
+              type="button"
+              className="mt-2 min-h-11"
+              disabled={busy || running}
+              aria-busy={running}
+              aria-describedby={descriptionId}
+              onClick={onRefresh}
+            >
+              {running
+                ? t("sessionAdmission.refreshing")
+                : t("sessionAdmission.refreshSessionStatus")}
+            </Button>
+          ) : null}
+        </>
+      ) : paused ? (
+        <p className="mt-2">{t("sessionAdmission.pausedNote")}</p>
+      ) : copy.action !== null && target !== null && canMove && canControl ? (
+        <Button
+          type="button"
+          className="mt-2 min-h-11 max-w-full whitespace-normal"
+          disabled={busy || running}
+          aria-busy={running}
+          aria-describedby={descriptionId}
+          onClick={() => onRun(target.sandboxId)}
+        >
+          {running ? t("sessionAdmission.moving") : copy.action}
+        </Button>
+      ) : access.isOwner && !target && machineAction ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">{machineAction}</div>
+      ) : null}
+      {failure ? (
+        <p role="alert" className="mt-2">
+          {failure}
+        </p>
+      ) : null}
+    </Notice>
   );
 }
 
@@ -508,6 +673,8 @@ export function SessionStartNotice({
           session={session}
           machineAccess={start.machineAccess}
           machineAction={picker}
+          machines={start.machines}
+          onMoveToMachine={start.moveToMachine}
           canControl={canControl}
           paused={session.effectiveControl.state === "paused"}
           busy={busy}

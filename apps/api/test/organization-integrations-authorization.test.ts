@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { AccessContext } from "@opengeni/contracts";
-import { requireAccessContext } from "@opengeni/core";
+import { missingPermissionMessage, requireAccessContext } from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
@@ -96,20 +96,20 @@ describe("organization integration authority", () => {
     const access = context();
     access.accountGrants[0]!.permissions = ["workspace:admin"];
     expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
-      "account:admin",
+      missingPermissionMessage("account:admin"),
     );
     access.accountGrants[0]!.subjectId = access.subjectId;
     access.accountGrants[0]!.permissions = organizationApiKeyPermissionsForAccess("full");
     expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
-      "account:admin",
+      missingPermissionMessage("account:admin"),
     );
     expect(() => requireOrganizationIntegrationAdmin(context(), workspaceId)).toThrow(
-      "account:admin",
+      missingPermissionMessage("account:admin"),
     );
     access.accountGrants[0]!.permissions = ["account:admin"];
     access.accountGrants[0]!.subjectId = "user:other";
     expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
-      "account:admin",
+      missingPermissionMessage("account:admin"),
     );
   });
   test("agent attempts and attempt metadata are refused despite account admin", () => {

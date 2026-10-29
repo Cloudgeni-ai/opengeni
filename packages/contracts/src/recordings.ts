@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
+import { FeatureUnavailableReason } from "./inference-residency";
+import * as primitives from "./primitives";
 
 /**
  * Recordings: captured conversations (meetings, interviews, site walks) with
@@ -238,6 +240,12 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        */
       liveTranscript: z.boolean().optional(),
       /**
+       * Write a summary into each meeting's notes once its transcript is
+       * ready. On when unset; `false` turns it off. An agent session writes
+       * it, like any chat, and never replaces notes someone already saved.
+       */
+      autoSummary: z.boolean().optional(),
+      /**
        * How long meetings are kept, in days after they were recorded. Unset
        * keeps them until someone deletes them. When `audioDays` passes, the
        * audio is deleted and the transcript stays (0 deletes it as soon as
@@ -267,7 +275,8 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /**
        * meeting (the default) or dictation. A dictation is private and has one
        * microphone track; it is transcribed with the workspace's voice input
-       * model, as text without speakers.
+       * model, as text without speakers. Its `transcription` can name only the
+       * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),
@@ -304,6 +313,13 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
           "track numbers must be unique",
         ),
       transcription: RecordingTranscriptionRequest.optional(),
+      /**
+       * The person recording's name, as your app knows it. With computer or
+       * tab audio beside the microphone, the microphone is theirs and is
+       * named with this in the transcript, unless Opengeni already has a name
+       * for them (their profile or membership label).
+       */
+      ownerName: z.string().trim().min(1).max(200).optional(),
     })
     .strict(),
 );
@@ -613,6 +629,11 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     transcript: RecordingTranscriptVersion.nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /**
+     * Set when the person's own Only me meeting is listed or opened in another
+     * workspace of its organization than the one that stores it (`workspaceId`).
+     */
+    sourceWorkspace: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Recording = z.infer<typeof Recording>;
@@ -847,6 +868,12 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     name: z.string(),
     /** The provider can serve this workspace now (its key, sign-in or account is set up). */
     available: z.boolean(),
+    /**
+     * Why `available` is false when the reason is not setup: `region_restricted`
+     * when the workspace is EU-only and this provider has no EU route (show
+     * "Not supported in EU").
+     */
+    unavailableReason: FeatureUnavailableReason.nullable().optional(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
     /**
@@ -856,6 +883,11 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
      * or the price is unknown.
      */
     usdPerHour: z.number().nullable(),
+    /**
+     * Transcribing with it is charged in credits, so a payer without credits
+     * is refused. Absent from older servers, which tell it by `usdPerHour`.
+     */
+    chargedInCredits: z.boolean().optional(),
   }),
 );
 export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;
@@ -878,6 +910,11 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
      * recording names another; null detects it. Absent from older servers.
      */
     language: z.string().nullable().optional(),
+    /**
+     * Whether this workspace's recorders start with the live transcript on
+     * (its `recordings.liveTranscript` setting). Absent from older servers.
+     */
+    liveTranscript: z.boolean().optional(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;
@@ -1105,3 +1142,19 @@ export type RecordingEventData = {
   noteRevision?: number;
   sessionId?: string | null;
 };
+
+/** Limits of durable (chunked, resumable) dictation, advertised in client config. */
+export const ClientResumableVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      maxDurationSeconds: primitives.positiveInteger.max(8 * 60 * 60),
+      maxSizeBytes: primitives.positiveInteger.max(512 * 1024 * 1024),
+      maxChunkSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
+      providerSegmentSeconds: z.number().int().positive().max(600),
+    })
+    .strict(),
+);
+export type ClientResumableVoiceInputConfig = z.infer<typeof ClientResumableVoiceInputConfig>;
+
+/** Audio is sent to a transcription provider in segments of at most this length. */
+export const TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS = 50;

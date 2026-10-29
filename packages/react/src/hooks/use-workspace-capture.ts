@@ -8,6 +8,7 @@ import type {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** The announce event M1 emits at turn end (metadata only, never content). */
 const REVISION_CAPTURED = "workspace.revision.captured";
@@ -27,10 +28,6 @@ const CAPTURE_STATS_NUMBER_FIELDS = [
   "treeEntryCount",
   "durationMs",
 ] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * Signed manifests bypass the authenticated JSON client's wire decoder. Treat

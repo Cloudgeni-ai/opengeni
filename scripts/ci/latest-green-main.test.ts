@@ -1,5 +1,20 @@
 import { expect, test } from "bun:test";
-import { latestGreenMain } from "./latest-green-main";
+import { GH_API_MAX_BUFFER, ghApiJson, latestGreenMain } from "./latest-green-main";
+
+test("gh API reads allow pages larger than the 1 MiB child-process default", () => {
+  let options: { maxBuffer?: number } | undefined;
+  const page = ghApiJson("repos/owner/repo/actions/runs", ((
+    _file: string,
+    _args: string[],
+    received: { maxBuffer?: number },
+  ) => {
+    options = received;
+    return JSON.stringify({ workflow_runs: [{ name: "x".repeat(2 * 1024 * 1024) }] });
+  }) as never);
+  expect(page.workflow_runs).toHaveLength(1);
+  expect(options?.maxBuffer).toBe(GH_API_MAX_BUFFER);
+  expect(GH_API_MAX_BUFFER).toBeGreaterThanOrEqual(64 * 1024 * 1024);
+});
 
 test("latest-green discovery requires full success on the exact successful run", () => {
   const calls: string[] = [];

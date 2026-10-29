@@ -187,14 +187,15 @@ impl<S: Store> Service<S> {
                 Some(host) => self.view.target(host).ok_or_else(|| {
                     Failure::Unavailable("the host asked for was given up on".into())
                 })?,
-                None => self.place(&demand, &exclude)?,
+                None => self.place(&demand, &row.spec.config.reach, &exclude)?,
             };
             row.ownership = row.ownership.give(target.host).set;
             row.sends.send(row.ownership.epoch, target.seq);
             row.class = Some(target.class.clone());
             match replace(&*self.store, &mut row).await? {
                 Write::Done => {}
-                Write::Conflict => return Ok(()),
+                // (Only an insert finds its template gone.)
+                Write::Conflict | Write::TemplateGone => return Ok(()),
                 // Given up on since it was placed: elsewhere, unless it
                 // was asked for there.
                 Write::OwnerLost if on.is_none() => {

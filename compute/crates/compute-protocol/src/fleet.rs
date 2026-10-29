@@ -87,6 +87,12 @@ pub struct HostInfo {
     pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
+    /// What it offers sandboxes that ask to reach it
+    /// ([`crate::host::SandboxConfig::reach`]), by name, sorted: placement
+    /// puts such a sandbox only on a host that offers all it asks for.
+    /// Missing from what a host of an earlier release sends: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<String>,
     /// The boot of its machine it registers from. A restart ends every VM
     /// on the machine: once this registration has lapsed, a machine its
     /// cloud says runs a later boot (on Compute Engine, the instance's
@@ -168,6 +174,15 @@ pub struct Capacity {
     pub awake: u32,
     /// Sandboxes it holds.
     pub sandboxes: u32,
+    /// The digest of the guest programs it builds sandbox images with now
+    /// (`sha256:<hex>`, what its bundle's base image is named by): the
+    /// service builds each release's images with the programs most live
+    /// hosts say. Told with what it can take on rather than in
+    /// [`HostInfo`], since an agent upgraded in place keeps its
+    /// registration. `None` from a host that builds none, or of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
 }
 
 /// A sandbox a registering host still has, under the owner epoch its

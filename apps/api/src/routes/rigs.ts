@@ -1,4 +1,3 @@
-import { legacyVariableSetFields, VariableSetsRemovedError } from "../http/variable-sets-removed";
 import {
   CreateRigRequest,
   ProposeRigChangeRequest,
@@ -18,6 +17,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requirePermission,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -35,6 +35,7 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
+import { errorMessage } from "@opengeni/contracts/values";
 
 async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string): Promise<T> {
   const body: unknown = await c.req.json().catch(() => null);
@@ -43,21 +44,6 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
     bodyRecord?.payload && typeof bodyRecord.payload === "object"
       ? (bodyRecord.payload as Record<string, unknown>)
       : null;
-  // RM-1: rig default Variable Sets were removed with Variable Sets.
-  const legacyFields = [
-    ...legacyVariableSetFields(bodyRecord),
-    ...legacyVariableSetFields(payloadRecord).map((field) => `payload.${field}`),
-  ];
-  if (legacyFields.length > 0) {
-    throw new VariableSetsRemovedError(legacyFields);
-  }
-  // An explicit [] still clears an old version's defaults; null means "unchanged".
-  if (bodyRecord && !Array.isArray(bodyRecord.defaultVariableSetIds)) {
-    delete bodyRecord.defaultVariableSetIds;
-  }
-  if (payloadRecord && !Array.isArray(payloadRecord.defaultVariableSetIds)) {
-    delete payloadRecord.defaultVariableSetIds;
-  }
   const imageOverrideUnsupported = Boolean(
     (bodyRecord && Object.hasOwn(bodyRecord, "image")) ||
     (payloadRecord && Object.hasOwn(payloadRecord, "image")),
@@ -100,9 +86,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") !== true
     ) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     return { authorization, grant: authorization.grant, rig };
   }
@@ -146,7 +130,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         changeId,
         attempt,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return { change, started: false };
     }
@@ -184,7 +168,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
         {
           workspaceId,
           versionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         },
       );
       return false;
@@ -211,9 +195,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
     if (payload.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const rig = await createRigForApi({ db }, grant, payload, {
       allowOrganization,
@@ -241,9 +223,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
     if (rig.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     const payload = await parseRigRequest(
       c,
@@ -263,9 +243,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
     if (rig.scope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
+      throw new MissingPermissionRefusal("account:admin");
     }
     await deleteRigForApi({ db }, grant, rig, { allowOrganization });
     return c.json({ ok: true });

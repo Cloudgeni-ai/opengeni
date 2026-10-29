@@ -200,7 +200,7 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(headline()).toBe(
     "The free model has reached its daily limit. Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect a subscription", "Retry"]);
   expect(row().querySelector("details p")!.textContent).toBe(detail);
 
   // A deployment without subscriptions never names them or links to them.
@@ -210,12 +210,12 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(headline()).toBe(
     "The free model has reached its daily limit. Buy Opengeni credits, connect a model provider, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect a model", "Retry"]);
   await act(async () =>
     root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
   );
   expect(headline()).toContain("connect ChatGPT, or pick another model");
-  expect(labels()).toEqual(["Buy credits", "Connect ChatGPT", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect ChatGPT", "Retry"]);
 
   // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
   await act(async () =>
@@ -766,8 +766,8 @@ test("safety refusal preserves draft and has no recovery action", async () => {
 test("billing offers at most one authorized action and never Retry", async () => {
   const container = await render(null);
   for (const [canBuyCredits, canConnectModel, expected] of [
-    [true, true, "Buy credits"],
-    [false, true, "Connect a model"],
+    [true, true, "Add credits"],
+    [false, true, "Use your own provider account"],
     [false, false, null],
   ] as const) {
     await act(async () =>
@@ -823,7 +823,7 @@ test("free credit for other models offers a covered model before buying credits"
   expect(container.textContent).not.toMatch(/out of Opengeni credits/i);
   const switchButton = container.querySelector("button")!;
   expect(switchButton.textContent).toBe("Use GPT-6.1 Sol");
-  expect(container.querySelector("a")!.textContent).toBe("Buy credits");
+  expect(container.querySelector("a")!.textContent).toBe("Add credits");
   await act(async () => switchButton.click());
   expect(chosen).toEqual(["azure-sol/gpt-6.1-sol"]);
 
@@ -933,4 +933,81 @@ test("the timeline flag never hides a failure the timeline cannot own", async ()
   );
   expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
   expect(quota.textContent).toContain("daily limit");
+});
+
+test("a Codex usage limit shows when it resets and a Continue at reset switch in place of Retry", async () => {
+  const changes: boolean[] = [];
+  const limited = {
+    ...failure,
+    failureCode: "codex_usage_limit_reached",
+    reason:
+      "Your ChatGPT/Codex subscription usage limit has been reached. Access resets in about 72h.",
+  };
+  const codexUsage = {
+    resetText: "Resets Sat 14:05.",
+    continueAtReset: false,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
+  };
+  const container = await render(
+    <FailedSessionBanner failure={limited} actions={actions} codexUsage={codexUsage} />,
+  );
+  const banner = container.querySelector('[data-testid="failed-session-banner"]');
+  expect(banner?.textContent).toContain("Codex usage limit reached. Resets Sat 14:05.");
+  expect(banner?.textContent).not.toContain("Retry");
+  expect(banner?.textContent).not.toContain("Continue with");
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
+  );
+  expect(toggle?.getAttribute("role")).toBe("switch");
+  expect(toggle?.getAttribute("aria-checked")).toBe("false");
+  expect(container.querySelector(`label[for="${toggle?.id}"]`)?.textContent).toBe(
+    "Continue at reset",
+  );
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([true]);
+  // Other failures keep Retry, and so does a banner without the switch.
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={failure} actions={actions} codexUsage={codexUsage} />,
+    ),
+  );
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
+  expect(container.textContent).toContain("Retry");
+  await act(async () => root!.render(<FailedSessionBanner failure={limited} actions={actions} />));
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
+});
+
+test("the Codex usage notice is one line with when it resets and the Continue at reset switch", async () => {
+  const { CodexUsageNotice } = await import("./codex-usage-notice");
+  const changes: boolean[] = [];
+  const choice = {
+    resetText: "Reset time unknown.",
+    continueAtReset: true,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
+  };
+  const container = await render(<CodexUsageNotice choice={choice} />);
+  const notice = container.querySelector('[data-testid="codex-usage-notice"]');
+  expect(notice?.querySelector("p")?.textContent).toBe(
+    "Codex usage limit reached. Reset time unknown.",
+  );
+  // One switch and no buttons: another model is picked in the composer.
+  expect(notice?.querySelectorAll("button:not([role=switch])")).toHaveLength(0);
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
+  );
+  // A waiting chat continues at the reset unless the person switches it off.
+  expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([false]);
+  // While a change is saving it ignores clicks, and its error shows plainly.
+  await act(async () =>
+    root!.render(<CodexUsageNotice choice={{ ...choice, pending: true, error: "Try again." }} />),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="codex-usage-continue-at-reset"]')!
+      .click(),
+  );
+  expect(changes).toEqual([false]);
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("Try again.");
 });

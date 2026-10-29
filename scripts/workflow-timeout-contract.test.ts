@@ -256,14 +256,6 @@ describe("workflow timeout contract", () => {
       false,
     );
     expect(validJobCap("ci.yml", "automation-admission", { ...job, steps: [] })).toBe(false);
-    expect(validJobCap("batch-ci.yml", "plan", job)).toBe(false);
-    expect(
-      validJobCap("batch-ci.yml", "plan", {
-        ...job,
-        steps: [{ run: "bun scripts/ci/github-pr-ci.ts priority batch" }],
-      }),
-    ).toBe(false);
-    expect(validJobCap("batch-ci.yml", "plan", { "timeout-minutes": 20, steps: [] })).toBe(true);
     expect(validJobCap("other.yml", "plan", job)).toBe(false);
   });
   test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {

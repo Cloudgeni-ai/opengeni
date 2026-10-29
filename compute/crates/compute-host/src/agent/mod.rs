@@ -29,7 +29,7 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::fleet::{Admission, Freezes, LeaseGate};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
-use crate::layout::{Images, Paths};
+use crate::layout::{self, Images, Paths};
 use crate::net::{NetworkConfig, Networks};
 use crate::observe::{Observer, TraceContext};
 use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
@@ -41,6 +41,7 @@ use crate::step::{After, Live, Reading, Report};
 use crate::store::{Claimed, OwnerEpoch, Store};
 use compute_protocol::fleet::Ruling;
 
+mod capture;
 mod check;
 mod config;
 mod disk;
@@ -180,6 +181,9 @@ pub enum HostError {
     /// The sandbox is being handed off and takes no wake.
     #[error("sandbox {0} is being handed off")]
     HandingOff(Id),
+    /// This host cannot store sandboxes' disks as images.
+    #[error("this host cannot capture sandboxes: {0}")]
+    CannotCapture(String),
     /// The host's lease from the control service has run out: it runs
     /// nothing until it is renewed.
     #[error("this host's lease from the control service has run out")]
@@ -316,6 +320,14 @@ enum Command {
         generation: Option<u64>,
         level: Level,
         reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::Capture`]: copies the disk of the
+    /// saved sandbox to `into`, answering its length.
+    Capture {
+        id: Id,
+        generation: Option<u64>,
+        into: std::path::PathBuf,
+        reply: Reply<u64>,
     },
     /// A named hold from the API, with an optional expiry.
     Hold {
@@ -619,6 +631,8 @@ pub struct Handle {
     trace: Option<TraceContext>,
     /// What builds the sandbox images asked for, if this host does.
     preparer: Option<Arc<crate::rootfs::Preparer>>,
+    /// What stores saved sandboxes' disks as images, if this host does.
+    captures: Option<Arc<crate::capture::Captures>>,
 }
 
 /// Who sends requests through a [`Handle`].
@@ -825,10 +839,7 @@ fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
 fn host_images(config: &HostConfig) -> Images {
     Images {
         kernel: config.kernel.clone(),
-        boot_args: match &config.network {
-            Some(_) => format!("{} {}", config.boot_args, NetworkConfig::boot_args()),
-            None => config.boot_args.clone(),
-        },
+        boot_args: layout::command_line(&config.boot_args, config.network.is_some()),
         first_uid: config.first_uid,
         network: config.network.clone(),
     }
@@ -1017,25 +1028,33 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         // Boxed: recovery's future is large, and every caller awaits this one.
         Box::pin(agent.begin(held, strays, warm_shapes, began)).await;
-        let handle = agent.handle(commands_tx, config.stream_idle, config.prepare);
+        let handle = agent.handle(commands_tx, config.stream_idle, config.prepare)?;
         Ok((handle, tokio::spawn(agent.run())))
     }
 
     /// A handle sending commands on `commands`, that builds the images the
-    /// control service asks for as `prepare` says.
+    /// control service asks for as `prepare` says and stores captures if
+    /// this host's store keeps images. Deletes the copies captures an
+    /// earlier agent made left.
     fn handle(
         &self,
         commands: mpsc::UnboundedSender<Command>,
         stream_idle: Duration,
         prepare: Option<crate::rootfs::PrepareConfig>,
-    ) -> Handle {
-        Handle::new(
+    ) -> Result<Handle, HostError> {
+        let captures = crate::capture::Captures::of(&self.root, &self.store).map_err(|error| {
+            HostError::Io(format!(
+                "emptying the directory captures are copied to: {error}"
+            ))
+        })?;
+        Ok(Handle::new(
             commands,
             stream_idle,
             self.lease.clone(),
             self.observer.clone(),
             crate::rootfs::Preparer::of(prepare, &self.store),
-        )
+            captures,
+        ))
     }
 
     /// Takes back what an earlier agent left, then takes a first reading
@@ -1183,7 +1202,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// by while it runs; and what a wake from object storage writes
     /// locally: its disk, the memory image its pager fills, and its device
     /// state. A disk of unknown length counts as a copy of its image as it
-    /// is today, as a new sandbox's is.
+    /// is today grown to the length `config` asks for, as a new sandbox's
+    /// is.
     fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
@@ -1192,7 +1212,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             u64::from(config.memory_request()) << 20
         };
         let disk = disk_bytes.map_or_else(
-            || self.disk_bound(config.image),
+            || self.new_disk_bound(config),
             |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
         );
         Size {

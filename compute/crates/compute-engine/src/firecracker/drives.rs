@@ -1,15 +1,16 @@
 //! What Firecracker is told about a VM's drives: how each is set up at a
-//! boot, which files its user owns, and when the writes it started on them
-//! have returned.
+//! boot, which files its user owns, when the writes it started on them have
+//! returned, and that a drive's file grew.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use super::FirecrackerVm;
 use super::api::Api;
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
-use crate::spec::Drive;
+use crate::spec::{Drive, VmSpec};
 
 /// `/drives/{id}` for a fresh boot, with the drive's file at `path` as the
 /// VMM sees it.
@@ -37,7 +38,18 @@ pub(super) fn drive_config(drive: &Drive, path: &Path) -> Value {
     })
 }
 
-/// The drives a guest may write to.
+/// `PATCH /drives/{id}` for a drive whose file at `path`, as the VMM sees
+/// it, grew: the VMM opens the file again, takes its length as the
+/// device's and tells the guest its configuration changed. Everything else
+/// about the drive, discards included, stays as it was set up.
+fn grown(drive: &Drive, path: &Path) -> Value {
+    json!({
+        "drive_id": drive.id,
+        "path_on_host": path,
+    })
+}
+
+/// The drives a guest may write to, which are the only ones that grow.
 fn writable(drives: &[Drive]) -> impl Iterator<Item = &Drive> {
     drives.iter().filter(|drive| !drive.read_only)
 }
@@ -63,4 +75,40 @@ pub(super) async fn settled(api: Api) -> Result<(), EngineError> {
         .await
         .map(drop)
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "settle_writes", error))
+}
+
+/// [`crate::Engine::resize_drives`]: each writable drive of `vm`, started
+/// from `spec`, is opened again at its length now. A refused request
+/// changed nothing.
+pub(super) async fn resize(vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
+    const OP: &str = "resize_drives";
+    for drive in writable(&spec.drives) {
+        let path = vm.inside(OP, &drive.path)?;
+        let at = format!("/drives/{}", drive.id);
+        vm.call(OP, ErrorKind::Transient, "PATCH", &at, &grown(drive, &path))
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_grown_drive_names_only_its_file() {
+        let drive = |read_only| Drive {
+            id: "rootfs".into(),
+            path: PathBuf::from("/srv/vm/disk"),
+            root: true,
+            read_only,
+        };
+        assert_eq!(
+            grown(&drive(false), Path::new("/disk")),
+            json!({ "drive_id": "rootfs", "path_on_host": "/disk" })
+        );
+        let drives = [drive(true), drive(false)];
+        let ids: Vec<bool> = writable(&drives).map(|drive| drive.read_only).collect();
+        assert_eq!(ids, [false]);
+    }
 }

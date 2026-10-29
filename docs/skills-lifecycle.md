@@ -55,6 +55,11 @@ session identities are not registry UUIDs and cannot be removed through this
 tool. Organization Skills are outside its scope. Off refuses new changes;
 Automatic applies deletion; Review first retains a removal proposal in
 Knowledge > Needs review without interrupting the task.
+An agent removes only Skills in its chat's own learning scope. The exception
+is work the verified owner started in their own Personal workspace: it may also
+remove that workspace's Skills, including a directly installed one, because
+the workspace has no other member (migration 1070). An agent removal never
+names a scope.
 
 A removal proposal is a marked, immutable revision, never executable guidance.
 The review surfaces explicitly label irreversible deletion. Human approval must
@@ -321,99 +326,6 @@ regardless of Learning mode. MCP already redirects that lane to `skill_save`.
 The historical confirmation and receipt schemas remain readable; Knowledge and
 instruction-policy remember/confirm workflows retain their existing behavior.
 
-The exact 0433 runner stage executes inside an explicit migration transaction:
-setup and owner window, TypeScript parsing into a temporary staging table, then
-SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
-fails closed. All existing active authored heads receive new canonical revisions;
-original revisions, hashes, scope and provenance remain in history. Already valid
-frontmatter wins over stale DB metadata and keeps its exact bytes. Plain text gets
-a deterministic header from legacy metadata without changing its body. Legacy
-names use a safe lowercase slug, or `legacy-<stable UUID>` if no legal name can be
-derived without truncation. Invalid/ambiguous headers and oversized descriptions
-abort the entire cutover for explicit repair. No malformed record is silently
-dropped, and no additional summary field is created.
-
-The installed-source backfill opens an owner-only `NO FORCE` window on the four
-portable source tables and the registry heads, revisions, events, and source
-bindings. RLS stays enabled for application roles. Deferred proposal-event and
-foreign-key constraints are flushed before restoring FORCE RLS, all within the
-migration transaction. A seeded `NOSUPERUSER NOBYPASSRLS` owner test verifies
-cross-tenant identity preservation, folder content, and the restored posture.
-
-Migration `0433_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
-old API/control/turn workers, supply the exact application database role list,
-migrate, provision roles, and start only the unified-Skill-aware release. Never
-restart a pre-0433 binary: its installed reads bypass the registry content head.
-The migration preserves existing source ownership, backfills installed Skills
-by portable identity, and rejects invalid existing folders for repair rather
-than silently truncating them. New binding/write-receipt tables are FORCE-RLS and
-read-only for the runtime role; mutation requires the exact SECURITY DEFINER
+Skill binding and write-receipt tables are FORCE-RLS and read-only for the
+runtime role; mutation requires the exact SECURITY DEFINER
 lifecycle capability.
-
-### Stored execution configuration maintenance
-
-The same atomic 0433 runner calls `packages/db/src/skill-config-migration.ts`
-after staging registry metadata. It converts headerless Skills in current
-`sessions.skills` and `workspace_packs.manifest` (including inline automation
-template Skills). It uses historical name/description, preserves the complete
-body and supporting UTF-8 file bytes, and applies the shared parser and folder
-limits. Valid YAML, its cached descriptor fields, unrelated manifest fields,
-and source timestamps remain unchanged; the stored read projections derive
-canonical metadata without rewriting those bytes. Names that cannot be slugged
-use a stable source/array-position hash, never content-based identity or merging.
-Canonical name collisions, malformed/apparent YAML headers, missing historical
-metadata and overflow are repair-required, not silently normalized or dropped.
-
-Before replacing any current configuration, the migration inserts its original
-JSON, PostgreSQL JSONB-text SHA-256, replacement hash, tenant/source identity,
-conversion version and truthful migration actor into
-`skill_config_conversion_receipts` in the same transaction. These receipts survive
-source replacement, but cascade with deletion of their owning workspace, using
-the existing document-migration receipt retention pattern. Direct updates and
-deletes remain forbidden. This is immutable maintenance evidence, not another
-Skill head. The table has FORCE RLS and **no
-runtime table privileges**, including SELECT: an archived private Session's
-configuration must not become workspace-readable audit content. Authorized
-database maintenance uses explicit account/workspace context to inspect it.
-Workspace tenancy advisory locks, table locks and old-value CAS protect writes;
-the conversion entry also verifies that it is running as the table owner inside
-the parser-backed migration's temporary owner window. It cannot be reused as an
-ordinary runtime session-configuration writer.
-The migration ledger makes committed retries no-ops. A failure rolls back all
-configuration changes, receipts, registry conversion and schema changes.
-
-The following notes document historical migration 0433, which runs before the
-destructive Pack-removal migration. Archived Pack JSON is migration evidence,
-not a current API contract or runtime compatibility layer.
-
-The owner-only RLS window also covers current configurations and the exact
-Session/automation/Pack tables read by preflight; FORCE is restored before commit.
-Preflight reports source kinds/IDs and blocker counts without content. It refuses
-conversion when plain inline Session Skills have a nonterminal accepted turn or
-an active-turn pointer. It also refuses plain or invalid Skills in non-disabled
-Pack installation snapshots, active/paused current automation revisions, queued
-or dispatching accepted runs, and accepted event matches not yet assigned a run.
-Already assigned events do not independently block after their run is terminal.
-
-Operator repair requirements:
-
-- Before stopping old runtimes, complete or explicitly cancel affected accepted
-  work. Stopping database clients alone does not retire accepted execution pins.
-- Replace active plain automation templates with a newly validated revision, or
-  explicitly disable the trigger. Pausing alone is not archival. Preserve every
-  old revision and accepted execution payload.
-- Explicitly disable or replace active plain Pack sources through an appropriate
-  audited lifecycle. Migration never rewrites `pack_installations.manifest_snapshot`
-  or its digest, published plugin versions/facets/files, or accepted event matches.
-  Ordinary Pack re-admission overwrites the current installation snapshot: archive
-  that original separately before using re-admission as an operator repair.
-- Repair malformed mutable source configuration explicitly, then retry the whole
-  migration. The failure inventory reports up to 30 IDs and the total blocker
-  count; repeat preflight after repairs if further IDs remain.
-
-Disabled Pack snapshots, noncurrent/disabled automation revisions, terminal runs
-and immutable audit history remain unchanged. Re-enabling a plain historical
-artifact still requires explicit valid replacement; no read-time synthesis or
-silent rebinding is supported. Deployment/host configuration outside these DB
-sources needs its own validation. This maintenance inventory materializes source
-JSON in memory and has not been load-tested on a large production dataset.

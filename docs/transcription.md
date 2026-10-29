@@ -29,38 +29,6 @@ message by itself.
   anything longer than three seconds. Taking the text deletes the dictation
   first, so two tabs never insert it twice.
 
-The rest of this section and the next ones describe the deprecated
-`transcription-recordings` routes, kept for older clients until their sunset on
-January 26, 2027.
-
-- The resumable default is two hours, 512 MiB total, 8 MiB per browser chunk, and
-  24-hour server retention. Contract hard limits permit at most eight hours,
-  512 MiB, and 1,000 normalized provider segments.
-- Interrupted upload, segmentation, or transcription reuses the same recording
-  UUID. Duplicate chunks are accepted only when sequence, size, SHA-256, and
-  timing metadata match exactly; conflicting retries fail closed. Retryable API,
-  database, storage, and provider failures stay in a bounded automatic recovery
-  loop, including after reload, until the user explicitly pauses or discards.
-- Workspace voice settings choose a preferred provider and whether automatic
-  fallback is enabled (default true). Selection prefers that configured provider,
-  then the deployment order. Provider ids and billing labels are public; secrets
-  remain server-private.
-- A recording pins its provider before sending a segment. An explicit rejection
-  may advance an untouched recording to the next configured provider. The failure
-  and new pin settle atomically under the attempt fence. A null pre-claim segment
-  pin establishes eligibility; unknown failures keep the pin, so a later auth
-  rejection cannot move a previously uncertain request to another vendor. Legacy
-  pins fail closed. Successful segments also prevent vendor changes.
-- Provider results are persisted server-side so another browser carrying the same
-  exact authenticated subject can list and resume an unexpired recording. The
-  local browser still persists the final transcript before mutating the draft.
-  A retry or reload may finish transcription automatically, but its delayed result
-  is held as an explicit saved-transcript insertion so it cannot mutate a draft
-  whose identity is uncertain.
-- Controlled error codes and retryability cross the API. Raw provider detail,
-  object keys, credentials, provider ids, audio bytes, and transcript bodies are
-  excluded from logs and client capability configuration.
-
 ## Trust boundary and data flow
 
 ```text
@@ -73,25 +41,7 @@ Device recorder (1s chunks, IndexedDB or the phone's files)
   -> ordinary user Send
 ```
 
-The deprecated resumable routes:
-
-```text
-Browser MediaRecorder (5s chunks)
-  -> IndexedDB manifest + Blob chunks + timing + SHA-256
-  -> POST /v1/workspaces/:workspaceId/transcription-recordings
-  -> ordered PUT .../:recordingId/chunks/:chunkNumber
-  -> object storage (tenant-derived opaque keys)
-  -> POST .../:recordingId/finalize
-  -> API ffmpeg: mono 16 kHz PCM WAV segments (bounded to <= 1,000)
-  -> POST .../:recordingId/process-next
-  -> one recording-wide pinned provider
-  -> Postgres segment results + deterministic transcript assembly
-  -> { transcriptText, languages } persisted locally before draft mutation
-  -> editable composer draft
-  -> ordinary user Send
-```
-
-Legacy fallback when `voiceInput.resumable` is absent:
+When `voiceInput.resumable` is absent, the client sends one request:
 
 ```text
 IndexedDB chunks
@@ -101,13 +51,6 @@ IndexedDB chunks
   -> one server-selected provider
   -> { text, languages }
 ```
-
-Every resumable route first resolves the normal `sessions:create` access grant.
-Persistence binds the immutable recording id to the exact
-`(accountId, workspaceId, subjectId)` authority tuple. All four recording tables
-use FORCE RLS for both workspace/account visibility and exact subject equality.
-The collection route returns at most 50 unexpired, non-discarded recordings for
-that subject; possession of a recording UUID alone is not authority.
 
 ## Client capability
 
@@ -154,67 +97,6 @@ and empty pools, responses are byte-identical and the hint saves 12 statements
 and two transactions per request. This local result is not a production latency
 claim; enabled providers, pool sizes and preference/fallback settings affect the
 total request budget.
-
-## Server lifecycle
-
-| State | Meaning |
-| --- | --- |
-| `uploading` | Manifest exists; the next contiguous chunk number is authoritative. |
-| `segmenting` | One generation/owner lease is validating chunks and preparing normalized WAV segments. |
-| `ready` | At least one provider segment is pending and no segment call is active. |
-| `transcribing` | One attempt lease owns the next segment. |
-| `complete` | Every segment completed and transcript/languages were assembled in segment order. |
-| `failed` | A typed retryable or terminal assembly/provider failure is persisted. |
-| `discarded` | The user discarded the recording or retention expired. |
-
-Finalization verifies the client totals against durable upload truth, reads every
-chunk from object storage, and checks exact byte length and SHA-256 before ffmpeg
-sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
-is the lower of the Opengeni 50-second target and the selected service's maximum;
-recordings that would require more than 1,000 segments fail before ffmpeg starts.
-Generation and pre-provider attempt leases become reclaimable after 15 minutes.
-Immediately before a provider call, the server refreshes the durable attempt
-lease origin and persists an absolute 10-minute server-owned provider deadline.
-After that refresh transaction returns, the service computes the remaining time
-against the persisted deadline and arms its AbortController for only that
-remaining duration; if the deadline has already passed, it refuses to invoke
-the provider. Reclaim is therefore impossible until at least five minutes after
-that provider deadline, even when object reads, handler setup, or refresh/commit
-latency consumed most of the original lease.
-Request/network aborts do not cancel this server-owned provider work: the same
-recording UUID remains retryable and its objects remain retained. Only explicit
-Discard is destructive. Stale callbacks cannot settle a successor generation or
-attempt.
-
-Each `process-next` request claims at most one segment. The first claim persists
-the recording-wide provider pin. Retryable `network`, `timeout`, `unavailable`,
-and `provider` failures retain the same segment, pin, object, and recording UUID.
-Successful segment text is stored separately; final assembly sorts by segment
-number, trims empty text, joins nonempty segments with a blank line, and preserves
-the first occurrence of each nonempty language.
-
-## Retention and cleanup
-
-- Chunk and normalized segment objects are registered in a durable object ledger
-  before upload. Object keys include account/workspace/recording lineage and a
-  sequence/hash component, but keys never appear in client responses.
-- Completion, explicit discard, and non-retryable failure make every remaining
-  object immediately cleanup-eligible. The request path attempts deletion and
-  settles each object independently; a partial provider outage never marks an
-  undeleted object cleaned.
-- Abandoned recordings become cleanup-eligible at
-  `OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS` (24 hours by default).
-  The existing Temporal file-upload reaper claims recording rows before object
-  rows with `SKIP LOCKED`, uses reclaimable claim ids/timeouts, deletes one object
-  at a time, and settles only successful provider deletes.
-- After retention plus the reaper grace window, a bounded security-definer purge
-  removes an expired recording only when no uncleaned object remains. That purge
-  deletes chunk/segment metadata, the private provider pin, and persisted
-  transcript/language results. A metadata purge can never hide an object that
-  still requires provider cleanup.
-- Server transcript state is only the resumable recovery/result record. It is not
-  appended to session history, documents, knowledge, memory, or an agent turn;
-  only the user's later ordinary Send can create message truth.
 
 ## Provider paths
 
@@ -291,11 +173,10 @@ available independently when a provider is ready.
 
 | Concern | Canonical source |
 | --- | --- |
-| Public contracts and limits | `packages/contracts/src/transcription-recordings.ts`, `packages/contracts/src/index.ts` |
+| Public contracts and limits | `packages/contracts/src/recordings.ts`, `packages/contracts/src/index.ts` |
 | Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
 | Service and segmenter ports | `packages/core/src/transcription.ts` |
-| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
-| Deprecated API routes and the ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `packages/core/src/transcription-service/segmenter.ts` |
+| The ffmpeg segmenter | `packages/core/src/transcription-service/segmenter.ts` |
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
 | Dictation recordings (API, worker) | `apps/api/src/routes/recordings.ts`, `apps/worker/src/activities/recordings.ts` |
 | Web and phone dictation | `packages/react/src/hooks/use-voice-input.ts`, `packages/react-native/src/recordings/dictation.ts` |

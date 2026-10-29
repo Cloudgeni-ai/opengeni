@@ -5,6 +5,7 @@
  * manifest where it has them, and leaves out only the exemptions below.
  * Regenerate with `bun scripts/public-api/action-catalog.ts --write`; a test
  * fails when a registered route is neither in the catalog nor exempt.
+ * `--check` fails when either committed file differs from a fresh render.
  */
 import * as contracts from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
@@ -61,7 +62,8 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   {
     pattern:
       /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
-    reason: "meeting recordings reach agents through the meetings_search and meeting_read tools",
+    reason:
+      "meeting recordings reach agents through the meetings_search, meeting_read and meeting_notes_save tools",
   },
 ];
 
@@ -122,8 +124,6 @@ export type RouteInputs = {
   body: string[];
   query: string[];
   queryParameters: string[];
-  /** The replacement a retired route names (`routeRetired("METHOD /path", ...)`). */
-  retired?: string;
   /** The workspace permission the handler's first access check requires. */
   permission?: string;
 };
@@ -250,7 +250,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
   const looseBody: string[] = [];
   const query: string[] = [];
   const queryParameters = new Set<string>();
-  let retired: string | undefined;
   for (const source of sources) {
     const parsed = parseSync("handler.js", `(${source});`);
     if (parsed.errors.length > 0) continue;
@@ -282,10 +281,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
       if (node.type !== "CallExpression") continue;
       const name = calleeName(node);
       const [first, second] = node.arguments as AstNode[];
-      if (name === "routeRetired") {
-        if (first?.type === "Literal" && typeof first.value === "string") retired = first.value;
-        continue;
-      }
       if (requestQueryCall(node)) {
         const parameter = propertyName(first);
         if (first?.type === "Literal" && parameter) queryParameters.add(parameter);
@@ -333,18 +328,24 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
     body: [...new Set([...body, ...looseBody])].slice(0, 1),
     query: [...new Set(query)],
     queryParameters: [...queryParameters].sort(),
-    ...(retired ? { retired } : {}),
     ...gatePermission(sources),
   };
 }
 
-/** The shared access checks that take the permission a route needs as their last argument. */
-const ACCESS_GATES = new Set([
-  "requireAccessGrant",
-  "requireAccessGrantAuthorization",
-  "requireFreshAccessGrant",
-  "requireMachineAccessGrant",
-]);
+/**
+ * The shared access checks, with the permission each requires, or null for
+ * the ones that take it as their last argument (`await requireAccessGrant(c,
+ * deps, workspaceId, "sessions:read")`). Workspace settings need
+ * workspace:admin; only a Personal workspace's own named owner gets in
+ * without it, and nobody acting through another product is that owner.
+ */
+const ACCESS_GATES: Readonly<Record<string, string | null>> = {
+  requireAccessGrant: null,
+  requireAccessGrantAuthorization: null,
+  requireFreshAccessGrant: null,
+  requireMachineAccessGrant: null,
+  requireWorkspaceSettingsGrant: "workspace:admin",
+};
 
 /**
  * Timing wrappers a route may run its access check inside (`await
@@ -382,20 +383,21 @@ export const ACCESS_GATE_OPERATIONS: Readonly<
   },
 };
 
-/** The permission an access-check call names: a shared gate's last argument, or a helper operation's. */
+/** The permission an access-check call names: a shared gate's own or last argument, or a helper operation's. */
 function gateCallPermission(call: AstNode): string | null {
   const name = calleeName(call) ?? "";
   const args = call.arguments as AstNode[];
+  const gate = Object.hasOwn(ACCESS_GATES, name) ? ACCESS_GATES[name] : undefined;
   const last = args.at(-1);
   const literal = last?.type === "Literal" && typeof last.value === "string" ? last.value : null;
-  if (literal === null) return null;
   const operations = ACCESS_GATE_OPERATIONS[name];
-  const permission = ACCESS_GATES.has(name)
-    ? literal
-    : operations && args.length === 3 && Object.hasOwn(operations, literal)
-      ? operations[literal]!
-      : null;
-  return permission !== null && contracts.Permission.safeParse(permission).success
+  const permission =
+    gate !== undefined
+      ? (gate ?? literal)
+      : operations && literal !== null && args.length === 3 && Object.hasOwn(operations, literal)
+        ? operations[literal]!
+        : null;
+  return permission != null && contracts.Permission.safeParse(permission).success
     ? permission
     : null;
 }
@@ -403,7 +405,7 @@ function gateCallPermission(call: AstNode): string | null {
 function isGateCall(call: AstNode): boolean {
   const name = calleeName(call) ?? "";
   return (
-    ACCESS_GATES.has(name) ||
+    Object.hasOwn(ACCESS_GATES, name) ||
     (Object.hasOwn(ACCESS_GATE_OPERATIONS, name) && (call.arguments as AstNode[]).length === 3)
   );
 }
@@ -588,7 +590,6 @@ export function buildActionCatalog(
         sdk: route?.sdk ?? [],
         request,
         query: inputs.queryParameters,
-        retired: inputs.retired,
         permission: inputs.permission,
         response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
@@ -617,7 +618,6 @@ export function buildActionCatalog(
         ...(route.query.length > 0 ? { query: [...route.query] } : {}),
         response: [...route.response],
         ...(browserOnly ? { browserOnly } : {}),
-        ...(route.retired ? { retired: route.retired } : {}),
         ...(route.permission ? { permission: route.permission } : {}),
         ...(secretFields.length > 0 ? { secretFields } : {}),
       };
@@ -643,4 +643,23 @@ if (import.meta.main && process.argv.includes("--write")) {
   await Bun.write(ACTION_CATALOG_PATH, renderActionCatalog(catalog));
   await Bun.write(ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog));
   console.log(`[action-catalog] wrote ${ACTION_CATALOG_PATH.pathname}`);
+} else if (import.meta.main && process.argv.includes("--check")) {
+  const catalog = buildActionCatalog(registeredApiRoutes());
+  const rendered: Array<[URL, string]> = [
+    [ACTION_CATALOG_PATH, renderActionCatalog(catalog)],
+    [ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog)],
+  ];
+  const stale: string[] = [];
+  for (const [path, text] of rendered) {
+    const file = Bun.file(path);
+    if (!(await file.exists()) || (await file.text()) !== text) stale.push(path.pathname);
+  }
+  if (stale.length > 0) {
+    console.error(
+      `[action-catalog] stale: ${stale.join(", ")}; run \`bun scripts/public-api/action-catalog.ts --write\``,
+    );
+    process.exit(1);
+  }
+  console.log("[action-catalog] current");
+  process.exit(0);
 }

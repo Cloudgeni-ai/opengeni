@@ -1,9 +1,9 @@
 //! The cross-platform native [`Platform`] implementation.
 //!
-//! exec/fs/git are portable, so a single struct serves every OS: exec via
-//! [`tokio::process`], the filesystem via [`tokio::fs`], git by shelling the
-//! system `git`. The per-OS specifics (OS/arch identity, the default shell)
-//! delegate to the cfg-gated `linux`/`macos`/`windows` modules.
+//! exec/fs are portable, so a single struct serves every OS: exec via
+//! [`tokio::process`] and the filesystem via [`tokio::fs`]. The per-OS specifics
+//! (OS/arch identity, the default shell) delegate to the cfg-gated
+//! `linux`/`macos`/`windows` modules.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use crate::error::{PlatformError, PlatformResult};
 use crate::run_as::{RunAsChild, RunAsIdentity};
 use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
 
-/// The host-native platform: exec/fs/git against the machine the agent runs on,
+/// The host-native platform: exec/fs against the machine the agent runs on,
 /// plus the desktop backend (capture + computer-use input) and the optional relay
 /// stream registrar that powers the M8 pty/desktop streams.
 #[derive(Clone)]
@@ -1225,6 +1225,9 @@ impl Platform for NativePlatform {
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
+        if let Some(email) = crate::default_git_email(req.env.keys()) {
+            cmd.env("EMAIL", email);
+        }
 
         let requested_policy = requested_policy(policy)?;
         if requested_policy.has_limits()
@@ -1397,190 +1400,7 @@ impl Platform for NativePlatform {
         let recursive = req.recursive;
         crate::run_as::run(identity, move || fs_remove_at(path, recursive)).await
     }
-
-    /// Builds the git argv (op-aware) and spawns it inside the shared
-    /// containment primitive — the engine-job path. Descendants are contained
-    /// (process group / Job Object) and, on a delegated Linux host, placed in
-    /// a per-op OOM cgroup leaf like any exec child.
-    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
-        self.spawn_git_with_policy(req, None)
-    }
-
-    fn spawn_git_with_policy(
-        &self,
-        req: &v1::GitRequest,
-        policy: Option<&v1::OperationResourcePolicy>,
-    ) -> PlatformResult<ContainedExec> {
-        let identity = crate::run_as::resolve(&req.run_as)?;
-        let mut cmd = tokio::process::Command::new("git");
-        cmd.args(git_args(req.op(), &req.args));
-        let cwd = self.resolve_process_cwd(&req.cwd, "git", identity.as_ref())?;
-        let run_as = identity.map(|identity| RunAsChild {
-            identity,
-            cwd: cwd.clone(),
-        });
-        if let Some(run_as) = &run_as {
-            // Entered as the user by the credential hook, never here as root.
-            cmd.envs(run_as.identity.login_env());
-        } else {
-            cmd.current_dir(cwd);
-        }
-        let requested_policy = requested_policy(policy)?;
-        if requested_policy.has_limits()
-            && self
-                .cgroups
-                .as_ref()
-                .is_none_or(|cgroups| !cgroups.supports_policy(requested_policy))
-        {
-            return Err(PlatformError::Unsupported(
-                "operation resource policy requires the corresponding delegated Linux cgroup-v2 controller support on the runner"
-                    .to_string(),
-            ));
-        }
-        spawn_contained_with_policy(
-            cmd,
-            self.cgroups.as_deref(),
-            requested_policy,
-            run_as.as_ref(),
-        )
-        .map_err(|e| PlatformError::from_io("spawn git", &e))
-    }
-
-    async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
-        // Spawn via the shared containment primitive (spawn_git): behaviorally
-        // the pre-engine plain spawn plus containment — a closed piped stdin
-        // reads EOF exactly like the old Stdio::null.
-        let mut contained = self.spawn_git(req)?;
-        drop(contained.stdin.take());
-        let stdout = contained.stdout.take();
-        let stderr = contained.stderr.take();
-        let (status, stdout, stderr) = tokio::try_join!(
-            contained.wait(),
-            read_optional_pipe(stdout),
-            read_optional_pipe(stderr),
-        )
-        .map_err(|e| PlatformError::from_io("git wait", &e))?;
-        Ok(assemble_git_response(
-            req.op(),
-            status.code().unwrap_or(-1),
-            stdout,
-            stderr,
-        ))
-    }
 }
-
-/// Assembles the wire `GitResponse` from a finished git invocation: the
-/// porcelain-v2 structured parse for a clean `GIT_OP_STATUS`, raw
-/// stdout/stderr otherwise. Shared by the one-shot [`Platform::git`] and the
-/// engine-job git adapter so the reply shape can never drift.
-#[must_use]
-pub fn assemble_git_response(
-    op: v1::GitOp,
-    exit_code: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-) -> v1::GitResponse {
-    let status = if op == v1::GitOp::Status && exit_code == 0 {
-        Some(parse_porcelain_status(&stdout))
-    } else {
-        None
-    };
-    v1::GitResponse {
-        exit_code,
-        stdout: prost::bytes::Bytes::from(stdout),
-        stderr: prost::bytes::Bytes::from(stderr),
-        status,
-    }
-}
-
-/// Builds the git argv for an op. For [`v1::GitOp::Status`] we always use the
-/// machine-readable porcelain-v2 + branch headers so [`parse_porcelain_status`]
-/// can produce structured output; other ops pass through their `args` verbatim.
-fn git_args(op: v1::GitOp, args: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    match op {
-        v1::GitOp::Status => {
-            out.push("status".to_string());
-            out.push("--porcelain=v2".to_string());
-            out.push("--branch".to_string());
-        }
-        v1::GitOp::Diff => out.push("diff".to_string()),
-        v1::GitOp::Log => out.push("log".to_string()),
-        v1::GitOp::Add => out.push("add".to_string()),
-        v1::GitOp::Commit => out.push("commit".to_string()),
-        v1::GitOp::Branch => out.push("branch".to_string()),
-        v1::GitOp::Checkout => out.push("checkout".to_string()),
-        v1::GitOp::Pull => out.push("pull".to_string()),
-        v1::GitOp::Push => out.push("push".to_string()),
-        // RAW and the unspecified default pass through whatever args were given.
-        v1::GitOp::Raw | v1::GitOp::Unspecified => {}
-    }
-    out.extend(args.iter().cloned());
-    out
-}
-
-/// Parses `git status --porcelain=v2 --branch` into the structured
-/// [`v1::GitStatus`]. Tolerant of fields it does not recognize.
-fn parse_porcelain_status(stdout: &[u8]) -> v1::GitStatus {
-    let text = String::from_utf8_lossy(stdout);
-    let mut status = v1::GitStatus {
-        clean: true,
-        ..Default::default()
-    };
-
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
-            status.branch = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
-            status.upstream = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-            // Format: "+<ahead> -<behind>".
-            let mut parts = rest.split_whitespace();
-            if let Some(a) = parts.next() {
-                status.ahead = a.trim_start_matches('+').parse().unwrap_or(0);
-            }
-            if let Some(b) = parts.next() {
-                status.behind = b.trim_start_matches('-').parse().unwrap_or(0);
-            }
-        } else if let Some(file) = parse_status_entry(line) {
-            status.clean = false;
-            status.files.push(file);
-        }
-    }
-    status
-}
-
-/// Parses one porcelain-v2 entry line (ordinary `1`, renamed `2`, or untracked
-/// `?`) into a [`v1::GitFileStatus`]. Returns `None` for header/unknown lines.
-fn parse_status_entry(line: &str) -> Option<v1::GitFileStatus> {
-    let mut parts = line.split_whitespace();
-    match parts.next()? {
-        "1" | "2" => {
-            // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` — XY is the second field.
-            let xy = parts.next()?;
-            let path = line.split_whitespace().last()?.to_string();
-            let staged = xy.starts_with(|c| c != '.');
-            Some(v1::GitFileStatus {
-                path,
-                code: xy.to_string(),
-                staged,
-            })
-        }
-        "?" => {
-            let path = parts.next()?.to_string();
-            Some(v1::GitFileStatus {
-                path,
-                code: "??".to_string(),
-                staged: false,
-            })
-        }
-        _ => None,
-    }
-}
-
-// --- File operations on resolved paths ---------------------------------------
-// Each runs on the calling task, or on a run-as thread for a request with
-// `run_as` (crate::run_as::run), so the kernel applies that user's identity.
 
 async fn fs_read_at(path: PathBuf, offset: u64, length: u64) -> PlatformResult<v1::FsReadResponse> {
     let (content, total_size) = crate::spawn_blocking_reserved(move || {
@@ -1838,7 +1658,7 @@ mod tests {
     use super::*;
     use opengeni_agent_proto::v1::{
         ExecRequest, FsListRequest, FsMkdirRequest, FsMoveRequest, FsReadRequest, FsRemoveRequest,
-        FsStatRequest, FsWriteRequest, GitOp, GitRequest,
+        FsStatRequest, FsWriteRequest,
     };
 
     /// A platform rooted at a fresh temp dir, plus the dir guard (kept alive so it
@@ -1978,7 +1798,7 @@ mod tests {
     /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.
     ///
     /// Under the default parallel `cargo test`, this NixOS sandbox intermittently
-    /// fails a `fork`/`exec` of a *known-present* binary (git, `/bin/sh`) with
+    /// fails a `fork`/`exec` of a *known-present* binary (`/bin/sh`) with
     /// `ENOENT` ("No such file or directory", os error 2) purely from concurrent
     /// subprocess churn — re-running the same test with `--test-threads=1` always
     /// passes. It is NOT a code bug (production agents on normal Linux never hit
@@ -1986,11 +1806,11 @@ mod tests {
     /// retries the spawn a few times when — and ONLY when — the failure is that
     /// transient spawn ENOENT for a binary the caller KNOWS is installed.
     ///
-    /// This is strictly a `#[cfg(test)]` helper: production exec/git paths are
+    /// This is strictly a `#[cfg(test)]` helper: production exec paths are
     /// untouched, so a user command that genuinely does not exist still returns
     /// `NotFound` immediately with no masking. Callers must only wrap spawns of
-    /// binaries they have already confirmed are present (the `git`/exec tests gate
-    /// on [`which_git`] / the platform shell); tests that deliberately assert
+    /// binaries they have already confirmed are present (the exec tests gate on
+    /// the platform shell); tests that deliberately assert
     /// `NotFound` for a missing target must NOT route through here.
     async fn retry_transient_spawn<T, F, Fut>(mut op: F) -> PlatformResult<T>
     where
@@ -2271,6 +2091,112 @@ mod tests {
         let out = String::from_utf8_lossy(&resp.stdout);
         assert!(out.contains("hello"), "stdout was {out:?}");
         assert!(!resp.timed_out);
+    }
+
+    /// A machine with no Git identity can still commit: with the default email
+    /// where Git cannot guess one (a fresh container), with Git's own guess
+    /// elsewhere. Any identity the repository or the request sets wins.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_commits_without_a_configured_git_identity() {
+        // Pin PATH in the request: a parallel test briefly points the process
+        // PATH at a missing directory, which would hide git from the shell.
+        let Some(git_dir) = ["/usr/bin", "/usr/local/bin", "/bin", "/opt/homebrew/bin"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|dir| dir.join("git").is_file())
+        else {
+            eprintln!("skipped: git is not installed");
+            return;
+        };
+        let path = format!("{}:/usr/bin:/bin", git_dir.display());
+        // A developer's exported identity would mask the fallback under test.
+        if [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!("skipped: a GIT_* identity is exported");
+            return;
+        }
+        // The probe resolves git through the process PATH; retry past that race
+        // once, after which its answer is remembered for the exec below.
+        let mut guesses = None;
+        for _ in 0..50 {
+            guesses = crate::git_guesses_email();
+            if guesses.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Some(guesses) = guesses else {
+            eprintln!("skipped: the git identity probe could not run");
+            return;
+        };
+        let (platform, dir) = rooted();
+        let home = tempfile::tempdir().expect("home tempdir");
+        // Only the agent's own environment decides the fallback; keep this
+        // test truthful on a developer machine that exports EMAIL.
+        let ambient = std::env::var("EMAIL").ok();
+        let isolated = |extra: &[(&str, &str)]| {
+            [
+                ("PATH", path.as_str()),
+                ("HOME", home.path().to_str().expect("utf-8 home")),
+                ("XDG_CONFIG_HOME", home.path().to_str().expect("utf-8 home")),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<std::collections::HashMap<String, String>>()
+        };
+        let run = |script: &str, env: std::collections::HashMap<String, String>| ExecRequest {
+            command: vec![script.to_string()],
+            shell: true,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            env,
+            ..Default::default()
+        };
+        let commit = "git init -q repo && cd repo && echo a > a && git add a && \
+                      git -c user.name=Agent commit -qm first && git log -1 --format=%ae";
+        let req = run(commit, isolated(&[]));
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        let stderr = String::from_utf8_lossy(&resp.stderr);
+        assert_eq!(resp.exit_code, 0, "stderr was {stderr:?}");
+        let email = String::from_utf8_lossy(&resp.stdout).trim().to_string();
+        match ambient {
+            Some(ambient) => assert_eq!(email, ambient),
+            None if !guesses => assert_eq!(email, crate::DEFAULT_GIT_EMAIL),
+            None => assert_ne!(email, crate::DEFAULT_GIT_EMAIL, "Git's own guess is kept"),
+        }
+
+        let repository = "cd repo && git config user.email repo@example.com && \
+                          echo b > b && git add b && git -c user.name=Agent commit -qm second && \
+                          git log -1 --format=%ae";
+        let req = run(repository, isolated(&[]));
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            "repo@example.com"
+        );
+
+        let req = run(
+            "printf %s \"$EMAIL\"",
+            isolated(&[("EMAIL", "me@example.com")]),
+        );
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(String::from_utf8_lossy(&resp.stdout), "me@example.com");
     }
 
     #[test]
@@ -3029,130 +2955,6 @@ mod tests {
             .expect("stat must succeed for an absent path");
         assert!(!stat.exists);
         assert!(stat.entry.is_none());
-    }
-
-    /// Initializes a git repo in the platform root, returning the platform.
-    async fn git_init(platform: &NativePlatform) {
-        // Configure identity locally so commits work in CI with no global config.
-        for args in [
-            vec!["init", "-q"],
-            vec!["config", "user.email", "agent@opengeni.test"],
-            vec!["config", "user.name", "Opengeni Agent"],
-        ] {
-            // git is gated as known-present by the callers' `which_git()` check, so
-            // a spawn `NotFound` here is the transient NixOS fork/exec ENOENT — retry
-            // it rather than fail the gate non-deterministically.
-            let req = GitRequest {
-                op: GitOp::Raw as i32,
-                args: args.iter().map(ToString::to_string).collect(),
-                ..Default::default()
-            };
-            let resp = retry_transient_spawn(|| platform.git(&req))
-                .await
-                .expect("git setup");
-            assert_eq!(resp.exit_code, 0, "git {args:?} failed");
-        }
-    }
-
-    #[tokio::test]
-    async fn git_status_reports_structured_state() {
-        let (platform, _dir) = rooted();
-        if which_git().is_none() {
-            return; // git absent on this host; the dispatch path is still covered.
-        }
-        git_init(&platform).await;
-
-        // git is known-present here (guarded by `which_git` above), so each spawn
-        // is retried against the transient NixOS fork/exec ENOENT.
-        let status_req = GitRequest {
-            op: GitOp::Status as i32,
-            ..Default::default()
-        };
-        // Clean repo: status is clean.
-        let clean = retry_transient_spawn(|| platform.git(&status_req))
-            .await
-            .expect("status");
-        assert_eq!(clean.exit_code, 0);
-        let st = clean.status.expect("structured status");
-        assert!(st.clean, "fresh repo should be clean: {st:?}");
-
-        // Add an untracked file → status reports it, not clean.
-        platform
-            .fs_write(&FsWriteRequest {
-                path: "tracked.txt".to_string(),
-                content: prost::bytes::Bytes::from_static(b"data"),
-                ..Default::default()
-            })
-            .await
-            .expect("write");
-        let dirty = retry_transient_spawn(|| platform.git(&status_req))
-            .await
-            .expect("status");
-        let st = dirty.status.expect("structured status");
-        assert!(!st.clean);
-        assert!(st.files.iter().any(|f| f.code == "??"));
-    }
-
-    #[tokio::test]
-    async fn git_add_commit_then_status_clean() {
-        let (platform, _dir) = rooted();
-        if which_git().is_none() {
-            return;
-        }
-        git_init(&platform).await;
-        platform
-            .fs_write(&FsWriteRequest {
-                path: "a.txt".to_string(),
-                content: prost::bytes::Bytes::from_static(b"hi"),
-                ..Default::default()
-            })
-            .await
-            .expect("write");
-        // git is known-present here (guarded by `which_git` above), so each spawn
-        // is retried against the transient NixOS fork/exec ENOENT.
-        let add_req = GitRequest {
-            op: GitOp::Add as i32,
-            args: vec!["a.txt".to_string()],
-            ..Default::default()
-        };
-        let add = retry_transient_spawn(|| platform.git(&add_req))
-            .await
-            .expect("add");
-        assert_eq!(add.exit_code, 0);
-        let commit_req = GitRequest {
-            op: GitOp::Commit as i32,
-            args: vec!["-m".to_string(), "init".to_string()],
-            ..Default::default()
-        };
-        let commit = retry_transient_spawn(|| platform.git(&commit_req))
-            .await
-            .expect("commit");
-        assert_eq!(
-            commit.exit_code,
-            0,
-            "commit stderr: {}",
-            String::from_utf8_lossy(&commit.stderr)
-        );
-        let status_req = GitRequest {
-            op: GitOp::Status as i32,
-            ..Default::default()
-        };
-        let status = retry_transient_spawn(|| platform.git(&status_req))
-            .await
-            .expect("status");
-        assert!(status.status.expect("status").clean);
-    }
-
-    /// Returns `Some(())` if a `git` binary is resolvable on the host.
-    fn which_git() -> Option<()> {
-        std::process::Command::new("git")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok()
-            .filter(std::process::ExitStatus::success)
-            .map(|_| ())
     }
 
     #[tokio::test]

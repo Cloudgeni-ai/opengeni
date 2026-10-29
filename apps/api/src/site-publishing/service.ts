@@ -63,6 +63,7 @@ import { createSiteEdgeSync, type SiteEdgeSync } from "./edge-sync";
 import { effectiveSiteLimits, sourceSiteLimitProfile, storedSiteLimitProfileKind } from "./limits";
 import { requireSitePlatformOpen, requireSitePlatformQuota } from "./platform-usage";
 import { readSitePublicationReadiness } from "./readiness";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Published Sites: publication management, the host map, and the work that
@@ -232,7 +233,7 @@ function createEffects(
             await run();
           } catch (error) {
             console.warn(`[site-publishing] ${name} failed`, {
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
           } finally {
             running -= 1;
@@ -540,7 +541,7 @@ export async function notifySitePublicationChanged(
   } catch (error) {
     console.warn("[site-publishing] could not record a Site change", {
       siteId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -682,7 +683,7 @@ export async function stopSiteViewers(
     } catch (error) {
       console.warn("[site-publishing] could not revoke viewer sessions", {
         siteId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -724,7 +725,7 @@ export async function stopSiteViewers(
             console.warn("[site-publishing] could not cancel a Site conversation", {
               siteId,
               sessionId,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
           }
         }
@@ -1143,11 +1144,12 @@ export async function upsertSitePublicationForManager(
       "site_admin_required",
       "Only a workspace admin can change a Site's limits",
     );
-  // Workspace tools act with the workspace's shared connections for the
-  // workspace members who use the Site's agent (people outside the workspace
-  // never get them): only a workspace admin may give them to the Site's
-  // agent. Anyone who manages the Site may keep or remove them. `guestTools`
-  // is retired: accepted and ignored.
+  // `agent.tools` is still saved, but no conversation is given it: a
+  // workspace member's chat with the Site's agent is an ordinary chat with
+  // their own tools and connections, and people outside the workspace get only
+  // the Site's own data tools. Only a workspace admin may add tools here;
+  // anyone who manages the Site may keep or remove them. `guestTools` is
+  // retired: accepted and ignored.
   const tools = request.agent?.tools;
   const currentTools = new Set(existing?.agent.tools ?? []);
   const addsTools = (tools ?? []).some((tool) => !currentTools.has(tool));

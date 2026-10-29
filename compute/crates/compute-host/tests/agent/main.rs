@@ -28,6 +28,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;
@@ -174,12 +175,18 @@ struct World {
     guarantees: Mutex<Vec<(String, u32, u16)>>,
     /// While set, no VM can be given new guarantees.
     refuse_guarantees: AtomicBool,
+    /// What the VMs may still take together, as an engine that limits
+    /// what they hold together reports it; `None` for no such limit.
+    memory_room: Mutex<Option<u64>>,
     /// Each VM started: its name and the memory limit it started under.
     started_limits: Mutex<Vec<(String, Option<u64>)>>,
     /// Each VM started: its name and the processor weight it started at.
     started_weights: Mutex<Vec<(String, u16)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
+    /// Each time a VM was told its drives grew: which VM, how long its
+    /// writable drives' files were then, and whether it was paused.
+    drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
     /// Times a guest was asked to write its disks out.
     syncs: AtomicUsize,
     /// While set, a guest asked to write its disks out answers only once
@@ -998,6 +1005,10 @@ impl Engine for Fake {
         Ok(100 << 20)
     }
 
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        Ok(*self.world.memory_room.lock().unwrap())
+    }
+
     fn set_guarantees(
         &self,
         vm: &FakeVm,
@@ -1026,6 +1037,26 @@ impl Engine for Fake {
             .unwrap()
             .push((vm.name.clone(), bytes));
         Ok(())
+    }
+
+    fn resize_drives(
+        &self,
+        vm: &FakeVm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let lengths = spec
+            .drives
+            .iter()
+            .filter(|drive| !drive.read_only)
+            .map(|drive| std::fs::metadata(&drive.path).map_or(0, |found| found.len()))
+            .collect();
+        let paused = *vm.paused.lock().unwrap();
+        self.world
+            .drives_resized
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), lengths, paused));
+        ready(Ok(()))
     }
 
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
@@ -1240,6 +1271,8 @@ impl Lab {
 
     async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,

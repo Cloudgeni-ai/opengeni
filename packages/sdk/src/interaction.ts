@@ -19,6 +19,7 @@ export type {
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "./errors";
 import type { RetainedArtifactReference } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Public Browser/Computer protocol version. Driver and provider details stay private. */
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
@@ -902,6 +903,7 @@ export type BrowserAction =
       mobile: boolean;
       deviceScaleFactor?: number | undefined;
     }
+  | { type: "viewport_reset" }
   | {
       type: "click";
       locator: BrowserLocator;
@@ -1285,6 +1287,12 @@ export type ComputerTarget = {
   /** Present on the target this computer was last observed or acted on in,
    * which a call that omits targetId works in. */
   current?: true | undefined;
+  /** Present when someone other than Opengeni (a person, or other software)
+   * used this computer's keyboard, mouse or trackpad within the last minute,
+   * as of the listing or observation that carries it: how many whole seconds
+   * before it. Input Opengeni's computer sessions on this computer send does
+   * not count. */
+  personInputSecondsAgo?: number | undefined;
 };
 
 export type ComputerObservation = {
@@ -2825,7 +2833,15 @@ export type BrowserFrameMetadata = {
   capturedAt: string;
 };
 
-export type BrowserFrame = BrowserFrameMetadata & { data: Uint8Array };
+export type BrowserFrame = BrowserFrameMetadata & {
+  data: Uint8Array;
+  /**
+   * Set when a full-page capture could not keep the space of some scrollbars
+   * (horizontal ones, or ones inside shadow trees), so content beside them
+   * may be offset by up to a scrollbar's width.
+   */
+  inexactScrollbars?: true;
+};
 
 export type BrowserScreenshotOptions = {
   /** Capture the document content instead of the visible viewport. */
@@ -3376,8 +3392,4 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

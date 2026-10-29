@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -469,31 +469,17 @@ describe("online-safety SQL recognition", () => {
       ).map((f) => f.rule),
     ).toEqual(["table-rewrite"]);
   });
-  test("frozen ordinals are excluded without touching migration bytes", () => {
-    expect(ONLINE_SAFETY_FROM_ORDINAL).toBe(888);
+  test("baseline ordinals are excluded without touching migration bytes", () => {
+    expect(ONLINE_SAFETY_FROM_ORDINAL).toBe(978);
     expect(
-      analyzeMigrationOnlineSafety("0887_frozen.sql", violations["nonconcurrent-index"]),
+      analyzeMigrationOnlineSafety("0977_baseline_01.sql", violations["nonconcurrent-index"]),
     ).toEqual([]);
     expect(
-      analyzeMigrationOnlineSafety("0888_new.sql", violations["nonconcurrent-index"]),
+      analyzeMigrationOnlineSafety("0978_new.sql", violations["nonconcurrent-index"]),
     ).toHaveLength(1);
     expect(analyzeMigrationOnlineSafety("README.md", violations["nonconcurrent-index"])).toEqual(
       [],
     );
     expect(analyzeMigrationOnlineSafetyDirectory(MIGRATIONS_DIR)).toEqual([]);
-    // Ensure the historical audit actually exercises the old governed range.
-    const audit = analyzeMigrationOnlineSafetyDirectory(MIGRATIONS_DIR, 786);
-    expect(
-      audit.some(
-        (f) => f.file === "0789_external_vault_sources.sql" && f.rule === "constraint-validation",
-      ),
-    ).toBe(true);
-    for (const file of readdirSync(MIGRATIONS_DIR).filter(
-      (f) => /^0[78]\d\d_.*\.sql$/.test(f) && Number(f.slice(0, 4)) < ONLINE_SAFETY_FROM_ORDINAL,
-    )) {
-      expect(readFileSync(join(MIGRATIONS_DIR, file), "utf8")).not.toContain(
-        "-- online-safety-exception:",
-      );
-    }
   });
 });

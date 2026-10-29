@@ -43,7 +43,7 @@ const CHECKPOINTED: SleepConfig = SleepConfig {
 
 /// The directory on a filesystem whose files share extents, if the test
 /// host has one.
-fn shared_extents() -> Option<PathBuf> {
+pub(super) fn shared_extents() -> Option<PathBuf> {
     let dir = std::env::var_os("COMPUTE_TEST_SHARED_EXTENTS_DIR").map(PathBuf::from);
     if dir.is_none() {
         required::skip(
@@ -56,6 +56,8 @@ fn shared_extents() -> Option<PathBuf> {
 
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
         vcpus: 1,
         memory_mib: 256,
         memory_request_mib: None,

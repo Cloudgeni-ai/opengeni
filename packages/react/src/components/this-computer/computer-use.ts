@@ -6,6 +6,7 @@ import {
   type ThisComputerErrorCode,
   type ThisComputerPermissionId,
   type ThisComputerStatus,
+  type ThisComputerWaitingOn,
 } from "@opengeni/sdk/this-computer";
 import { useCallback, useMemo } from "react";
 import type { OpenGeniText } from "../../messages/runtime";
@@ -14,11 +15,12 @@ import type { UseThisComputerResult } from "./use-this-computer";
 
 /**
  * What is wrong while computer use is on: a sign-in, a server that can't be
- * reached at all, or anything else (with the server's or agent's own words
- * when there are some). A missing permission is not one of these: see
+ * reached at all, turning on that has waited too long (`stalled`, with what it
+ * waits for), or anything else (with the server's or agent's own words when
+ * there are some). A missing permission is not one of these: see
  * `needs_permission`.
  */
-export type ComputerUseProblem = "signed_out" | "offline" | "error";
+export type ComputerUseProblem = "signed_out" | "offline" | "stalled" | "error";
 
 export type ComputerUseState =
   /** Outside a desktop app that can host the agent, or not read yet. */
@@ -48,6 +50,8 @@ export type ComputerUseState =
       code: ThisComputerErrorCode | null;
       /** The host's or server's own message, if there is one. */
       detail: string | null;
+      /** For `stalled`: what turning on still waits for, when the host says. */
+      waitingOn?: ThisComputerWaitingOn | null;
     };
 
 /** How a missing permission or a problem is fixed: one action each. */
@@ -81,6 +85,8 @@ export function computerUseProblemText(
       return t("thisComputer.computerUse.signedOut", { machineName });
     case "offline":
       return t("thisComputer.computerUse.offline");
+    case "stalled":
+      return computerUseStalledText(state.waitingOn ?? null, machineName, t);
     default:
       // The server's or agent's own words say most; else what the code means.
       return (
@@ -89,6 +95,28 @@ export function computerUseProblemText(
           ? labels.error(state.code, null)
           : t("thisComputer.computerUse.error"))
       );
+  }
+}
+
+/** Why turning on has taken too long, in one plain sentence. */
+export function computerUseStalledText(
+  waitingOn: ThisComputerWaitingOn | null,
+  machineName: string,
+  t: OpenGeniText,
+): string {
+  switch (waitingOn) {
+    case "sign_in":
+      return t("thisComputer.computerUse.stalled.signIn", { machineName });
+    case "server":
+      return t("thisComputer.computerUse.stalled.server", { machineName });
+    case "agent":
+      return t("thisComputer.computerUse.stalled.agent");
+    case "another_agent":
+      return t("thisComputer.computerUse.stalled.anotherAgent");
+    case "handover":
+      return t("thisComputer.computerUse.stalled.handover");
+    default:
+      return t("thisComputer.computerUse.stalled", { machineName });
   }
 }
 
@@ -104,6 +132,8 @@ export function computerUseNoticeText(
       return t("thisComputer.computerUse.pill.signedOut");
     case "offline":
       return t("thisComputer.computerUse.pill.offline");
+    case "stalled":
+      return t("thisComputer.computerUse.pill.stalled");
     default:
       return t("thisComputer.computerUse.pill.error");
   }
@@ -126,12 +156,14 @@ function failure(
  * registers this computer again. Only a failure the host reports as the server
  * being out of reach is "offline"; a server that answered is never that. A
  * permission being asked for is still turning on; one the person didn't give
- * is `needs_permission`, never a problem.
+ * is `needs_permission`, never a problem. Turning on that has waited too long
+ * (`stalled`, see `useThisComputer`) is a problem that says what it waits for.
  */
 export function computerUseState(
   computer: Pick<UseThisComputerResult, "status" | "actionError"> & {
     pending?: UseThisComputerResult["pending"] | undefined;
     asking?: UseThisComputerResult["asking"] | undefined;
+    stalled?: UseThisComputerResult["stalled"] | undefined;
   },
 ): ComputerUseState {
   const status: ThisComputerStatus | null = computer.status;
@@ -155,9 +187,16 @@ export function computerUseState(
         ? { kind: "turning_on", progress: null, asking }
         : { kind: "needs_permission", appName: status.permissionAppName ?? null };
     }
-    return status.reconnecting
-      ? { kind: "turning_on", progress: null, asking: null }
-      : { kind: "on" };
+    if (!status.reconnecting) return { kind: "on" };
+    return computer.stalled
+      ? {
+          kind: "problem",
+          problem: "stalled",
+          code: null,
+          detail: status.waitingDetail || null,
+          waitingOn: status.waitingOn ?? null,
+        }
+      : { kind: "turning_on", progress: null, asking: null };
   }
   return { kind: "off" };
 }

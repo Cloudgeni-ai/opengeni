@@ -28,7 +28,11 @@ import {
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
-import { managedSessionGroupBackend, managedSessionGroupOs } from "@opengeni/core";
+import {
+  backgroundCommandWakeSender,
+  managedSessionGroupBackend,
+  managedSessionGroupOs,
+} from "@opengeni/core";
 import { mergeResourceRefs } from "../common";
 import {
   mintSandboxCodemodeToken,
@@ -87,6 +91,7 @@ import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SandboxRouteDeps = {
   input: RunAgentTurnInput;
@@ -119,6 +124,8 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
   settings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
+  /** Wakes a session waiting on a background command this turn settles. */
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"] | undefined;
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
@@ -360,6 +367,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     settings,
     db,
     bus,
+    wakeSessionWorkflow,
     objectStorage,
     observability,
     runtimeCancellationSignal,
@@ -409,9 +417,9 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   // backend is "none" -> never resolve (no box to touch).
   //
   // Established AFTER sandboxEnvironment is computed (not before) so the box's
-  // manifest is created with the SAME variableSet the agent declares — the SDK
+  // manifest is created with the SAME environment the agent declares — the SDK
   // applies the agent's manifest to this provided session and throws on ANY
-  // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
+  // environment delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
   // here makes current==target so the delta is empty.
   recordTurnStartupPhase(observability, {
     phase: "runtime_preparation",
@@ -440,6 +448,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
+              wake: backgroundCommandWakeSender(wakeSessionWorkflow),
               backgroundCommandAttempt: {
                 turnId: turn.id,
                 executionGeneration: attempt.executionGeneration,
@@ -554,6 +563,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             db,
             settings,
             bus,
+            wakeSessionWorkflow,
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
             onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
@@ -628,6 +638,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               db,
               settings,
               bus,
+              wakeSessionWorkflow,
               opJournal,
               onOp: machineOpObserver.observer,
               onSandboxOperation: sandboxOperationObserver,
@@ -707,6 +718,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  wakeSessionWorkflow,
                   ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
@@ -791,6 +803,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  wakeSessionWorkflow,
                   ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
@@ -838,7 +851,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 type: "sandbox.operation.failed",
                 payload: {
                   name: "sandbox.provision",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                 },
               },
             ],
@@ -890,6 +903,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               db,
               settings,
               bus,
+              wakeSessionWorkflow,
               opJournal,
               onSandboxOperation: sandboxOperationObserver,
               onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
@@ -961,6 +975,7 @@ export async function bindLazySandboxProvisioner(
     settings,
     db,
     bus,
+    wakeSessionWorkflow,
     observability,
     runtimeCancellationSignal,
     sandboxResumeSignal,
@@ -1280,7 +1295,7 @@ export async function bindLazySandboxProvisioner(
                 type: "sandbox.operation.failed",
                 payload: {
                   name: "sandbox.provision",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   provisionId: settlement.provisionId,
                   internalAttempts: settlement.internalAttempts,
                   failureCategory: failure.category,
@@ -1313,6 +1328,7 @@ export async function bindLazySandboxProvisioner(
         db,
         settings,
         bus,
+        wakeSessionWorkflow,
         opJournal,
         onOp: machineOpObserver.observer,
         onSandboxOperation: sandboxOperationObserver,

@@ -116,9 +116,19 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // Background keys refused before any was sent: another window of the app
   // (a sheet, a dialog) has the keyboard focus.
   window_not_key: "invalid_action",
+  // Background keys refused before any was sent: the app named no focused
+  // window, so where they would go is unknown.
+  key_focus_unknown: "invalid_action",
   // Background input refused before anything was sent: the addressed element
   // could not be proven to be in the addressed window.
   element_outside_target_window: "invalid_action",
+  // Input refused before anything was sent: the window is no longer one of
+  // its app's windows on screen (an earlier action closed or hid it, or it is
+  // on another Space).
+  off_space_or_ax_unresolved: "invalid_action",
+  // A step's lookup stopped before anything was sent: the window it names is
+  // closed or no longer on screen, so its element will never appear.
+  window_not_on_screen: "invalid_action",
   // Pointer or key input refused before anything was sent: the element is in
   // a bubble or popover attached to the window, which takes accessibility
   // actions only.

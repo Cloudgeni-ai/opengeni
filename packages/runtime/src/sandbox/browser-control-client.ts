@@ -117,6 +117,7 @@ import {
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
+import { isRecord } from "@opengeni/contracts/values";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
@@ -226,6 +227,8 @@ export type BrowserControlFrame = {
   mediaType: "image/jpeg" | "image/png";
   metadataHeader: string;
   metadata: BrowserFrameMetadata;
+  /** Set when a full-page capture could not keep every scrollbar's space. */
+  inexactScrollbars?: true;
 };
 
 export type BrowserControlScreenshotOptions = {
@@ -2939,7 +2942,15 @@ function browserControlFrame(
   ) {
     throw new BrowserControlProtocolError("browser frame evidence does not match its request");
   }
-  return { data, mediaType, metadataHeader, metadata };
+  return {
+    data,
+    mediaType,
+    metadataHeader,
+    metadata,
+    ...(get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+      ? { inexactScrollbars: true as const }
+      : {}),
+  };
 }
 
 function computerControlFrame(
@@ -4357,8 +4368,4 @@ function parseHttpStatus(value: string): number {
     throw new BrowserControlProtocolError("HTTP status is invalid");
   }
   return status;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

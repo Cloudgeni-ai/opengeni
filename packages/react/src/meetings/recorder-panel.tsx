@@ -48,6 +48,7 @@ import { cn } from "../app/lib/utils";
 
 import { defaultMeetingTitle, formatClock, ownerLiveLaneName } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
+import { canStartRecording } from "./recorder-state";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 import { MeetingsOverlayScope } from "./overlay-scope";
@@ -450,6 +451,7 @@ function RecorderLiveTranscript({
       className="mt-4 border-t border-border pt-4"
       lines={lines}
       partials={live.map((track) => ({ trackNumber: track.trackNumber, text: track.partial }))}
+      tracks={recorder.tracks}
       speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg, viewerName)}
       status={status}
       empty={
@@ -648,6 +650,8 @@ function RecorderPanelContent({
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
       ...(externalRef ? { externalRef } : {}),
+      // Names their microphone in the transcript when Opengeni has no name for them.
+      ...(viewerName?.trim() ? { ownerName: viewerName } : {}),
       // Sent even when it's the workspace's, so this meeting keeps it.
       transcription:
         languageChoice === null && defaultLanguage === undefined
@@ -655,15 +659,19 @@ function RecorderPanelContent({
           : { language: language === DETECT_LANGUAGE ? null : language },
     });
   };
-  const autoStartReady = Boolean(autoStart?.pending && recorder?.supported && state === "idle");
+  // After an earlier recording stopped or failed too, as a click on Start would.
+  const autoStartReady = Boolean(
+    autoStart?.pending && recorder?.supported && canStartRecording(state),
+  );
   const startRef = useRef(start);
   startRef.current = start;
   useEffect(() => {
     if (!autoStartReady) return;
     const request = autoStart?.take();
     if (!request) return;
-    setTitle(request.title);
-    void startRef.current(request.title);
+    // A start without a title (the Start recording key) keeps one already typed, as the button does.
+    if (request.title) setTitle(request.title);
+    void startRef.current(request.title || undefined);
   }, [autoStart, autoStartReady]);
 
   if (recorder && !recorder.supported) {

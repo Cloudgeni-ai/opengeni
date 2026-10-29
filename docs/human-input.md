@@ -18,7 +18,8 @@ freezes it behind the open suffix, and later injects one of these structured out
 into that exact call:
 
 - `answered`, with validated question answers;
-- `skipped`, only when the request allows it;
+- `skipped`, only when the request allows it, or with `agentDecides: true`
+  when the person chose "Let the agent decide";
 - `expired`, when its durable deadline wins the settlement race; or
 - `cancelled`, when the owning turn is permanently replaced or terminated.
 
@@ -28,6 +29,30 @@ the answer or issue a new structured request if genuine clarification is still
 needed; Opengeni never manufactures an automatic reprompt.
 No outcome creates a synthetic `user.message`, no response starts a new logical
 turn, and a host must not translate Skip or expiry into approval rejection.
+
+## Let the agent decide
+
+Every ordinary question card offers one secondary action, "Let the agent
+decide", in place of Skip. It settles the request as
+`{ outcome: "skipped", agentDecides: true }`, which the server accepts even
+when the request does not allow an ordinary skip. The agent's tool result then
+carries a `note` telling it to make its own best choice, continue, and say in
+one short sentence what it chose; the settled card reads "You let the agent
+decide". It is never offered, and the server refuses it, for secret questions,
+Skill reviews and secret-use approval cards; tool approvals are a separate
+surface and stay human-only.
+
+On a sub-session's card shown in an ancestor's chat, the action hands the
+question to that chat's own agent instead: it sends a `user.message` whose
+visible text is `Let the agent decide: <question>` and whose `modelContext`
+starts with an `opengeni:human-input-delegation {"sessionId","requestId"}`
+marker line, then the questions and an instruction to answer with
+`session_human_input_respond` using its best judgement (doing any agent work
+the question asks for, such as starting a reviewer) and to say what it chose.
+The card stays answerable and says "Your agent is deciding"; in the chat the
+message renders as a small record that reads the child's request and shows
+"Agent decided: <answer>" once it settles
+(`packages/react/src/human-input-delegation.ts`).
 
 ## Secret questions
 
@@ -280,9 +305,13 @@ carrying each request's compact questions (id, kind, prompt, required, option
 ids and labels; secret questions carry no options or secret spec, and a Skill
 review question is marked `humanOnly`), so the parent can call
 `session_human_input_respond` without reading the child's history. That update
-wakes an idle parent that has an active goal, a held wait, or no goal at all. A
+wakes an idle parent that has an active goal, a held wait, no goal at all, or
+a completed goal (the worker is still its work; the goal is not reopened). A
+goal paused by intent keeps the update pending for its next turn. A
 mid-turn parent receives it at its next claim, and a waiting parent's
-`wait_for_input` ends.
+`wait_for_input` ends. When the parent cannot act on it (failed, or its agent
+has no session tools), the update goes to the nearest ancestor that can, and
+only to that one (see `docs/durable-agent-inputs.md`).
 
 The first accepted answer wins under the request row lock. A later human
 submission returns `200` with the winning event. A later agent call returns
@@ -299,8 +328,9 @@ question, who answered, and the answer
 `packages/react/src/timeline/agent-work-human-input.ts`, shared by web and
 native). A person's or API client's answer, an expired or cancelled question,
 and a system skip (a scheduled run's question nobody answered in time) keep the
-conversation card. Agents are told to answer a child's question only from their
-task context and to leave questions only a person can answer (decisions,
+conversation card. Agents are told to answer a child's question from their task context before the
+person has to, to do agent work it asks for (such as starting a reviewer) and
+then answer, and to leave questions only a person can answer (decisions,
 preferences, credentials, approvals) to the person.
 
 ## Acceptance boundary

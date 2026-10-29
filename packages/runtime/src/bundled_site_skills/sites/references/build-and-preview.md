@@ -121,6 +121,44 @@ publishing instructions in SKILL.md use `dist/index.html`. Inline ordinary style
 scripts, and assets as usual; the Opengeni client tag is resolved by the host.
 An HTML-only Site can be a small widget; it does not require a full-page layout.
 
+## Pages and addresses
+
+One Site can have several pages (`/`, `/admin`, `/unsubscribe`) and links
+with query parameters. The host reports the Site's own address; Site code
+never reads `window.location`, which is the frame's, not the Site's.
+
+```ts
+import { createOpenGeniSiteClient, type OpenGeniSiteLocation } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+const render = (at: OpenGeniSiteLocation) => {
+  if (at.path === "/unsubscribe") showUnsubscribe(at.params.get("t"));
+  else if (at.path === "/admin") showAdmin();
+  else showHome();
+};
+const at = await site.location; // { path, search, hash, href, params }, null on older hosts
+render(at ?? { path: "/", search: "", hash: "", href: "/", params: new URLSearchParams() });
+site.onLocationChange(render); // Back/Forward, links and navigate
+await site.navigate("/admin?tab=2"); // { replace: true } adds no history entry
+```
+
+- On the web the address is the real one (`https://<site>/unsubscribe?t=abc`),
+  kept through sign-in. In the console it is kept in the Site page's own URL.
+- Ordinary links to the Site's own pages (`<a href="/admin">`, `?tab=2`)
+  move the Site without reloading it; links to other sites, `target`,
+  `download` and `#section` links behave as usual. Pass
+  `createOpenGeniSiteClient({ links: false })` to handle links yourself,
+  for example with a router that listens for clicks on `window`.
+- `navigate` refuses other origins, `/_og/...` and `/__opengeni/...` with
+  `invalid_location`; open other addresses with a normal link.
+- Create one client per page and keep it: each client listens for links and
+  holds a connection to the host.
+- Addresses are untrusted input, never proof of who someone is: check a
+  token with an `everyone` Site SQL query (see `references/site-sql.md`), and
+  render parameters as text.
+- In a local preview the page is the top-level document, so `site.location`
+  is the preview server's address: serve `index.html` for every page path.
+
 ## Authoring, preview, and viewer access
 
 Your authoring session's tools let you build, inspect, and publish the Site;
@@ -169,13 +207,23 @@ access limitation. Missing publishing access itself still blocks publication.
    catalog into model context. Generate local types with
    `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
-   identity in the Site's `requestedTools` publish field.
+   identity in the Site's `requestedTools` publish field. For a connector tool
+   that runs on a person's account (Gmail, Slack, ...), declare and call the
+   connector identity (`{ serverId: "gmail", toolName: "send_message" }`), not
+   your own account route: each viewer then uses their own account.
 3. Do not request tools the Site does not call. A Site using only `site.client`
    SDK operations, with no direct `site.tools` calls, should publish
    `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
    no tool authority and requires no separate tool approval. Execution still follows
-   normal tool approval rules; handle approval-required responses in the UI.
+   normal tool approval rules: in Opengeni the frame asks the viewer to confirm
+   (Send/Cancel, "Always allow for this Site") before an approval-required call
+   runs, so do not build your own confirmation for it. Handle a cancelled call
+   (`site_tool_consent_declined`) and, on a published hostname,
+   `site_tool_consent_requires_opengeni` as normal UI states. When a published
+   Site is blocked by a tool set to Ask and that blocks the person you work for,
+   offer to set it to Allow in the chat with the integration's tool approval app
+   action instead of describing the setting.
 5. The host intersects that set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal

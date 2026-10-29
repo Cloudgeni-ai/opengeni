@@ -30,6 +30,7 @@ import { githubAppBotIdentity } from "@opengeni/github";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
+  signalBackgroundCommandWakes,
   getSandboxSessionEnvelope,
   touchLeaseHolder,
   markWarmLeaseInstanceLost,
@@ -57,6 +58,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { isRetryableControllerTransport } from "../controller-data-plane";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -104,6 +106,8 @@ import {
   getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
+  backgroundCommandWakeSender,
+  type BackgroundCommandWakeSignal,
   type ChannelAMachineAuthority,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
@@ -114,6 +118,9 @@ export type ChannelAServices = {
   bus: EventBus;
   objectStorage?: ObjectStorage | null;
   observability?: Observability | undefined;
+  /** Wakes a session waiting on a background command a request settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: BackgroundCommandWakeSignal | null | undefined;
 };
 
 export type ChannelAOperation =
@@ -488,13 +495,6 @@ export function shouldEvictChannelAHandleAfterError(
   return (
     cacheKind === "read" &&
     (error instanceof ChannelAUnavailableError || isRetryableControllerTransport(error))
-  );
-}
-
-function isRetryableControllerTransport(error: unknown): boolean {
-  return (
-    error instanceof BrowserControlTransportError ||
-    (error instanceof BrowserControlRequestError && error.retryable)
   );
 }
 
@@ -928,6 +928,7 @@ async function withChannelAOperation<T>(
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
           ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          wakeSessionWorkflow: services.wakeSessionWorkflow,
         },
         {
           accountId,
@@ -1072,6 +1073,10 @@ async function withChannelAOperation<T>(
                   payload: { sandboxId: live.instanceId },
                 },
               ]).catch(() => undefined);
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
               mappedError = new ApiHttpError(409, {
                 code: "conflict",
                 message: "sandbox instance was lost; retry to restore it",
@@ -1179,7 +1184,12 @@ async function withChannelAOperation<T>(
             type: "sandbox.box.lost",
             payload: { sandboxId: live.instanceId },
           },
-        ]);
+        ]).finally(() =>
+          signalBackgroundCommandWakes(
+            marked.backgroundCommandWakes,
+            backgroundCommandWakeSender(services.wakeSessionWorkflow),
+          ),
+        );
       }
       throw new ApiHttpError(409, {
         code: "conflict",
@@ -1282,6 +1292,7 @@ async function withChannelAOperation<T>(
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
           ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          wakeSessionWorkflow: services.wakeSessionWorkflow,
         },
         {
           accountId,

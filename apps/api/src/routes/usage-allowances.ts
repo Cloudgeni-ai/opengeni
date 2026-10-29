@@ -25,6 +25,7 @@ import {
   requireResolvedAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   clearWorkspaceAllowance,
@@ -69,7 +70,7 @@ export function requireAllowanceAuthority(
     (operation === "workspace-write" || operation === "member-write")
   ) {
     if (authorization.accountGrant?.permissions.includes("usage_allowances:manage")) return;
-    throw new HTTPException(403, { message: "missing permission: usage_allowances:manage" });
+    throw new MissingPermissionRefusal("usage_allowances:manage");
   }
   if (operation === "own") {
     if (grant.principalKind !== "human_session" || grant.serviceInitiator) {

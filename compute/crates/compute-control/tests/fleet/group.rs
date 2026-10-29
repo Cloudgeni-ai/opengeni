@@ -918,6 +918,7 @@ fn registration(name: &str, attempt: u64, boot: Boot) -> Register {
             memory_mib: 4096,
             cpu_millis: 4000,
             disk_mib: 4096,
+            offers: Vec::new(),
             boot: Some(boot),
         },
         capacity: roomy(),

@@ -11,13 +11,19 @@ import {
   APP_ACTION_CALL_TOOL_NAME,
   appActionChangesState,
   appActionCallCarriesSecrets,
+  appActionNeedsConfirmation,
+  appActionPaymentPage,
   findAppAction,
   type ActionCatalogEntry,
 } from "@opengeni/contracts/app-actions";
+import { ExternalIdentityReference } from "@opengeni/contracts/external-identities";
 import { hasPermission } from "@opengeni/core";
+import type { PresentedAppActionPage } from "@opengeni/contracts/session-history";
 import {
+  findWorkspaceByExternalIdentity,
   listConfirmedAppActionChanges,
   resolveSessionAppActionAuthority,
+  withAccountRls,
   type Database,
   type SessionAppActionUnavailableReason,
 } from "@opengeni/db";
@@ -31,6 +37,11 @@ import {
   searchActions,
   type OrganizationActionContext,
 } from "../organization-mcp";
+import {
+  contentFlowCheckFailure,
+  withOtherWorkspaceContentFlow,
+  type OtherWorkspaceContentFlow,
+} from "./workspace-content-flow";
 
 /**
  * How a session reaches the app's actions: the same actions as the
@@ -82,6 +93,27 @@ const SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
 const EXTERNAL_PERSON_SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. Tell the person plainly that this isn't available here, without pointing them to a page.";
+
+// What's true of each kind of page, added to its successful result.
+const EXACT_LINK =
+  "If you do share it, copy url exactly as returned, including everything after #: a retyped or shortened link doesn't open. Test-mode pages (ids starting cs_test_) are expected where the deployment takes test payments; share them like any other.";
+const PAYMENT_PAGE: Record<PresentedAppActionPage, string> = {
+  credits: `The chat shows the person this page as a button that opens it, and confirms there with their new balance once they've paid, so you needn't repeat the link. ${EXACT_LINK}`,
+  subscription: `The chat shows the person this page as a button that opens it, so you needn't repeat the link. ${EXACT_LINK}`,
+  portal:
+    "The chat shows the person this page as a button that opens it, so you needn't repeat the link. Anyone with this link can change the organization's payment method or plan until it expires, so give it only to this person, never in a shared place.",
+};
+
+// A payment page the person isn't allowed to open: the route's 403 names a
+// permission, which neither they nor the agent should have to decode.
+const PAYMENT_PAGE_FORBIDDEN: Record<PresentedAppActionPage, string> = {
+  credits:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.",
+  subscription:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't subscribe here. Tell them an owner or admin of the organization can change the plan in the app.",
+  portal:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't open its billing page here. Tell them an owner or admin of the organization can do it in the app.",
+};
 
 const CallInput = z4.object({
   id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
@@ -166,7 +198,7 @@ function isExternalPerson(subjectId: string): boolean {
 function externalPersonCanRun(entry: ActionCatalogEntry, authority: ActingAuthority): boolean {
   if (!actionInOneWorkspace(entry)) return false;
   if (authority.kind === "full_access") return true;
-  if (authority.kind === "read_only" && appActionChangesState(entry)) return false;
+  if (authority.kind === "read_only" && appActionNeedsConfirmation(entry)) return false;
   if (appActionCallCarriesSecrets(entry, undefined)) return false;
   return (
     entry.permission === undefined ||
@@ -244,6 +276,15 @@ export function createSessionAdminReach(input: {
               workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
             }),
     },
+    // The agent of this exact session turn acts for the person.
+    auditProvenance: {
+      source: "agent",
+      principalKind: grant.principalKind ?? null,
+      via: "session_admin_access",
+      sessionId,
+      turnId,
+      attemptId: typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : null,
+    },
     origin: access.origin,
     dispatch: access.dispatch,
     ...(access.signal ? { signal: access.signal } : {}),
@@ -281,7 +322,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Find app actions",
       description:
-        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, and manage sessions, connections, schedules, files, knowledge and keys. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, set whether an integration's tools run without asking (Allow, Ask or Block), and manage sessions, connections, schedules, files, knowledge and keys. When a setting blocks what the person asked for, find its action and make the change here. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
@@ -327,7 +368,7 @@ export function registerSessionAdminAccessTools(input: {
       const authority = await currentAuthority();
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       const entry = findAppAction(id);
-      if (!entry || entry.browserOnly || entry.retired) return describeActionResult(id);
+      if (!entry || entry.browserOnly) return describeActionResult(id);
       return text({
         ...describeAction(entry),
         ...(entry.path.includes(":workspaceId")
@@ -357,11 +398,15 @@ export function registerSessionAdminAccessTools(input: {
         appActionCallCarriesSecrets(entry, args.body)
       )
         return failure(isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_SECRETS : SECRETS);
-      if (authority.kind === "read_only" && entry && appActionChangesState(entry))
+      // Opening a checkout charges nothing, so it runs without a confirmation
+      // here and in an embed alike; the page itself asks, and the route still
+      // checks that this person may pay. A billing portal link keeps both
+      // safeguards (see appActionNeedsConfirmation).
+      if (authority.kind === "read_only" && entry && appActionNeedsConfirmation(entry))
         return failure(
           isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_READ_ONLY : READ_ONLY,
         );
-      if (authority.kind === "confirm" && entry && appActionChangesState(entry)) {
+      if (authority.kind === "confirm" && entry && appActionNeedsConfirmation(entry)) {
         // Enforced here, not only in the chat: the change runs only if this
         // attempt is executing exactly these arguments, which this same
         // person approved.
@@ -376,13 +421,130 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
-      return await callOrganizationAction(reach.actAs(authority), {
+      // After the confirmation check, which compares the call as the model made it.
+      const call = {
         id: args.id,
-        // After the confirmation check, which compares the call as the model made it.
         pathParameters: withPathParameterDefaults(entry, args.pathParameters, grant.workspaceId),
         query: args.query,
         ...(args.body !== undefined ? { body: args.body } : {}),
-      });
+      };
+      const page = entry ? appActionPaymentPage(entry) : undefined;
+      // EU-only content stays in EU-only workspaces, for the workspace the call
+      // really reaches.
+      return await withAppActionContentFlow(db, grant, call, async () =>
+        callOrganizationAction(
+          reach.actAs(authority),
+          call,
+          page ? { note: PAYMENT_PAGE[page], billingForbidden: PAYMENT_PAGE_FORBIDDEN[page] } : {},
+        ),
+      );
     },
   );
+}
+
+/** Query keys that only name or page through what a read returns, never this session's text. */
+const ID_OR_PAGING_QUERY_KEY =
+  /^(?:[a-z]+Ids?|ids?|limit|cursor|before|after|offset|page|pageSize|order|direction)$/;
+/** A query value shaped like an id, a cursor or a page setting rather than free text. */
+const ID_OR_PAGING_QUERY_VALUE = /^[A-Za-z0-9._:=+/-]{1,200}$/;
+
+function idOrPagingQueryValue(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "boolean") return true;
+  if (typeof value === "string") return ID_OR_PAGING_QUERY_VALUE.test(value);
+  if (Array.isArray(value)) return value.length <= 100 && value.every(idOrPagingQueryValue);
+  return false;
+}
+
+/**
+ * Whether the call only brings the other workspace's content here: a read
+ * with no body whose query holds only ids and paging values. Anything else
+ * (a change, a search, a preview, a read that sends text) also carries this
+ * session's content there.
+ */
+export function appActionContentFlow(
+  entry: ActionCatalogEntry,
+  call: { query?: Record<string, unknown>; body?: unknown },
+): OtherWorkspaceContentFlow {
+  if (appActionChangesState(entry)) return "both_ways";
+  const body = call.body;
+  const emptyBody =
+    body === undefined ||
+    body === null ||
+    (typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0);
+  if (!emptyBody) return "both_ways";
+  return Object.entries(call.query ?? {}).every(
+    ([key, value]) => ID_OR_PAGING_QUERY_KEY.test(key) && idOrPagingQueryValue(value),
+  )
+    ? "from_there"
+    : "both_ways";
+}
+
+/**
+ * An app action in another workspace of this organization brings that
+ * workspace's content into this session, and anything carrying this session's
+ * text takes it there: run only when that may happen, checked again when the
+ * call returns.
+ */
+export async function withAppActionContentFlow(
+  db: Database,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
+  call: {
+    id: string;
+    pathParameters: Record<string, string>;
+    query?: Record<string, unknown>;
+    body?: unknown;
+  },
+  run: () => Promise<CallToolResult>,
+): Promise<CallToolResult> {
+  const entry = findAppAction(call.id);
+  if (!entry) return await run();
+  const here = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  if (entry.path.startsWith("/v1/workspaces/external/:")) {
+    // A workspace named by its external identity in this organization: an
+    // import carries this session's content there, so both ways.
+    let there: string | null;
+    try {
+      there = await externalIdentityWorkspaceId(db, grant.accountId, call.pathParameters);
+    } catch (error) {
+      return contentFlowCheckFailure(error);
+    }
+    if (!there) return await run();
+    return await withOtherWorkspaceContentFlow(
+      db,
+      { here, thereWorkspaceId: there, flow: "both_ways" },
+      run,
+    );
+  }
+  const otherWorkspaceId = call.pathParameters["workspaceId"];
+  if (!entry.path.includes(":workspaceId") || !otherWorkspaceId) return await run();
+  return await withOtherWorkspaceContentFlow(
+    db,
+    { here, thereWorkspaceId: otherWorkspaceId, flow: appActionContentFlow(entry, call) },
+    run,
+  );
+}
+
+/**
+ * The workspace an external identity names in this organization, as the
+ * route resolves it; null when it names none (the route answers that).
+ */
+async function externalIdentityWorkspaceId(
+  db: Database,
+  accountId: string,
+  pathParameters: Record<string, string>,
+): Promise<string | null> {
+  const reference = ExternalIdentityReference.safeParse({
+    source: pathParameters["source"] ?? pathParameters["workspaceSource"],
+    externalId: pathParameters["externalId"] ?? pathParameters["workspaceExternalId"],
+  });
+  if (!reference.success) return null;
+  const workspace = await withAccountRls(db, accountId, (tx) =>
+    findWorkspaceByExternalIdentity(tx, {
+      accountId,
+      externalSource: reference.data.source,
+      externalId: reference.data.externalId,
+    }),
+  );
+  return workspace?.id ?? null;
 }

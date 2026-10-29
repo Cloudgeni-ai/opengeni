@@ -171,11 +171,17 @@ enabling it changes no session's backend.
    to the release's OCI images, normally the Opengeni sandbox and desktop
    images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
    the deployment. When a release names an OCI image no stored image was
-   built from, the service has a live host build it (a few minutes, one
-   at a time per host; the host's log says `built and stored a sandbox
-   image`), records it, and new creates of that name start from it; until
-   then they start from the image the name had before. Existing sandboxes
-   keep theirs. A host builds into its state directory's `prepare/`
+   built from with the fleet's guest programs, the service has a live
+   host with those programs build it (a few minutes, one at a time per
+   host, different OCI images on different hosts; the host's log says
+   `built and stored a sandbox image`), records it, and new creates of
+   that name start from it; until then they start from the image the name
+   had before. A host bundle upgrade that changes the guest programs
+   (`compute-guest`, envd, bash) has every followed image built again
+   once most live hosts run it, so new sandboxes get the new programs
+   without an app release; the control service's log says `new creates
+   start from the image built with the fleet's guest programs`. Existing
+   sandboxes keep theirs. A host builds into its state directory's `prepare/`
    scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
    for a private registry. `computeControl.storedImages` (`name: <image
    id>`) still pins an image by hand, and is what a name starts from
@@ -379,6 +385,52 @@ Hosts check the gateway's certificate against the system's authorities;
 for a gateway with a certificate of a private authority, give each host
 `--agent-link-ca <pem>` in `COMPUTE_HOST_ARGS`, and it trusts that
 authority alone for agent links.
+
+### Runner pools
+
+GitHub Actions runner pools ([ADR 23](adr/0023-github-actions-runner-pools.md))
+reach compute through its E2B front door. In the chart:
+
+1. **The front door.** Set `computeControl.e2b.enabled` and give the
+   runner template a shape with room for a job's disk, for example
+   `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
+   where `runner` is a stored image built from
+   `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   Jobs rarely use all of their shape at once; a template that guarantees
+   less, for example `"runner:8x24576x65536,memory-request=8192"`, fits
+   more jobs on a host at once, each using more memory when the host has
+   it free, and warm templates saved from it guarantee the same. A host
+   that backs guest memory with huge pages reserves all of it anyway.
+   It listens on its own port (3000) of the API Service, with the API's
+   certificate under `apiTls`, and network policy admits only the pools
+   and `e2b.ingressFrom`.
+2. **A key.** Add a team for the pools to `computeControl.keys`; its
+   sandboxes are its own. Put the key in a Secret (`COMPUTE_API_KEY`).
+3. **GitHub.** A GitHub App installed on the organization or repository,
+   with administration access to self-hosted runners (repository
+   `administration: write`, or organization `self-hosted runners: write`)
+   and, for warm templates, `contents: read`; or a token with the same
+   rights. Its private key (`app.pem`) or token (`GITHUB_TOKEN`) goes in a
+   Secret.
+4. **The pool**, an entry of `computeRunners.pools`: name, scope,
+   template, `minIdle` and `max`, the two Secrets, and optionally `warm`
+   (repository, branch, prepare command) and `cache` (bucket, its address
+   as runners reach it, a token Secret). The cache's Service must be
+   reachable from the hosts, so give it a LoadBalancer or an Ingress and
+   name that address in `cache.url`; the pods' identity
+   (`computeRunners.serviceAccount.annotations`) needs read and write on
+   the bucket.
+
+Workflows say `runs-on: <pool name>`, and with a warm template check out
+with `clean: false` so the prepared dependencies stay. A pool's log shows
+each job it takes, each runner it starts and ends, and each warm refresh.
+
+A pool whose jobs deploy to a private destination, such as a cluster's
+API, reaches it as an offer of the hosts (see **Private destinations only
+some sandboxes need** under Network): give that pool a team of its own and
+grant the team the offer (`--team-reach TEAM=NAME`). Its sandboxes, created
+through the front door, reach every offer their team is given and go only
+to hosts that offer them; other pools' teams reach none.
 
 ## Hosts
 
@@ -1002,6 +1054,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   (the path under `--cgroup`). Its files stay and the agent treats
   the VM's end like a crash. Remove the sandbox through the API once the
   disk is writable again.
+- **Lifting the VMs' memory limit.** `echo max > /sys/fs/cgroup/compute/memory.high`
+  (the group under `--cgroup`) lifts it until the agent next starts, which
+  sets it again. The agent reads it back as it samples, so its count of
+  available memory stops counting the limit at once. Without it, guests
+  bursting together can take the host's memory faster than relief saves
+  them (see Capacity and cost).
 
 ## Network
 
@@ -1023,6 +1081,26 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
   default); keep them public, as sandboxes can look up whatever they
   know.
+- **Private destinations only some sandboxes need.** Where only some
+  workloads should reach a private destination, such as CI jobs that
+  deploy to a private cluster's API, offer it under a name instead:
+  `--offer previews=k3s.internal:6443` in `COMPUTE_HOST_ARGS`, repeated
+  per destination (entries with one name make one offer). It is checked
+  and resolved as `--reach` is, but opens only to the sandboxes whose
+  create lists the name in `reach` (`"reach": ["previews"]`), in their
+  namespaces and, on the host, for their links' addresses alone; their
+  name servers alone answer its names. The host tells the control service
+  its offers' names, and placement puts such a sandbox only on a host that
+  offers every name it asks for: elsewhere its create answers 503 (no host
+  offers it). Grant each team the names its sandboxes may ask for on the
+  control service, `--team-reach TEAM=NAME`, repeated (in the chart,
+  `computeControl.extraArgs`); a create asking for one its team was not
+  given is refused with 400. E2B's API has no way to name an offer, so a
+  create through the E2B front door (runner pools' among them) reaches
+  every offer its team is given: give such workloads a team of their own.
+  A sandbox keeps its `reach` for life,
+  including on another host after a move, which must offer it too; one on
+  a host restarted without the offer reaches it no more, and is warned of.
 - **Hosts on an overlay network.** Where the control service and Opengeni
   are reached only over an overlay network (a WireGuard mesh such as
   Tailscale), the GCP root joins hosts to it at boot with
@@ -1063,6 +1141,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   to start the nested profile without a pool. On cgroup v2 without the
   `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
   its `memory.current`.
+- **Nested hosts should run on an invariant TSC.** A host VM whose
+  hypervisor does not pass the invariant TSC through (`constant_tsc` and
+  `nonstop_tsc` missing from `/proc/cpuinfo`, `kvm-clock` as its clock
+  source) saves memory images without a realtime clock. They restore, but
+  a woken guest's monotonic clock leaves out the time it slept (ADR 3).
+  For a libvirt host VM, require the `invtsc` CPU feature.
 - **Sleeping sandboxes are not free on the host.** Each record keeps a
   network namespace and its guest-port listeners even when its memory and
   disk live only in object storage. The final measurements report agent
@@ -1083,6 +1167,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   Raise it, or the headroom, where saved sandboxes wait long for their
   archive and local disk runs short; `--worker-threads` and
   `--blocking-threads` rarely need changing.
+- **Bursting sandboxes stop short of the host's own memory.** On 4 KiB
+  pages with relief, the agent sets `memory.high` on the VMs' group
+  (`--cgroup`) to the host's memory less the high watermark, and logs it
+  (`memory the VMs may hold together`) as it starts. Sandboxes above
+  their request that reach it together are slowed while relief pauses and
+  saves them, instead of taking the agent's and the guard's memory.
+  A warning at start says the memory capacity is above the limit, which
+  the defaults never do (their headroom is the high watermark): with
+  `--memory-capacity-mib`, `--memory-headroom-mib` or the watermarks
+  given, keep the capacity at or under it so requests always fit.
+  `memory.events` in that group counts `high` each time the kernel slowed
+  the VMs.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.

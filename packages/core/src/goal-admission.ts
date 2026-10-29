@@ -13,7 +13,6 @@ import {
   type GoalAdmissionPausedReason,
   type Session,
 } from "@opengeni/contracts";
-import { isCodexBilledModel } from "@opengeni/codex";
 import {
   checkSessionUsageLimitAdmission,
   getWorkspaceModelPolicy,
@@ -71,13 +70,6 @@ export function goalContinuationModelDecision(input: {
         policyVerdict.reason === "credits"
           ? "Credits are turned off in this workspace. Choose a model paid by a subscription or API key before resuming."
           : "Workspace policy blocks the selected model. Choose an allowed model before resuming.",
-      pausedReason: "model_policy",
-    };
-  }
-  if (input.codexCompactionMode === "remote_v2" && !isCodexBilledModel(model)) {
-    return {
-      model,
-      blocked: "This conversation requires a Codex model. Choose a Codex model before resuming.",
       pausedReason: "model_policy",
     };
   }

@@ -355,8 +355,8 @@ ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=155.0.8059.79-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261015T173155Z
+ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
 
 RUN set -eux; \
     printf '%s\n' \
@@ -576,6 +576,14 @@ RUN set -eux; \
     else \
       test -f /opt/opengeni/artifact-runtime/.unavailable; \
     fi
+
+# A commit identity for a box nobody configured one for. Commands run as the
+# host's uid, which has no passwd entry here, so Git can find neither a name nor
+# an email and `git commit` fails. The system level is Git's lowest: `GIT_*`
+# variables (OPENGENI_GIT_* or the GitHub App bot), ~/.gitconfig and
+# repository config all win over it.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
 
 ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681

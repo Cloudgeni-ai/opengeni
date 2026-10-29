@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "5.3.1",
+  "version": "5.5.1",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -32,6 +32,10 @@
     "./mcp-network": {
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
+    },
+    "./calling-workspace": {
+      "types": "./src/calling-workspace.ts",
+      "default": "./src/calling-workspace.ts"
     },
     "./model-call": {
       "types": "./src/model-call.ts",

@@ -1202,8 +1202,6 @@ grant. Empty broad tool selection is silent; requested first-party tools and
 dedicated `files`/`docs` stay unavailable with the existing `insufficient_scope`
 advisory. External-host, local-registration, connection-backed and
 already-authorized native paths retain their independent authorization.
-Automation template defaults and linked ceilings follow the same rule; see
-[automations](automations.md#empty-first-party-authority).
 
 Codemode submission compares the caller's catalog digest with the exact active
 catalog before creating its durable operation. A mismatch returns the stable
@@ -1967,8 +1965,8 @@ For the Codex subscription catalog this means a 272,000-token raw window, a
 the newest user messages and system-role machine-input batches that fit one
 cumulative 20,000-token budget, then appends the summary. Retained machine inputs
 keep their original role and accepted goal snapshot, never become user intent,
-and are never requeued. Remote v2 also retains these system messages within its
-existing shared 64,000-token budget. Automatic compaction uses provider-reported
+and are never requeued. Remote v2 retains these system messages within the same
+20,000-token budget. Automatic compaction uses provider-reported
 usage only: the durable prior-call input count at a turn boundary, or the immediately preceding
 same-activity provider total plus bounded newly appended input. With no bound
 provider count, Opengeni sends the request and recovers from a genuine provider
@@ -3768,14 +3766,10 @@ Numeric and string gRPC transport codes and bounded AggregateError causes
 dominate terminal sandbox hints; transient observation can never retire a live
 lease or authorize command replay.
 
-`modal-control-v1` is an explicit legacy reader for already launched commands;
-new starts never select it. Its batch API does not guarantee full replay, so
-historical missing output cannot be reconstructed or called complete. Never
-reinterpret its `tp-` execution IDs or batch indices as router UUIDs/byte offsets.
-The locator-schema rollout requires a maintenance worker cutover because old
-readers cannot parse the new discriminator. After old active locators have
-settled or passed the existing evidence-backed drain, remove the legacy live
-reader; historical records remain immutable and do not authorize execution.
+Modal commands use only the `modal-router-v1` locator. The earlier
+batch-index `modal-control-v1` reader has been removed; any historical exited
+row that still carries that locator is immutable evidence and never authorizes
+reading or execution.
 
 Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
 `/bin/true` invocation with no shell, user environment or command admission.
@@ -4609,8 +4603,8 @@ only alongside the typed update, event pair, usage fact, session transition,
 and successor workflow wake. Single-target producers signal directly, including
 an internal update that coalesces into a still-undelivered, often future-dated
 revision such as a `wait_for_input` deadline, so it does not wait for the
-10-second dispatcher tick (except terminal background-command settlement, which
-the dispatcher delivers);
+10-second dispatcher tick; terminal background-command settlement returns its
+committed wake and its caller signals it after commit;
 recursive controls trigger the bounded dispatcher once without loading the
 affected tree into API memory. Successful delivery acknowledges the exact
 revision, and the dispatcher retries only due unacknowledged rows.

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { GENERATED_ARTIFACT_CHECKS } from "./check-generated-artifacts";
 
 const workflow = (name: string) =>
   Bun.YAML.parse(readFileSync(`.github/workflows/${name}.yml`, "utf8")) as any;
@@ -18,7 +19,7 @@ test("PR-only capped selection precedes unit count; selected failures still fail
   expect(units["continue-on-error"]).toBeUndefined();
   expect(units.run).toContain("set -euo pipefail");
   expect(jobs.ready.steps[0].run).toContain('test "$FAST" = success');
-  expect(JSON.stringify(workflow("batch-ci"))).not.toContain("pr-fast-plan.ts");
+  expect(JSON.stringify(workflow("ci"))).not.toContain("pr-fast-plan.ts");
 });
 
 test("PR CI reserves a bounded PR lane without cancelling main or batch", () => {
@@ -33,12 +34,6 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(
     pr.jobs.plan.steps.some((s: any) => /github-pr-ci.ts (priority|admit-fast)/.test(s.run ?? "")),
   ).toBe(false);
-  expect(
-    workflow("batch-ci").jobs.plan.steps.some(
-      (s: any) => s.run === "bun scripts/ci/github-pr-ci.ts priority batch",
-    ),
-  ).toBe(false);
-  expect(workflow("batch-ci").concurrency["cancel-in-progress"]).toBe(false);
   expect(Object.keys(pr.jobs).sort()).toEqual(["fast", "plan", "ready"]);
   expect(pr.jobs.fast.needs).toBe("plan");
   expect(pr.jobs.fast["timeout-minutes"]).toBe(15);
@@ -67,17 +62,6 @@ test("actual concurrency expression isolates PRs and matches dispatch", () => {
   }
   expect(buckets.size).toBe(1000);
   expect(workflow("pr-ci").jobs.fast.strategy).toBeUndefined();
-});
-
-test("Queue ready entry and labeling do not wait for PR CI", () => {
-  const queue = workflow("merge-queue");
-  expect(queue.on.pull_request.types).toContain("labeled");
-  const entry = Object.values(queue.jobs).find((j: any) =>
-    String(j.name).includes("Queue ready"),
-  ) as any;
-  expect(entry).toBeDefined();
-  expect(entry.needs).toBeUndefined();
-  expect(entry.steps.map((s: any) => s.run ?? "").join("\n")).toContain("exact-head PR CI");
 });
 
 test("required aggregate covers docs and every selected job at exact head", () => {
@@ -114,7 +98,7 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const index = (text: string) => steps.findIndex((s: any) => (s.run ?? "").includes(text));
   const changesets = steps[index("scripts/ci/changeset-plan.ts")];
   expect(changesets.run).toContain("set -euo pipefail");
-  expect(changesets.run).toContain("bun scripts/generate-site-browser-runtime.ts --check");
+  expect(changesets.run).toContain("bun scripts/ci/check-generated-artifacts.ts");
   expect(changesets.run).toContain(
     "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
   );
@@ -128,18 +112,41 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const batch = readFileSync("scripts/ci/batch-source.ts", "utf8");
   expect(batch).toContain('from "./changeset-plan"');
   expect(batch).toContain('"scripts/generate-site-browser-runtime.ts", "--check"');
+  // ...and the generated-artifact step re-renders the same Site runtime.
+  expect(
+    GENERATED_ARTIFACT_CHECKS.some(
+      (check) => check.check.join(" ") === "bun scripts/generate-site-browser-runtime.ts --check",
+    ),
+  ).toBe(true);
 
-  // Guards: exactly Batch's deferrals, plus lint (its own step above) and the
-  // ~20s subscription-contract scan. Any other new guard runs on PRs too.
+  // Guards: exactly Batch's deferrals plus lint (its own step above), so every
+  // guard that can fail Batch source contracts fails the PR first.
   const guards = steps[index("run-guards-plan.ts")];
   expect(guards.if).toBeUndefined();
   expect(guards.run).toContain('--plan "$RUNNER_TEMP/pr-plan/pr-plan.json"');
+  expect(guards.run).toContain("--scope-scans-to-changes");
+  expect(batch).not.toContain("--scope-scans-to-changes");
   const excluded = (text: string) =>
     [...text.matchAll(/--exclude"?,?\s*"?([a-z-]+)/g)].map((m) => m[1]);
   const batchExcluded = excluded(batch.slice(batch.indexOf("run-guards-plan.ts")));
-  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure", "sdk-compat"]);
-  expect(excluded(guards.run).sort()).toEqual(
-    [...batchExcluded, "lint", "subscription-contract"].sort(),
+  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure"]);
+  expect(excluded(guards.run).sort()).toEqual([...batchExcluded, "lint"].sort());
+});
+
+test("PR fast checks build the production web bundle whenever the plan selects it", () => {
+  const { jobs } = workflow("pr-ci");
+  const plan = jobs.plan.steps.find((step: any) => step.id === "plan").run as string;
+  expect(plan.indexOf("pr-fast-plan.ts")).toBeLessThan(plan.indexOf("web_bundle="));
+  expect(plan).toContain(`jq '.prWebBundle == true' "$RUNNER_TEMP/pr-plan.json"`);
+  expect(jobs.plan.outputs.web_bundle).toBe("${{ steps.plan.outputs.web_bundle }}");
+  const steps = jobs.fast.steps as any[];
+  const pr = steps.find((step) => step.name === "Production web bundle");
+  expect(pr.if).toBe("${{ needs.plan.outputs.web_bundle == 'true' }}");
+  expect(pr.env).toEqual({ NODE_ENV: "production" });
+  expect(pr.run).toContain("bun run --cwd apps/web build");
+  expect(pr["continue-on-error"]).toBeUndefined();
+  expect(steps.indexOf(pr)).toBeLessThan(
+    steps.findIndex((step) => step.name === "Test every selected unit file"),
   );
 });
 
