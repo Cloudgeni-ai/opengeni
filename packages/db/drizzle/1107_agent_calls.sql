@@ -17,8 +17,9 @@
 --    embedding Opengeni can ring its own app with its own push credentials.
 --
 -- Rolling: the previous release never writes a call or the new rules, and
--- ignores the new column. The wider webhook check is added NOT VALID; every
--- existing row satisfies the narrower list.
+-- ignores the new column. The new and wider checks on existing tables are
+-- added NOT VALID: the new column is empty, and every existing row satisfies
+-- the narrower lists.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
@@ -85,13 +86,15 @@ $agent_calls_grants$;
 
 -- Phones opt in to calls one by one.
 ALTER TABLE opengeni_private.native_push_devices
-  ADD COLUMN voip_token text CHECK (voip_token IS NULL OR char_length(voip_token) BETWEEN 8 AND 4096);
+  ADD COLUMN voip_token text;
 ALTER TABLE opengeni_private.native_push_devices
+  ADD CONSTRAINT native_push_devices_voip_token_check
+    CHECK (voip_token IS NULL OR char_length(voip_token) BETWEEN 8 AND 4096) NOT VALID,
   DROP CONSTRAINT native_push_devices_rules_check,
   ADD CONSTRAINT native_push_devices_rules_check
     CHECK (rules <@ ARRAY[
       'needs_input', 'reply_ready', 'failed', 'agent', 'call', 'call_members'
-    ]::text[]);
+    ]::text[]) NOT VALID;
 
 CREATE FUNCTION opengeni_private.native_push_device_v2(p_auth_session_id text)
 RETURNS TABLE (
