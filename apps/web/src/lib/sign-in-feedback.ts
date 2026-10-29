@@ -122,3 +122,16 @@ export function securityReauthenticationPath(search: string): string {
     ? `/settings/security?signInMethod=${outcome}`
     : "/settings/security";
 }
+
+const ORGANIZATION_PAGE = /^\/workspaces\/([0-9a-f-]{36})\/organization$/i;
+
+/**
+ * Organization settings > Security & data, when sign-in starts there (signing
+ * in again to turn EU-only inference off), so it returns to the same page.
+ * Fixed shape only: the workspace id and `section=security`, nothing else.
+ */
+export function organizationSecurityReturnPath(pathname: string, search: string): string | null {
+  const workspaceId = ORGANIZATION_PAGE.exec(pathname)?.[1];
+  if (!workspaceId || new URLSearchParams(search).get("section") !== "security") return null;
+  return `/workspaces/${workspaceId.toLowerCase()}/organization?section=security`;
+}

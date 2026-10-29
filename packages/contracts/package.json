@@ -46,6 +46,10 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./timeline-order": {
+      "types": "./src/timeline-order.ts",
+      "default": "./src/timeline-order.ts"
+    },
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
       "default": "./src/learning-refusal.ts"

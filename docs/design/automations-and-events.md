@@ -163,7 +163,13 @@ describes, so a new app needs no new adapter. The format says:
   list, or holds one at `batch.path`. At most 100 events per delivery.
 - **Where each field is**: `type` (a path, a header, or a fixed `value`),
   and optional `deliveryId`, `eventId`, `occurredAt`, `summary`, `subject`,
-  `url` and `actor` paths. The whole event is the event's data, so trigger
+  `url` and `actor` paths. `eventId` can also join 2 to 4 `parts`, each a
+  path or a header, with a `separator` (a dot by default): an alert's status,
+  fingerprint and start time name one firing episode, so a group the app
+  sends again runs each alert once, while a resolve or a later re-fire is a
+  new event. An event missing a part gets no id rather than a partial one, so
+  it is never taken for another event. Header parts are kept with the
+  delivery for replay. The whole event is the event's data, so trigger
   conditions can filter on any field.
 
 `preset` names a well-known app whose format Opengeni ships
