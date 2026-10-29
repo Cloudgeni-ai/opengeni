@@ -2144,20 +2144,24 @@ describe("generic lazy tool dispatch", () => {
       JSON.stringify({ query: "weather capability", limit: 20 }),
       undefined as never,
     );
-    const parsed = JSON.parse(String(output)) as { tools: unknown[] };
-    expect(parsed.tools.length).toBeGreaterThan(0);
-    expect(parsed.tools.length).toBe(tools.length);
+    // A tie loads the top candidate and lists the others compactly.
+    const parsed = JSON.parse(String(output)) as { tools: unknown[]; suggestions: unknown[] };
+    expect(parsed.tools.length).toBe(1);
+    expect(parsed.tools.length + parsed.suggestions.length).toBe(tools.length);
     expect(Buffer.byteLength(String(output))).toBeLessThan(3_000);
     expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
       MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
     );
 
-    const item = { type: "function_call_result", callId: "search-1", output };
+    // An unmarked historical search replays its compact ranked listing.
+    const args = JSON.stringify({ query: "weather capability", limit: 20 });
+    const historical = runtime.genericSearchOutput(args);
+    expect(Buffer.byteLength(historical)).toBeLessThan(3_000);
+    const item = { type: "function_call_result", callId: "search-1", output: historical };
     const truncated = boundModelToolOutputItem(item, 100) as typeof item;
-    expect(truncated.output).not.toBe(output);
+    expect(truncated.output).not.toBe(historical);
     expect(String(truncated.output)).toContain("tokens truncated");
 
-    const args = JSON.stringify({ query: "weather capability", limit: 20 });
     const marked = transformGenericDispatchResponse(
       {
         usage: new Usage(),
@@ -2186,7 +2190,7 @@ describe("generic lazy tool dispatch", () => {
       (candidate) => candidate.type === "function_call_result",
     );
     expect(providerCall?.providerData).toBeUndefined();
-    expect(providerResult?.output).toBe(output);
+    expect(providerResult?.output).toBe(historical);
     expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 

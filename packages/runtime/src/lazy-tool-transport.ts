@@ -29,8 +29,18 @@ import {
   toolsWithExactName,
   unresolvedToolNames,
 } from "./codex-tool-search";
-import { isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
-import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
+import { hasSearchTerms, isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
+import {
+  decisionCandidate,
+  selectFromJudgments,
+  TOOL_SELECTION_POLICY,
+  type ToolSelector,
+} from "./tool-discovery-decision";
+import {
+  fuseRankings,
+  TOOL_MEANING_POLICY,
+  type ToolMeaningRanker,
+} from "./tool-discovery-meaning";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
@@ -49,6 +59,40 @@ export type LazyToolTransport = "codex_native" | "openai_native" | "generic_disp
 const TOOL_SEARCH_NAME = "tool_search";
 const TOOL_LIST_NAME = "tool_list";
 const TOOL_INVOKE_NAME = "tool_invoke";
+/** How deep each keyword ranking reaches when it is fused with a meaning ranking. */
+const FUSION_DEPTH = 300;
+
+/** A search's independent requests: semicolon- or line-separated clauses with search words. */
+function searchClauses(query: string): string[] {
+  const clauses = query.split(/[;\n]+/).filter((part) => hasSearchTerms(part));
+  return clauses.length ? clauses : [query];
+}
+
+/**
+ * What candidates are gathered for: each request's sentences, since an agent
+ * often writes several asks as prose in one request. Loading still follows
+ * the requests themselves.
+ */
+function searchUnits(query: string): { clause: number; text: string }[] {
+  return searchClauses(query).flatMap((clause, index) => {
+    const sentences = clause.split(/(?<=[.!?])\s+/).filter((part) => hasSearchTerms(part));
+    return (sentences.length > 1 ? sentences : [clause]).map((text) => ({ clause: index, text }));
+  });
+}
+
+/** Round-robin over the requests' rankings, so every request is represented near the top. */
+function interleave(rankings: readonly (readonly string[])[]): string[] {
+  const out = new Set<string>();
+  const depth = Math.max(0, ...rankings.map((ranking) => ranking.length));
+  for (let rank = 0; rank < depth; rank++)
+    for (const ranking of rankings) if (ranking[rank] !== undefined) out.add(ranking[rank]!);
+  return [...out];
+}
+/** A tool's name after its server prefix, lowercased: `projects_search` for `mcp_<id>__projects_search`. */
+const shortToolName = (name: string) => {
+  const separator = name.indexOf("__");
+  return (separator >= 0 ? name.slice(separator + 2) : name).toLowerCase();
+};
 /**
  * Base runtime tools that stay in the first request on every transport. These
  * have no MCP connection to prepare, so "eager" here means schema visibility
@@ -478,6 +522,13 @@ export class LazyToolRuntime {
   private visibleIndex: ToolSearchIndex | undefined;
   /** Whether a search this turn already named the person's connected accounts. */
   private connectedAccountsNamed = false;
+  /**
+   * This turn's search memory: tools earlier searches loaded, and tools they
+   * showed as alternatives. A repeated search tells the selector what it
+   * already loaded and shows alternatives the agent has not seen yet.
+   */
+  private readonly loadedThisTurn = new Set<string>();
+  private readonly shownThisTurn = new Set<string>();
   /** Tools a new session's opening context is for (see openingToolLoad). */
   private openingToolNames: readonly string[] = [];
   private openingToolLoadConsidered = false;
@@ -505,6 +556,8 @@ export class LazyToolRuntime {
     private readonly connectableLookup?: ConnectableIntegrationLookup,
     /** The connected account each tool reaches, by model tool name. */
     private readonly connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
+    /** Ranks tools by meaning alongside keywords; absent means keywords alone. */
+    private readonly meaningRanker?: ToolMeaningRanker,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -971,29 +1024,25 @@ export class LazyToolRuntime {
     if (parsed.names !== undefined) {
       const resolve = this.exactMcpNameResolver();
       const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
-      return this.withAlreadyAvailable(
-        this.withCandidatesNotice({
-          version: 2,
-          output: this.genericSearchOutput(exact),
-          tools: structuredClone(this.searchDisclosure(exact)),
-        }),
-        query,
-        parsed.names,
+      return this.remembered(
+        this.withAlreadyAvailable(
+          this.withCandidatesNotice({
+            version: 2,
+            output: this.genericSearchOutput(exact),
+            tools: structuredClone(this.searchDisclosure(exact)),
+          }),
+          query,
+          parsed.names,
+        ),
       );
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
-    const named = [
-      ...new Set([
-        ...this.exactMcpNamesIn(query),
-        ...toolsNamedInQuery(pool.filter(isFunctionTool), query).map((t) => t.name),
-      ]),
-    ];
+    const { named, near, onlyNames } = this.namesInQuery(pool.filter(isFunctionTool), query);
     const strong = this.searchIndex
       .strongMatches(query)
       .filter(isFunctionTool)
       .map((t) => t.name);
-    const clear = this.decisionModel ? strong : [];
     const strongest = this.searchIndex
       .bestMatches(query)
       .filter(isFunctionTool)
@@ -1017,26 +1066,154 @@ export class LazyToolRuntime {
           ? [INTEGRATION_CARD_TOOL_NAME]
           : []
       ).filter((name) => !chosen.includes(name));
+    // A search that only names tools needs no ranking.
+    const meaning = onlyNames
+      ? undefined
+      : await this.meaningRankings(pool.filter(isFunctionTool), query, signal);
     const ranked = await this.rankedSearch(
       rawArguments,
-      { query, limit, named, clear, strongest },
+      { query, limit, named, near, onlyNames, strongest, meaning },
       setupFor,
       signal,
     );
-    // A named or clearly strongest tool needs no alternatives. Otherwise the
-    // loaded best match is a guess, and the close candidates must reach the
-    // model on every route.
-    const result = named.length || strong.length ? ranked : this.withCandidatesNotice(ranked);
+    // A search that only names tools, or (without a selector or meaning
+    // ranking) clearly matches one by keywords, needs no alternatives.
+    // Otherwise the alternatives a result lists must reach the model on every
+    // route.
+    const result =
+      onlyNames || (!this.decisionModel && !meaning && strong.length)
+        ? ranked
+        : this.withCandidatesNotice(ranked);
     const connectable = await lookup;
     const withConnectable = connectable.length
       ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
       : result;
     const accounts = this.connectedAccountsNotice(withConnectable);
-    return this.withAlreadyAvailable(
-      accounts ? this.withNotice(withConnectable, "connectedAccounts", accounts) : withConnectable,
-      query,
-      undefined,
+    return this.remembered(
+      this.withAlreadyAvailable(
+        accounts
+          ? this.withNotice(withConnectable, "connectedAccounts", accounts)
+          : withConnectable,
+        query,
+        undefined,
+      ),
     );
+  }
+
+  /** Records what a decided search loaded and showed, for later searches this turn. */
+  private remembered(result: GenericSearchMarker): GenericSearchMarker {
+    for (const tool of result.tools ?? []) this.loadedThisTurn.add(String(tool.name));
+    const output = JSON.parse(result.output) as {
+      schemasLoaded?: boolean;
+      tools?: { name?: unknown }[];
+      suggestions?: { name?: unknown }[];
+    };
+    for (const tool of [
+      ...(output.schemasLoaded ? [] : (output.tools ?? [])),
+      ...(output.suggestions ?? []),
+    ])
+      if (typeof tool.name === "string") this.shownThisTurn.add(tool.name);
+    return result;
+  }
+
+  /**
+   * Tools a free-text query names, in any supported form, and whether the
+   * query is nothing but names: every name-like token resolved and no other
+   * search words remain.
+   */
+  private namesInQuery(
+    pool: (Tool & { name: string })[],
+    query: string,
+  ): { named: string[]; near: string[]; onlyNames: boolean } {
+    const resolve = this.exactMcpNameResolver();
+    const lookup = (token: string) => {
+      const exact = resolve(token);
+      if (exact) return [exact];
+      const matches = toolsNamedInQuery(pool, token).map((tool) => tool.name);
+      // Shortened tool names (`…__request_drafts_convert_to` for convert_to_ticket
+      // and convert_to_order alike) can each begin the longer name a query
+      // writes. When several do and none is the name itself, the name is
+      // ambiguous: they become candidates for the selector, not loaded tools.
+      const plain = token.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+      if (matches.length > 1 && !matches.some((name) => shortToolName(name) === plain)) {
+        for (const name of matches) if (!near.includes(name)) near.push(name);
+        return [];
+      }
+      return matches;
+    };
+    const named: string[] = [];
+    const near: string[] = [];
+    let unresolved = false;
+    const remainder: string[] = [];
+    const tokens = query
+      .split(/[^A-Za-z0-9_.\-/:]+/)
+      .map((raw) => raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, ""));
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index]!;
+      if (!/[_.\-/:]/.test(token)) {
+        remainder.push(token);
+        continue;
+      }
+      let tools = lookup(token);
+      if (!tools.length) {
+        // A tool family followed by operations names one tool per operation:
+        // "support_tickets create get" is support_tickets_create and _get.
+        while (index + 1 < tokens.length && /^[a-z0-9]+$/i.test(tokens[index + 1]!)) {
+          const operation = lookup(`${token}_${tokens[index + 1]!.toLowerCase()}`);
+          if (!operation.length) break;
+          tools = [...tools, ...operation];
+          index++;
+        }
+      }
+      if (!tools.length) {
+        // A family that only begins several tool names leaves the choice to
+        // the selector: those tools become candidates, not loaded tools.
+        const prefix = `${token.toLowerCase().replaceAll(".", "_")}_`;
+        const family = pool.filter((tool) => shortToolName(tool.name).startsWith(prefix));
+        if (family.length <= TOOL_SELECTION_POLICY.maxAlternatives)
+          for (const tool of family) if (!near.includes(tool.name)) near.push(tool.name);
+      }
+      if (!tools.length) unresolved = true;
+      for (const name of tools) if (!named.includes(name)) named.push(name);
+    }
+    return {
+      named,
+      near: near.filter((name) => !named.includes(name)),
+      onlyNames: named.length > 0 && !unresolved && !hasSearchTerms(remainder.join(" ")),
+    };
+  }
+
+  /**
+   * Tools the candidates' own descriptions point to ("use reports.get_sections
+   * for…", "call get_configuration first"), in candidate order, that are not
+   * candidates yet. Curated integrations route between their tools this way.
+   */
+  private toolsNamedByCandidates(
+    pool: (Tool & { name: string })[],
+    candidates: readonly Tool[],
+    max: number,
+  ): Tool[] {
+    const resolve = this.exactMcpNameResolver();
+    const present = new Set(candidates.map((tool) => (tool as { name: string }).name));
+    const byName = new Map(pool.map((tool) => [tool.name, tool]));
+    const added: Tool[] = [];
+    for (const candidate of candidates) {
+      if (added.length >= max) break;
+      const description = candidate.type === "function" ? (candidate.description ?? "") : "";
+      for (const raw of description.split(/[^A-Za-z0-9_.\-/:]+/)) {
+        const token = raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, "");
+        if (!/[_.]/.test(token) || !/[a-z]/i.test(token)) continue;
+        const exact = resolve(token);
+        const names = exact ? [exact] : toolsWithExactName(pool, token).map((tool) => tool.name);
+        for (const name of names) {
+          const tool = byName.get(name);
+          if (!tool || present.has(name) || added.length >= max) continue;
+          present.add(name);
+          added.push(tool);
+        }
+      }
+    }
+    return added;
   }
 
   /**
@@ -1157,25 +1334,49 @@ export class LazyToolRuntime {
     const registries = [...new Set(this.modelMcpServerIds().values())];
     return (name) => {
       if (!name || name.includes("__") || pool.has(name)) return undefined;
-      for (const registryId of registries) {
-        const model = prefixedMcpToolName(registryId, name);
-        if (isAliasedMcpToolName(model) && pool.has(model)) return model;
-      }
+      // A shortened alias encodes the server's own spelling, and agents write
+      // `projects.search`, `projects_search` and `projects-search` alike: the
+      // name as written, all underscores, and each single underscore as the
+      // server's dot are tried.
+      const plain = name.replace(/[.-]/g, "_");
+      const spellings = new Set([name, plain]);
+      for (let at = plain.indexOf("_"); at > 0; at = plain.indexOf("_", at + 1))
+        spellings.add(`${plain.slice(0, at)}.${plain.slice(at + 1)}`);
+      for (const spelling of spellings)
+        for (const registryId of registries) {
+          const model = prefixedMcpToolName(registryId, spelling);
+          if (isAliasedMcpToolName(model) && pool.has(model)) return model;
+        }
       return undefined;
     };
   }
 
-  /** Aliased MCP tools a free-text query names by the exact name their server publishes. */
-  private exactMcpNamesIn(query: string): string[] {
-    const resolve = this.exactMcpNameResolver();
-    const named: string[] = [];
-    for (const raw of query.split(/[^A-Za-z0-9_.\-/:]+/)) {
-      const token = raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, "");
-      if (!/[_.\-/:]/.test(token)) continue;
-      const model = resolve(token);
-      if (model !== undefined && !named.includes(model)) named.push(model);
-    }
-    return named;
+  /**
+   * Each of the search's units ({@link searchUnits}) ranked by meaning over
+   * the authorized pool, or undefined (keywords alone) when there is no
+   * meaning ranker or it does not answer in time. The turn's own cancellation
+   * still wins.
+   */
+  private async meaningRankings(
+    pool: readonly Tool[],
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<string[][] | undefined> {
+    if (!this.meaningRanker || !pool.length) return undefined;
+    const units = searchUnits(query);
+    const deadline = AbortSignal.timeout(TOOL_MEANING_POLICY.deadlineMs);
+    const rankings = await this.meaningRanker({
+      queries: units.map((unit) => unit.text),
+      tools: pool,
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+    }).catch(() => undefined);
+    signal?.throwIfAborted();
+    if (!Array.isArray(rankings) || rankings.length !== units.length) return undefined;
+    // Only this pool's tools can be ranked, whatever the ranker returned.
+    const names = new Set(pool.map((tool) => (tool as { name: string }).name));
+    return rankings.map((ranking) =>
+      Array.isArray(ranking) ? ranking.filter((name) => names.has(name)) : [],
+    );
   }
 
   private async rankedSearch(
@@ -1184,26 +1385,88 @@ export class LazyToolRuntime {
       query: string;
       limit: number;
       named: readonly string[];
-      clear: readonly string[];
+      /** Tools a family in the query begins, judged before keyword candidates. */
+      near: readonly string[];
+      onlyNames: boolean;
       strongest: readonly string[];
+      /** Each unit's meaning ranking, when one answered in time. */
+      meaning: readonly (readonly string[])[] | undefined;
     },
     setupFor: (chosen: readonly string[]) => Promise<string[]>,
     signal?: AbortSignal,
   ): Promise<GenericSearchMarker> {
-    const { query, limit, named, clear, strongest } = search;
-    if (named.length || clear.length || !this.decisionModel) {
-      const chosen = named.length ? named : clear.length ? clear : strongest;
+    const { query, limit, named, near, onlyNames, strongest, meaning } = search;
+    const clauses = searchClauses(query);
+    const units = searchUnits(query);
+    const keywordRanking = (clause: string, depth: number) =>
+      this.searchIndex!.rank(clause, depth)
+        .filter(isFunctionTool)
+        .map((t) => t.name);
+    // Each request's keyword ranking fused with its sentences' meaning
+    // rankings, when meaning answered: what is loaded without a selector.
+    const fused = meaning
+      ? clauses.map((clause, i) =>
+          fuseRankings([
+            keywordRanking(clause, FUSION_DEPTH),
+            ...units.flatMap((unit, u) => (unit.clause === i ? [meaning[u]!] : [])),
+          ]),
+        )
+      : undefined;
+    // Each sentence's own ranking: where candidates and alternatives come from.
+    const recall = (depth: number) =>
+      interleave(
+        units.map((unit, u) =>
+          meaning
+            ? fuseRankings([keywordRanking(unit.text, FUSION_DEPTH), meaning[u]!])
+            : keywordRanking(unit.text, depth),
+        ),
+      );
+    // Without a selector, the best match for each request is loaded: the top
+    // of its fused ranking, else the best keyword match. When keyword ranking
+    // cannot tell (a tie, or a clause without resource words) the top-ranked
+    // candidate still is, since an empty result hides candidates that fit.
+    const lexical = () =>
+      named.length
+        ? named
+        : fused
+          ? [...new Set(fused.flatMap((ranking) => ranking.slice(0, 1)))]
+          : strongest.length
+            ? strongest
+            : keywordRanking(query, 1);
+    // What a result without a selection shows beside its loaded tools: the
+    // fused rankings' next candidates, else the keyword matches.
+    const unselected = (chosen: readonly string[]): true | string[] =>
+      fused
+        ? recall(FUSION_DEPTH)
+            .filter((name) => !chosen.includes(name))
+            .slice(0, limit)
+        : true;
+    if (onlyNames || !this.decisionModel) {
+      const chosen = lexical();
       const companions = await setupFor(chosen);
       return chosen.length || companions.length
-        ? this.selectedSearch(chosen, rawArguments, true, companions)
+        ? this.selectedSearch(chosen, rawArguments, onlyNames || unselected(chosen), companions)
         : {
             version: 2,
             output: this.genericSearchOutput(rawArguments),
             tools: [],
           };
     }
-    // Wider recall than the model-facing result page, not an execution quota.
-    const candidates = this.searchIndex!.rank(query, Math.max(40, limit));
+    // Wider recall than the model-facing result page, not an execution quota:
+    // tools the query names, the top candidates for each of its requests, and
+    // tools those candidates' own descriptions point to.
+    const pool = this.searchableTools(this.currentTools).filter(isFunctionTool);
+    const byName = new Map(pool.map((tool) => [tool.name, tool]));
+    const depth = Math.max(TOOL_SELECTION_POLICY.candidates, limit);
+    const ranked = recall(depth)
+      .slice(0, depth)
+      .flatMap((name) => byName.get(name) ?? []);
+    const candidates: Tool[] = [
+      ...new Set([...[...named, ...near].flatMap((name) => byName.get(name) ?? []), ...ranked]),
+    ];
+    candidates.push(
+      ...this.toolsNamedByCandidates(pool, candidates, TOOL_SELECTION_POLICY.pointedCandidates),
+    );
     if (!candidates.length) {
       const companions = await setupFor([]);
       return companions.length
@@ -1219,27 +1482,55 @@ export class LazyToolRuntime {
           };
     }
     signal?.throwIfAborted();
-    let chosen: readonly string[];
+    let chosen: string[];
+    let alternatives: string[];
     try {
-      chosen = await this.decisionModel({
+      // A selection that has not answered by the deadline falls back to keywords
+      // like any other selector failure; the turn's own cancellation still wins.
+      const deadline = AbortSignal.timeout(TOOL_SELECTION_POLICY.deadlineMs);
+      const judgments = await this.decisionModel({
         query,
+        ...(units.length > 1 ? { requests: units.map((unit) => unit.text.trim()) } : {}),
         candidates: candidates.map(decisionCandidate),
-        ...(signal ? { signal } : {}),
+        ...(this.loadedThisTurn.size ? { loadedEarlier: [...this.loadedThisTurn] } : {}),
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       });
       const available = new Set(candidates.filter(isFunctionTool).map((t) => t.name));
       if (
-        !Array.isArray(chosen) ||
-        chosen.some((name) => typeof name !== "string" || !available.has(name)) ||
-        new Set(chosen).size !== chosen.length
+        !Array.isArray(judgments) ||
+        judgments.length !== available.size ||
+        judgments.some(
+          (judgment) =>
+            typeof judgment?.name !== "string" ||
+            !available.has(judgment.name) ||
+            typeof judgment.probability !== "number" ||
+            !(judgment.probability >= 0 && judgment.probability <= 1),
+        ) ||
+        new Set(judgments.map((judgment) => judgment.name)).size !== judgments.length
       )
         throw new Error("Invalid decision model selection");
+      const selection = selectFromJudgments(judgments, limit);
+      // Named tools are loaded whatever the judgments say; the selector
+      // covers the query's other needs.
+      chosen = [...new Set([...named, ...selection.load])];
+      alternatives = selection.clear
+        ? []
+        : selection.rest
+            .filter((name) => !chosen.includes(name) && !this.shownThisTurn.has(name))
+            .slice(0, TOOL_SELECTION_POLICY.maxAlternatives);
     } catch {
       // Cancellation belongs to the owning turn, not the recovery path.
       signal?.throwIfAborted();
-      const companions = await setupFor(strongest);
+      const fallbackChosen = lexical();
+      const companions = await setupFor(fallbackChosen);
       const fallback =
-        strongest.length || companions.length
-          ? this.selectedSearch(strongest, rawArguments, true, companions)
+        fallbackChosen.length || companions.length
+          ? this.selectedSearch(
+              fallbackChosen,
+              rawArguments,
+              unselected(fallbackChosen),
+              companions,
+            )
           : {
               version: 2 as const,
               output: this.genericSearchOutput(rawArguments),
@@ -1254,13 +1545,14 @@ export class LazyToolRuntime {
       };
     }
     signal?.throwIfAborted();
-    return this.selectedSearch(chosen, rawArguments, false, await setupFor(chosen));
+    return this.selectedSearch(chosen, rawArguments, alternatives, await setupFor(chosen));
   }
 
   private selectedSearch(
     chosen: readonly string[],
     rawArguments: unknown,
-    alternatives: boolean,
+    /** true: the keyword matches; a list: exactly these; false: none. */
+    alternatives: boolean | readonly string[],
     companions: readonly string[] = [],
   ): GenericSearchMarker {
     const { limit } = parseSearchArgs(rawArguments);
@@ -1276,6 +1568,28 @@ export class LazyToolRuntime {
       ...resolved.filter((t) => chosen.includes(t.name)).slice(0, limit),
       ...resolved.filter((t) => companions.includes(t.name) && !chosen.includes(t.name)),
     ];
+    const isSelected = (tool: Tool) =>
+      selected.some((s) => s.name === (tool as { name: string }).name);
+    const suggestions =
+      alternatives === true
+        ? // Loaded tools do not use up the alternatives: up to `limit` others are shown.
+          this.matches({
+            query: parseSearchArgs(rawArguments).query,
+            limit: limit + selected.length,
+          })
+            .filter(isFunctionTool)
+            .filter((t) => !isSelected(t))
+            .slice(0, limit)
+        : alternatives === false
+          ? []
+          : this.search({
+              query: "",
+              names: [...alternatives],
+              limit: alternatives.length,
+            })
+              .filter(isFunctionTool)
+              .filter((t) => alternatives.includes(t.name) && !isSelected(t))
+              .sort((a, b) => alternatives.indexOf(a.name) - alternatives.indexOf(b.name));
     return {
       version: 2,
       output: JSON.stringify({
@@ -1283,13 +1597,8 @@ export class LazyToolRuntime {
         schemasLoaded: selected.length > 0,
         unavailable: chosen.filter((name) => !selected.some((t) => t.name === name)),
         ...this.unavailableSources(),
-        ...(alternatives
-          ? {
-              suggestions: this.matches(rawArguments)
-                .filter(isFunctionTool)
-                .filter((t) => !selected.some((s) => s.name === t.name))
-                .map(toolDescriptor),
-            }
+        ...(alternatives !== false && (alternatives === true || suggestions.length)
+          ? { suggestions: suggestions.map(toolDescriptor) }
           : {}),
       }),
       tools: structuredClone(
@@ -1602,6 +1911,7 @@ export function installLazyToolRuntime(
   unavailableMcpServers?: () => ReadonlyMap<string, string>,
   connectableLookup?: ConnectableIntegrationLookup,
   connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
+  meaningRanker?: ToolMeaningRanker,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -1619,6 +1929,7 @@ export function installLazyToolRuntime(
     unavailableMcpServers,
     connectableLookup,
     connectedAccounts,
+    meaningRanker,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

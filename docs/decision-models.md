@@ -8,10 +8,12 @@ the conversational model picker. A model judges common input against named
 
 Two consumers use it:
 
-- Tool discovery judges the wider lexical shortlist, then resolves only exact
-  authorized candidate identities. Exact names and strong lexical matches bypass
-  inference. Unconfigured, invalid or unavailable judgments recover through the
-  normal best-match-first lexical path. Cancellation propagates.
+- Tool discovery judges a candidate list built from keywords and, when an
+  embedding model is configured, meaning, then resolves only exact authorized
+  candidate identities. Only searches that are nothing but tool names bypass
+  inference. Unconfigured, invalid, late or unavailable judgments recover through
+  the best-match-first path with the other candidates shown. Cancellation
+  propagates. See [tool search](tool-search.md).
 - `code_search` uses the same interface for file, passage, symbol and evidence
   judgments. Its existing rubrics, workspace access and session-frozen offering
   remain. It does **not** silently substitute keyword scores after a refusal or

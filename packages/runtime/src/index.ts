@@ -2262,6 +2262,11 @@ const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
   toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
+  /**
+   * Ranks tools by meaning alongside keywords in tool search; the caller owns
+   * its route checks. Absent means keyword ranking alone.
+   */
+  toolSearchMeaningRanker?: import("./tool-discovery-meaning").ToolMeaningRanker | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -3756,6 +3761,7 @@ function maybeInstallLazyToolTransport(
       }
       return accounts;
     },
+    options.toolSearchMeaningRanker,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -10880,6 +10886,12 @@ export type {
   ToolDecisionInput,
   ToolDecisionCandidate,
 } from "./tool-discovery-decision";
+export { createEmbeddingToolRanker } from "./tool-discovery-meaning";
+export type {
+  EmbeddingToolRanker,
+  ToolMeaningRanker,
+  ToolTextEmbedder,
+} from "./tool-discovery-meaning";
 
 export { MaxTurnsExceededError, ToolCallError } from "@openai/agents";
 

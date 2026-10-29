@@ -58,6 +58,11 @@ export function isOperationWord(text: string): boolean {
   return tokens.length === 1 && !isResourceTerm(tokens[0]!);
 }
 
+/** Whether text holds any word the ranker searches by (not only stopwords or punctuation). */
+export function hasSearchTerms(text: string): boolean {
+  return words(text).length > 0;
+}
+
 type Field = { frequencies: Map<string, number>; length: number };
 type Document = {
   tool: Tool;
