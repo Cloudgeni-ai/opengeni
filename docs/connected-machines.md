@@ -2238,9 +2238,15 @@ a few seconds for it. A tab blocked by a dialog its page opened while no agent
 held the browser is left as it is for the person, and the session continues in
 a new tab.
 
-An attached tab's debugger disconnect invalidates its cached target, document,
-frame and element authority without restarting Chrome or changing other tabs.
-A later read can reattach the same surviving tab with fresh fences. Chrome's
+An attached tab's debugger disconnect ends that attachment's commands and
+controls without restarting Chrome or changing other tabs. A later call can
+reattach the same surviving tab: if it still shows the same document (same
+main-frame frame and loader ids), its target, document, frame and element
+authority carry over, so an observation made just before still holds; a new
+document gets fresh fences. Chrome ends debugging of a tab whenever another
+extension adds a frame of its own page (a password manager's inline menu); the
+extension removes such frames, also ones created blank and then loaded with the
+other extension's page, which their address does not show. Chrome's
 `canceled_by_user` disconnect requires reconnecting the profile; it is never
 silently overridden. Detachment during pending input or other possible effects preserves an unknown
 outcome and blocks automatic reattachment until the profile reconnects. A late

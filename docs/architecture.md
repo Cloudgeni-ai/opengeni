@@ -2344,9 +2344,13 @@ diagnosis with open-a-new-tab guidance, not as a retryable outage.
 Pre-input failures are definite; already-sent input retains uncertain effects and
 must not replay. Other tabs keep their independent authority and queues.
 
-An attached tab's debugger disconnect invalidates only its cached target,
-document, frame and element authority. Read-only recovery can attach the same
-surviving tab with fresh fences; explicit cancellation and uncertain effects
+An attached tab's debugger disconnect ends only that attachment's commands and
+controls. Recovery can attach the same surviving tab again; when it still shows
+the same document (same main-frame frame and loader ids), it keeps its target,
+document, frame and element authority, so an observation made before the
+disconnect still holds, and otherwise it gets fresh fences. Another extension
+adding a frame (a password manager's inline menu) ends Chrome's debugging of a
+tab without changing its page. Explicit cancellation and uncertain effects
 require profile reconnection. Chrome and unrelated tabs remain intact, and
 mutations are never replayed. Partially dispatched input remains outcome unknown;
 queued input, DOM changes, navigation and emulation cannot cross into a replacement

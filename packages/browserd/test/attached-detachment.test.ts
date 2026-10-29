@@ -14,6 +14,8 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Readonly<Record<string, unknown>>> = [];
   readonly attached = new Set<string>();
   readonly events: Array<Record<string, unknown>> = [];
+  /** How many documents each tab has loaded since its first. */
+  readonly navigations = new Map<string, number>();
   private sequence = 0;
   beforeAttachReply: (() => Promise<void>) | null = null;
   beforeCommandReply: ((method: unknown) => Promise<void>) | null = null;
@@ -21,6 +23,11 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
   detach(tabId: string, reason: "target_closed" | "canceled_by_user"): void {
     this.attached.delete(tabId);
     this.event(tabId, "OpenGeni.debuggerDetached", { reason });
+  }
+
+  /** The tab loads a new document, as a navigation the driver does not see. */
+  navigate(tabId: string): void {
+    this.navigations.set(tabId, (this.navigations.get(tabId) ?? 0) + 1);
   }
 
   event(tabId: string, method: string, params: Record<string, unknown>): void {
@@ -62,7 +69,7 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
             frameTree: {
               frame: {
                 id: `frame-${id}`,
-                loaderId: `loader-${id}`,
+                loaderId: `loader-${id}-${this.navigations.get(id) ?? 0}`,
                 url: `https://browser.example.test/${id}`,
               },
             },
@@ -179,13 +186,14 @@ async function drainDetach(bridge: DetachmentBridge): Promise<void> {
   await Bun.sleep(0);
 }
 
-test("reattaches only the disconnected tab and invalidates its old causal fences", async () => {
+test("reattaches only the disconnected tab and invalidates its old causal fences once its page changed", async () => {
   const { bridge, connection, driver } = await fixture();
   try {
     const before = await driver.observe("7");
     const other = await driver.observe("8");
     bridge.detach("7", "target_closed");
     await drainDetach(bridge);
+    bridge.navigate("7");
     const after = await driver.observe("7");
     expect(after.target.targetGeneration).not.toBe(before.target.targetGeneration);
     expect(after.target.documentGeneration).not.toBe(before.target.documentGeneration);
@@ -224,6 +232,55 @@ test("reattaches only the disconnected tab and invalidates its old causal fences
           String(c.method).startsWith("Input."),
       ),
     ).toBe(false);
+  } finally {
+    connection.close();
+  }
+});
+
+test("an observation made before the tab's debugging ended still acts on its unchanged page", async () => {
+  // A password manager shows its inline menu (another extension's frame), and
+  // Chrome ends the attachment of the tab without changing its page.
+  const { bridge, connection, driver } = await fixture();
+  try {
+    const before = await driver.observe("7");
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    // Before, the click was refused as targeting an earlier target generation.
+    await driver.dispatch({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: before.browserSessionId,
+      controllerGeneration: before.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: before.target.targetGeneration,
+      expectedDocumentGeneration: before.target.documentGeneration!,
+      expectedFrameId: before.frameId,
+      observationMode: "none",
+      action: { type: "pointer", action: "click", x: 10, y: 10 },
+    });
+    expect(
+      bridge.commands.filter((c) => c.type === "debugger.attach" && c.tabId === "7"),
+    ).toHaveLength(2);
+    expect(
+      bridge.commands.filter((c) => c.method === "Input.dispatchMouseEvent").length,
+    ).toBeGreaterThan(0);
+    // Ended again, while attaching once more, it still keeps that authority.
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    let endedWhileAttaching = false;
+    bridge.beforeAttachReply = async () => {
+      if (endedWhileAttaching) return;
+      endedWhileAttaching = true;
+      bridge.detach("7", "target_closed");
+    };
+    await driver.observe("7").catch(() => undefined);
+    bridge.beforeAttachReply = null;
+    const after = await driver.observe("7");
+    expect(endedWhileAttaching).toBe(true);
+    expect(after.target.targetGeneration).toBe(before.target.targetGeneration);
+    expect(after.target.documentGeneration).toBe(before.target.documentGeneration);
+    expect(after.frameId).toBe(before.frameId);
   } finally {
     connection.close();
   }
@@ -482,10 +539,11 @@ test("detachment during a semantic read discards that observation and reads agai
     await drainDetach(bridge);
     held.release();
     const after = await observing;
-    expect(after.target.targetGeneration).not.toBe(first.target.targetGeneration);
-    expect(after.target.documentGeneration).not.toBe(first.target.documentGeneration);
-    expect(after.frameId).not.toBe(first.frameId);
+    // Read on a new attachment, of the same document.
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+    expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
+    expect(after.target.documentGeneration).toBe(first.target.documentGeneration);
+    expect(after.frameId).toBe(first.frameId);
     expect(bridge.commands.some((c) => String(c.method).startsWith("Input."))).toBe(false);
   } finally {
     held.release();
@@ -963,7 +1021,8 @@ test("a read Chrome refuses because its attachment ended reads again on a new at
       });
     }, 20);
     const state = await driver.targetState("7");
-    expect(state.targetGeneration).not.toBe(first.target.targetGeneration);
+    // The same document on the new attachment keeps its authority.
+    expect(state.targetGeneration).toBe(first.target.targetGeneration);
     const after = await driver.observe("7");
     expect(after.target.targetGeneration).toBe(state.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
@@ -982,7 +1041,7 @@ test("a refused read whose detach is never reported still attaches again", async
     const first = await driver.observe("7");
     bridge.detachSilently("7");
     const after = await driver.observe("7");
-    expect(after.target.targetGeneration).not.toBe(first.target.targetGeneration);
+    expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
   } finally {
     connection.close();
@@ -1072,9 +1131,10 @@ for (const ending of ["during", "before"] as const)
         message:
           "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
       });
-      // The page as the click left it, read on the new attachment.
+      // The page as the click left it, read on the new attachment; the
+      // click did not change the document.
       expect(receipt.observation?.target.id).toBe("7");
-      expect(receipt.observation?.target.targetGeneration).not.toBe(
+      expect(receipt.observation?.target.targetGeneration).toBe(
         observation.target.targetGeneration,
       );
       expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
@@ -1181,7 +1241,7 @@ test("Chrome's frame refusal for an attachment it is ending reads again on a new
       });
     }, 20);
     const after = await driver.observe("7");
-    expect(after.target.targetGeneration).not.toBe(first.target.targetGeneration);
+    expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
     // Input refused the same way before anything was sent is a definite
     // failure, and the tab attaches again for the next call.

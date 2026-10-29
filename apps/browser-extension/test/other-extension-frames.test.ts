@@ -113,7 +113,9 @@ function harness(
       },
     },
     scripting: {
-      executeScript: async () => {
+      executeScript: async (injection: { func: { name: string } }) => {
+        // Frames listening for the frames they hold, before the removal.
+        if (injection.func.name === "listenForScriptableFrames") return [{ result: null }];
         removals += 1;
         if (hanging > 0) {
           hanging -= 1;
