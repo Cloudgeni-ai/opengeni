@@ -42,12 +42,15 @@ export function subscribeLists(workspaceId: string, listener: (next: Lists) => v
 
 /**
  * Put one session's latest row into a pinned list: replaced where it already
- * is, or added (as the newest top-level chat) when the list doesn't have it.
- * Order is the screens' to derive from the rows, as for a fresh page.
+ * is, or, for a chat just created, added as the newest top-level chat. An
+ * older chat opened from elsewhere is not added: it may sit beyond the loaded
+ * page, and the next refresh would take it away again. Order is the screens'
+ * to derive from the rows, as for a fresh page.
  */
 export function withSessionRow(
   current: PinnedSessionLists<Session>,
   session: Session,
+  options: { created?: boolean } = {},
 ): PinnedSessionLists<Session> {
   const replace = (rows: Session[]) =>
     rows.map((row) => (row.id === session.id ? { ...row, ...session } : row));
@@ -56,16 +59,23 @@ export function withSessionRow(
   if (current.sessions.some((row) => row.id === session.id))
     return { ...current, sessions: replace(current.sessions) };
   // Sub-agents live under their parent, not in these lists.
-  if (session.parentSessionId) return current;
+  if (!options.created || session.parentSessionId) return current;
   return { ...current, sessions: [session, ...current.sessions] };
 }
 
-/** Write one session's latest row into every cached list of its workspace. */
-export function rememberSessionRow(session: Session): void {
+/**
+ * Write one session's latest row into every cached list of its workspace;
+ * `created` adds a chat the lists can't have yet.
+ */
+export function rememberSessionRow(session: Session, options: { created?: boolean } = {}): void {
   const cached = lists.get(session.workspaceId);
   if (!cached?.home && !cached?.sessions) return;
+  const home = cached.home ? withSessionRow(cached.home, session, options) : undefined;
+  const sessions = cached.sessions ? withSessionRow(cached.sessions, session, options) : undefined;
+  // Nothing listed changed: no listener needs to re-render.
+  if (home === cached.home && sessions === cached.sessions) return;
   rememberLists(session.workspaceId, {
-    ...(cached.home ? { home: withSessionRow(cached.home, session) } : {}),
-    ...(cached.sessions ? { sessions: withSessionRow(cached.sessions, session) } : {}),
+    ...(home ? { home } : {}),
+    ...(sessions ? { sessions } : {}),
   });
 }

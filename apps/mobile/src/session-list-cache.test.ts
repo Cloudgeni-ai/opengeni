@@ -28,13 +28,15 @@ test("a chat's fresh row replaces its old one in place, or leads the list when n
   expect(withSessionRow(lists, row("pinned", { title: "Renamed" })).pinned[0]!.title).toBe(
     "Renamed",
   );
-  expect(withSessionRow(lists, row("new")).sessions.map((each) => each.id)).toEqual([
-    "new",
-    "older",
-    "used",
-  ]);
+  expect(
+    withSessionRow(lists, row("new"), { created: true }).sessions.map((each) => each.id),
+  ).toEqual(["new", "older", "used"]);
+  // An older chat opened from elsewhere waits for the refresh to place it.
+  expect(withSessionRow(lists, row("opened"))).toBe(lists);
   // Sub-agents are reached from their parent, never listed here.
-  expect(withSessionRow(lists, row("child", { parentSessionId: "older" }))).toBe(lists);
+  expect(withSessionRow(lists, row("child", { parentSessionId: "older" }), { created: true })).toBe(
+    lists,
+  );
 });
 
 test("lists below an open chat follow its row as soon as it changes", () => {
@@ -43,13 +45,16 @@ test("lists below an open chat follow its row as soon as it changes", () => {
   const stop = subscribeLists("work", (next) =>
     seen.push(next.home?.sessions.map((each) => each.id) ?? []),
   );
-  rememberSessionRow(row("new"));
+  rememberSessionRow(row("new"), { created: true });
   expect(seen).toEqual([["new", "older"]]);
   expect(cachedLists("work").home?.sessions.map((each) => each.id)).toEqual(["new", "older"]);
+  // A chat that isn't listed changes nothing and wakes no one.
+  rememberSessionRow(row("opened"));
+  expect(seen).toHaveLength(1);
   stop();
-  rememberSessionRow(row("later"));
+  rememberSessionRow(row("later"), { created: true });
   expect(seen).toHaveLength(1);
   // A workspace with no list shown yet has nothing to keep current.
-  rememberSessionRow(row("elsewhere", { workspaceId: "unseen" }));
+  rememberSessionRow(row("elsewhere", { workspaceId: "unseen" }), { created: true });
   expect(cachedLists("unseen")).toEqual({});
 });

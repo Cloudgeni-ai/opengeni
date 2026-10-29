@@ -282,7 +282,7 @@ function Home() {
         resources: [...chosen.resources, ...attachments.readyResources],
       });
       // The new chat leads the lists before anyone comes back to them.
-      rememberSessionRow(created);
+      rememberSessionRow(created, { created: true });
       // The draft is the server's now. Settling its saved copy starts here, before
       // the composer empties, but needn't hold the chat back.
       if (flushed) void draftSync.acknowledgeConsumed(flushed).catch(() => null);
