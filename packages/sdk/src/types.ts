@@ -9431,6 +9431,11 @@ export type ApiIntegrationInstallationSummary = {
   approvalRequiredToolCount: number;
   revisionId: string;
   contentSha256: string;
+  /**
+   * Set on an instance a Personal workspace carries for its owner from another
+   * workspace where they connected it "Only me"; it is managed there.
+   */
+  personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
 };
 
 export type ListApiIntegrationsResponse = {
