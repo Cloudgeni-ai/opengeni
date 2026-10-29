@@ -361,10 +361,8 @@ describe("latest started session policy", () => {
       sessionId: value.session.id,
       subjectId: value.grant.subjectId,
     };
-    const inScope = <T>(run: (db: Parameters<typeof saveComposerDraftInTransaction>[0]) => T) =>
-      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, run);
     const save = (expectedRevision: number, text: string, pick = {}) =>
-      inScope((db) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
         saveComposerDraftInTransaction(db, {
           ...scope,
           expectedRevision,
@@ -374,7 +372,7 @@ describe("latest started session policy", () => {
         }),
       );
     const submit = (expectedDraftRevision: number, text: string, pick = {}) =>
-      inScope((db) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
         submitHumanPromptInTransaction(db, {
           ...scope,
           actor: value.actor,
@@ -389,10 +387,10 @@ describe("latest started session policy", () => {
         }),
       );
     const read = () =>
-      inScope(async (db) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, async (db) =>
         withEffectiveComposerDraftPolicy(
           db,
-          await getComposerDraftInTransaction(db, { workspaceId, ...scope }),
+          await getComposerDraftInTransaction(db, scope),
         ),
       );
     const storedModel = async () =>
