@@ -39,12 +39,20 @@ function harness(
     hangingRemovals?: number;
     // Runs before Chrome handles each command.
     beforeCommand?: (method: string) => Promise<void>;
+    // The frame is created blank and then loaded with the extension's page,
+    // so its address does not show it. The page also holds a cross-origin
+    // frame the extension scripts (frame 3), and with `pageFrameUnscripted`
+    // one it cannot (frame 4, an error page, say). With `unheard`, frame 3
+    // runs the script but its parent does not hear it; with `noTarget`,
+    // Chrome's debugging targets hold no other extension's page.
+    blank?: { pageFrameUnscripted?: boolean; unheard?: boolean; noTarget?: boolean };
   } = {},
 ) {
   const ports: any[] = [];
   const sent: string[] = [];
   let framePresent = false;
   let removals = 0;
+  let blankRemovals = 0;
   let hanging = options.hangingRemovals ?? 0;
   const tab = {
     id: 7,
@@ -103,6 +111,10 @@ function harness(
       onDetach: event(),
       attach: async () => {},
       detach: async () => {},
+      getTargets: async () =>
+        options.blank && framePresent && !options.blank.noTarget
+          ? [{ type: "other", url: `chrome-extension://${PASSWORD_MANAGER}/menu.html` }]
+          : [],
       sendCommand: async (_source: unknown, method: string) => {
         await options.beforeCommand?.(method);
         if (framePresent) throw new Error(FRAME_REFUSAL);
@@ -114,17 +126,55 @@ function harness(
     },
     scripting: {
       executeScript: async (injection: { func: { name: string } }) => {
-        // Frames listening for the frames they hold, before the removal.
-        if (injection.func.name === "listenForScriptableFrames") return [{ result: null }];
+        const blank = options.blank;
+        switch (injection.func.name) {
+          case "listenForFrameAnnouncements":
+            return [
+              { frameId: 0, result: null },
+              { frameId: 3, result: null },
+            ];
+          case "announceFrame":
+            return [
+              { frameId: 0, result: null },
+              { frameId: 3, result: "frame-3" },
+            ];
+          case "unseenFrames":
+            return [
+              {
+                frameId: 0,
+                result: {
+                  unseen: (blank && framePresent ? 1 : 0) + (blank?.pageFrameUnscripted ? 1 : 0),
+                  heard: blank?.unheard ? [] : ["frame-3"],
+                },
+              },
+              { frameId: 3, result: { unseen: 0, heard: [] } },
+            ];
+          case "removeUnseenFrames": {
+            blankRemovals += 1;
+            const count = framePresent ? 1 : 0;
+            framePresent = options.frameReturns === true;
+            return [{ frameId: 0, result: count }];
+          }
+        }
         removals += 1;
         if (hanging > 0) {
           hanging -= 1;
           return await new Promise<never>(() => {});
         }
+        if (blank) return [{ frameId: 0, result: [] }];
         const removed = framePresent ? [PASSWORD_MANAGER] : [];
         framePresent = options.frameReturns === true;
         return [{ result: removed }];
       },
+    },
+    webNavigation: {
+      getAllFrames: async () => [
+        { frameId: 0, parentFrameId: -1, url: tab.url },
+        { frameId: 3, parentFrameId: 0, url: "https://widget.example.net/" },
+        ...(options.blank?.pageFrameUnscripted
+          ? [{ frameId: 4, parentFrameId: 0, url: "https://unreachable.example.net/" }]
+          : []),
+      ],
     },
     windows: {
       getAll: async () => [{ id: 1, type: "normal", focused: true }],
@@ -193,6 +243,7 @@ function harness(
       framePresent = true;
     },
     removals: () => removals,
+    blankRemovals: () => blankRemovals,
   };
 }
 
@@ -343,5 +394,73 @@ describe("another extension's frame in an attached tab", () => {
     expect(first).toMatchObject({ ok: true });
     expect(late).toMatchObject({ ok: true });
     expect(h.removals()).toBe(2);
+  });
+});
+
+describe("another extension's frame created blank in an attached tab", () => {
+  const refused = async (h: ReturnType<typeof harness>) => {
+    const command = await h.ready();
+    const attached = await command({ type: "debugger.attach", tabId: "7" });
+    const send = () =>
+      command({
+        type: "debugger.command",
+        tabId: "7",
+        attachment: attached.payload.attachment,
+        method: "Page.getFrameTree",
+        params: {},
+      });
+    h.addFrame();
+    return send;
+  };
+
+  test("is removed when Chrome accounts for every other frame of its page", async () => {
+    const h = harness({ blank: {} });
+    const send = await refused(h);
+    expect(await send()).toMatchObject({
+      ok: true,
+      payload: { result: { ran: "Page.getFrameTree" } },
+    });
+    expect(h.blankRemovals()).toBe(1);
+  });
+
+  test("coming straight back fails the command, naming the extension", async () => {
+    const h = harness({ blank: {}, frameReturns: true });
+    const send = await refused(h);
+    const result = await send();
+    expect(result).toMatchObject({ ok: false, error: { code: "tab_unavailable" } });
+    expect(result.error.message).toStartWith("Bitwarden keeps adding its own frame to this page");
+  });
+
+  test("is not removed when the page also holds a frame the extension cannot script", async () => {
+    // That frame (an error page, or a site the person took the extension's
+    // access from) could be the menu as well as the page's own.
+    const h = harness({ blank: { pageFrameUnscripted: true } });
+    const send = await refused(h);
+    const result = await send();
+    expect(result).toMatchObject({ ok: false, error: { code: "tab_unavailable" } });
+    expect(result.error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
+    expect(h.sent).toEqual([]);
+  });
+
+  test("is not removed while a frame that ran the script has not been heard", async () => {
+    const h = harness({ blank: { unheard: true } });
+    const send = await refused(h);
+    expect((await send()).error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
+  });
+
+  test("is not removed when Chrome holds no other extension's page", async () => {
+    const h = harness({ blank: { noTarget: true } });
+    const send = await refused(h);
+    expect((await send()).error.message).toContain("it could not be removed");
+    expect(h.blankRemovals()).toBe(0);
+  });
+
+  test("removals that remove nothing do not use up the tab's limit", async () => {
+    const h = harness({ blank: { pageFrameUnscripted: true } });
+    const send = await refused(h);
+    for (let attempt = 0; attempt < 8; attempt++)
+      expect((await send()).error.message).toContain("it could not be removed");
   });
 });

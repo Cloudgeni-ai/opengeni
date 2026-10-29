@@ -2245,8 +2245,15 @@ main-frame frame and loader ids), its target, document, frame and element
 authority carry over, so an observation made just before still holds; a new
 document gets fresh fences. Chrome ends debugging of a tab whenever another
 extension adds a frame of its own page (a password manager's inline menu); the
-extension removes such frames, also ones created blank and then loaded with the
-other extension's page, which their address does not show. Chrome's
+extension removes such frames. A frame created blank and then loaded with the
+other extension's page, which its address does not show, is removed only when
+Chrome's own reports single it out: Chrome lists every other frame of its page
+to the extension (`webNavigation`), each of those ran the extension's script,
+and Chrome's debugging targets hold another extension's page. Otherwise (the
+page also holds an error page, say, or a site the person took the extension's
+access from) no frame is removed, the call fails saying the frame could not be
+removed, and the tab can be debugged again once the menu closes, still holding
+earlier observations of the same document. Chrome's
 `canceled_by_user` disconnect requires reconnecting the profile; it is never
 silently overridden. Detachment during pending input or other possible effects preserves an unknown
 outcome and blocks automatic reattachment until the profile reconnects. A late

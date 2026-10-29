@@ -35,21 +35,51 @@ document.addEventListener("focusin", (event) => {
   document.documentElement.appendChild(host);
   if (blank) frame.contentWindow.location.href = chrome.runtime.getURL("menu.html");
 }, true);
+// Escape closes the menu, as in password managers.
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") host?.remove();
+}, true);
 `;
 
-function page(menu: "src" | "blank", otherOrigin: string): string {
+// Frames of the page's own that the Opengeni extension cannot script, each
+// created blank and loaded by script: an error page, a page that keeps
+// navigating itself, and the target of a form posted to another origin whose
+// page posts itself again, as in a payment challenge.
+const PAGE_FRAMES = ["error", "hopping", "posted"] as const;
+
+function page(menu: "src" | "blank", otherOrigin: string, pageFrames: boolean): string {
+  const frames = pageFrames
+    ? `<iframe id="error" title="Error"></iframe><iframe id="hopping" title="Hopping"></iframe>
+<iframe id="posted" name="posted" title="Posted"></iframe>
+<form id="post" method="post" target="posted" action="${otherOrigin}/post"><input type="hidden" name="step" value="1"></form>
+<script>
+document.getElementById("error").contentWindow.location.href = "http://127.0.0.1:9/";
+document.getElementById("hopping").contentWindow.location.href = ${JSON.stringify(otherOrigin)} + "/hop";
+document.getElementById("post").submit();
+</script>`
+    : "";
   return `<!doctype html><html data-menu="${menu}"><head><title>Verify</title></head><body>
 <div id="box"><input id="email" aria-label="Email" value="a@example.com">
 <button type="button" id="send">Send code to email</button>
 <button type="button" id="arm">Focus the email field soon</button></div>
 <p id="frames"></p>
 <iframe id="widget" title="Widget"></iframe>
+${frames}
 <script>
 // The page's own frame, created blank and loaded from another origin by script.
 document.getElementById("widget").contentWindow.location.href = ${JSON.stringify(otherOrigin)} + "/widget";
 setInterval(() => {
   document.getElementById("frames").textContent = "widget " + (document.getElementById("widget") ? "present" : "removed");
+  // Tells the test which of its frames the page still holds, also while
+  // the tab cannot be debugged.
+  const held = [...document.querySelectorAll("iframe")].map((frame) => frame.id).filter(Boolean);
+  fetch("/frames", { method: "POST", body: held.join(",") }).catch(() => {});
 }, 50);
+// The person presses Escape (see /escape).
+setInterval(async () => {
+  const pressed = await fetch("/escape").then((response) => response.text()).catch(() => "");
+  if (pressed === "yes") document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+}, 100);
 document.getElementById("arm").onclick = () => setTimeout(() => document.getElementById("email").focus(), 1200);
 document.getElementById("send").onclick = () => {
   document.getElementById("box").innerHTML = '<input id="code" aria-label="Code"><button type="button" id="verify">Verify</button><p id="out"></p>';
@@ -63,7 +93,7 @@ document.getElementById("send").onclick = () => {
 
 type Fixture = Awaited<ReturnType<typeof launch>>;
 
-async function launch(menu: "src" | "blank") {
+async function launch(menu: "src" | "blank", pageFrames: boolean) {
   const directory = await mkdtemp("/tmp/ogb-extension-frame-e2e-");
   const extension = join(directory, "extension");
   const build = Bun.spawnSync(
@@ -89,18 +119,33 @@ async function launch(menu: "src" | "blank") {
   const other = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: () =>
-      new Response("<!doctype html><title>Widget</title><p>Widget</p>", {
-        headers: { "content-type": "text/html" },
-      }),
+    fetch: (request) => {
+      const path = new URL(request.url).pathname;
+      const body =
+        path === "/hop"
+          ? "<!doctype html><title>Hop</title><script>setTimeout(() => location.replace('/hop?' + Date.now()), 200)</script>"
+          : path === "/post"
+            ? `<!doctype html><title>Challenge</title><form id="again" method="post" action="/post"></form><script>setTimeout(() => document.getElementById("again").submit(), 250)</script>`
+            : "<!doctype html><title>Widget</title><p>Widget</p>";
+      return new Response(body, { headers: { "content-type": "text/html" } });
+    },
   });
+  let heldFrames: string[] = [];
+  let escape = false;
   const site = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: () =>
-      new Response(page(menu, `http://localhost:${other.port}`), {
+    fetch: async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/frames") {
+        heldFrames = (await request.text()).split(",").filter(Boolean);
+        return new Response("");
+      }
+      if (path === "/escape") return new Response(escape ? "yes" : "no");
+      return new Response(page(menu, `http://localhost:${other.port}`, pageFrames), {
         headers: { "content-type": "text/html" },
-      }),
+      });
+    },
   });
 
   // A native messaging host that relays the extension's messages to this test.
@@ -304,6 +349,10 @@ process.stdin.on("end", () => process.exit(0));
   return {
     observe,
     act,
+    heldFrames: () => heldFrames,
+    pressEscape: () => {
+      escape = true;
+    },
     close: async () => {
       await driver.close().catch(() => undefined);
       connection.close();
@@ -329,8 +378,12 @@ const ref = (observation: BrowserObservation, role: string, name: string) => {
 const shows = (observation: BrowserObservation, text: string) =>
   nodes(observation).some((node) => (node.name ?? "").includes(text));
 
-async function withFixture(menu: "src" | "blank", run: (fixture: Fixture) => Promise<void>) {
-  const fixture = await launch(menu);
+async function withFixture(
+  menu: "src" | "blank",
+  run: (fixture: Fixture) => Promise<void>,
+  pageFrames = false,
+) {
+  const fixture = await launch(menu, pageFrames);
   try {
     await run(fixture);
   } finally {
@@ -374,6 +427,64 @@ e2e(
       // The page's own frame, also loaded by script from another origin, stays.
       expect(shows(observation, "widget present")).toBe(true);
     });
+  },
+  90_000,
+);
+
+e2e(
+  "the page's own frames that the extension cannot script are never removed with a password manager's blank-created menu",
+  async () => {
+    await withFixture(
+      "blank",
+      async ({ observe, act, heldFrames, pressEscape }) => {
+        const before = await observe();
+        // The click shows the menu, and Chrome ends debugging of the tab.
+        const focus = await act(before, {
+          type: "click",
+          locator: ref(before, "textbox", "Email"),
+        });
+        expect(["completed", "outcome_unknown"]).toContain(focus.state);
+        // Each attempt removes other extensions' frames before attaching
+        // again. The page holds frames the extension cannot see into, so it
+        // cannot tell which one is the menu: it removes none and says so.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const error = await observe().then(
+            () => null,
+            (failure: Error) => failure,
+          );
+          if (error !== null) expect(error.message).toContain("could not be removed");
+          await Bun.sleep(300);
+          expect(heldFrames()).toEqual(expect.arrayContaining(["widget", ...PAGE_FRAMES]));
+        }
+        // Once the person closes the menu, the tab can be debugged again, and
+        // the agent goes on with its earlier observation of the unchanged page.
+        pressEscape();
+        let debuggable = false;
+        for (let attempt = 0; attempt < 20 && !debuggable; attempt++) {
+          await Bun.sleep(300);
+          debuggable = await observe().then(
+            () => true,
+            () => false,
+          );
+        }
+        expect(debuggable).toBe(true);
+        const send = await act(before, {
+          type: "click",
+          locator: ref(before, "button", "Send code"),
+        });
+        expect(send.error?.code).not.toBe("target_stale");
+        // The click focuses the code field, so the menu shows (and closes) again.
+        expect(["completed", "outcome_unknown"]).toContain(send.state);
+        let after: BrowserObservation | null = null;
+        for (let attempt = 0; attempt < 10 && after === null; attempt++) {
+          after = await observe().catch(() => null);
+          if (after === null) await Bun.sleep(300);
+        }
+        expect(after !== null && shows(after, "Verify")).toBe(true);
+        expect(heldFrames()).toEqual(expect.arrayContaining(["widget", ...PAGE_FRAMES]));
+      },
+      true,
+    );
   },
   90_000,
 );

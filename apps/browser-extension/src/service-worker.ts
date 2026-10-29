@@ -854,36 +854,29 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
   );
   frameRemovalTimes.set(tabId, recent);
   if (recent.length >= FRAME_REMOVAL_LIMIT) return null;
-  recent.push(now);
-  // Each removal has its own token, so frames that answered an earlier one
-  // count only for it.
-  const token = crypto.randomUUID();
-  const run = (target: chrome.scripting.InjectionTarget, probed: boolean) =>
+  const run = (target: chrome.scripting.InjectionTarget) =>
     chrome.scripting.executeScript({
       target,
       world: "ISOLATED",
       func: removeFramesOfOtherExtensions,
-      args: [chrome.runtime.id, probed ? token : null],
+      args: [chrome.runtime.id],
     });
-  let results: Awaited<ReturnType<typeof run>>;
+  let blankCreated: BlankCreatedFrames | null = null;
   try {
-    // First every frame this extension can script listens for its child
-    // frames, then each says so to its parent: a child frame that does not
-    // is one this extension cannot script, such as another extension's page.
-    await withinFrameRemovalTimeout(
-      chrome.scripting.executeScript({
-        target: { tabId, allFrames: true },
-        world: "ISOLATED",
-        func: listenForScriptableFrames,
-        args: [token],
-      }),
-    );
-    results = await withinFrameRemovalTimeout(run({ tabId, allFrames: true }, true));
+    blankCreated = await blankCreatedExtensionFrames(tabId);
   } catch (error) {
     // A page that does not answer is not asked again.
     if (error instanceof FrameRemovalTimeout) return [];
+  }
+  let results: Awaited<ReturnType<typeof run>>;
+  try {
+    results = await withinFrameRemovalTimeout(run({ tabId, allFrames: true }));
+  } catch (error) {
+    // A page that does not answer is not asked again.
+    if (error instanceof FrameRemovalTimeout) return [];
+    blankCreated = null;
     try {
-      results = await withinFrameRemovalTimeout(run({ tabId }, false));
+      results = await withinFrameRemovalTimeout(run({ tabId }));
     } catch {
       // A closed tab, a page Chrome does not let extensions script, or one
       // that does not answer.
@@ -899,7 +892,28 @@ async function removeOtherExtensionFrames(tabId: number): Promise<readonly strin
       ),
     ),
   ];
+  if (blankCreated !== null) {
+    try {
+      const removals = await withinFrameRemovalTimeout(
+        chrome.scripting.executeScript({
+          target: { tabId, frameIds: blankCreated.parentFrameIds },
+          world: "ISOLATED",
+          func: removeUnseenFrames,
+          args: [blankCreated.token],
+        }),
+      );
+      if (
+        removals.some((removal) => typeof removal.result === "number" && removal.result > 0) &&
+        !removed.includes(blankCreated.extensionId)
+      )
+        removed.push(blankCreated.extensionId);
+    } catch {
+      // The frames' page went away or stopped answering meanwhile.
+    }
+  }
   if (removed.length > 0) {
+    // Only a removal that changed the page counts against its limit.
+    recent.push(now);
     removedFrameExtensions.set(tabId, removed);
     console.warn(`removed other extensions' frames from tab ${tabId}: ${removed.join(", ")}`);
   }
@@ -924,51 +938,11 @@ async function withinFrameRemovalTimeout<T>(script: Promise<T>): Promise<T> {
   }
 }
 
-/** Runs in every page frame, in this extension's isolated world: records which
- * child frames say `token` to it (see removeFramesOfOtherExtensions).
- * Self-contained, since Chrome runs it from its source. */
-function listenForScriptableFrames(token: string): void {
-  const scope = globalThis as typeof globalThis & {
-    __otherExtensionFrameProbe?: { token: string; sources: Set<MessageEventSource> };
-  };
-  if (!scope.__otherExtensionFrameProbe) {
-    const probe = { token, sources: new Set<MessageEventSource>() };
-    scope.__otherExtensionFrameProbe = probe;
-    addEventListener(
-      "message",
-      (event) => {
-        if (event.data === probe.token && event.source) probe.sources.add(event.source);
-      },
-      true,
-    );
-  }
-  scope.__otherExtensionFrameProbe.token = token;
-  scope.__otherExtensionFrameProbe.sources.clear();
-}
-
 /** Runs in a page frame, in this extension's isolated world: removes elements
  * showing another extension's page, also inside closed shadow roots (where
  * password managers put their inline menus), and returns those extensions'
- * ids. An extension can also load its page into a frame it created blank, so
- * the frame's address does not show it. With a `token`, such a frame (created
- * blank, holding a page this extension could not script, since it did not say
- * the token to this frame) is removed too, as an unnamed extension's ("").
- * Self-contained, since Chrome runs it from its source. */
-async function removeFramesOfOtherExtensions(
-  ownId: string,
-  token: string | null,
-): Promise<string[]> {
-  const probe = (
-    globalThis as typeof globalThis & {
-      __otherExtensionFrameProbe?: { token: string; sources: Set<MessageEventSource> };
-    }
-  ).__otherExtensionFrameProbe;
-  const probed = token !== null && probe !== undefined && probe.token === token;
-  if (token !== null) {
-    if (window !== window.parent) window.parent.postMessage(token, "*");
-    // Give this frame's children time to say it too.
-    if (probed) await new Promise((resolve) => setTimeout(resolve, 150));
-  }
+ * ids. Self-contained, since Chrome runs it from its source. */
+function removeFramesOfOtherExtensions(ownId: string): string[] {
   const removed = new Set<string>();
   const shadowRootOf = (element: Element): ShadowRoot | null => {
     try {
@@ -993,24 +967,194 @@ async function removeFramesOfOtherExtensions(
         element.remove();
         continue;
       }
-      if (
-        probed &&
-        (element instanceof HTMLIFrameElement || element instanceof HTMLFrameElement) &&
-        /^(about:blank)?$/i.test((element.getAttribute("src") ?? "").trim()) &&
-        element.contentWindow !== null &&
-        element.contentDocument === null &&
-        !probe.sources.has(element.contentWindow)
-      ) {
-        removed.add("");
-        element.remove();
-        continue;
-      }
       const shadow = shadowRootOf(element);
       if (shadow) visit(shadow);
     }
   };
   visit(document);
   return [...removed];
+}
+
+type BlankCreatedFrames = {
+  token: string;
+  parentFrameIds: number[];
+  // The extension whose page they hold, or "" when Chrome holds pages of
+  // more than one.
+  extensionId: string;
+};
+
+/**
+ * An extension can load its page into a frame it created blank, so the
+ * frame's address does not show it, and nothing tells this extension which
+ * element holds it. It is found by what Chrome reports, never by a frame
+ * merely not answering, which may be the page's own:
+ * - Chrome reports every frame of the page to this extension
+ *   (webNavigation.getAllFrames) except one holding another extension's page
+ *   (or a blob: page), and lets this extension script every frame except one
+ *   holding another extension's page or a page it may not access (an error
+ *   page, a site the person took its access from).
+ * - Every frame that runs this extension's script says so to its parent, so
+ *   a parent knows which of its frames (`unseen`) did not.
+ * - A parent's unseen frames hold other extensions' pages only when each
+ *   frame Chrome reports in that parent ran the script (so none of them is
+ *   unseen), every frame that ran it was heard, and Chrome's debugging
+ *   targets hold at least as many other extensions' pages as there are
+ *   unseen frames.
+ * Otherwise nothing found this way is removed. Returns the parents whose
+ * unseen frames are other extensions', or null.
+ */
+async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedFrames | null> {
+  const ownId = chrome.runtime.id;
+  const extensionFrames = (await withinFrameRemovalTimeout(chrome.debugger.getTargets())).flatMap(
+    (target) => {
+      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(target.url)?.[1]?.toLowerCase();
+      return target.type === "other" && id && id !== ownId ? [id] : [];
+    },
+  );
+  if (extensionFrames.length === 0) return null;
+  const reported =
+    (await withinFrameRemovalTimeout(chrome.webNavigation.getAllFrames({ tabId }))) ?? [];
+  const token = crypto.randomUUID();
+  const inEveryFrame = <Args extends unknown[], Result>(
+    func: (...args: Args) => Result,
+    args: Args,
+  ) =>
+    withinFrameRemovalTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        world: "ISOLATED",
+        func,
+        args,
+      }),
+    );
+  await inEveryFrame(listenForFrameAnnouncements, [token]);
+  const announced = await inEveryFrame(announceFrame, [token]);
+  const ran = new Set(announced.map((result) => result.frameId));
+  const expected = announced.flatMap((result) =>
+    result.frameId !== 0 && typeof result.result === "string" ? [result.result] : [],
+  );
+  let reports: { frameId: number; unseen: number }[] = [];
+  for (let round = 0; ; round++) {
+    const results = await inEveryFrame(unseenFrames, [token]);
+    const heard = new Set(results.flatMap((result) => result.result?.heard ?? []));
+    reports = results.map((result) => ({
+      frameId: result.frameId,
+      unseen: result.result?.unseen ?? 0,
+    }));
+    if (expected.every((announcement) => heard.has(announcement))) break;
+    // A frame that ran the script but was not heard may be among the unseen.
+    if (round >= 2) return null;
+  }
+  const unscripted = new Set(
+    reported
+      .filter((frame) => frame.frameId !== 0 && !ran.has(frame.frameId))
+      .map((frame) => frame.parentFrameId),
+  );
+  const holding = reports.filter((report) => report.unseen > 0 && !unscripted.has(report.frameId));
+  const unseen = holding.reduce((sum, report) => sum + report.unseen, 0);
+  if (unseen === 0 || unseen > extensionFrames.length) return null;
+  const extensions = new Set(extensionFrames);
+  return {
+    token,
+    parentFrameIds: holding.map((report) => report.frameId),
+    extensionId: extensions.size === 1 ? [...extensions][0]! : "",
+  };
+}
+
+type FrameProbe = { token: string; heard: Map<MessageEventSource, string> };
+
+/** Runs in every page frame, in this extension's isolated world: records
+ * which of its frames say `token` to it (see blankCreatedExtensionFrames).
+ * Self-contained, since Chrome runs it from its source. */
+function listenForFrameAnnouncements(token: string): void {
+  const scope = globalThis as typeof globalThis & { __frameProbe?: FrameProbe };
+  if (!scope.__frameProbe) {
+    const probe: FrameProbe = { token, heard: new Map() };
+    scope.__frameProbe = probe;
+    addEventListener(
+      "message",
+      (event) => {
+        const data: unknown = event.data;
+        if (
+          event.source &&
+          typeof data === "string" &&
+          data.startsWith(`${probe.token}:`) &&
+          data.length > probe.token.length + 1
+        )
+          probe.heard.set(event.source, data.slice(probe.token.length + 1));
+      },
+      true,
+    );
+  }
+  scope.__frameProbe.token = token;
+  scope.__frameProbe.heard.clear();
+}
+
+/** Runs in every page frame, in this extension's isolated world: says
+ * `token` to its parent with a new announcement id, and returns that id.
+ * Self-contained, since Chrome runs it from its source. */
+function announceFrame(token: string): string | null {
+  if (window === window.parent) return null;
+  const announcement = crypto.randomUUID();
+  window.parent.postMessage(`${token}:${announcement}`, "*");
+  return announcement;
+}
+
+/** Runs in every page frame, in this extension's isolated world, after its
+ * frames announced themselves: keeps the frames this extension cannot see
+ * into (no readable document, created blank, so their address names no page)
+ * that did not say `token`, and returns how many there are, with the
+ * announcements heard. Self-contained, since Chrome runs it from its source. */
+async function unseenFrames(token: string): Promise<{ unseen: number; heard: string[] } | null> {
+  const probe = (globalThis as typeof globalThis & { __frameProbe?: FrameProbe }).__frameProbe;
+  if (!probe || probe.token !== token) return null;
+  // Messages from frames in other processes arrive a moment later.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const shadowRootOf = (element: Element): ShadowRoot | null => {
+    try {
+      return chrome.dom.openOrClosedShadowRoot(element as HTMLElement) ?? null;
+    } catch {
+      return element.shadowRoot;
+    }
+  };
+  const unseen: Element[] = [];
+  const visit = (root: Document | ShadowRoot): void => {
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      if (
+        (element instanceof HTMLIFrameElement || element instanceof HTMLFrameElement) &&
+        /^(about:blank)?$/i.test((element.getAttribute("src") ?? "").trim()) &&
+        element.contentWindow !== null &&
+        element.contentDocument === null &&
+        !probe.heard.has(element.contentWindow)
+      )
+        unseen.push(element);
+      const shadow = shadowRootOf(element);
+      if (shadow) visit(shadow);
+    }
+  };
+  visit(document);
+  (globalThis as typeof globalThis & { __unseenFrames?: [string, Element[]] }).__unseenFrames = [
+    token,
+    unseen,
+  ];
+  return { unseen: unseen.length, heard: [...probe.heard.values()] };
+}
+
+/** Runs in a page frame blankCreatedExtensionFrames found holding other
+ * extensions' pages, in this extension's isolated world: removes the frames
+ * unseenFrames kept for `token` and returns how many it removed.
+ * Self-contained, since Chrome runs it from its source. */
+function removeUnseenFrames(token: string): number {
+  const kept = (globalThis as typeof globalThis & { __unseenFrames?: [string, Element[]] })
+    .__unseenFrames;
+  if (!kept || kept[0] !== token) return 0;
+  let count = 0;
+  for (const element of kept[1]) {
+    if (!element.isConnected) continue;
+    element.remove();
+    count += 1;
+  }
+  return count;
 }
 
 /**
