@@ -200,6 +200,39 @@ finish resumes purging on the next pass. Deleting an archived session queues
 its objects for deletion in the deleting transaction, and the maintenance
 worker removes them, so a deleted session never leaves its bundle behind.
 
+### Removing secrets from the archive
+
+The secret history scrub (docs/secrets.md, "Removing secrets from stored
+history") also covers sessions in long-term storage. The database copies that
+stay (session row, turns, goals, readable events) are rewritten in place; the
+archive's read-only guard lets the scrub's updates through (it marks its
+transaction) for content columns only and still refuses every other write.
+Then the bundle and transcript are downloaded and verified against the
+manifest, rewritten line by line, and uploaded under a fresh archive id, so a
+published key is never overwritten. Each bundle row is redacted column by
+column, through the column's lossless codec where it has one, and its other
+bytes (numbers included) stay exact. A model-request snapshot is hydrated
+from the bundle's own blob rows, redacted whole and re-encoded; its new blob
+rows are added in digest order, blob rows nothing refers to any more are
+dropped, and the footer's and manifest's content-blob row count follow. A
+matched blob row a tool catalog still refers to stays, and the run reports
+it as `cell_not_rewritten`. The
+session's manifest is swapped to the new keys, sizes and SHA-256 digests only
+while it is still the manifest that was read; nothing else in it may change.
+The replaced objects are queued for deletion in the same transaction. An
+object with no match is kept as it is. A dry run only reads and counts, as
+`archive_bundle` and `archive_transcript`.
+
+Any error from the swap is treated as an unknown outcome (the connection may
+have dropped while it could still commit, or after it did), and the uploaded
+objects are kept, because deleting them could leave the manifest naming
+objects that are gone. If the swap did not in fact commit, such an object is
+already redacted, but nothing refers to it, so neither the deletion queue nor
+deleting the session removes it; it stays in object storage until removed by
+hand. The uploaded objects are deleted only when the swap was never attempted
+(an upload failed), lost its compare-and-swap (the manifest changed
+meanwhile), or the session is gone.
+
 ## Streamed text deltas
 
 A model answer or reasoning stream arrives as many small provider fragments.

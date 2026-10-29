@@ -3931,7 +3931,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's and 1060's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's and 1091's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3975,6 +3975,18 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "browser_session_associations",
     "organization_inference_residency",
     "organization_inference_residency_events",
+    "task_notes",
+    "host_export_outbox",
+    "session_history_items_repair_audit",
+    "session_goals",
+    "session_goal_revisions",
+    "session_message_search_texts",
+    "session_content_blobs",
+    "session_events",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_system_updates",
+    "task_note_write_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4027,6 +4039,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "summarize_queued_turns_by_hold()",
       "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+      "redact_session_secret_cells_v1(uuid, text, jsonb)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4034,6 +4048,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "summarize_queued_turns_by_hold()",
       "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+      "redact_session_secret_cells_v1(uuid, text, jsonb)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4087,6 +4103,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "summarize_queued_turns_by_hold()",
       "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+      "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+      "redact_session_secret_cells_v1(uuid, text, jsonb)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

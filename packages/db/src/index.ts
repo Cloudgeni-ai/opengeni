@@ -92846,6 +92846,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-secret-redaction";
 export * from "./session-archive";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";

@@ -52,8 +52,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
  * control worker's content-free queued-turn hold summary (0988), the API's
- * inventory of browsers an agent session holds (1002) and the only writer of
- * the EU-only inference setting and its history (1060). Each is
+ * inventory of browsers an agent session holds (1002), the only writer of
+ * the EU-only inference setting and its history (1060) and the secret history
+ * scrub's reader and cell writer (1091). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -70,6 +71,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "summarize_queued_turns_by_hold()",
   "list_agent_held_browser_sessions(integer, bigint)",
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+  "redact_session_secret_cells_v1(uuid, text, jsonb)",
 ] as const;
 
 /**
@@ -87,7 +90,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1002 withholds the held-browser inventory; until it is granted, the API
  * renews no browser holds.
  * 1060 withholds the EU-only change function; until it is granted the setting
- * cannot be changed and stays off.
+ * cannot be changed and stays off. 1091 withholds the secret history scrub's
+ * reader and cell writer; until they are granted, a scrub reports the cells
+ * only they reach as pending.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -95,6 +100,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "summarize_queued_turns_by_hold()",
   "list_agent_held_browser_sessions(integer, bigint)",
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
+  "redact_session_secret_cells_v1(uuid, text, jsonb)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -153,6 +160,30 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_inference_residency_events",
     "organization_memberships",
     "api_keys",
+  ],
+  "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)": [
+    "task_notes",
+    "task_note_write_capabilities",
+    "host_export_outbox",
+    "mcp_operations",
+    "session_history_items_repair_audit",
+  ],
+  "redact_session_secret_cells_v1(uuid, text, jsonb)": [
+    "sessions",
+    "session_turns",
+    "session_goals",
+    "session_goal_revisions",
+    "session_events",
+    "session_message_search_texts",
+    "session_content_blobs",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_system_updates",
+    "task_notes",
+    "task_note_write_capabilities",
+    "host_export_outbox",
+    "mcp_operations",
+    "session_history_items_repair_audit",
   ],
 };
 
