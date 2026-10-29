@@ -363,3 +363,195 @@ test("a page with document-sized accessible names still yields a valid snapshot"
   expect(cell.description).toHaveLength(8_192);
   expect(InteractionSemanticNode.safeParse(snapshot.roots[0]).success).toBe(true);
 });
+
+describe("protected page content", () => {
+  const text = (nodeId: string, backendDOMNodeId: number, name: string): CdpAxNode => ({
+    nodeId,
+    ignored: false,
+    role: { value: "StaticText" },
+    name: { value: name },
+    backendDOMNodeId,
+  });
+  const fromContents = (value: string) => ({
+    value,
+    sources: [{ type: "contents", value: { type: "computedString", value } }],
+  });
+  const related = (backendDOMNodeId: number) => ({
+    type: "idrefList",
+    value: `id-${backendDOMNodeId}`,
+    relatedNodes: [{ backendDOMNodeId, idref: `id-${backendDOMNodeId}` }],
+  });
+  const normalize = (nodes: CdpAxNode[]) =>
+    normalizeCdpAccessibilityTree({
+      controllerGeneration: "controller-1",
+      targetId: "target-1",
+      documentGeneration: "document-1",
+      nodes,
+    });
+  const tree = (marked: boolean): CdpAxNode[] => {
+    const mark = (reason: "password" | "payment" | "private") =>
+      marked ? { protectedReason: reason } : {};
+    return [
+      {
+        nodeId: "1",
+        ignored: false,
+        role: { value: "RootWebArea" },
+        childIds: ["2", "3", "4", "5", "6", "7", "8"],
+        backendDOMNodeId: 1,
+      },
+      // A private text field: present, labelled and fillable.
+      {
+        nodeId: "2",
+        ignored: false,
+        role: { value: "textbox" },
+        name: { value: "Notes" },
+        value: { value: "secret note" },
+        childIds: ["20"],
+        backendDOMNodeId: 2,
+        ...mark("private"),
+      },
+      text("20", 20, "secret note"),
+      // A payment select: its options are what it holds.
+      {
+        nodeId: "3",
+        ignored: false,
+        role: { value: "combobox" },
+        name: { value: "Expiry" },
+        value: { value: "12/30" },
+        childIds: ["30"],
+        backendDOMNodeId: 3,
+        ...mark("payment"),
+      },
+      {
+        nodeId: "30",
+        ignored: false,
+        role: { value: "MenuListPopup" },
+        childIds: ["31"],
+        backendDOMNodeId: 30,
+      },
+      {
+        nodeId: "31",
+        ignored: false,
+        role: { value: "MenuListOption" },
+        name: { value: "12/30" },
+        properties: [{ name: "selected", value: { type: "boolean", value: true } }],
+        backendDOMNodeId: 31,
+      },
+      // A button whose name includes a private span.
+      {
+        nodeId: "4",
+        ignored: false,
+        role: { value: "button" },
+        name: fromContents("Pay 42 now"),
+        childIds: ["40", "41", "42"],
+        backendDOMNodeId: 4,
+      },
+      text("40", 40, "Pay"),
+      { ...text("41", 41, "42"), ...mark("private") },
+      text("42", 42, "now"),
+      // A button labelled and described by private text and public text.
+      {
+        nodeId: "5",
+        ignored: false,
+        role: { value: "button" },
+        name: {
+          value: "Ending 4242 Confirm",
+          sources: [
+            {
+              type: "relatedElement",
+              attribute: "aria-labelledby",
+              attributeValue: {
+                type: "idrefList",
+                value: "id-6 id-7",
+                relatedNodes: [{ backendDOMNodeId: 6 }, { backendDOMNodeId: 7 }],
+              },
+              value: { type: "computedString", value: "Ending 4242 Confirm" },
+            },
+          ],
+        },
+        description: { value: "Ending 4242" },
+        properties: [{ name: "describedby", value: related(6) }],
+        backendDOMNodeId: 5,
+      },
+      {
+        nodeId: "6",
+        ignored: false,
+        role: { value: "generic" },
+        childIds: ["60"],
+        backendDOMNodeId: 6,
+        ...mark("payment"),
+      },
+      text("60", 60, "Ending 4242"),
+      {
+        nodeId: "7",
+        ignored: false,
+        role: { value: "generic" },
+        childIds: ["70"],
+        backendDOMNodeId: 7,
+      },
+      text("70", 70, "Confirm"),
+      // A link inside a private block: its address is what it holds.
+      {
+        nodeId: "8",
+        ignored: false,
+        role: { value: "link" },
+        name: fromContents("statement"),
+        properties: [
+          { name: "url", value: { type: "string", value: "https://bank.test/acct/42" } },
+        ],
+        childIds: ["80"],
+        backendDOMNodeId: 8,
+        ...mark("private"),
+      },
+      text("80", 80, "statement"),
+    ];
+  };
+
+  test("a marked node shows that it holds something, never what", () => {
+    const snapshot = normalize(tree(true));
+    const [notes, expiry, pay, confirm, , , link] = snapshot.roots[0]!.children!;
+    expect(notes).toEqual({
+      ref: notes!.ref,
+      role: "textbox",
+      name: "Notes",
+      value: { redacted: true, reason: "private" },
+      states: [],
+      actions: ["focus", "fill", "type", "press"],
+    });
+    expect(expiry).toMatchObject({
+      role: "combobox",
+      name: "Expiry",
+      value: { redacted: true, reason: "payment" },
+    });
+    expect(expiry).not.toHaveProperty("children");
+    expect(pay).toMatchObject({ role: "button", name: "Pay now" });
+    expect(pay!.children!.map((child) => child.name ?? child.value)).toEqual([
+      "Pay",
+      { redacted: true, reason: "private" },
+      "now",
+    ]);
+    expect(confirm).toMatchObject({ role: "button", name: "Confirm" });
+    expect(confirm).not.toHaveProperty("description");
+    expect(link).toMatchObject({ role: "link", actions: ["click"] });
+    expect(link).not.toHaveProperty("name");
+    expect(link!.states).toEqual([]);
+    const shown = JSON.stringify(snapshot.roots);
+    for (const secret of ["secret note", "12/30", "Pay 42", "4242", "bank.test", "statement"]) {
+      expect(shown).not.toContain(secret);
+    }
+    expect(InteractionSemanticNode.safeParse(snapshot.roots[0]).success).toBe(true);
+  });
+
+  test("an unmarked tree is shown as before", () => {
+    const shown = JSON.stringify(normalize(tree(false)).roots);
+    for (const expected of [
+      "secret note",
+      "12/30",
+      "Pay 42 now",
+      "Ending 4242 Confirm",
+      "bank.test",
+    ]) {
+      expect(shown).toContain(expected);
+    }
+  });
+});

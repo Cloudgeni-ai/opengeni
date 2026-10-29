@@ -141,8 +141,10 @@ describe("connected-machine interaction control errors", () => {
     expect(interactionControlRequestFor("computer.action")).toBe("action");
     expect(interactionControlRequestFor("browser.attach")).toBe("live_view");
     expect(interactionControlRequestFor("computer.attach")).toBe("live_view");
-    expect(interactionControlRequestFor("browser.read")).toBe("request");
+    expect(interactionControlRequestFor("browser.read")).toBe("read");
+    expect(interactionControlRequestFor("computer.read")).toBe("read");
     expect(interactionControlRequestFor("browser.control")).toBe("request");
+    expect(interactionControlRequestFor("computer.end")).toBe("request");
 
     // A click that reached the machine and got no answer may have happened.
     const click = browserRouteError(timeout({ neverSent: false }), "action") as ApiHttpError;
@@ -155,7 +157,7 @@ describe("connected-machine interaction control errors", () => {
     // One that never left the API did not.
     const unsent = browserRouteError(timeout({ neverSent: true }), "action") as ApiHttpError;
     expect(unsent.message).toBe(
-      "The connected machine did not answer in time, so this browser action was not sent.",
+      "The connected machine did not answer in time, so this browser action was not sent. It is safe to retry.",
     );
     expect(unsent.outcomeUnknown).toBe(false);
     const computerClick = interactionControlApiError(
@@ -166,11 +168,13 @@ describe("connected-machine interaction control errors", () => {
     expect(computerClick?.message).toBe(
       "The connected machine did not answer this computer action in time, so whether it ran is unknown. Check the window before doing anything again; do not repeat the action automatically.",
     );
-    // Reads and other requests name themselves too, and nothing mentions a
-    // live view that was never involved.
-    expect(browserRouteError(timeout({ neverSent: false })).message).toBe(
-      "The connected machine did not answer this browser request in time.",
+    // Other requests name themselves too, and nothing mentions a live view
+    // that was never involved.
+    const opened = browserRouteError(timeout({ neverSent: false })) as ApiHttpError;
+    expect(opened.message).toBe(
+      "The connected machine did not answer this browser request in time, so whether it ran is unknown. Check the browser before repeating it.",
     );
+    expect(opened.outcomeUnknown).toBe(true);
     for (const code of [
       AgentErrorCode.ERROR_CODE_UNSUPPORTED,
       AgentErrorCode.ERROR_CODE_OS,
@@ -185,7 +189,7 @@ describe("connected-machine interaction control errors", () => {
       AgentErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
       AgentErrorCode.ERROR_CODE_UNSPECIFIED,
     ]) {
-      for (const request of ["action", "request"] as const) {
+      for (const request of ["action", "read", "request"] as const) {
         const projected = interactionControlApiError(controlError(code), "browser", request)!;
         expect(projected.message).not.toContain("live view");
         expect(projected.message).not.toContain("PRIVATE");
@@ -195,6 +199,52 @@ describe("connected-machine interaction control errors", () => {
         ).toContain("live view");
       }
     }
+  });
+
+  test("says whether a timed-out request may have run and when repeating it is safe", () => {
+    const timeout = (neverSent: boolean) =>
+      controlError(AgentErrorCode.ERROR_CODE_TIMEOUT, { retryable: true, neverSent });
+    // A request that reached the machine (opening a tab, ending a session)
+    // may have run.
+    const sent = interactionControlApiError(timeout(false), "computer", "request")!;
+    expect(sent.message).toBe(
+      "The connected machine did not answer this computer request in time, so whether it ran is unknown. Check the screen before repeating it.",
+    );
+    expect(sent.outcomeUnknown).toBe(true);
+    // One that never left the API did not.
+    const unsent = interactionControlApiError(timeout(true), "browser", "request")!;
+    expect(unsent.message).toBe(
+      "The connected machine did not answer in time, so this browser request was not sent. It is safe to retry.",
+    );
+    expect(unsent.outcomeUnknown).toBe(false);
+    // A read changes nothing, sent or not.
+    for (const neverSent of [false, true]) {
+      const read = interactionControlApiError(timeout(neverSent), "browser", "read")!;
+      expect(read.message).toBe(
+        "The connected machine did not answer this browser request in time. It only reads, so it is safe to retry.",
+      );
+      expect(read.outcomeUnknown).toBe(false);
+      expect(read.retryable).toBe(true);
+    }
+  });
+
+  test("a missing controller or missing screen access names the next step", () => {
+    const notFound = controlError(AgentErrorCode.ERROR_CODE_NOT_FOUND);
+    expect(interactionControlApiError(notFound, "browser", "action")!.message).toBe(
+      "The connected machine's browser controller is not running, so this browser action could not run. Open the browser again with browser_open, then look at the page before repeating it.",
+    );
+    expect(interactionControlApiError(notFound, "computer", "read")!.message).toBe(
+      "The connected machine's screen controller is not running, so this computer request could not run. Open the computer again with computer_open, then look at the screen before repeating it.",
+    );
+    const consent = interactionControlApiError(
+      controlError(AgentErrorCode.ERROR_CODE_CONSENT_REQUIRED),
+      "computer",
+      "action",
+    )!;
+    expect(consent.status).toBe(403);
+    expect(consent.message).toBe(
+      "Screen access is not enabled on this connected machine, so this computer action could not run. Turn screen control on with connected_machine_enable_screen_control; on a Mac, the person must also allow Opengeni under Privacy & Security in System Settings.",
+    );
   });
 
   test("omits malformed inner correlation instead of reflecting it", () => {

@@ -4,6 +4,7 @@ import { InteractionOutcomeUnknownDriverError } from "@opengeni/interaction";
 import { AgentBrowserDriver, CdpTransportError, type BrowserCdpConnection } from "../src";
 import { goneBrowserTargetMessage } from "../src/cdp-driver";
 import type { OwnedTabsState } from "../src/attached-tab-ledger";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 test("metadata-only tab opening returns owned navigated inventory without scanning accessibility", async () => {
   const fixture = inventoryFixture();
@@ -347,6 +348,8 @@ function inventoryFixture(
       options?: Parameters<BrowserCdpConnection["send"]>[2],
     ): Promise<T> {
       calls.push({ method, params });
+      const probe = protectedFieldsProbeAnswer(method, params);
+      if (probe) return probe as T;
       if (method === "Target.createTarget") {
         const targetId = `opened-${++created}`;
         pages.set(targetId, {

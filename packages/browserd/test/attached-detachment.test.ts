@@ -9,6 +9,7 @@ import {
 } from "../src/attached-cdp";
 import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 class DetachmentBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Readonly<Record<string, unknown>>> = [];
@@ -90,6 +91,7 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
                 : 1,
             },
           };
+        result = protectedFieldsProbeAnswer(String(payload.method), payload.params) ?? result;
         await this.beforeCommandReply?.(payload.method);
         return { result } as T;
       }

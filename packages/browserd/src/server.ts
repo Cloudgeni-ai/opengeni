@@ -2410,7 +2410,16 @@ async function browserReadResponse<T>(
         await new Promise((resolve) => setTimeout(resolve, BROWSER_READ_RETRY_PAUSE_MS));
         continue;
       }
-      return failure("resource_unavailable", `browser ${operation} unavailable`, true, 503);
+      // The driver's error class and frame travel beside the error, as for a
+      // driver failure, so the caller's log keeps the cause.
+      return failureResponse(
+        "resource_unavailable",
+        `browser ${operation} unavailable`,
+        true,
+        503,
+        undefined,
+        interactionDriverDiagnostic(error),
+      );
     }
     return respond(value);
   }

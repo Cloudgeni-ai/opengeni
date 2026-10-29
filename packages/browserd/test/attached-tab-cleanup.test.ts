@@ -16,6 +16,7 @@ import {
   type AttachedTabLedger,
 } from "../src/attached-tab-ledger";
 import { BrowserSupervisor } from "../src/supervisor";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 const DEVICE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const GENERATION = "chrome-generation-1";
@@ -162,6 +163,8 @@ class FakeChromeProfile {
   }
 
   private command(tabId: string, method: string, params: unknown): unknown {
+    const probe = protectedFieldsProbeAnswer(method, params);
+    if (probe) return probe;
     const tab = this.tabs.get(tabId);
     if (method === "Page.getFrameTree")
       return {

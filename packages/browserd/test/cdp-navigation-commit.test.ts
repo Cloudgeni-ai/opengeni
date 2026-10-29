@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { BrowserActionCommand } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
 import { AgentBrowserDriver, CdpConnection, type BrowserCommandRunner } from "../src";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 // Chromium answers Page.navigate before the new document commits, and reports
 // the commit in an event that can arrive later still. These tests script
@@ -239,6 +240,7 @@ function navigationFixture() {
         }
         break;
     }
+    result = protectedFieldsProbeAnswer(command.method, command.params) ?? result;
     queueMicrotask(() =>
       socket.dispatchEvent(
         new MessageEvent("message", {

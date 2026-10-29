@@ -3160,7 +3160,9 @@ function parseEnvelope(body: string, status: number): unknown {
       throw new BrowserControlRequestError(
         status,
         parsed.data,
-        parsed.data.code === "driver_failed"
+        // A driver failure, or a read that kept failing for an unclassified
+        // reason, carries the driver's error class and frame for logs.
+        parsed.data.code === "driver_failed" || parsed.data.code === "resource_unavailable"
           ? parseInteractionDriverDiagnostic(value.diagnostic)
           : null,
       );

@@ -7,6 +7,7 @@ import {
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 const FOCUS_EMULATION = "Emulation.setFocusEmulationEnabled";
 
@@ -42,7 +43,11 @@ class BackgroundTabBridge implements AttachedBrowserBridgeTransport {
       case "debugger.poll":
         return { events: [], cursor: 0, truncated: false } as T;
       case "debugger.command":
-        return { result: this.result(payload) } as T;
+        return {
+          result:
+            protectedFieldsProbeAnswer(String(payload.method), payload.params) ??
+            this.result(payload),
+        } as T;
       default:
         return {} as T;
     }

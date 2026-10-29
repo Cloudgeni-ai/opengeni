@@ -16,16 +16,19 @@ export type InteractionControlSurface = "browser" | "computer";
 
 /**
  * What the failed Connected Machine request was for: opening the live view a
- * person watches, running an action, or any other request (reads, opening or
- * resuming the session). Failures are worded for it, since a click that
- * timed out has nothing to do with a live view.
+ * person watches, running an action, a read that changes nothing, or any
+ * other request (opening, selecting or closing a tab, resuming or ending the
+ * session, recordings, saving downloads). Failures are worded for it, since a
+ * click that timed out has nothing to do with a live view, and a read that
+ * timed out is safe to repeat where a request may already have run.
  */
-export type InteractionControlRequest = "live_view" | "action" | "request";
+export type InteractionControlRequest = "live_view" | "action" | "read" | "request";
 
 /** The request kind of a browser or computer route's channel operation. */
 export function interactionControlRequestFor(operation: string): InteractionControlRequest {
   if (operation === "browser.action" || operation === "computer.action") return "action";
   if (operation === "browser.attach" || operation === "computer.attach") return "live_view";
+  if (operation === "browser.read" || operation === "computer.read") return "read";
   return "request";
 }
 
@@ -135,7 +138,9 @@ export function interactionControlApiError(
     message: ruling.message,
     retryable: controlError.retryable,
     outcomeUnknown:
-      controlError.code === AgentErrorCode.ERROR_CODE_TIMEOUT && !controlError.neverSent,
+      request !== "read" &&
+      controlError.code === AgentErrorCode.ERROR_CODE_TIMEOUT &&
+      !controlError.neverSent,
     details,
   });
 }
@@ -255,21 +260,22 @@ function safeControlRequestId(value: string | null): value is string {
   return value !== null && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value);
 }
 
-/** The ruling for a failed action or other request: it names that request,
- * and an action that may have reached the machine says its outcome is unknown. */
+/** The ruling for a failed action, read or other request: it names that
+ * request and says what to do next. One that timed out after it reached the
+ * machine says its outcome is unknown, unless it only reads. */
 function requestControlFailureRuling(
   error: SelfhostedControlError,
   surface: InteractionControlSurface,
-  request: "action" | "request",
+  request: "action" | "read" | "request",
   code: InteractionControlFailureCode,
 ): { status: number; code: ErrorCode; message: string } {
-  const what = `this ${surface} ${request}`;
+  const what = `this ${surface} ${request === "action" ? "action" : "request"}`;
   switch (code) {
     case "consent_required":
       return {
         status: 403,
         code: "forbidden",
-        message: `Screen access is not enabled on this connected machine, so ${what} could not run.`,
+        message: `Screen access is not enabled on this connected machine, so ${what} could not run. Turn screen control on with connected_machine_enable_screen_control; on a Mac, the person must also allow Opengeni under Privacy & Security in System Settings.`,
       };
     case "unsupported":
       return {
@@ -281,7 +287,10 @@ function requestControlFailureRuling(
       return {
         status: 404,
         code: "not_found",
-        message: `The connected machine no longer has what ${what} needs.`,
+        message:
+          surface === "browser"
+            ? `The connected machine's browser controller is not running, so ${what} could not run. Open the browser again with browser_open, then look at the page before repeating it.`
+            : `The connected machine's screen controller is not running, so ${what} could not run. Open the computer again with computer_open, then look at the screen before repeating it.`,
       };
     case "fenced":
       return {
@@ -306,11 +315,13 @@ function requestControlFailureRuling(
         status: 504,
         code: "upstream_unavailable",
         message:
-          request === "request"
-            ? `The connected machine did not answer ${what} in time.`
+          request === "read"
+            ? `The connected machine did not answer ${what} in time. It only reads, so it is safe to retry.`
             : error.neverSent
-              ? `The connected machine did not answer in time, so ${what} was not sent.`
-              : `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "page" : "window"} before doing anything again; do not repeat the action automatically.`,
+              ? `The connected machine did not answer in time, so ${what} was not sent. It is safe to retry.`
+              : request === "request"
+                ? `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "browser" : "screen"} before repeating it.`
+                : `The connected machine did not answer ${what} in time, so whether it ran is unknown. Check the ${surface === "browser" ? "page" : "window"} before doing anything again; do not repeat the action automatically.`,
       };
     case "payload_too_large":
       return {

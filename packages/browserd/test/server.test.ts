@@ -364,11 +364,15 @@ describe("BrowserControlServer", () => {
           reported.length = 0;
           const failed = await read();
           expect(failed.status).toBe(503);
-          expect(((await failed.json()) as { error: unknown }).error).toEqual({
+          const body = (await failed.json()) as { error: unknown; diagnostic?: unknown };
+          expect(body.error).toEqual({
             code: "resource_unavailable",
             message: `browser ${label} unavailable`,
             retryable: true,
           });
+          // The driver's error class travels beside the error for the
+          // caller's log, never inside it.
+          expect(body.diagnostic).toMatchObject({ errorClass: "Error" });
           expect(attempts).toBe(2);
           expect(reported).toHaveLength(2);
         },
