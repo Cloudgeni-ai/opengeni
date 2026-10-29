@@ -16,7 +16,7 @@ import { oneLine, type NormalizedEventInput } from "./normalize";
  * recording is one an agent made, and notes an agent saved name its chat, so
  * those events count as Opengeni's own.
  *
- * Chat and usage facts come from workspace_activity_events (migration 1100):
+ * Chat and usage facts come from workspace_activity_events (migration 1105):
  * a chat finished, failed, was stopped, waits for an approval, asked a
  * question or sent a notification, and usage thresholds. A chat event counts
  * as Opengeni's own when an automation run caused it, and carries that run's

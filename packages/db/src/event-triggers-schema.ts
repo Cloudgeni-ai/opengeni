@@ -145,7 +145,7 @@ export const inboundEvents = pgTable(
     data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
     dataTruncated: boolean("data_truncated").notNull().default(false),
     gapBefore: boolean("gap_before").notNull().default(false),
-    // Migration 1100: 0, or the chain depth of the automation run that caused it.
+    // Migration 1105: 0, or the chain depth of the automation run that caused it.
     chainDepth: smallint("chain_depth").notNull().default(0),
   },
   (table) => ({
@@ -206,7 +206,7 @@ export const scheduledTaskEventSettings = pgTable("scheduled_task_event_settings
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// Migration 1100: what happens in Opengeni itself (chats finishing, failing,
+// Migration 1105: what happens in Opengeni itself (chats finishing, failing,
 // waiting; usage thresholds), written by database triggers and kept 24 hours
 // for the "This workspace" feed. Row security decides who sees each fact.
 export const workspaceActivityEvents = pgTable(

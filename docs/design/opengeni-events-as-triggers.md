@@ -1,7 +1,7 @@
 # Opengeni's own events as automation triggers
 
 Status: **Accepted** (2026-10-29; proposed 2026-10-26). Built in migration
-1100. Extends the "This workspace" source in
+1105. Extends the "This workspace" source in
 [Automations, event sources and MCP Events](automations-and-events.md) and
 settles the chain (hop) limit that its decision 6 deferred.
 

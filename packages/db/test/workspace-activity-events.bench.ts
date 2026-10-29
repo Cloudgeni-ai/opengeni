@@ -1,11 +1,11 @@
-/** Cost of migration 1100's session_events trigger on the append path.
+/** Cost of migration 1105's session_events trigger on the append path.
  * bun packages/db/test/workspace-activity-events.bench.ts [rows=2000] [runs=5]
  * Uses only the disposable PostgreSQL fixture, never a live application database.
  *
  * Each case appends `rows` session_events in one INSERT ... SELECT as the
  * application role under workspace row security, with every other
  * session_events trigger active, and reports microseconds per row. "off"
- * disables only the 1100 trigger, so the difference is its whole cost.
+ * disables only the 1105 trigger, so the difference is its whole cost.
  */
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";

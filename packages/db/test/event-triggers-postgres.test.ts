@@ -846,7 +846,7 @@ describe("dispatch", () => {
   });
 });
 
-describe("Opengeni's own events (migration 1100)", () => {
+describe("Opengeni's own events (migration 1105)", () => {
   /** Test setup past the lifecycle guards: links that real runs make through their own paths. */
   async function force(write: (tx: postgres.TransactionSql) => Promise<unknown>) {
     await shared!.admin.begin(async (tx) => {

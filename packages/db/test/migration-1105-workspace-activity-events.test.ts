@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { WORKSPACE_WEBHOOK_EVENT_TYPES } from "@opengeni/contracts";
 
 const migration = readFileSync(
-  new URL("../drizzle/1100_workspace_activity_events.sql", import.meta.url),
+  new URL("../drizzle/1105_workspace_activity_events.sql", import.meta.url),
   "utf8",
 );
 
@@ -13,7 +13,7 @@ const migration = readFileSync(
 // types core's catalog leaves out (workspaceEventTypesNotOffered, checked
 // against the same two in core's tests). A new chat webhook type is then a
 // conscious decision here too.
-test("1100's session trigger fires for exactly the offered chat types", () => {
+test("1105's session trigger fires for exactly the offered chat types", () => {
   const notOffered = ["session.status.changed", "session.notification.withdrawn"];
   const chatTypes = WORKSPACE_WEBHOOK_EVENT_TYPES.filter(
     (type) =>
@@ -31,7 +31,7 @@ test("1100's session trigger fires for exactly the offered chat types", () => {
   }
 });
 
-test("1100 is rolling, protects the facts table and never lets a fact fail its insert", () => {
+test("1105 is rolling, protects the facts table and never lets a fact fail its insert", () => {
   expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
   expect(migration).toContain("ALTER TABLE workspace_activity_events ENABLE ROW LEVEL SECURITY;");
   expect(migration).toContain("ALTER TABLE workspace_activity_events FORCE ROW LEVEL SECURITY;");

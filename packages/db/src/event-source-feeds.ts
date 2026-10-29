@@ -320,7 +320,7 @@ export type WorkspaceActivityEventsRead = {
 };
 
 /**
- * Migration 1100. The activity facts (chats finishing, failing, waiting;
+ * Migration 1105. The activity facts (chats finishing, failing, waiting;
  * usage thresholds) a person may see that a source has not stored yet,
  * oldest first, written after `since`. It reads as that person, so row
  * security keeps out other people's private chats and usage, exactly as

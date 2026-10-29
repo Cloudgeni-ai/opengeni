@@ -607,7 +607,7 @@ export type StoredEventInput = {
   gapBefore: boolean;
   /**
    * The chain depth of the automation run that caused the event, or 0 when
-   * none did (every event from another app). Migration 1100.
+   * none did (every event from another app). Migration 1105.
    */
   chainDepth?: number;
 };

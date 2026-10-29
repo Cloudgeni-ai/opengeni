@@ -2721,7 +2721,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
-  // Written by the invoker-rights 1100 triggers; read by the "This workspace" feed.
+  // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
   "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_versions",
