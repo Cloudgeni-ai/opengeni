@@ -209,6 +209,8 @@ export {
 export { resolveTurnSurface } from "./turn-surface";
 export {
   billingOriginForGrant,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
   requestBillingOrigin,
   resolveTurnBillingOrigin,
   stampRequestBillingOrigin,

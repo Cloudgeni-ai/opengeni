@@ -11,6 +11,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackAccessMode: "limited",
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
+    billingLegacyAccountIds: ["25eacc5d-f383-4f79-910a-b3d11dbf1310"],
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],

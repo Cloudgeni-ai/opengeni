@@ -1,13 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
-import {
-  withBillingOriginOverride,
-  withCreditDebitAttribution,
-  type Database,
-} from "@opengeni/db";
+import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS } from "@opengeni/config";
+import * as opengeniDb from "@opengeni/db";
+import { withBillingOriginOverride, withCreditDebitAttribution, type Database } from "@opengeni/db";
 import type { AccessGrantAuthorization } from "../src/access";
 import {
   billingOriginForGrant,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
   requestBillingOrigin,
   resolveTurnBillingOrigin,
   stampRequestBillingOrigin,
@@ -74,14 +74,16 @@ describe("billingOriginForGrant", () => {
     }
   });
 
-  test("an unverified person credential is api; a published Site's viewer is app", async () => {
+  test("an unverified person credential is api, even inside a Site frame", async () => {
     expect(billingOriginForGrant(human)).toBe("api");
+    // The frame header is caller input: a personal API key that sends it
+    // stays API use. Published Sites stamp their requests instead.
     expect(
       await withSiteSessionOrigin(
         { siteId: "site", ownerSubjectId: "user:owner" } as never,
         async () => billingOriginForGrant(human),
       ),
-    ).toBe("app");
+    ).toBe("api");
   });
 });
 
@@ -146,9 +148,50 @@ describe("resolveTurnBillingOrigin", () => {
       ).toBe(billingOrigin);
     }
     // Plan credit never pays for an agent whose chat cannot be found.
-    expect(await resolveTurnBillingOrigin(noDb, { grant: agent, requestedSurface: "web" })).toBe(
-      "api",
-    );
+    const read = spyOn(opengeniDb, "readTurnBillingOrigin").mockResolvedValueOnce(null);
+    try {
+      expect(await resolveTurnBillingOrigin(noDb, { grant: agent, requestedSurface: "web" })).toBe(
+        "api",
+      );
+      // A failed read fails the request instead of deciding who pays.
+      read.mockRejectedValueOnce(new Error("connection reset"));
+      await expect(
+        resolveTurnBillingOrigin(noDb, { grant: agent, requestedSurface: "web" }),
+      ).rejects.toThrow("connection reset");
+    } finally {
+      read.mockRestore();
+    }
+  });
+});
+
+describe("legacy billing accounts (CloudGeni)", () => {
+  afterEach(() => configureBillingLegacyAccounts(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS));
+
+  test("CloudGeni's host account is listed by default and all its work is funded as app", async () => {
+    const cloudgeni: AccessGrant = {
+      ...base,
+      accountId: DEFAULT_BILLING_LEGACY_ACCOUNT_IDS[0]!,
+      subjectId: "api_key:cloudgeni",
+      principalKind: "api_key",
+    };
+    expect(billingOriginForGrant(cloudgeni)).toBe("app");
+    expect(
+      await resolveTurnBillingOrigin(noDb, { grant: cloudgeni, requestedSurface: "embedded" }),
+    ).toBe("app");
+    expect(
+      await withBillingOriginOverride("api", () =>
+        resolveTurnBillingOrigin(noDb, { grant: cloudgeni }),
+      ),
+    ).toBe("app");
+    expect(fundedBillingOrigin(cloudgeni.accountId.toUpperCase(), "api")).toBe("app");
+    // Other accounts keep the split.
+    expect(billingOriginForGrant({ ...cloudgeni, accountId: base.accountId })).toBe("api");
+  });
+
+  test("the configured list replaces the default", () => {
+    configureBillingLegacyAccounts([base.accountId]);
+    expect(fundedBillingOrigin(base.accountId, "api")).toBe("app");
+    expect(fundedBillingOrigin(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS[0], "api")).toBe("api");
   });
 });
 

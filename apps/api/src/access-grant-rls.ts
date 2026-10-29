@@ -1,6 +1,7 @@
 import type { AccessGrant, BillingOrigin } from "@opengeni/contracts";
 import {
   billingOriginForGrant,
+  fundedBillingOrigin,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
@@ -46,7 +47,10 @@ function agentAttemptAuthorityError(
 export function creditDebitAttributionForGrant(grant: AccessGrant): CreditDebitAttribution {
   if (grant.principalKind === "agent_attempt") return currentCreditDebitAttribution();
   // Who pays: a trusted dispatcher's origin, else the credential's.
-  const billingOrigin = ambientBillingOrigin() ?? billingOriginForGrant(grant);
+  const billingOrigin = fundedBillingOrigin(
+    grant.accountId,
+    ambientBillingOrigin() ?? billingOriginForGrant(grant),
+  );
   return grant.principalKind === "human_session"
     ? { kind: "human", initiatingHumanSubjectId: grant.subjectId, billingOrigin }
     : ["service", "api_key", "configured_key", "mcp_gateway"].includes(grant.principalKind ?? "")
@@ -74,13 +78,15 @@ async function agentTurnBillingOrigin(
   const key = `${grant.accountId}:${grant.workspaceId}:${turnId}`;
   const remembered = cache.get(key);
   if (remembered) return remembered;
-  // Plan credit never pays for work whose chat cannot be found.
-  const origin =
-    (await readTurnBillingOrigin(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      turnId,
-    })) ?? "api";
+  const stored = await readTurnBillingOrigin(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    turnId,
+  });
+  // Plan credit never pays for work whose chat cannot be found. Only a
+  // decided origin is remembered: a turn not yet visible is read again.
+  if (!stored) return "api";
+  const origin = stored;
   if (cache.size >= TURN_ORIGIN_LIMIT) {
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
@@ -100,9 +106,15 @@ export async function billingOriginForAccessGrant(
 ): Promise<BillingOrigin> {
   const turnId = grant.metadata?.turnId;
   if (grant.principalKind === "agent_attempt") {
-    return typeof turnId === "string" ? await agentTurnBillingOrigin(deps, grant, turnId) : "api";
+    return fundedBillingOrigin(
+      grant.accountId,
+      typeof turnId === "string" ? await agentTurnBillingOrigin(deps, grant, turnId) : "api",
+    );
   }
-  return ambientBillingOrigin() ?? billingOriginForGrant(grant);
+  return fundedBillingOrigin(
+    grant.accountId,
+    ambientBillingOrigin() ?? billingOriginForGrant(grant),
+  );
 }
 
 /**

@@ -365,6 +365,23 @@ test("plan credit never repays API debt: not mid-period, not at expiry, not in t
   expect((await getBillingBalance(client.db, accountId)).creditsMicros).toBe(3 * M);
 }, 180_000);
 
+test("an ended period awaiting expiry never reads API debt as spent plan credit", async () => {
+  if (!client || !shared) return;
+  const { accountId, periodId } = await proPeriod();
+  await topup(accountId, 1 * M);
+  await apiOverrun(accountId, 6 * M);
+  // The period ended; no writer has expired it yet (the read settles it).
+  await shared.admin`
+    update plan_credit_periods set period_end = now() - interval '1 second'
+    where id = ${periodId}::uuid`;
+  const pending = await getBillingBalance(client.db, accountId);
+  expect(pending.plan?.creditRemainingMicros).toBe(0);
+  expect(pending.plan?.creditPendingExpiryMicros).toBe(200 * M);
+  expect(pending.balanceMicros).toBe(-5 * M);
+  expect(pending.creditsMicros).toBe(-5 * M);
+  expect(pending.apiDebtMicros).toBe(5 * M);
+}, 180_000);
+
 test("app overruns still carry into the next period's opening debt", async () => {
   if (!client || !shared) return;
   const { accountId, periodId } = await proPeriod();

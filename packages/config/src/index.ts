@@ -341,6 +341,27 @@ export const McpOperationRecoverySchema = z
 export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
 
+/** CloudGeni's production host account (Cloudgeni-Embedded). */
+export const DEFAULT_BILLING_LEGACY_ACCOUNT_IDS: readonly string[] = [
+  "25eacc5d-f383-4f79-910a-b3d11dbf1310",
+];
+
+/**
+ * Whether this account keeps the billing terms from before the app/API split:
+ * any credit pays any use, no own-key platform fee, no newly metered tools.
+ */
+export function isLegacyBillingAccount(
+  settings: Pick<Settings, "billingLegacyAccountIds">,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    typeof accountId === "string" &&
+    (settings.billingLegacyAccountIds ?? DEFAULT_BILLING_LEGACY_ACCOUNT_IDS).includes(
+      accountId.toLowerCase(),
+    )
+  );
+}
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -2301,6 +2322,22 @@ const SettingsSchema = z.object({
   stripeCreditsProductId: z.string().optional(),
   // Enables subscription service paths only; top-up billing remains independent.
   subscriptionPlansEnabled: EnvBoolean.default(false),
+  // Accounts billed on the terms from before the app/API split
+  // (docs/billing-origin.md#cloudgeni): any credit pays any use, no own-key
+  // platform fee, no newly metered tool charges. Defaults to CloudGeni's host
+  // account; "none" lists no account.
+  billingLegacyAccountIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value.trim().toLowerCase() === "none"
+          ? []
+          : value
+              .split(",")
+              .map((id) => id.trim().toLowerCase())
+              .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
+  ),
   mcpServers: z
     .array(
       z.object({
@@ -6354,6 +6391,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
+    billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);

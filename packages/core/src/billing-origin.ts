@@ -1,16 +1,12 @@
-import type {
-  AccessGrant,
-  BillingOrigin,
-  SessionTurnSurface,
-} from "@opengeni/contracts";
+import type { AccessGrant, BillingOrigin, SessionTurnSurface } from "@opengeni/contracts";
 import {
   ambientBillingOrigin,
   currentCreditDebitAttribution,
   readTurnBillingOrigin,
   type Database,
 } from "@opengeni/db";
+import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS } from "@opengeni/config";
 import { isAppCredentialGrant, type AccessGrantAuthorization } from "./access";
-import { currentSiteSessionOrigin } from "./site-session-origin";
 
 /* ----------------------------------------------------------------------------
    Funding origin of accepted work (docs/billing-origin.md).
@@ -22,6 +18,28 @@ import { currentSiteSessionOrigin } from "./site-session-origin";
    -------------------------------------------------------------------------- */
 
 const requestBillingOrigins = new WeakMap<Request, BillingOrigin>();
+
+/*
+ * Accounts on the billing terms from before the split (CloudGeni's host
+ * account by default): all their work is funded as app use, which is exactly
+ * how every turn was funded before origins existed. Processes install the
+ * configured list at boot with `configureBillingLegacyAccounts`.
+ */
+let legacyAccountIds: ReadonlySet<string> = new Set(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS);
+
+export function configureBillingLegacyAccounts(accountIds: readonly string[]): void {
+  legacyAccountIds = new Set(accountIds.map((id) => id.toLowerCase()));
+}
+
+/** The origin `accountId` is funded under: a legacy account's is always app. */
+export function fundedBillingOrigin(
+  accountId: string | null | undefined,
+  origin: BillingOrigin,
+): BillingOrigin {
+  return typeof accountId === "string" && legacyAccountIds.has(accountId.toLowerCase())
+    ? "app"
+    : origin;
+}
 
 /**
  * TRUSTED IN-PROCESS DISPATCH ONLY: bill everything this exact raw Request
@@ -68,6 +86,13 @@ export function billingOriginForGrant(
   grant: AccessGrant,
   authorization?: AccessGrantAuthorization | null,
 ): BillingOrigin {
+  return fundedBillingOrigin(grant.accountId, credentialBillingOrigin(grant, authorization));
+}
+
+function credentialBillingOrigin(
+  grant: AccessGrant,
+  authorization?: AccessGrantAuthorization | null,
+): BillingOrigin {
   const metadata = grant.metadata ?? {};
   if (
     grant.principalKind === "api_key" ||
@@ -79,7 +104,8 @@ export function billingOriginForGrant(
   ) {
     return "api";
   }
-  if (currentSiteSessionOrigin()) return "app";
+  // A Site frame's own header is caller input: it never makes a credential
+  // app use. Published Sites stamp their requests (stampRequestBillingOrigin).
   return authorization?.canonicalManagedHumanSession ||
     authorization?.canonicalLocalHumanSession ||
     isAppCredentialGrant(grant)
@@ -102,6 +128,13 @@ export async function resolveTurnBillingOrigin(
     requestedSurface?: SessionTurnSurface | null | undefined;
   },
 ): Promise<BillingOrigin> {
+  return fundedBillingOrigin(input.grant.accountId, await decideTurnBillingOrigin(db, input));
+}
+
+async function decideTurnBillingOrigin(
+  db: Database,
+  input: Parameters<typeof resolveTurnBillingOrigin>[1],
+): Promise<BillingOrigin> {
   if (input.requestedOrigin) return input.requestedOrigin;
   const ambient = ambientBillingOrigin();
   if (ambient) return ambient;
@@ -112,13 +145,14 @@ export async function resolveTurnBillingOrigin(
     if (attribution.kind === "turn" && attribution.turnId === turnId && attribution.billingOrigin) {
       return attribution.billingOrigin;
     }
-    // Plan credit never pays for work whose chat cannot be found.
+    // Plan credit never pays for work whose chat cannot be found. A failed
+    // read fails the request rather than deciding who pays.
     return typeof turnId === "string"
       ? ((await readTurnBillingOrigin(db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           turnId,
-        }).catch(() => null)) ?? "api")
+        })) ?? "api")
       : "api";
   }
   return (

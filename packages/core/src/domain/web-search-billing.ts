@@ -1,6 +1,8 @@
 import { webSearchCreditBillingActive, type Settings } from "@opengeni/config";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import {
   applyCreditDebitAfterUse,
+  chargeBillingOrigin,
   checkWorkspaceAllowance,
   creditDebitAttributionForTurn,
   creditDebitAttributionMetadata,
@@ -92,18 +94,21 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
       }
       const attribution = await attributionFor(scope);
       // Non-model resources spend general credits only; API work credits only.
+      const origin = attribution.kind === "unknown" ? undefined : attribution.billingOrigin;
       const balance = await getSpendableCreditBalance(
         deps.db,
         scope.accountId,
         undefined,
         undefined,
         undefined,
-        attribution.kind === "unknown" ? undefined : attribution.billingOrigin,
+        origin,
       );
       if (balance.balanceMicros <= 0) {
         throw new WebSearchBillingRefusedError(
           "insufficient_credits",
-          "Web search needs credits, and this account has none left.",
+          chargeBillingOrigin(origin) === "api"
+            ? `${API_CREDITS_REQUIRED_MESSAGE} Add credits to search the web.`
+            : "Web search needs credits, and this account has none left.",
         );
       }
       const refusal = await checkWorkspaceAllowance(deps.db, {

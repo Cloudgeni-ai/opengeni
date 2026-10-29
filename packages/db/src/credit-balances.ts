@@ -36,18 +36,20 @@ export async function getBillingBalance(
         select revision, policy from opengeni_private.credit_promotion_policy_revisions
         where (${policyRevision ?? null}::bigint is null or revision <= ${policyRevision ?? null}::bigint)
         order by revision desc limit 1
+      ), totals as (
+        -- One pass: the balance, and what API work has spent (negative
+        -- credits up to this are API debt).
+        select coalesce(sum(amount_micros), 0)::text as balance,
+          greatest(0, coalesce(sum(-amount_micros) filter (where usage_origin = 'api'), 0))::text as "apiSpent"
+        from ${schema.creditLedgerEntries} where account_id = ${accountId}
       )
       select
         coalesce((select decision from promotion_decisions where account_id=${accountId}::uuid), 'eligible') as decision,
         (select enabled from promotion_enforcement where singleton) as enforcement,
         coalesce((select revision from current_policy), 0)::int as revision,
         read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
-        (select coalesce(sum(amount_micros), 0)::text
-          from ${schema.creditLedgerEntries} where account_id = ${accountId}) as balance,
-        -- What API work has spent: negative credits up to this are API debt.
-        (select greatest(0, coalesce(sum(-amount_micros), 0))::text
-          from ${schema.creditLedgerEntries}
-          where account_id = ${accountId} and usage_origin = 'api') as "apiSpent",
+        (select balance from totals) as balance,
+        (select "apiSpent" from totals) as "apiSpent",
         coalesce((select jsonb_agg(jsonb_build_object(
           'grantId', g.id,
           'label', coalesce(g.metadata->>'creditOfferLabel', 'Promotional credits'),
@@ -166,8 +168,8 @@ export function chargeBillingOrigin(origin?: BillingOrigin | null): BillingOrigi
 /**
  * What a charge pays for. A canonical model ID uses grants scoped to that
  * model; {@link VOICE_CREDIT_USAGE} (dictation and live voice) uses grants
- * that cover voice, which are the verified-signup trial credits. Omitted means
- * a non-model resource, which can only use general credits.
+ * that cover voice: the verified-signup trial credits and plan credit. Omitted
+ * means a non-model resource, which uses general credits and plan credit.
  */
 export type CreditUsage = string | { readonly kind: "voice" } | undefined;
 
@@ -175,7 +177,11 @@ export type CreditUsage = string | { readonly kind: "voice" } | undefined;
 export const VOICE_CREDIT_USAGE: { readonly kind: "voice" } = Object.freeze({ kind: "voice" });
 
 function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boolean {
-  if (grant.held || !usage) return false;
+  if (grant.held) return false;
+  // Plan credit, the Free plan's too, pays for app tools (search, voice,
+  // images, video, sandbox time); its model scope only limits which models.
+  if (grant.planCredit && typeof usage !== "string") return true;
+  if (!usage) return false;
   if (typeof usage === "string") return grant.eligibleModelIds.includes(usage);
   return grant.coversVoice === true;
 }

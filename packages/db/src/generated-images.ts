@@ -8,6 +8,7 @@ import { lockSessionEventWriteRows } from "./session-control";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
 import {
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
   planPostUseCreditAllocations,
@@ -1031,13 +1032,14 @@ async function admitImageGenerationCredits(
   }
   // Plan and trial grants covering the turn's model pay, as they do for chat;
   // API work spends credits only.
+  const usageOrigin = attribution.kind === "turn" ? attribution.billingOrigin : undefined;
   const { balanceMicros } = await getSpendableCreditBalance(
     tx,
     operation.accountId,
     operation.creditUsageModelId ?? undefined,
     undefined,
     settledAt,
-    attribution.kind === "turn" ? attribution.billingOrigin : undefined,
+    usageOrigin,
   );
   const [held] = await rawRows<{ micros: string }>(
     tx,
@@ -1051,7 +1053,11 @@ async function admitImageGenerationCredits(
   );
   const available = balanceMicros - Number(held?.micros ?? 0);
   if (!Number.isSafeInteger(available) || available < operation.pricedCostMicros) {
-    throw new ImageGenerationCreditError();
+    throw new ImageGenerationCreditError(
+      chargeBillingOrigin(usageOrigin) === "api"
+        ? "API usage uses credits, not your plan credit, and there aren't enough left for it"
+        : undefined,
+    );
   }
 }
 
@@ -1085,11 +1091,11 @@ async function debitImageGenerationCredits(
     ? ((await readTurnBillingOriginInTransaction(tx, operation)) ?? "app")
     : "app";
   const allocations =
-    operation.creditUsageModelId && usageOrigin === "app"
+    usageOrigin === "app"
       ? planPostUseCreditAllocations(
           await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
           operation.pricedCostMicros,
-          operation.creditUsageModelId,
+          operation.creditUsageModelId ?? undefined,
         )
       : [];
   const now = new Date();

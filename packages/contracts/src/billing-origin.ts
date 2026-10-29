@@ -32,3 +32,9 @@ export const API_CREDITS_REQUIRED_MESSAGE = "API usage uses credits, not your pl
 
 /** Where a person adds credits; the public refusal action for credit stops. */
 export const ADD_CREDITS_ACTION = Object.freeze({ type: "add_credits", href: "/billing" } as const);
+
+/** Where a person on the Free plan upgrades; the refusal action when only a paid plan helps. */
+export const UPGRADE_PLAN_ACTION = Object.freeze({
+  type: "upgrade_plan",
+  href: "/billing",
+} as const);

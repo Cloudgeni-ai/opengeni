@@ -97,6 +97,7 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
   planCreditDebit,
@@ -162,6 +163,7 @@ import {
   withSessionUnattendedMetadata,
   type SessionUnattendedSetting,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -6911,7 +6913,9 @@ export async function applyCreditDebitAfterUse(
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
       const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
-      if (input.usage && usageOrigin === "app") {
+      // App use: plan credit (the Free plan's scoped credit too) pays for
+      // tools as well as models.
+      if (usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
@@ -46490,8 +46494,9 @@ export class SandboxPaidComputeAdmissionError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
+    message = "Insufficient workspace credits to admit paid sandbox compute",
   ) {
-    super("Insufficient workspace credits to admit paid sandbox compute");
+    super(message);
   }
 }
 
@@ -47815,16 +47820,27 @@ async function acquireLeaseOnce(
               );
             }
             // The box is funded like the work it runs: an API chat's box spends credits.
+            const leaseOrigin = await attributionBillingOrigin(tx, {
+              accountId,
+              workspaceId,
+              attribution,
+            });
             const balance = await getSpendableCreditBalance(
               tx,
               accountId,
               undefined,
               undefined,
               undefined,
-              await attributionBillingOrigin(tx, { accountId, workspaceId, attribution }),
+              leaseOrigin,
             );
             if (balance.balanceMicros <= 0) {
-              throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
+              throw new SandboxPaidComputeAdmissionError(
+                workspaceId,
+                sandboxGroupId,
+                chargeBillingOrigin(leaseOrigin) === "api"
+                  ? `${API_CREDITS_REQUIRED_MESSAGE} Add credits to start this computer.`
+                  : undefined,
+              );
             }
           }
         }

@@ -3,6 +3,7 @@ import type { BillingBalance } from "@opengeni/contracts";
 import {
   apiSpendableCreditMicros,
   chargeBillingOrigin,
+  VOICE_CREDIT_USAGE,
   planCreditDebit,
   planPostUseCreditAllocations,
   spendableCreditMicros,
@@ -52,4 +53,35 @@ test("the charge origin is explicit, else the trusted scope's, else app", async 
   expect(await withBillingOriginOverride("api", async () => chargeBillingOrigin("app"))).toBe(
     "app",
   );
+});
+
+test("the Free plan's monthly credit pays for app tools, not for other models or API work", () => {
+  // $10 of scoped Free plan credit and nothing else.
+  const free = {
+    ...balance,
+    balanceMicros: 10 * M,
+    generalBalanceMicros: 0,
+    creditsMicros: 0,
+    promotionalCredits: [
+      {
+        grantId: "00000000-0000-4000-8000-000000000003",
+        label: "Monthly plan credit",
+        eligibleModelIds: ["model-a"],
+        remainingMicros: 10 * M,
+        planCredit: true,
+      },
+    ],
+  } as BillingBalance;
+  // Search, sandbox time, video (no model) and voice.
+  expect(spendableCreditMicros(free, undefined)).toBe(10 * M);
+  expect(spendableCreditMicros(free, VOICE_CREDIT_USAGE)).toBe(10 * M);
+  expect(planCreditDebit(free, 2 * M).allocations).toEqual([
+    { grantEntryId: "00000000-0000-4000-8000-000000000003", amountMicros: 2 * M },
+  ]);
+  // Its model scope still holds for models, and API work never spends it.
+  expect(spendableCreditMicros(free, "model-a")).toBe(10 * M);
+  expect(spendableCreditMicros(free, "model-b")).toBe(0);
+  expect(spendableCreditMicros(free, undefined, "api")).toBe(0);
+  // A promotional offer for a model is still for that model only.
+  expect(spendableCreditMicros(balance, undefined)).toBe(100 * M);
 });

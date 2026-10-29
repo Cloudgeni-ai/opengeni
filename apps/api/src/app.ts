@@ -192,6 +192,8 @@ import {
   requestBillingOrigin,
   sessionUsageLimitsProducerEnabled,
   stampRequestBillingOrigin,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -535,6 +537,8 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
+  // Accounts on the billing terms from before the app/API split (CloudGeni).
+  configureBillingLegacyAccounts(deps.settings.billingLegacyAccountIds);
   // Sessions created by this process freeze their code_search decision from
   // the boot-parsed deployment policy.
   configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(deps.settings));
@@ -1883,7 +1887,13 @@ export function createAppComposition(deps: AppDependencies): {
       publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       // Sign-in, personal and organization keys over MCP are API use.
       dispatch: async (request) => {
-        stampRequestBillingOrigin(request, "api");
+        stampRequestBillingOrigin(
+          request,
+          fundedBillingOrigin(
+            caller.kind === "person" ? caller.accountId : organizationKeyAccountId,
+            "api",
+          ),
+        );
         return await app.fetch(request, c.env);
       },
       signal: c.req.raw.signal,

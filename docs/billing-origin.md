@@ -86,16 +86,40 @@ credits.
 - Schedules created through the API before this change have no stored origin
   and are billed as app; telling them apart afterwards is not reliable.
 - Opengeni calling Opengeni over MCP is an outside agent and is billed as API.
+- A Site frame's own request header never makes a credential app use; only
+  published Sites, which stamp their requests in-process, are app.
+- A failed read of a turn's origin fails the request instead of guessing who
+  pays; a turn that cannot be found is API.
+- Inheriting "the chat's latest decided origin" reads the chat's newest turn
+  with an origin; the existing turn indexes serve it. A dedicated partial
+  index can follow if that read shows up.
+
+## Paid tools
+
+Web search, dictation and live voice, image and video generation, sandbox
+time and knowledge indexing cost credit whatever model the chat uses. App use
+pays for them from whatever credit applies, plan credit first, including the
+Free plan's monthly credit (its model scope only limits which models it pays
+for). API use pays for them from credits only. A failed video refunds what
+other credit paid; scoped plan credit it used is not returned, so it never
+turns into credits.
 
 ## CloudGeni
 
-CloudGeni embeds Opengeni through organization keys and delegated tokens, so
-its turns are API origin and are funded by credits, which operators grant with
-`manual_credit_grant` as today. No exemption is needed: its accounts are
-funded by credits, not plan or promotional credit, so nothing changes for it.
-A product that needs different terms gets operator credit grants, not a code
-path. Before billing is switched on for CloudGeni's accounts, they need a
-positive credits balance, or their API turns are refused. Promotional credit (signup and offers) is app-only from this change.
+CloudGeni, our own product that embeds Opengeni, keeps exactly today's
+billing. Its host account (Cloudgeni-Embedded) is on legacy billing terms:
+`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` lists such accounts and its built-in
+default lists CloudGeni's production host account, so no deployment
+configuration is needed (`none` lists no account). For a listed account all
+work is funded as app use, which is how every turn was funded before origins
+existed: any credit pays any use, in today's order. It also pays no own-key
+platform fee and none of the newly metered tool charges.
+
+Why an account list: CloudGeni already pays cost plus margin from operator
+credit grants on that one account, and its people and embedded sessions must
+see no new blocks or charges. A list is one switch rather than a code path per
+product, and another account (a staging CloudGeni account) is added the same
+way. Processes install it at boot (`configureBillingLegacyAccounts`).
 
 ## Rollout
 
