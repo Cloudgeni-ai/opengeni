@@ -356,6 +356,37 @@ test("a system skip (a scheduled run's unanswered question) keeps its card", asy
 
 test("startup disappears on first useful output, not just on turn completion", async () => {
   sequence = 0;
+  // A start that just happened; one 30 seconds old says it is taking longer.
+  const now = (each: SessionEvent): SessionEvent => ({
+    ...each,
+    occurredAt: new Date().toISOString(),
+  });
+  const events = [
+    event("user.message", { text: "Plan a garden afternoon." }),
+    event("turn.started", {}),
+    event("turn.startup.phase.started", { phase: "model_preparation" }),
+  ].map(now);
+  const view = await renderComponent(<MessageTimeline events={events} />);
+  try {
+    expect(view.container.textContent).toContain("Working");
+    await view.rerender(
+      <MessageTimeline
+        events={[
+          ...events,
+          now(event("agent.message.delta", { text: "Start with a short walk." })),
+        ]}
+      />,
+    );
+    expect(view.container.textContent).toContain("Start with a short walk.");
+    expect(view.container.textContent).not.toContain("Working");
+    expect(view.container.textContent).not.toContain("Waiting for a response");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a start that runs past 30 seconds says it is taking longer than usual", async () => {
+  sequence = 0;
   const events = [
     event("user.message", { text: "Plan a garden afternoon." }),
     event("turn.started", {}),
@@ -363,15 +394,7 @@ test("startup disappears on first useful output, not just on turn completion", a
   ];
   const view = await renderComponent(<MessageTimeline events={events} />);
   try {
-    expect(view.container.textContent).toContain("Working");
-    await view.rerender(
-      <MessageTimeline
-        events={[...events, event("agent.message.delta", { text: "Start with a short walk." })]}
-      />,
-    );
-    expect(view.container.textContent).toContain("Start with a short walk.");
-    expect(view.container.textContent).not.toContain("Working");
-    expect(view.container.textContent).not.toContain("Waiting for a response");
+    expect(view.container.textContent).toContain("A little longer than usual");
   } finally {
     await view.unmount();
   }
