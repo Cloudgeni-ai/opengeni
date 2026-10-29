@@ -5081,31 +5081,56 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /**
-   * The main frame's accessibility nodes with what a person sees put right
-   * (see PAGE_FACTS_EXPRESSION): content the page hides with aria-hidden while
-   * a person can see and press it, such as an open menu whose markup was
-   * never updated, joins the tree with the role and name the page gives it,
-   * so the outline lists it and locators find it. Every read looks at the
-   * page: Chromium can leave a hidden subtree out of its tree altogether (an
-   * aria-hidden container whose content arrived later), so the tree cannot
-   * tell when there is nothing to reveal. Best effort: a page that cannot be
-   * read this way keeps the tree Chromium gave.
+   * The tab's accessibility nodes with what a person sees put right (see
+   * PAGE_FACTS_EXPRESSION), in every frame they come from, the page's own and
+   * each cross-origin frame's through its session: content a frame hides
+   * with aria-hidden while a person can see and press it, such as an open
+   * menu whose markup was never updated, joins the tree with the role and
+   * name the page gives it, so the outline lists it and locators find it.
+   * Every read looks at each frame: Chromium can leave a hidden subtree out
+   * of its tree altogether (an aria-hidden container whose content arrived
+   * later), so the tree cannot tell when there is nothing to reveal. Best
+   * effort: a frame that cannot be read this way keeps the tree Chromium
+   * gave.
    */
-  private async withPageFacts(state: TargetState, nodes: CdpAxNode[]): Promise<CdpAxNode[]> {
+  private async withPageFacts(
+    state: TargetState,
+    nodes: CdpAxNode[],
+    pageFrames: readonly MainFrame[],
+  ): Promise<CdpAxNode[]> {
     if (this.engine === "lightpanda") return nodes;
-    const facts = await this.pageFacts(state);
-    if (!facts) return nodes;
-    return withPageAccessibilityFacts(nodes, state.frame.id, facts);
+    const read = new Set<string>();
+    for (const node of nodes) if (typeof node.frameId === "string") read.add(node.frameId);
+    const frames = [
+      ...pageFrames.map((frame) => ({ sessionId: state.sessionId, frameId: frame.id })),
+      ...[...state.oopifs.values()].flatMap((oopif) =>
+        [...oopif.frameIds].map((frameId) => ({ sessionId: oopif.sessionId, frameId })),
+      ),
+    ].filter((frame) => read.has(frame.frameId));
+    let result = nodes;
+    for (let offset = 0; offset < frames.length; offset += ACCESSIBILITY_FRAME_CONCURRENCY) {
+      const batch = frames.slice(offset, offset + ACCESSIBILITY_FRAME_CONCURRENCY);
+      const facts = await Promise.all(
+        batch.map((frame) => this.pageFacts(frame.sessionId, frame.frameId)),
+      );
+      for (const [index, found] of facts.entries())
+        if (found) result = withPageAccessibilityFacts(result, batch[index]!.frameId, found);
+    }
+    return result;
   }
 
-  private async pageFacts(state: TargetState): Promise<PageAccessibilityFacts | null> {
+  /** One frame's page facts, read in its session; null when it has none or
+   * cannot be read. */
+  private async pageFacts(
+    sessionId: string,
+    frameId: string,
+  ): Promise<PageAccessibilityFacts | null> {
     const connection = await this.ensureConnection();
-    const sessionId = state.sessionId;
     const objectGroup = `opengeni-page-facts-${this.createId()}`;
     try {
       const world = await connection.send<{ executionContextId?: unknown }>(
         "Page.createIsolatedWorld",
-        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+        { frameId, worldName: "opengeni-dom-read" },
         { sessionId, timeoutMs: 2_000 },
       );
       if (!Number.isSafeInteger(world.executionContextId)) return null;
@@ -5352,7 +5377,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
       }
-      nodes = await this.withPageFacts(state, nodes);
+      nodes = await this.withPageFacts(state, nodes, before);
       let accessibility: CdpAccessibilitySnapshot;
       try {
         accessibility = normalizeCdpAccessibilityTree({
@@ -7952,8 +7977,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Scroll offsets of the window, visual viewport and every composed
-   * ancestor of a top-level-frame node, read in an isolated world so page
-   * scripts cannot fake them. Null means unknown: treat any scroll as an effect. */
+   * ancestor of a node, and for a node in a child frame the same around the
+   * `<iframe>` element in each document holding that frame up to the page
+   * (bringing the node into view can scroll any of them), read in isolated
+   * worlds so page scripts cannot fake them. Null means unknown: treat any
+   * scroll as an effect. */
   private async scrollPositions(
     state: TargetState,
     backendDOMNodeId: number,
@@ -7968,7 +7996,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         [],
         { isolatedFrameId: frameId },
       );
-      return typeof positions === "string" ? positions : null;
+      if (typeof positions !== "string") return null;
+      if (!state.nodeRoute && frameId === state.frame.id) return positions;
+      const holding = await this.framesHolding(state, frameId);
+      if (holding === null) return null;
+      const connection = await this.ensureConnection();
+      const all = [positions];
+      for (let index = 1; index < holding.length; index += 1) {
+        const frame = holding[index - 1]!;
+        const parent = holding[index]!;
+        const send = <T>(method: string, params: Record<string, unknown>) =>
+          connection.send<T>(method, params, { sessionId: parent.sessionId, timeoutMs: 2_000 });
+        const owner = await send<{ backendNodeId?: unknown }>("DOM.getFrameOwner", {
+          frameId: frame.frameId,
+        });
+        const world = await send<{ executionContextId?: unknown }>("Page.createIsolatedWorld", {
+          frameId: parent.frameId,
+          worldName: "opengeni-dom-read",
+        });
+        if (
+          typeof owner.backendNodeId !== "number" ||
+          !Number.isSafeInteger(world.executionContextId)
+        )
+          return null;
+        const resolved = await send<{ object?: unknown }>("DOM.resolveNode", {
+          backendNodeId: owner.backendNodeId,
+          executionContextId: world.executionContextId,
+        });
+        if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") return null;
+        const objectId = resolved.object.objectId;
+        try {
+          const read = await send<{ result?: unknown }>("Runtime.callFunctionOn", {
+            objectId,
+            functionDeclaration: SCROLL_POSITIONS_FUNCTION,
+            returnByValue: true,
+          });
+          if (!isRecord(read.result) || typeof read.result.value !== "string") return null;
+          all.push(read.result.value);
+        } finally {
+          void send("Runtime.releaseObject", { objectId }).catch(() => undefined);
+        }
+      }
+      return all.join("|");
     } catch {
       return null;
     }
@@ -7993,8 +8062,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
-    // Where scroll offsets cannot be read (a child frame), whether the
-    // target moved tells whether anything scrolled.
+    // Where scroll offsets cannot be read (a frame chain that cannot be
+    // walked), whether the target moved tells whether anything scrolled.
     const boxBefore =
       scrollBefore === null
         ? await this.centerPoint(state, backendDOMNodeId).catch(() => null)
@@ -8333,7 +8402,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       { isolatedFrameId: frameId },
     ).catch(() => false);
     if (transparent !== true) return null;
-    const watch = await this.watchPageReaction(state, backendDOMNodeId, frameId);
+    const watch = await this.watchPageReaction(state);
     const effectsBeforeMove = state.actionEffectCount;
     try {
       await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
@@ -8350,62 +8419,172 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /**
-   * Watches the main frame's document from just before a pointer move: after
-   * it, `unchanged` waits two drawn frames (at most 100 ms) and tells whether
-   * nothing in the document changed (no element, attribute or text, no focus
-   * or address change), so the page did not act on the move. Hover styling
-   * alone changes none of these. Null where it cannot watch: a child frame,
-   * whose page the move also reaches, or a page that cannot be read this way.
+   * Watches, from just before a pointer move, the document of every frame in
+   * the tab, each in the session that renders it: besides the target's frame,
+   * the move reaches the frames holding it, as the pointer passes into them,
+   * and whichever frame the pointer leaves. After it, `unchanged` watches
+   * each until PAGE_REACTION_WINDOW_MS after the move (and two drawn frames)
+   * and tells whether nothing changed in any (no element, attribute or text,
+   * no focus or address change), so the page did not act on the move; it
+   * answers as soon as one changes. Hover styling alone changes none of
+   * these. Null where it cannot watch them all.
    */
   private async watchPageReaction(
     state: TargetState,
-    backendDOMNodeId: number,
-    frameId: string,
   ): Promise<{ unchanged: () => Promise<boolean>; release: () => void } | null> {
-    if (this.engine === "lightpanda" || state.nodeRoute || frameId !== state.frame.id) return null;
-    try {
-      const world = await this.sendTarget<{ executionContextId?: unknown }>(
-        state,
-        "Page.createIsolatedWorld",
-        { frameId, worldName: "opengeni-dom-read" },
+    if (this.engine === "lightpanda") return null;
+    const connection = await this.ensureConnection();
+    const watches: Array<{ sessionId: string; objectId: string }> = [];
+    const call = (
+      watch: (typeof watches)[number],
+      functionDeclaration: string,
+      args: Array<{ value: unknown }> = [],
+    ) =>
+      connection.send<{ result?: unknown }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: watch.objectId,
+          functionDeclaration,
+          arguments: args,
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        { sessionId: watch.sessionId, timeoutMs: 2_000 },
       );
-      if (!Number.isSafeInteger(world.executionContextId)) return null;
-      const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
-        backendNodeId: backendDOMNodeId,
-        executionContextId: world.executionContextId,
-      });
-      if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") return null;
-      const objectId = resolved.object.objectId;
-      const call = (functionDeclaration: string) =>
-        this.sendTarget<{ result?: unknown }>(
-          state,
-          "Runtime.callFunctionOn",
-          { objectId, functionDeclaration, returnByValue: true, awaitPromise: true },
-          { timeoutMs: 2_000 },
-        );
-      const started = await call(PAGE_REACTION_WATCH_FUNCTION).catch(() => null);
-      const release = () =>
-        void call(PAGE_REACTION_STOP_FUNCTION)
+    const release = () => {
+      for (const watch of watches.splice(0))
+        void call(watch, PAGE_REACTION_STOP_FUNCTION)
           .catch(() => undefined)
           .finally(() =>
-            this.sendTarget(state, "Runtime.releaseObject", { objectId }).catch(() => undefined),
+            connection
+              .send(
+                "Runtime.releaseObject",
+                { objectId: watch.objectId },
+                {
+                  sessionId: watch.sessionId,
+                },
+              )
+              .catch(() => undefined),
           );
-      if (!isRecord(started?.result) || started.result.value !== true) {
+    };
+    try {
+      const frames = await this.tabFrames(state);
+      const started = await Promise.allSettled(
+        frames.map(async (frame) => {
+          const world = await connection.send<{ executionContextId?: unknown }>(
+            "Page.createIsolatedWorld",
+            { frameId: frame.frameId, worldName: "opengeni-dom-read" },
+            { sessionId: frame.sessionId, timeoutMs: 2_000 },
+          );
+          if (!Number.isSafeInteger(world.executionContextId)) return false;
+          const evaluated = await connection.send<{ result?: unknown; exceptionDetails?: unknown }>(
+            "Runtime.evaluate",
+            {
+              contextId: world.executionContextId,
+              expression: PAGE_REACTION_WATCH_EXPRESSION,
+              returnByValue: false,
+            },
+            { sessionId: frame.sessionId, timeoutMs: 2_000 },
+          );
+          if (
+            evaluated.exceptionDetails ||
+            !isRecord(evaluated.result) ||
+            typeof evaluated.result.objectId !== "string"
+          )
+            return false;
+          watches.push({ sessionId: frame.sessionId, objectId: evaluated.result.objectId });
+          return true;
+        }),
+      );
+      const failure = started.find((result) => result.status === "rejected");
+      if (failure) throw failure.reason;
+      if (started.some((result) => result.status === "fulfilled" && !result.value)) {
         release();
         return null;
       }
       return {
-        unchanged: async () => {
-          const read = await call(PAGE_REACTION_READ_FUNCTION).catch(() => null);
-          return isRecord(read?.result) && read.result.value === true;
-        },
+        // Unchanged only when every document stayed unchanged; the first one
+        // that changed answers at once.
+        unchanged: () =>
+          new Promise<boolean>((resolve) => {
+            let pending = watches.length;
+            if (pending === 0) resolve(false);
+            for (const watch of watches)
+              void call(watch, PAGE_REACTION_READ_FUNCTION, [{ value: PAGE_REACTION_WINDOW_MS }])
+                .catch(() => null)
+                .then((read) => {
+                  if (!isRecord(read?.result) || read.result.value !== true) resolve(false);
+                  else if (--pending === 0) resolve(true);
+                });
+          }),
         release,
       };
     } catch (error) {
+      release();
       if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
         throw error;
       return null;
     }
+  }
+
+  /** Every frame in the tab, each with the session that renders it: the
+   * page's own frames and each cross-origin frame's. */
+  private async tabFrames(
+    state: TargetState,
+  ): Promise<Array<{ sessionId: string; frameId: string }>> {
+    const sessions = [...state.oopifs.values()].map((oopif) => oopif.sessionId);
+    const trees = await Promise.all(
+      [state.sessionId, ...sessions].map(async (sessionId) => ({
+        sessionId,
+        frames: flattenFrameTree(await this.frameTree(sessionId, 2_000)),
+      })),
+    );
+    // A cross-origin frame is listed by the session that renders it.
+    const rendered = new Set(
+      trees.slice(1).flatMap((tree) => tree.frames.map((frame) => frame.id)),
+    );
+    return trees.flatMap((tree, index) =>
+      tree.frames
+        .filter((frame) => index > 0 || !rendered.has(frame.id))
+        .map((frame) => ({ sessionId: tree.sessionId, frameId: frame.id })),
+    );
+  }
+
+  /** The frame and every frame holding it up to the page, innermost first,
+   * each with the session that renders it; null when that chain cannot be
+   * read. */
+  private async framesHolding(
+    state: TargetState,
+    frameId: string,
+  ): Promise<Array<{ sessionId: string; frameId: string }> | null> {
+    const connection = await this.ensureConnection();
+    const frames: Array<{ sessionId: string; frameId: string }> = [];
+    let oopif = this.oopifForFrame(state, frameId);
+    let current = frameId;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const sessionId = oopif?.sessionId ?? state.sessionId;
+      const response = await connection.send<{ frameTree?: unknown }>(
+        "Page.getFrameTree",
+        {},
+        { sessionId, timeoutMs: 2_000 },
+      );
+      const path = framePath(response.frameTree, current);
+      if (path === null) return null;
+      for (const id of path.frames) frames.push({ sessionId, frameId: id });
+      if (!oopif) return frames;
+      // A cross-origin frame's root names the frame that holds it, which
+      // the session that owns its <iframe> element renders.
+      if (path.parentId === null) return null;
+      const parentSessionId: string = oopif.parentSessionId;
+      current = path.parentId;
+      oopif =
+        parentSessionId === state.sessionId
+          ? null
+          : ([...state.oopifs.values()].find((other) => other.sessionId === parentSessionId) ??
+            null);
+      if (parentSessionId !== state.sessionId && oopif === null) return null;
+    }
+    return null;
   }
 
   /**
@@ -10952,10 +11131,10 @@ export const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
   requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
-// A child frame's scroll can also move its parent documents, which this frame
-// cannot read, so only top-level frames report positions.
+// The positions around one document's node. A child frame's scroll can also
+// move the documents holding it, which scrollPositions reads around each
+// frame's <iframe> element in turn.
 const SCROLL_POSITIONS_FUNCTION = `function() {
-  if (window !== window.top) return null;
   const start = this instanceof Element ? this : this.parentElement;
   if (!(start instanceof Element)) return null;
   const viewport = window.visualViewport;
@@ -12072,6 +12251,10 @@ const PRESSABLE_CONTROL_SELECTOR =
 // instead. A decoration is such an element that is not itself a control (a
 // chevron icon drawn over a field): a control that takes no pointer input
 // is usually disabled by a class, and stays a control.
+// pointerOffRoot: the outermost of an element and its ancestors whose
+// pointer is off, unbroken (the chevron an icon is drawn in), which is
+// what takesNoPointer and pressedInstead judge. A control anywhere from
+// the element up to it stays a control, never a decoration.
 // pressedInstead: for a decoration, what a click at its middle reaches, when
 // that is an enabled control that holds the decoration or sits beside it in
 // the same small wrapper (its parent or grandparent); else null. Run with
@@ -12104,6 +12287,16 @@ const DECORATION_HELPER = `
     for (const node of inside) if (view.getComputedStyle(node).pointerEvents !== "none") return false;
     return true;
   };
+  const pointerOffRoot = (element) => {
+    const view = element.ownerDocument.defaultView || window;
+    let root = element;
+    for (let depth = 0; depth < 16; depth += 1) {
+      const parent = flatParentOf(root);
+      if (!(parent instanceof Element) || view.getComputedStyle(parent).pointerEvents !== "none") break;
+      root = parent;
+    }
+    return root;
+  };
   const hitAt = (doc, x, y) => {
     let hit = doc.elementFromPoint(x, y);
     for (let depth = 0; depth < 32 && hit && hit.shadowRoot; depth += 1) {
@@ -12123,8 +12316,12 @@ const DECORATION_HELPER = `
     const bottom = Math.min(box.bottom, view.innerHeight);
     return right - left >= 1 && bottom - top >= 1 ? [(left + right) / 2, (top + bottom) / 2] : null;
   };
-  const pressedInstead = (element) => {
-    if (element.matches(pressableSelector)) return null;
+  const pressedInstead = (target) => {
+    const element = pointerOffRoot(target);
+    for (let node = target; node instanceof Element; node = flatParentOf(node)) {
+      if (node.matches(pressableSelector)) return null;
+      if (node === element) break;
+    }
     // Where it is, first: a box is cheaper to read than styles.
     const middle = middleInView(element);
     if (!middle || !takesNoPointer(element)) return null;
@@ -12145,13 +12342,14 @@ const DECORATION_HELPER = `
     return related ? control : null;
   };`;
 
-/** Whether the target is a decoration (see DECORATION_HELPER): it shows but
- * takes no pointer input itself, nor does anything inside it. */
+/** Whether the target, with the pointer-off run it is drawn in, shows but
+ * takes no pointer input, nor does anything inside it (see
+ * DECORATION_HELPER). */
 const TAKES_NO_POINTER_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return false;
   ${DECORATION_HELPER}
-  return takesNoPointer(element);
+  return takesNoPointer(pointerOffRoot(element));
 }`;
 
 /** The control a click on this decoration reaches, or null. */
@@ -12162,48 +12360,53 @@ const DECORATION_PRESS_FUNCTION = `function() {
   return pressedInstead(element);
 }`;
 
-/** Starts watching the target's document for any change (see
- * watchPageReaction). Runs in an isolated world; the watch is kept on that
- * world's handle of the target, out of the page's reach. */
-const PAGE_REACTION_WATCH_FUNCTION = `function() {
-  const element = this instanceof Element ? this : this.parentElement;
-  if (!(element instanceof Element) || !element.isConnected) return false;
-  const document = element.ownerDocument;
-  let changed = false;
-  const observer = new MutationObserver(() => { changed = true; });
+/** How long after the hover's move the page is watched for a reaction
+ * before a refusal counts as definite: long enough for a menu or row that
+ * waits for the pointer to rest (commonly 100 to 300 ms). */
+const PAGE_REACTION_WINDOW_MS = 500;
+
+/** Starts watching a frame's document for any change (see
+ * watchPageReaction). Runs in an isolated world and returns the watch, which
+ * stays there, out of the page's reach. */
+const PAGE_REACTION_WATCH_EXPRESSION = `(() => {
+  const watch = { changed: false, started: performance.now(), wake: null };
+  const observer = new MutationObserver(() => { watch.changed = true; watch.wake?.(); });
   observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   const focus = document.activeElement;
   const address = document.location.href;
-  this.__opengeniPageReaction = {
-    observer,
-    unchanged: () => !changed && observer.takeRecords().length === 0 && document.activeElement === focus && document.location.href === address,
-  };
-  return true;
-}`;
+  watch.observer = observer;
+  watch.unchanged = () => !watch.changed && observer.takeRecords().length === 0 && document.activeElement === focus && document.location.href === address;
+  return watch;
+})()`;
 
-/** Whether nothing changed since the watch started, read after two drawn
- * frames (at most 100 ms), when the page has acted on the input. */
-const PAGE_REACTION_READ_FUNCTION = `async function() {
-  const watch = this.__opengeniPageReaction;
-  if (!watch) return false;
+/** Whether nothing changed since the watch started: read once the page has
+ * drawn two frames (at most 100 ms) and the watch has lasted `windowMs`, so
+ * a page that acts on the hover a moment later (a menu that waits for the
+ * pointer to rest) is seen acting; false as soon as anything changes. */
+const PAGE_REACTION_READ_FUNCTION = `async function(windowMs) {
   await new Promise((resolve) => {
     setTimeout(resolve, 100);
     requestAnimationFrame(() => requestAnimationFrame(resolve));
   });
-  return watch.unchanged();
+  const remaining = this.started + windowMs - performance.now();
+  if (remaining > 0 && this.unchanged())
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, remaining);
+      this.wake = () => { clearTimeout(timer); resolve(); };
+    });
+  return this.unchanged();
 }`;
 
 const PAGE_REACTION_STOP_FUNCTION = `function() {
-  this.__opengeniPageReaction?.observer.disconnect();
-  delete this.__opengeniPageReaction;
+  this.observer.disconnect();
 }`;
 
 /** Most nodes of aria-hidden content one read adds to the tree. */
 const REVEALED_HIDDEN_MAX_NODES = 400;
 
 /**
- * What the main frame's accessibility tree leaves out or misstates about
- * what a person sees, in the document and its open shadow roots. Content
+ * What a frame's accessibility tree leaves out or misstates about what a
+ * person sees, in its document and that document's open shadow roots. Content
  * hidden with aria-hidden that shows and holds a control a person can press
  * at its middle (an open menu whose markup still says hidden): its visible
  * elements and text come back with a role, name and states read from the
@@ -12211,7 +12414,8 @@ const REVEALED_HIDDEN_MAX_NODES = 400;
  * elements. Returns [JSON facts, ...nodes]: facts.revealed lists [node
  * index, role, name, states, parent's index in revealed or -1], and
  * facts.roots [index in revealed of a hidden root, node indexes of its
- * nearest ancestors].
+ * nearest ancestors]; null when there is nothing to reveal, so most frames
+ * cost no further reads.
  */
 const PAGE_FACTS_EXPRESSION = `(() => {
   ${DECORATION_HELPER}
@@ -12355,7 +12559,7 @@ const PAGE_FACTS_EXPRESSION = `(() => {
     facts.roots.push([facts.revealed.length, ancestors]);
     collect(root, -1);
   }
-  return [JSON.stringify(facts), ...nodes];
+  return facts.revealed.length === 0 ? null : [JSON.stringify(facts), ...nodes];
 })()`;
 
 /** Why an element's text or value must not leave the page: it is, sits in, or
@@ -13056,6 +13260,31 @@ function flattenFrameTree(root: PageFrameTree): MainFrame[] {
 
 function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
+}
+
+/** In a raw CDP frame tree, the frame ids from `frameId` up to the tree's
+ * root, and the id of the frame the root names as its parent (a
+ * cross-origin frame's, rendered by another session); null when the frame
+ * is not in the tree. */
+function framePath(
+  tree: unknown,
+  frameId: string,
+): { frames: string[]; parentId: string | null } | null {
+  if (!isRecord(tree) || !isRecord(tree.frame)) return null;
+  const rootParent = typeof tree.frame.parentId === "string" ? tree.frame.parentId : null;
+  const pending: Array<{ node: Record<string, unknown>; path: string[] }> = [
+    { node: tree, path: [] },
+  ];
+  for (let visited = 0; pending.length > 0 && visited < MAX_FRAME_TREES; visited += 1) {
+    const { node, path } = pending.pop()!;
+    if (!isRecord(node.frame) || typeof node.frame.id !== "string") continue;
+    const here = [node.frame.id, ...path];
+    if (node.frame.id === frameId) return { frames: here, parentId: rootParent };
+    if (Array.isArray(node.childFrames))
+      for (const child of node.childFrames)
+        if (isRecord(child)) pending.push({ node: child, path: here });
+  }
+  return null;
 }
 
 function isSelectorList(value: unknown): value is string[] {

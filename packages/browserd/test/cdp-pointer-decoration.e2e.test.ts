@@ -237,3 +237,65 @@ e2e(
   },
   90_000,
 );
+
+/** A row action that the page turns on a moment after the pointer enters
+ * its row, as hover-intent menus do. */
+const HOVER_ENABLED_LATER = `<!doctype html><title>Rows</title><style>.go{pointer-events:none}.go.on{pointer-events:auto}</style><table><tr id="row"><td>Row one</td><td><button class="go">Go</button></td></tr></table>${LOG}<script>
+document.getElementById("row").addEventListener("mouseenter",()=>setTimeout(()=>document.querySelector(".go").classList.add("on"),250));
+</script>`;
+
+e2e(
+  "a control the page turns on a moment after the hover is not refused as if the page had not reacted",
+  async () => {
+    await withPage(HOVER_ENABLED_LATER, async ({ act, evaluate }) => {
+      const clicked = await act({
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Go", exact: true },
+      });
+      expect(clicked.state).toBe("outcome_unknown");
+      expect(clicked.error?.code).toBe("outcome_unknown");
+      expect(((await evaluate("log")) as string[]).filter((entry) => entry !== "move")).toEqual([]);
+      expect(await evaluate('document.querySelector(".go").className')).toBe("go on");
+    });
+  },
+  90_000,
+);
+
+/**
+ * Chevrons whose pointer is off for all they hold: an icon inside one that
+ * is only drawn, and a control inside one, each over its combobox.
+ */
+const NESTED = `<!doctype html><title>Pick</title><style>.field{position:relative;width:260px;margin:8px}.field input{width:100%;box-sizing:border-box;padding:6px 32px 6px 6px}.chevron{position:absolute;right:2px;top:2px;bottom:2px;width:28px;pointer-events:none;background:#ddd}.chevron i,.chevron button{display:block;width:100%;height:100%;border:0;background:none;font-style:normal}</style><main>
+<label for="size">Size</label><div class="field"><input id="size" role="combobox" aria-expanded="false"><span class="chevron"><i>&#9662;</i></span></div>
+<label for="color">Color</label><div class="field"><input id="color" role="combobox" aria-expanded="false"><span class="chevron"><button tabindex="-1" aria-label="browse colors">v</button></span></div>
+</main>${LOG}<script>
+for(const box of document.querySelectorAll("[role=combobox]"))box.addEventListener("click",()=>{box.setAttribute("aria-expanded","true");log.push("open "+box.id)});
+</script>`;
+
+e2e(
+  "an icon inside a drawn chevron is pressed through to its combobox, and a control inside one is refused",
+  async () => {
+    await withPage(NESTED, async ({ act, evaluate }) => {
+      const size = await act({
+        type: "click",
+        locator: { kind: "text", text: "\u25BE", exact: true },
+      });
+      expect(size.error ?? null).toBeNull();
+      expect(size.state).toBe("completed");
+      expect(((await evaluate("log")) as string[]).filter((entry) => entry !== "move")).toEqual([
+        "click size",
+        "open size",
+      ]);
+      await evaluate("log.length = 0");
+      const color = await act({
+        type: "click",
+        locator: { kind: "role", role: "button", name: "browse colors", exact: true },
+      });
+      expect(color.state).toBe("failed");
+      expect(color.error?.code).toBe("invalid_action");
+      expect(color.error?.message).toBe(POINTER_EVENTS_NONE);
+      expect(((await evaluate("log")) as string[]).filter((entry) => entry !== "move")).toEqual([]);
+    });
+  },
+  90_000,
+);
