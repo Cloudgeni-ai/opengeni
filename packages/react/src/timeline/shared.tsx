@@ -485,7 +485,7 @@ function TermBlockView({
         <div className="flex items-start gap-2 pb-1">
           <span className="select-none text-og-status-idle">$</span>
           {command != null ? (
-            <span className="max-h-64 min-w-0 flex-1 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-sm text-og-fg-muted">
+            <span className="max-h-64 min-w-0 flex-1 overflow-auto whitespace-pre-wrap wrap-anywhere font-og-mono text-og-sm text-og-fg-muted">
               <SecretRefText text={command} />
             </span>
           ) : (
@@ -501,7 +501,7 @@ function TermBlockView({
           {t("timeline.shared.noOutput")}
         </p>
       ) : (
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5 text-og-fg-muted">
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap wrap-anywhere font-og-mono text-og-xs leading-5 text-og-fg-muted">
           {shown}
           {live ? (
             <span className="ml-px inline-block h-[1em] w-[2px] translate-y-[2px] animate-og-blink bg-og-accent align-middle" />
@@ -554,7 +554,7 @@ export function PayloadBlock({
       </p>
       <pre
         className={cn(
-          "max-h-64 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5",
+          "max-h-64 overflow-auto whitespace-pre-wrap wrap-anywhere font-og-mono text-og-xs leading-5",
           failed ? "text-og-status-failed" : "text-og-fg-muted",
         )}
       >

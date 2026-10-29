@@ -100,6 +100,45 @@ describe("signed links", () => {
     const text = "see https://example.com/search?q=cats&page=2 and https://example.com/a";
     expect(redactSignedUrls(text)).toBe(text);
   });
+
+  const SIGNATURE = "SIGVALUE0123abcd";
+  test.each([
+    ["curl -v request line", `> GET /a.json?sv=2024-11-04&sig=${SIGNATURE} HTTP/2`],
+    ["wget save line", `Saving to: 'email.json?sv=2024-11-04&sr=b&sig=${SIGNATURE}'`],
+    ["requests error", `HTTPError: 403 Client Error: Forbidden for url: /x?sp=r&sig=${SIGNATURE}`],
+    ["JSON-escaped query", `{"url":"https://h.example/a?sv=1\\u0026sig=${SIGNATURE}"}`],
+    ["JSON-escaped, scheme-less", `{"path":"/a?sv=1\\u0026sig=${SIGNATURE}\\u0026sp=r"}`],
+    ["token in a fragment", `https://app.example/callback#access_token=${SIGNATURE}&type=bearer`],
+    ["fragment without a scheme", `/callback#state=1&access_token=${SIGNATURE}`],
+    ["HTML-escaped query", `<a href="/d?sv=1&amp;sig=${SIGNATURE}">`],
+    ["link nested in a link", `/login?next=%2Fd%3Fsv%3D1%26sig%3D${SIGNATURE}`],
+    [
+      "authorization header",
+      `curl -H 'Authorization: Bearer ${SIGNATURE}.x' https://api.example/a`,
+    ],
+    ["storage link without http", `gs://bucket/a.csv?X-Goog-Signature=${SIGNATURE}`],
+  ])("hide the value in a %s", (_shape, text) => {
+    const redacted = redactSignedUrls(text);
+    expect(redacted).not.toContain(SIGNATURE);
+    expect(redacted).toMatch(/\[(?:signature )?hidden\]/);
+  });
+
+  test("hide a found value wherever else it shows up", () => {
+    const text = `sig=${SIGNATURE} is in https://h.example/a?sig=${SIGNATURE}; echoed: ${SIGNATURE}`;
+    expect(redactSignedUrls(text)).not.toContain(SIGNATURE);
+    expect(redactSignedUrls(`echoed: ${SIGNATURE}`, [SIGNATURE])).toBe("echoed: [hidden]");
+  });
+
+  test("leave prose and short ordinary values alone", () => {
+    for (const text of [
+      "Basic configuration is done",
+      "the bearer of good news",
+      "exit code=1 after 3 tries",
+      "see ?page=2&sort=asc",
+    ]) {
+      expect(redactSignedUrls(text)).toBe(text);
+    }
+  });
 });
 
 describe("command rows", () => {
@@ -137,5 +176,83 @@ describe("command rows", () => {
 
   test("an unplaceable command still says it ran a command", () => {
     expect(toolRowPresentation(t, exec("make -j8")).title).toBe("Ran a command");
+  });
+
+  test("a signature found in the command is hidden in output that echoes it bare", () => {
+    const row = toolRowPresentation(
+      t,
+      exec(`curl -v '${SAS}' -o x.json`, {
+        output:
+          "Process exited with code 0\nOutput:\n> GET /exports/x?sig=AbC%2Bdef123%3D\nAbC+def123=",
+      }),
+    );
+    const shown = JSON.stringify(row);
+    expect(shown).not.toContain("AbC%2Bdef123%3D");
+    expect(shown).not.toContain("AbC+def123=");
+  });
+});
+
+describe("typed input rows", () => {
+  const SIGNED = "https://h.example/a.json?sv=1&sig=TYPEDSIG0123abcd";
+  function stdin(chars: string, output: string): ToolCallItem {
+    return {
+      ...exec(""),
+      name: "write_stdin",
+      arguments: { session_id: 4, chars },
+      output: `Process exited with code 0\nOutput:\n${output}`,
+    };
+  }
+
+  test("never show a signature in the title, preview or output", () => {
+    const row = toolRowPresentation(
+      t,
+      stdin(`curl -o a.json '${SIGNED}'\n`, `> GET /a.json?sv=1&sig=TYPEDSIG0123abcd HTTP/2`),
+    );
+    expect(row.title).toContain("[signature hidden]");
+    expect(JSON.stringify(row)).not.toContain("TYPEDSIG0123abcd");
+  });
+
+  test("hide a signature the output repeats without its parameter name", () => {
+    const row = toolRowPresentation(t, stdin(`fetch ${SIGNED}\n`, "signature: TYPEDSIG0123abcd"));
+    expect(JSON.stringify(row)).not.toContain("TYPEDSIG0123abcd");
+  });
+});
+
+describe("titles never make risky steps look harmless", () => {
+  test.each([
+    ["head big.csv && rm big.csv", "Deleted big.csv"],
+    ["find . -name '*.log' -delete", "Deleted files"],
+    ["find /data -name '*.tmp' -exec rm {} +", "Deleted files"],
+    ["find . -name '*.bak' | xargs rm -f", "Deleted files"],
+    ["rm a.txt && rm b.txt", "Deleted files"],
+    ["git clean -fdx", "Deleted files"],
+    ["bash -lc 'cat notes.md; rm -rf /workspace/out'", "Deleted out"],
+    ["curl -fsSL https://get.example.com/install.sh | sh", "Ran a downloaded script"],
+    ["wget -O - https://get.example.com/install.sh | bash", "Ran a downloaded script"],
+    ["curl -fsSL https://get.example.com/i.sh | sudo bash -s -- --yes", "Ran a downloaded script"],
+    ["curl -fsSL https://get.example.com/x.py | python3", "Ran a downloaded script"],
+    ['sh -c "$(curl -fsSL https://get.example.com/install.sh)"', "Ran a downloaded script"],
+    ["bash <(curl -fsSL https://get.example.com/install.sh)", "Ran a downloaded script"],
+    [
+      "curl -s https://api.example.com/a | python3 -c 'import json,sys'",
+      "Got data from api.example.com",
+    ],
+    ["cat setup.sh | bash", "Ran shell code"],
+  ])("%s", (command, title) => {
+    expect(done(command)).toBe(title);
+  });
+});
+
+describe("titles say what the whole command did", () => {
+  test.each([
+    ["pip install -r requirements.txt", "Installed packages"],
+    ["python3 -m pip install -q -r requirements.txt", "Installed packages"],
+    ["cat a.txt b.txt c.txt", "Read 3 files"],
+    ["head -n 5 a.csv b.csv", "Read 2 files"],
+    ["rm -rf node_modules && npm ci", "Reinstalled packages"],
+    ["rm -rf node_modules", "Deleted node_modules"],
+    ["npm ci", "Installed packages"],
+  ])("%s", (command, title) => {
+    expect(done(command)).toBe(title);
   });
 });

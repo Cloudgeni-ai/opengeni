@@ -4990,6 +4990,11 @@ export const englishMessages = {
   "timeline.commandStep.readFiles.done_other": "Read {count} files",
   "timeline.commandStep.readFiles.running_one": "Reading {count} file",
   "timeline.commandStep.readFiles.running_other": "Reading {count} files",
+  "timeline.commandStep.reinstallPackages.done": "Reinstalled packages",
+  "timeline.commandStep.reinstallPackages.running": "Reinstalling packages",
+  /** Code fetched from the internet and run straight away (`curl … | sh`). */
+  "timeline.commandStep.runDownloadedCode.done": "Ran a downloaded script",
+  "timeline.commandStep.runDownloadedCode.running": "Running a downloaded script",
   /** Inline code run by an interpreter; `language` is "Python", "JavaScript", "shell", … */
   "timeline.commandStep.runCode.done": "Ran {language} code",
   "timeline.commandStep.runCode.running": "Running {language} code",

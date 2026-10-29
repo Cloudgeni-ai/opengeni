@@ -16,7 +16,7 @@ import {
   v4aToGitFileDiff,
   type ApplyPatchOperation,
 } from "./parsers";
-import { commandStepTitle, redactSignedUrls } from "./command-step";
+import { commandStepTitle, redactSignedUrls, signedValues } from "./command-step";
 import { invokedToolCall } from "./invoked-tool";
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
@@ -1911,7 +1911,32 @@ export function toolRowPresentation(
   item = invokedToolCall(item);
   const row = presentedToolRow(t, item, context);
   const presented = context.details === "plain" ? plainToolRow(t, item, row, context) : row;
-  return item.awaitingApproval ? awaitingApprovalRow(t, presented) : presented;
+  return redactRow(item.awaitingApproval ? awaitingApprovalRow(t, presented) : presented, item);
+}
+
+/**
+ * A signature, token or key never shows on a row, whichever tool produced it
+ * and wherever the text puts it: every string the row shows (title, preview,
+ * command, output, payloads) is redacted, including any credential value
+ * found anywhere in the call's arguments or output.
+ */
+function redactRow(row: ToolRowPresentation, item: ToolCallItem): ToolRowPresentation {
+  const source = [item.arguments, item.output]
+    .map((value) => (typeof value === "string" ? value : stringifyPayload(value)))
+    .join("\n");
+  return redactStrings(row, signedValues(source), 0) as ToolRowPresentation;
+}
+
+function redactStrings(value: unknown, values: readonly string[], depth: number): unknown {
+  if (typeof value === "string")
+    return redactSignedUrls(value, [...values, ...signedValues(value)]);
+  if (depth > 12 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((entry) => redactStrings(entry, values, depth + 1));
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, redactStrings(entry, values, depth + 1)]),
+  );
 }
 
 /** A call waiting for the person's approval has not run: say so, never "Done". */

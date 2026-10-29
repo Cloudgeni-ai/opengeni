@@ -15,38 +15,113 @@ import { toolStepLabel, type ToolStepPhase } from "./tool-steps";
 /* ---- signed links ---------------------------------------------------------- */
 
 /**
- * Query parameters that make a link a credential: storage signatures (Azure
- * SAS, S3, Google Cloud Storage, CloudFront) and access tokens or keys.
+ * Parameters whose value is a credential: storage signatures (Azure SAS, S3,
+ * Google Cloud Storage, CloudFront) and access tokens, keys and codes.
  */
-const SIGNED_QUERY_PARAM =
-  /(?:^|[?&;])(?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|googleaccessid|key-pair-id|policy|token|access_token|api_key|apikey|key|code|password|secret)=/i;
+const SECRET_PARAM_NAMES =
+  "sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|googleaccessid|key-pair-id|policy|token|access_token|id_token|refresh_token|auth_token|client_secret|api_key|apikey|key|code|password|secret";
+/**
+ * What can stand before a parameter: `?`, `&`, `#`, `;`, and the same
+ * separators escaped in JSON (`\u0026`), HTML (`&amp;`) or a link nested in
+ * another link (`%26`, `%3F`, `%23`).
+ */
+const PARAM_SEPARATOR = String.raw`(?:[?&#;]|\\+u0026|&amp;|%26|%3[Ff]|%23)`;
+const PARAM_EQUALS = String.raw`(?:=|%3[Dd])`;
+/** A parameter value: runs until the next separator, quote, space or bracket. */
+const PARAM_VALUE = String.raw`(?:\\\/|(?!%26)[^&\s'"\x60<>#\\,;()[\]{}|])+`;
+const SECRET_PARAM_SOURCE = `(${PARAM_SEPARATOR})(${SECRET_PARAM_NAMES})(${PARAM_EQUALS})(${PARAM_VALUE})`;
+const HAS_SECRET_PARAM = new RegExp(SECRET_PARAM_SOURCE, "i");
+/**
+ * `Authorization: Bearer …`, `Basic …` and `token …` credentials. The value must
+ * look like a token (a digit or token punctuation in it), so prose such as
+ * "Basic configuration" is left alone.
+ */
+const AUTH_HEADER_VALUE =
+  /\b([Bb]earer|Basic|(?<=[Aa]uthorization:\s*)token)(\s+)((?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,})/g;
 
-const URL_PATTERN = /\bhttps?:\/\/[^\s'"`<>()]+/gi;
+const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>()]+/gi;
 
 /** Replaces the query of a signed or token-bearing link, so the credential is never shown. */
 export const SIGNED_LINK_QUERY_PLACEHOLDER = "?[signature hidden]";
+const SIGNED_LINK_FRAGMENT_PLACEHOLDER = "#[signature hidden]";
+/** Replaces a credential value found outside a whole link. */
+const SECRET_VALUE_PLACEHOLDER = "[hidden]";
+/** Values this short are too likely to be ordinary words to hide everywhere they occur. */
+const MIN_SPREAD_VALUE_LENGTH = 8;
 
 /**
- * Hide the query of every signed or token-bearing link in `text` (the part
- * after `?` that carries the signature), keeping the host and path so the link
- * is still recognisable. Other links are left as they are.
+ * The credential values in `text` (signature, token and key parameter values,
+ * `Bearer` tokens), raw and URL-decoded, so the same value can be hidden
+ * wherever else it shows up, such as in a command's output.
  */
-export function redactSignedUrls(text: string): string {
-  if (!text.includes("://")) return text;
-  return text.replace(URL_PATTERN, (url) => {
-    const queryStart = url.indexOf("?");
-    if (queryStart < 0) return url;
-    const hashStart = url.indexOf("#", queryStart);
-    const query = url.slice(queryStart, hashStart < 0 ? undefined : hashStart);
-    if (!SIGNED_QUERY_PARAM.test(query)) return url;
-    return `${url.slice(0, queryStart)}${SIGNED_LINK_QUERY_PLACEHOLDER}`;
-  });
+export function signedValues(text: string): string[] {
+  const values = new Set<string>();
+  const add = (value: string) => {
+    if (value.length < MIN_SPREAD_VALUE_LENGTH) return;
+    values.add(value);
+    try {
+      const decoded = decodeURIComponent(value);
+      if (decoded.length >= MIN_SPREAD_VALUE_LENGTH) values.add(decoded);
+    } catch {
+      // Not URL-encoded.
+    }
+  };
+  for (const match of text.matchAll(new RegExp(SECRET_PARAM_SOURCE, "gi"))) add(match[4]!);
+  for (const match of text.matchAll(AUTH_HEADER_VALUE)) add(match[3]!);
+  return [...values];
+}
+
+function redactLink(url: string): string {
+  const cut = url.search(/[?#]/);
+  if (cut < 0) return url;
+  // A trailing backslash belongs to an escaped quote in JSON text, not the link.
+  const trailing = /\\+$/.exec(url)?.[0] ?? "";
+  const tail = url.slice(cut, url.length - trailing.length);
+  if (!HAS_SECRET_PARAM.test(tail)) return url;
+  const placeholder =
+    url[cut] === "?" ? SIGNED_LINK_QUERY_PLACEHOLDER : SIGNED_LINK_FRAGMENT_PLACEHOLDER;
+  return `${url.slice(0, cut)}${placeholder}${trailing}`;
+}
+
+/**
+ * Hide every credential in `text`, whatever shape it takes: a signed or
+ * token-bearing link loses its query or fragment (keeping the host and path so
+ * it is still recognisable); a signature, token or key parameter anywhere else
+ * (`GET /a.json?sv=…&sig=…`, `\u0026token=…` in JSON, `#access_token=…`) and an
+ * `Authorization` token keep their name and lose their value; and any of
+ * `values` (see `signedValues`, by default those found in `text`) is hidden
+ * wherever it occurs. Text without credentials is returned unchanged.
+ */
+export function redactSignedUrls(
+  text: string,
+  values: readonly string[] = signedValues(text),
+): string {
+  let out = text.includes("://") ? text.replace(URL_PATTERN, redactLink) : text;
+  out = out.replace(
+    new RegExp(SECRET_PARAM_SOURCE, "gi"),
+    (_match, separator: string, name: string, equals: string) =>
+      `${separator}${name}${equals}${SECRET_VALUE_PLACEHOLDER}`,
+  );
+  out = out.replace(
+    AUTH_HEADER_VALUE,
+    (_match, scheme: string, space: string) => `${scheme}${space}${SECRET_VALUE_PLACEHOLDER}`,
+  );
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
+    if (out.includes(value)) out = out.split(value).join(SECRET_VALUE_PLACEHOLDER);
+  }
+  return out;
 }
 
 /* ---- shell reading ---------------------------------------------------------- */
 
 type Redirect = { op: string; target: string };
-type SimpleCommand = { words: string[]; redirects: Redirect[]; heredoc: boolean };
+type SimpleCommand = {
+  words: string[];
+  redirects: Redirect[];
+  heredoc: boolean;
+  /** The first command of this command's pipeline (itself when it starts one). */
+  pipelineHead: SimpleCommand | null;
+};
 
 // `<<EOF` and `<<-'EOF'`, but not a `<<<` here-string.
 const HEREDOC = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][\w-]*)\1/g;
@@ -166,25 +241,34 @@ function tokenize(source: string): Token[] {
   return tokens;
 }
 
-/** Commands in source order; a pipeline contributes only its first command. */
+/** Commands in source order; a command after `|` points at its pipeline's first command. */
 function parseCommands(source: string): SimpleCommand[] {
   const text = stripHeredocBodies(source);
   const commands: SimpleCommand[] = [];
-  let current: SimpleCommand = { words: [], redirects: [], heredoc: false };
-  let piped = false;
+  const fresh = (): SimpleCommand => ({
+    words: [],
+    redirects: [],
+    heredoc: false,
+    pipelineHead: null,
+  });
+  let current = fresh();
+  let head: SimpleCommand | null = null;
   let pendingRedirect: string | null = null;
-  const end = () => {
-    if (!piped && current.words.length) commands.push(current);
-    current = { words: [], redirects: [], heredoc: false };
+  const end = (piped: boolean) => {
+    if (current.words.length) {
+      current.pipelineHead = head;
+      commands.push(current);
+      if (piped) head ??= current;
+    }
+    if (!piped) head = null;
+    current = fresh();
   };
   for (const token of tokenize(text)) {
     if ("op" in token) {
       if (token.op === ";") {
-        end();
-        piped = false;
+        end(false);
       } else if (token.op === "|") {
-        end();
-        piped = true;
+        end(true);
       } else if (token.op.startsWith("<<")) {
         current.heredoc = true;
         pendingRedirect = token.op === "<<<" ? "<<<" : "<<";
@@ -200,7 +284,7 @@ function parseCommands(source: string): SimpleCommand[] {
     }
     current.words.push(token.word);
   }
-  end();
+  end(false);
   return commands;
 }
 
@@ -243,7 +327,9 @@ type FixedStep =
   | "uploadChanges"
   | "getChanges"
   | "queryDatabase"
-  | "useGitHub";
+  | "useGitHub"
+  | "runDownloadedCode"
+  | "reinstallPackages";
 
 type Step =
   | { kind: "named"; step: NamedStep; name: string | null; weight: number }
@@ -273,6 +359,34 @@ const UNNAMED: Record<NamedStep, FixedStep | "editFile" | "download" | null> = {
   pack: "packFiles",
   convert: "convertFile",
 };
+
+/**
+ * Every step id a title is built from (`timeline.commandStep.<id>.<phase>`),
+ * so the message catalog can check each one still has a use.
+ */
+export const COMMAND_STEP_IDS: ReadonlyArray<
+  NamedStep | FixedStep | "readFiles" | "search" | "searchFiles" | "fetch" | "send" | "runCode"
+> = [
+  ...(Object.keys(UNNAMED) as NamedStep[]),
+  ...(Object.values(UNNAMED).filter(
+    (step): step is FixedStep => step !== null && step !== "editFile" && step !== "download",
+  ) as FixedStep[]),
+  "runTests",
+  "checkChanges",
+  "saveChanges",
+  "uploadChanges",
+  "getChanges",
+  "queryDatabase",
+  "useGitHub",
+  "runDownloadedCode",
+  "reinstallPackages",
+  "readFiles",
+  "search",
+  "searchFiles",
+  "fetch",
+  "send",
+  "runCode",
+];
 
 /** Shell plumbing that never describes the work. */
 const TRIVIAL = new Set([
@@ -405,6 +519,48 @@ const CONVERTERS = new Set([
 const DATABASES = new Set(["psql", "sqlite3", "mysql", "duckdb", "clickhouse-client"]);
 const TEST_RUNNERS = new Set(["pytest", "jest", "vitest", "mocha"]);
 
+/*
+ * A title never makes a deletion or running downloaded code look harmless:
+ * those steps outweigh everything else a command does, so the title names them.
+ */
+const DOWNLOADED_CODE_WEIGHT = 100;
+const DELETE_WEIGHT = 50;
+/** Clearing a dependency or cache folder that a tool rebuilds is routine, not the headline. */
+const REGENERABLE_DELETE_WEIGHT = 0.8;
+const DOWNLOADERS = new Set(["curl", "wget", "aria2c", "fetch", "http", "https", "xh"]);
+const DELETERS = new Set(["rm", "rmdir", "unlink", "trash", "shred", "srm"]);
+const REGENERABLE_FOLDERS = new Set([
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".next",
+  ".turbo",
+  ".parcel-cache",
+]);
+const INSTALL_VALUE_FLAGS = new Set([
+  "-r",
+  "--requirement",
+  "-c",
+  "--constraint",
+  "-e",
+  "--editable",
+  "-i",
+  "--index-url",
+  "--extra-index-url",
+  "-t",
+  "--target",
+  "--prefix",
+  "-f",
+  "--find-links",
+]);
+/** `bash <(curl …)`, `sh -c "$(wget …)"`, `eval "$(curl …)"`, `source <(curl …)`. */
+const RUNS_DOWNLOAD_INLINE =
+  /(?:^|[\s;&|(])(?:(?:ba|z|k|da)?sh|python3?|node|perl|ruby|php|eval|source|\.)\s+(?:-\S+\s+)*["']?(?:<\(|\$\(|`)\s*(?:\S*\/)?(?:curl|wget|aria2c|xh)\b/;
+
 function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   return trimmed.slice(trimmed.lastIndexOf("/") + 1);
@@ -532,6 +688,36 @@ function classify(command: SimpleCommand, depth: number): Step | null {
     return null;
   }
 
+  if (DELETERS.has(program)) {
+    const paths = operands(words);
+    if (paths.length && paths.every((path) => REGENERABLE_FOLDERS.has(basename(path)))) {
+      return paths.length === 1
+        ? named("delete", paths[0], REGENERABLE_DELETE_WEIGHT)
+        : fixed("deleteFiles", REGENERABLE_DELETE_WEIGHT);
+    }
+    return paths.length === 1
+      ? named("delete", paths[0], DELETE_WEIGHT)
+      : fixed("deleteFiles", DELETE_WEIGHT);
+  }
+  if (program === "find") {
+    const exec = words.findIndex((word) => /^-(?:exec|execdir|ok|okdir)$/.test(word));
+    if (
+      words.includes("-delete") ||
+      (exec >= 0 && DELETERS.has(basename(unwrap(words.slice(exec + 1))[0] ?? "")))
+    ) {
+      return fixed("deleteFiles", DELETE_WEIGHT);
+    }
+  }
+  if (program === "xargs" || program === "parallel") {
+    const rest = words.slice(1);
+    while (rest[0]?.startsWith("-")) rest.shift();
+    if (DELETERS.has(basename(unwrap(rest)[0] ?? ""))) return fixed("deleteFiles", DELETE_WEIGHT);
+    return null;
+  }
+  if (program === "git" && (sub === "clean" || sub === "rm")) {
+    return fixed("deleteFiles", DELETE_WEIGHT);
+  }
+
   if (TRIVIAL.has(program)) {
     return (program === "echo" || program === "printf") && output
       ? named("write", output, 2)
@@ -564,7 +750,9 @@ function classify(command: SimpleCommand, depth: number): Step | null {
     if (output) return named("write", output, 3);
     const files = operands(words);
     if (!files.length) return null;
-    return named("read", files[0], 2);
+    return files.length > 1
+      ? { kind: "readFiles", count: files.length, weight: 2 }
+      : named("read", files[0], 2);
   }
   if (program === "tee") return named("write", operands(words)[0], 3);
   if (program === "sed" || program === "awk" || (program === "perl" && words.includes("-pi"))) {
@@ -579,9 +767,11 @@ function classify(command: SimpleCommand, depth: number): Step | null {
       words,
       new Set(["-n", "-c", "--lines", "--bytes", "-d", "-f", "-k", "-t"]),
     );
-    const file = program === "jq" || program === "yq" ? files[1] : files[files.length - 1];
-    if (!file) return null;
-    return named("read", file, 2);
+    const inputs = program === "jq" || program === "yq" ? files.slice(1) : files;
+    if (!inputs.length) return null;
+    return inputs.length > 1
+      ? { kind: "readFiles", count: inputs.length, weight: 2 }
+      : named("read", inputs[0], 2);
   }
   if (LISTERS.has(program)) {
     const target = operands(
@@ -641,10 +831,6 @@ function classify(command: SimpleCommand, depth: number): Step | null {
     return paths.length === 2
       ? named(step, paths[0], 1.5)
       : fixed(step === "move" ? "moveFiles" : "copyFiles", 1.5);
-  }
-  if (program === "rm" || program === "rmdir" || program === "trash" || program === "unlink") {
-    const paths = operands(words);
-    return paths.length === 1 ? named("delete", paths[0], 2) : fixed("deleteFiles", 2);
   }
   if (program === "unzip" || program === "gunzip" || program === "bunzip2" || program === "unxz") {
     return named("unpack", operands(words, new Set(["-d"]))[0], 2);
@@ -722,9 +908,13 @@ function classify(command: SimpleCommand, depth: number): Step | null {
   }
   if (PACKAGE_MANAGERS.has(program)) {
     const installVerb = program === "uv" && sub === "pip" ? words[2] : sub;
+    if (installVerb === "ci" || (program === "uv" && installVerb === "sync")) {
+      return fixed("installPackages", 3);
+    }
     if (installVerb === "install" || installVerb === "add" || installVerb === "i") {
       const packages = operands(
         program === "uv" && sub === "pip" ? words.slice(2) : words.slice(1),
+        INSTALL_VALUE_FLAGS,
       ).filter((word) => !/^(?:-|install$|add$|i$)/.test(word));
       return packages.length === 1 ? named("install", packages[0], 3) : fixed("installPackages", 3);
     }
@@ -773,17 +963,74 @@ function classify(command: SimpleCommand, depth: number): Step | null {
   return null;
 }
 
+/**
+ * A command later in a pipeline only matters to the title when it deletes
+ * (`… | xargs rm`) or runs what flows into it as a program (`curl … | sh`).
+ */
+function classifyPiped(command: SimpleCommand, depth: number): Step | null {
+  const words = unwrap(command.words);
+  const program = basename(words[0] ?? "");
+  const language = INTERPRETERS[program];
+  if (language) {
+    // `python3 -c '…'` and `bash -lc '…'` run their own code and only read the piped text.
+    // (`bash -e` only stops on errors: it still runs the piped text.)
+    const inlineFlag =
+      language === "shell" || language === "Python" ? /^-[a-z]*c$/ : /^-(?:e|p|-eval|-print)$/;
+    const inline = words.some((word) => inlineFlag.test(word));
+    const script = operands(words).find((word) => /\.[A-Za-z0-9]+$/.test(word));
+    if (inline || script) return null;
+    const head = command.pipelineHead;
+    const headProgram = head ? basename(unwrap(head.words)[0] ?? "") : "";
+    if (DOWNLOADERS.has(headProgram)) {
+      return { kind: "fixed", step: "runDownloadedCode", weight: DOWNLOADED_CODE_WEIGHT };
+    }
+    const display =
+      program === "bun" || program === "deno" || program === "node" ? "JavaScript" : language;
+    return { kind: "code", language: display, weight: 3.5 };
+  }
+  const step = classify(command, depth);
+  return step && step.weight >= DELETE_WEIGHT ? step : null;
+}
+
 function pick(commands: readonly SimpleCommand[], depth: number): Step | null {
   let best: Step | null = null;
   const reads = new Set<string>();
+  let readCount = 0;
+  const deletions = new Set<string>();
+  let regenerableDeletion = false;
   for (const command of commands) {
-    const step = classify(command, depth);
+    const step = command.pipelineHead ? classifyPiped(command, depth) : classify(command, depth);
     if (!step) continue;
-    if (step.kind === "named" && step.step === "read" && step.name) reads.add(step.name);
+    if (step.kind === "named" && step.step === "read" && step.name) {
+      reads.add(step.name);
+      readCount++;
+    }
+    if (step.kind === "readFiles") readCount += step.count;
+    const deletes =
+      (step.kind === "named" && step.step === "delete") ||
+      (step.kind === "fixed" && step.step === "deleteFiles");
+    if (deletes && step.weight < DELETE_WEIGHT) regenerableDeletion = true;
+    else if (deletes) {
+      // Several deletions read as "Deleted files", never as just the first one.
+      deletions.add((step.kind === "named" && step.name) || `#${deletions.size}`);
+    }
     if (!best || step.weight > best.weight) best = step;
   }
-  if (best?.kind === "named" && best.step === "read" && reads.size > 1) {
-    return { kind: "readFiles", count: reads.size, weight: best.weight };
+  if (!best) return null;
+  if (best.weight >= DELETE_WEIGHT && best.weight < DOWNLOADED_CODE_WEIGHT && deletions.size > 1) {
+    return { kind: "fixed", step: "deleteFiles", weight: best.weight };
+  }
+  const installs =
+    (best.kind === "named" && best.step === "install") ||
+    (best.kind === "fixed" && best.step === "installPackages");
+  if (installs && regenerableDeletion) {
+    return { kind: "fixed", step: "reinstallPackages", weight: best.weight };
+  }
+  if (
+    (best.kind === "named" && best.step === "read" && reads.size > 1) ||
+    (best.kind === "readFiles" && readCount > best.count)
+  ) {
+    return { kind: "readFiles", count: Math.max(reads.size, readCount), weight: best.weight };
   }
   return best;
 }
@@ -799,6 +1046,8 @@ export function commandStepTitle(
   phase: ToolStepPhase,
 ): string | null {
   if (!command.trim()) return null;
+  if (RUNS_DOWNLOAD_INLINE.test(command))
+    return t(`timeline.commandStep.runDownloadedCode.${phase}`);
   const step = pick(parseCommands(command), 0);
   if (!step) return null;
   switch (step.kind) {
