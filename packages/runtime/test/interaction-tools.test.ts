@@ -3144,13 +3144,14 @@ describe("interaction attempt tools", () => {
       machines: {
         bridges?: Array<{ enrollmentId: string; sandboxId: string | null; machineName: string }>;
         activeSandboxId?: string | null;
+        sessions?: BrowserSession[];
       } = {},
     ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
         transport: {
           ...partialTransport({
-            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            listBrowserSessions: async () => ({ revision: 0, sessions: machines.sessions ?? [] }),
             listAttachedBrowsers: async () => ({
               revision: 1,
               bridges: (machines.bridges ?? []).map((bridge) => ({
@@ -3202,6 +3203,49 @@ describe("interaction attempt tools", () => {
         attachedProfile: { id: only.id, name: "Personal" },
       });
       expect(result.structuredContent).not.toHaveProperty("otherAttachedProfiles");
+    });
+
+    const liveSessionOn = (deviceId: string) => ({
+      ...discoveredBrowserSession(randomUUID(), sessionId),
+      placement: { kind: "attached_device" as const, deviceId },
+    });
+
+    test("does not reuse a session on a profile that has disconnected", async () => {
+      const connected = profile("Work", "2026-10-15T09:00:00.000Z");
+      const gone = profile("Personal", "2026-10-15T10:00:00.000Z", { state: "disconnected" });
+      const stale = liveSessionOn(gone.id);
+      const { result, createRequest } = await open([connected, gone], undefined, {
+        sessions: [stale],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: connected.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: connected.id, name: "Work" },
+      });
+      expect(JSON.stringify(result.structuredContent)).not.toContain(stale.id);
+    });
+
+    test("still reuses a session on a connected profile", async () => {
+      const connected = profile("Work", "2026-10-15T09:00:00.000Z");
+      const live = liveSessionOn(connected.id);
+      const { result, createRequest } = await open([connected], undefined, {
+        sessions: [live],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createRequest).toBeNull();
+      expect(JSON.stringify(result.structuredContent)).toContain(live.id);
+    });
+
+    test("says no profile is connected rather than reusing a session on a disconnected one", async () => {
+      const gone = profile("Personal", "2026-10-15T10:00:00.000Z", { state: "disconnected" });
+      const stale = liveSessionOn(gone.id);
+      const { result, createRequest } = await open([gone], undefined, { sessions: [stale] });
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
+      expect(JSON.stringify(result.structuredContent)).not.toContain(stale.id);
     });
 
     test("opens the most recently active profile and names the others", async () => {

@@ -4324,6 +4324,18 @@ async function openBrowser(
     // reused for an omitted/default headed request: OAuth providers such as
     // Google reject that automation-shaped login surface.
     const requestedHeadless = value.headless ?? false;
+    // Without a deviceId, a session on a profile that has since disconnected
+    // is not reusable: its calls would all fail while another profile is
+    // connected. The open then chooses among the connected profiles.
+    const connectedProfileIds = attachedInventory
+      ? new Set(
+          attachedInventory.devices
+            .filter(
+              (device) => device.state === "connected" && device.capabilities.debuggerAttachment,
+            )
+            .map((device) => device.id),
+        )
+      : null;
     const reusable =
       value.mode === "new"
         ? null
@@ -4337,6 +4349,9 @@ async function openBrowser(
                   value.placement,
                   currentPlacement,
                 ) &&
+                (connectedProfileIds === null ||
+                  (candidate.placement.kind === "attached_device" &&
+                    connectedProfileIds.has(candidate.placement.deviceId))) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
                   candidate.baseRevisionId === value.baseRevisionId) &&
