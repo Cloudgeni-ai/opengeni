@@ -3508,6 +3508,7 @@ const RegistryModelSchema = z
     toolOutputTruncationTokens: z.number().int().positive().optional(),
     reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
+    hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     // Where this route processes data, overriding the provider's declaration.
@@ -4482,6 +4483,8 @@ export interface ConfiguredModel {
   toolOutputTruncationTokens?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
+  /** Operator route setting; absent preserves the hosted-search SDK default. */
+  hostedWebSearchContextSize?: "low" | "medium" | "high" | undefined;
 }
 
 /**
@@ -8689,6 +8692,9 @@ function definitionVersionFor(
     // changing it; it is intentionally not a second executable-definition
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
+    ...(model.hostedWebSearchContextSize === undefined
+      ? {}
+      : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
     pricing: model.pricing ?? null,
     // Where an operator declares a route processes data is executable
     // identity: moving it fails accepted turns instead of silently moving them.
@@ -9479,6 +9485,9 @@ export function configuredModels(
             : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
           reasoningEffort: capabilities.reasoning.runnable,
           hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+          ...(model.hostedWebSearchContextSize === undefined
+            ? {}
+            : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
         }),
       );
     }
