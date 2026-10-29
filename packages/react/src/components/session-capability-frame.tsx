@@ -1,5 +1,17 @@
-import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
+import {
+  CalendarIcon,
+  CheckIcon,
+  CloudIcon,
+  ContactIcon,
+  FilesIcon,
+  InfoIcon,
+  MailIcon,
+  ShieldCheckIcon,
+  XIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { Dialog } from "radix-ui";
+import type { IntegrationExperienceIcon } from "../integration-presentation";
 import { containedPortal } from "../ui/portal-container";
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
@@ -12,6 +24,11 @@ export type SessionCapabilityFrameProps = {
   name: string;
   subtitle: string;
   logo: string | null;
+  /**
+   * The service's kind of content, drawn when it has no logo, so a reviewed
+   * service never reads as two letters of its name.
+   */
+  icon?: IntegrationExperienceIcon | undefined;
   /** A short kind label for the setup dialog's subtitle; the card itself shows none. */
   typeLabel: string;
   /**
@@ -54,14 +71,45 @@ export type SessionCapabilityFrameProps = {
   inlineSetup?: ReactNode;
 };
 
-function Mark({ src, name }: { src: string | null; name: string }) {
+const MARK_ICONS: Readonly<Record<IntegrationExperienceIcon, LucideIcon>> = {
+  calendar: CalendarIcon,
+  cloud: CloudIcon,
+  contacts: ContactIcon,
+  files: FilesIcon,
+  mail: MailIcon,
+};
+
+/** "Google Calendar" reads as GC, a one-word name keeps its first two letters. */
+export function capabilityMarkInitials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const initials =
+    words.length > 1 ? words.map((word) => [...word][0]).join("") : [...(words[0] ?? "")].join("");
+  return [...initials].slice(0, 2).join("").toUpperCase();
+}
+
+function Mark({
+  src,
+  name,
+  icon,
+}: {
+  src: string | null;
+  name: string;
+  icon?: IntegrationExperienceIcon | undefined;
+}) {
   const [failed, setFailed] = useState<string | null>(null);
+  const Icon = icon ? MARK_ICONS[icon] : null;
   return (
-    <span className="og-session-capability-logo" aria-hidden>
+    <span
+      className="og-session-capability-logo"
+      data-mark={src && failed !== src ? "image" : Icon ? "icon" : "initials"}
+      aria-hidden
+    >
       {src && failed !== src ? (
         <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(src)} />
+      ) : Icon ? (
+        <Icon size={18} strokeWidth={1.75} />
       ) : (
-        name.trim().slice(0, 2).toUpperCase()
+        capabilityMarkInitials(name)
       )}
     </span>
   );
@@ -73,6 +121,7 @@ export function SessionCapabilityFrame({
   name,
   subtitle,
   logo,
+  icon,
   typeLabel,
   badge,
   description,
@@ -113,7 +162,7 @@ export function SessionCapabilityFrame({
   }, [complete, followAnswer]);
   const identity = (
     <>
-      <Mark src={logo} name={name} />
+      <Mark src={logo} name={name} icon={icon} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
         {subtitle ? <span>{subtitle}</span> : null}
@@ -215,7 +264,7 @@ export function SessionCapabilityFrame({
             }}
           >
             <div className="og-session-capability-dialog-header">
-              <Mark src={logo} name={name} />
+              <Mark src={logo} name={name} icon={icon} />
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>

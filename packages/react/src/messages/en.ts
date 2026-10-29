@@ -4600,6 +4600,11 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
   "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",
+  "sessionMcpCapabilityCard.details": "Details",
+  "sessionMcpCapabilityCard.detailsAbout": "About",
+  "sessionMcpCapabilityCard.detailsAccess": "Access",
+  "sessionMcpCapabilityCard.detailsAddress": "Address",
+  "sessionMcpCapabilityCard.detailsType": "Type",
   "sessionMcpCapabilityCard.done": "Done",
   "sessionMcpCapabilityCard.everyoneInThisWorkspace": "Everyone in this workspace",
   "sessionMcpCapabilityCard.finishingYourConnection": "Finishing your connection…",
@@ -4609,6 +4614,7 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
+  "sessionMcpCapabilityCard.onceConnectedTheAgentCan": "Once connected, the agent can:",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",

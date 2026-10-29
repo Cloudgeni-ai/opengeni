@@ -13144,6 +13144,53 @@
   color: var(--og-color-fg-muted);
   font-size: 12px;
 }
+:where(.og-root).og-session-capability-abilities,:where(.og-root) .og-session-capability-abilities {
+  display: grid;
+  gap: 6px;
+}
+:where(.og-root).og-session-capability-abilities > p,:where(.og-root) .og-session-capability-abilities > p {
+  margin: 0;
+  font-weight: 600;
+}
+:where(.og-root).og-session-capability-abilities ul,:where(.og-root) .og-session-capability-abilities ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 18px;
+  list-style: disc;
+  line-height: 1.5;
+}
+:where(.og-root).og-session-capability-details,:where(.og-root) .og-session-capability-details {
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
+}
+:where(.og-root).og-session-capability-details summary,:where(.og-root) .og-session-capability-details summary {
+  width: max-content;
+  cursor: pointer;
+  border-radius: var(--og-radius-sm,6px);
+}
+:where(.og-root).og-session-capability-details summary:focus-visible,:where(.og-root) .og-session-capability-details summary:focus-visible {
+  outline: 2px solid var(--og-color-accent-deep);
+  outline-offset: 2px;
+}
+:where(.og-root).og-session-capability-details dl,:where(.og-root) .og-session-capability-details dl {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+:where(.og-root).og-session-capability-details dl > div,:where(.og-root) .og-session-capability-details dl > div {
+  display: grid;
+  gap: 2px;
+}
+:where(.og-root).og-session-capability-details dt,:where(.og-root) .og-session-capability-details dt {
+  font-weight: 600;
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-session-capability-details dd,:where(.og-root) .og-session-capability-details dd {
+  margin: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 :where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) {
   justify-self: stretch;
   width: 100%;
@@ -14605,6 +14652,53 @@
 :where(.og-root).og-session-capability-setup .og-session-capability-scope,:where(.og-root) .og-session-capability-setup .og-session-capability-scope {
   color: var(--og-color-fg-muted);
   font-size: 12px;
+}
+:where(.og-root).og-session-capability-abilities,:where(.og-root) .og-session-capability-abilities {
+  display: grid;
+  gap: 6px;
+}
+:where(.og-root).og-session-capability-abilities > p,:where(.og-root) .og-session-capability-abilities > p {
+  margin: 0;
+  font-weight: 600;
+}
+:where(.og-root).og-session-capability-abilities ul,:where(.og-root) .og-session-capability-abilities ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 18px;
+  list-style: disc;
+  line-height: 1.5;
+}
+:where(.og-root).og-session-capability-details,:where(.og-root) .og-session-capability-details {
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
+}
+:where(.og-root).og-session-capability-details summary,:where(.og-root) .og-session-capability-details summary {
+  width: max-content;
+  cursor: pointer;
+  border-radius: var(--og-radius-sm,6px);
+}
+:where(.og-root).og-session-capability-details summary:focus-visible,:where(.og-root) .og-session-capability-details summary:focus-visible {
+  outline: 2px solid var(--og-color-accent-deep);
+  outline-offset: 2px;
+}
+:where(.og-root).og-session-capability-details dl,:where(.og-root) .og-session-capability-details dl {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+:where(.og-root).og-session-capability-details dl > div,:where(.og-root) .og-session-capability-details dl > div {
+  display: grid;
+  gap: 2px;
+}
+:where(.og-root).og-session-capability-details dt,:where(.og-root) .og-session-capability-details dt {
+  font-weight: 600;
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-session-capability-details dd,:where(.og-root) .og-session-capability-details dd {
+  margin: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 :where(.og-root).og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary),:where(.og-root) .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) {
   justify-self: stretch;

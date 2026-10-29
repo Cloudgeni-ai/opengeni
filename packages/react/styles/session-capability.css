@@ -65,6 +65,18 @@
 .og-session-capability-setup legend { padding:0 0 10px; font-weight:600; }
 .og-session-capability-setup input { margin-top:4px; accent-color:var(--og-color-accent-deep); }
 .og-session-capability-setup .og-session-capability-scope { color:var(--og-color-fg-muted); font-size:12px; }
+/* What the agent can do once connected, in the service's reviewed words. */
+.og-session-capability-abilities { display:grid; gap:6px; }
+.og-session-capability-abilities > p { margin:0; font-weight:600; }
+.og-session-capability-abilities ul { display:grid; gap:4px; margin:0; padding-inline-start:18px; list-style:disc; line-height:1.5; }
+/* Host, type and full description for people who want them; closed by default. */
+.og-session-capability-details { color:var(--og-color-fg-muted); font-size:12px; }
+.og-session-capability-details summary { width:max-content; cursor:pointer; border-radius:var(--og-radius-sm,6px); }
+.og-session-capability-details summary:focus-visible { outline:2px solid var(--og-color-accent-deep); outline-offset:2px; }
+.og-session-capability-details dl { display:grid; gap:8px; margin:10px 0 0; }
+.og-session-capability-details dl > div { display:grid; gap:2px; }
+.og-session-capability-details dt { font-weight:600; color:var(--og-color-fg); }
+.og-session-capability-details dd { margin:0; line-height:1.5; overflow-wrap:anywhere; }
 /* The card's one solid action, whichever step draws it: full width while the
    card is narrow, at the end of its line once it is wide. */
 .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) { justify-self:stretch; width:100%; min-height:40px; padding:8px 16px; border:1px solid transparent; border-radius:var(--og-radius-md,10px); background:var(--og-color-fg); color:var(--og-color-bg); font-size:13px; font-weight:500; }

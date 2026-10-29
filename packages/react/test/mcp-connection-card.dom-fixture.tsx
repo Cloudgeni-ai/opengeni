@@ -1295,6 +1295,134 @@ test("a server's sign-in inspection message stays out of the card", async () => 
   }
 });
 
+test("a reviewed service's card speaks its catalog copy and keeps the technical detail under Details", async () => {
+  const presentation = {
+    providerName: "Example Co",
+    icon: "calendar",
+    introduction: "Let agents work with the calendar you choose.",
+    capabilities: [
+      { title: "See what's coming up", description: "Read events in a time range." },
+      { title: "Plan and change events", description: "Create, move or cancel events." },
+    ],
+    permissionSummary: "Example Co asks for access to the calendar you approve.",
+  };
+  const render = async (input: {
+    source: CapabilityCatalogItem["source"];
+    name: string;
+    metadata: Record<string, unknown>;
+    mcpUrl?: string;
+  }) => {
+    const shown = {
+      ...item,
+      id: `service-${input.source}-${input.name}`,
+      name: input.name,
+      source: input.source,
+      description: "Events, calendars and free/busy through the reviewed Example REST bridge.",
+      metadata: input.metadata,
+      ...(input.mcpUrl ? { mcpUrl: input.mcpUrl } : {}),
+      enabled: false,
+      connectionRef: null,
+    } as CapabilityCatalogItem;
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [shown] }),
+        listConnections: async () => [],
+        connectTransport: () => ({}),
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    ) as unknown as OpenGeniClient;
+    const images: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records)
+        for (const node of record.addedNodes)
+          for (const image of node instanceof Element
+            ? [node, ...node.querySelectorAll("img")].filter((el) => el.tagName === "IMG")
+            : [])
+            images.push(image.getAttribute("src") ?? "");
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId="workspace"
+        capabilityId={shown.id}
+        name={input.name}
+        returnUrl="https://host.example/"
+        personalOnly
+        dialogOnly
+      />,
+    );
+    await flush();
+    const dialog = document.querySelector(".og-session-capability-dialog");
+    const details = dialog?.querySelector("details.og-session-capability-details");
+    const result = {
+      header: dialog?.querySelector(".og-session-capability-dialog-header")?.textContent ?? null,
+      mark: dialog?.querySelector(".og-session-capability-logo")?.getAttribute("data-mark") ?? null,
+      markText: dialog?.querySelector(".og-session-capability-logo")?.textContent ?? null,
+      lead: dialog?.querySelector(".og-session-capability-setup > p")?.textContent ?? null,
+      abilities: [...(dialog?.querySelectorAll(".og-session-capability-abilities li") ?? [])].map(
+        (node) => node.textContent,
+      ),
+      buttons: [...(dialog?.querySelectorAll(".og-session-capability-primary") ?? [])].map(
+        (node) => node.textContent,
+      ),
+      detailsOpen: details ? (details as HTMLDetailsElement).open : null,
+      detailsText: details?.textContent ?? null,
+      images,
+    };
+    observer.disconnect();
+    await view.unmount();
+    return result;
+  };
+
+  const reviewed = await render({
+    source: "built_in",
+    name: "Example Calendar",
+    metadata: { presentation },
+  });
+  // The service and its provider, in words, and the agent's abilities as a short list.
+  expect(reviewed.header).toContain("Example Calendar");
+  expect(reviewed.header).toContain("Example Co");
+  expect(reviewed.header).not.toContain("service.example");
+  expect(reviewed.mark).toBe("icon");
+  expect(reviewed.lead).toBe(presentation.introduction);
+  expect(reviewed.abilities).toEqual(["See what's coming up", "Plan and change events"]);
+  // One clear action.
+  expect(reviewed.buttons).toEqual(["Continue to Example Calendar"]);
+  // The host, type, catalog description and access summary are one click away.
+  expect(reviewed.detailsOpen).toBe(false);
+  expect(reviewed.detailsText).toContain("Details");
+  expect(reviewed.detailsText).toContain("https://service.example/mcp");
+  expect(reviewed.detailsText).toContain("MCP server");
+  expect(reviewed.detailsText).toContain("reviewed Example REST bridge");
+  expect(reviewed.detailsText).toContain(presentation.permissionSummary);
+
+  // Without curated copy or a logo, a two-word name reads as its initials.
+  const plain = await render({ source: "built_in", name: "Example Calendar", metadata: {} });
+  expect({ mark: plain.mark, markText: plain.markText, abilities: plain.abilities }).toEqual({
+    mark: "initials",
+    markText: "EC",
+    abilities: [],
+  });
+  expect(plain.lead).toContain("reviewed Example REST bridge");
+
+  // Gmail's reviewed mark ships with the package. This DOM cannot load it,
+  // and a logo that fails falls back to the service's icon, not two letters.
+  const gmail = await render({
+    source: "built_in",
+    name: "Gmail",
+    metadata: { presentation: { ...presentation, icon: "mail" } },
+    mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+  });
+  expect(gmail.images.some((src) => src.endsWith("gmail.ico"))).toBe(true);
+  expect(gmail.mark).toBe("icon");
+  expect(reviewed.images).toEqual([]);
+
+  // A hand-added server keeps its host in the header for the person checking it.
+  const manual = await render({ source: "manual", name: "Example Calendar", metadata: {} });
+  expect(manual.header).toContain("service.example");
+});
+
 test("a reviewed catalog service reads as the service; a hand-added server keeps its MCP label", async () => {
   const render = async (source: CapabilityCatalogItem["source"]) => {
     const shown = { ...item, source, enabled: false, connectionRef: null } as CapabilityCatalogItem;
@@ -1325,7 +1453,8 @@ test("a reviewed catalog service reads as the service; a hand-added server keeps
     await view.unmount();
     return result;
   };
-  expect(await render("library")).toEqual({ badge: null, provider: true });
+  // A reviewed service shows no host on the card; a hand-added one keeps it.
+  expect(await render("library")).toEqual({ badge: null, provider: false });
   expect(await render("manual")).toEqual({ badge: "MCP server", provider: true });
 });
 
