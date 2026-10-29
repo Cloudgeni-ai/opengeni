@@ -828,6 +828,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "secrets",
   "admin",
   "attachments",
+  "unattended",
 ] as const;
 export const AgentPromptModuleId = /* @__PURE__ */ defineSchema(() =>
   z.enum(AGENT_PROMPT_MODULE_IDS),
@@ -852,6 +853,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
+  unattended: "Unattended session",
 };
 
 /** The prompt module each capability owns; capabilities absent here own none. */

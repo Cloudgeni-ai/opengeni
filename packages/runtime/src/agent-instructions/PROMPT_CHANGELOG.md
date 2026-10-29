@@ -1,5 +1,20 @@
 # Modular prompt changelog
 
+Unattended sessions say so. A session created with `unattended: true` (no
+person will see or answer a question until the task ends) adds one paragraph,
+in the legacy CORE and as the last modular module (`unattended`, "# Unattended
+session"): asking, or waiting for human input, ends the work unanswered, so
+where any guidance says to ask, settle open choices with the most conventional
+option and finish the reversible work inside the workspace; never take or stand
+in for a step only a person can take, and leave it undone with anything
+destructive, outside the workspace or needing authority not given; end with
+the result, the assumptions made and the steps left for a person. Such a
+session is not given `request_human_input` or `interaction_request_human`, so
+the modular prompt also drops the clauses that offer them. A setup check of the
+general Autonomy principle alone still saw headless runs end with a question,
+because nothing told the model that no one would answer. Interactive sessions
+keep their bytes; the legacy lock adds an `unattended` case.
+
 Tool search returns the right tool on every route. No system prompt or tool
 description text changes; what changes is what a `tool_search` result carries,
 always appended after that result, so nothing an earlier request sent changes.

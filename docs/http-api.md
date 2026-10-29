@@ -55,6 +55,20 @@ the archive state); messages to an archived session return 409
 deployment archives idle sessions. See
 [`session-storage-lifecycle.md`](session-storage-lifecycle.md).
 
+Session create accepts `unattended: true` for a session no person will follow
+until its task ends, such as an API automation or another headless run. The
+agent is told that a question would end the work unanswered, so it settles open
+choices with the most conventional option, does the reversible work, leaves
+steps only a person can take undone and reports its assumptions and those
+steps. Tools that wait for a person (`request_human_input`,
+`interaction_request_human`) are not offered. The setting is frozen at create
+(recorded under the reserved `_opengeniUnattended` metadata key; session create
+ignores a caller-supplied value for it) and holds for every later turn of the
+session, including messages a person sends later. It is not inherited by child
+sessions, a fork of the session is attended (a person makes it to continue the
+work), and a keyed retry that changes it is an idempotency conflict. Omitted or
+`false` keeps the ordinary interactive behavior.
+
 Session goals support `GET`, `PATCH`, and idempotent `DELETE` on
 `/v1/workspaces/:workspaceId/sessions/:id/goal`; `GET` 404s for a goal-less
 session unless the client opts in with `?absent=null` (200 `null`). See
