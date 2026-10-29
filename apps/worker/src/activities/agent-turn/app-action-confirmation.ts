@@ -4,26 +4,38 @@ import {
   appActionCallHandlesSecrets,
   appActionConfirmationTitle,
 } from "@opengeni/contracts/app-actions";
+import type { Settings } from "@opengeni/config";
 import {
   prefixedMcpToolName,
   type ConnectorActionPolicyHooks,
   type ConnectorActionToolCall,
 } from "@opengeni/runtime";
+import { videoPolicyCardPrice } from "../video-generation-availability";
 
 /** As whom this turn's app actions run; see resolveSessionAppActionAuthority. */
 export type AppActionAuthorityKind = "full_access" | "confirm" | "read_only" | "unavailable";
 
 const APP_ACTION_CALL_MODEL_NAME = prefixedMcpToolName("opengeni", APP_ACTION_CALL_TOOL_NAME);
 
+/** The chat asking, and the deployment settings that price what it asks. */
+type AppActionChat = { workspaceId: string; sessionId: string; settings?: Settings };
+
+/**
+ * The card's question, plus the price when the change starts something paid
+ * (turning on video paid with Opengeni credits), so one yes covers the cost.
+ */
+function confirmationTitle(args: unknown, chat: AppActionChat): string {
+  const title = appActionConfirmationTitle(args, chat);
+  const price = chat.settings ? videoPolicyCardPrice(chat.settings, args) : null;
+  return price ? `${title} ${price}` : title;
+}
+
 /**
  * Word an app action's pending approval as the same plain question its saved
  * review asks, so every surface that draws the approval from the event alone
  * (embeds, the session-ui components) shows it too. Presentation only.
  */
-export function withAppActionApprovalTitle(
-  approval: unknown,
-  chat: { workspaceId: string; sessionId: string },
-): unknown {
+export function withAppActionApprovalTitle(approval: unknown, chat: AppActionChat): unknown {
   if (!approval || typeof approval !== "object" || Array.isArray(approval)) return approval;
   const item = approval as Record<string, unknown>;
   const raw =
@@ -40,7 +52,7 @@ export function withAppActionApprovalTitle(
     display: {
       ...display,
       toolName: APP_ACTION_CALL_TOOL_NAME,
-      title: appActionConfirmationTitle(item.arguments ?? raw.arguments, chat),
+      title: confirmationTitle(item.arguments ?? raw.arguments, chat),
     },
   };
 }
@@ -59,11 +71,7 @@ export function withAppActionApprovalTitle(
  */
 export function withAppActionConfirmation(
   policy: ConnectorActionPolicyHooks,
-  chat: {
-    workspaceId: string;
-    sessionId: string;
-    authority: () => Promise<AppActionAuthorityKind>;
-  },
+  chat: AppActionChat & { authority: () => Promise<AppActionAuthorityKind> },
 ): ConnectorActionPolicyHooks {
   const decided = new Map<string, boolean>();
   const decide = async (call: ConnectorActionToolCall): Promise<ConnectorActionToolCall> => {
@@ -84,7 +92,7 @@ export function withAppActionConfirmation(
         reviewContext: {
           kind: "generic",
           ...call.reviewContext,
-          title: appActionConfirmationTitle(call.arguments, chat),
+          title: confirmationTitle(call.arguments, chat),
         },
       };
     }

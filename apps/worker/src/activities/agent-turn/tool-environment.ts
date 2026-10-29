@@ -472,17 +472,43 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  const videoSkillSelected =
+    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
+  // These are independent metadata reads on separate pool scopes, after the
+  // linked-identity guard. No selection, credential or authority is cached.
+  // Join every scope before proceeding or failing; executable preparation and
+  // the ordered, fenced history writes still happen at their original boundary.
+  const [workspaceResult, skillConfigurationResult, sharedSkillsResult] = await Promise.allSettled([
+    scheduledTurnMcpServerIds(turn) === null
+      ? requireWorkspace(db, input.workspaceId)
+      : Promise.resolve(null),
+    toolFamilies.skills === false || !videoSkillSelected
+      ? Promise.resolve(null)
+      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    toolFamilies.skills === false
+      ? Promise.resolve([])
+      : listSkillDescriptors(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+        }),
+  ]);
+  if (workspaceResult.status === "rejected") throw workspaceResult.reason;
+  if (skillConfigurationResult.status === "rejected") throw skillConfigurationResult.reason;
+  if (sharedSkillsResult.status === "rejected") throw sharedSkillsResult.reason;
+  const skillConfiguration = skillConfigurationResult.value;
+  const sharedSkillDescriptors = sharedSkillsResult.value;
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     scheduledTurnMcpServerIds(turn) !== null
       ? allowedFirstPartyMcpToolsForSession(
           runSettings,
           scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
         )
-      : resolveSessionFirstPartyMcpTools(
-          runSettings,
-          session,
-          (await requireWorkspace(db, input.workspaceId)).settings,
-        ),
+      : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -533,6 +559,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      settings: runSettings,
       // Live per change, the same check the API makes before running it.
       authority: async () =>
         (
@@ -545,29 +572,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ).kind,
     },
   );
-  // These reads only feed the Skill index. Disabled Skills need neither the
-  // descriptors nor bundled files; agent build still rechecks live video policy.
-  // Enabled reads remain independent and finish before executable preparation.
-  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
-    session.bundledSkillIds,
-    session.agent,
-  );
-  // A policy cannot affect the bundled index when this Skill was explicitly omitted.
-  // Agent build still performs its independent live policy read and validation.
-  const videoSkillSelected =
-    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
-  const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    toolFamilies.skills === false || !videoSkillSelected
-      ? Promise.resolve(null)
-      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-    toolFamilies.skills === false
-      ? Promise.resolve([])
-      : listSkillDescriptors(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-        }),
-  ]);
   const bundledSkills =
     toolFamilies.skills === false
       ? []

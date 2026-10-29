@@ -1284,9 +1284,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     );
     setOpenIntegration("github", true);
     if (result.outcome === "success") {
-      void context.refreshPersonalGitHub(workspaceId).then(() => {
-        toast.success("Your GitHub identity is connected");
-      });
+      void context
+        .refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true })
+        .then(() => {
+          toast.success("Your GitHub identity is connected");
+        });
       return;
     }
     toast.error("Couldn't connect your GitHub identity", {

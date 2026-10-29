@@ -709,9 +709,11 @@ const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
 const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
 
 /**
- * True when a recording's microphone is the person recording it: computer
- * or tab audio sits beside it, so everyone else is on that track. A
- * microphone alone (a phone, a room) may hear several people.
+ * True when a recording's microphone is the person recording's: computer or
+ * tab audio sits beside it, so the others in a call are on that track and
+ * the microphone is mostly them (a finished transcript still tells apart
+ * anyone in the room with them). A microphone alone (a phone, a room) may
+ * hear several people.
  */
 export function recordingMicrophoneIsOwner(
   tracks: readonly { source: RecordingTrackSource }[],
@@ -732,8 +734,9 @@ export type RecordingSpeakerDefault =
 
 /**
  * What a speaker label stands for until someone names it: the diarizer's
- * `speaker_1` (or `t0_speaker_1`) is speaker 2, and a whole-track label such as
- * `track-0` is that track's microphone, shared audio or plain track number.
+ * `speaker_1` (or `t0_speaker_1` in older versions) is speaker 2, and a
+ * whole-track label such as `track-0` is that track's microphone, shared
+ * audio or plain track number.
  */
 export function recordingSpeakerDefault(
   label: string,
@@ -754,8 +757,9 @@ export function recordingSpeakerDefault(
 
 /**
  * The name a speaker label has until someone names it: "Speaker 2" for a
- * diarizer's `speaker_1` (or `t0_speaker_1` when several tracks were
- * diarized), and the track's role for a whole-track label such as `track-0`.
+ * diarizer's `speaker_1` (or `t0_speaker_1` in older versions that diarized
+ * several tracks), and the track's role for a whole-track label such as
+ * `track-0`.
  * Servers and clients both use this, so the same voice reads the same
  * everywhere.
  */

@@ -297,6 +297,38 @@ describe("GitHub conversation card", () => {
     }
   });
 
+  test("Retry after a failed load is a refresh the person started", async () => {
+    context.githubCatalogReady = false;
+    context.githubStatusFailed = true;
+    const h = await render();
+    try {
+      expect(h.text()).toContain("Couldn't load this workspace's repositories.");
+      await click(h.buttons().find((button) => button.textContent === "Retry") ?? null);
+      expect(refreshGitHub).toHaveBeenCalledWith("workspace", undefined, {
+        userInitiated: true,
+      });
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("connecting an App bound elsewhere reads GitHub's list fresh", async () => {
+    context.githubStatus = { ...boundStatus(), status: "unbound", installations: [] };
+    const h = await render();
+    try {
+      await click(
+        h.buttons().find((button) => button.textContent === "Connect GitHub App") ?? null,
+      );
+      expect(getGitHubApp).toHaveBeenCalledTimes(1);
+      expect(refreshGitHub).toHaveBeenCalledWith("workspace", undefined, {
+        sync: true,
+        userInitiated: true,
+      });
+    } finally {
+      await h.close();
+    }
+  });
+
   test("a stale card from an old turn recognises a repository the chat already uses", async () => {
     const api = repo(101, "acme/api");
     context.githubRepos = [api, repo(102, "acme/web")];

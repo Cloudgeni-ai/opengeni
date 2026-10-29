@@ -1240,6 +1240,9 @@ export type ComputerSessionCapabilities = {
   /** Accepts a ComputerActionBatch as one operation. Absent means unsupported. */
   actionBatches?: boolean | undefined;
   parallelApps: boolean;
+  /** A focus action brings a target's window to the front. Absent means not
+   * reported. */
+  targetFocus?: boolean | undefined;
 };
 
 export type ComputerClipboard = {
