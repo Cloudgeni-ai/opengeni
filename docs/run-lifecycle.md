@@ -5108,6 +5108,15 @@ operation's result. `startup_phase_delivery` measures that batch delivery, and
 remaining wait in the visible `credential_mint` row. Shared rig claim/join time
 remains covered by the existing shared-preparation metric.
 
+The managed client download is gzip-compressed under a `.json.gz` object key.
+Its identity remains the digest of the original release JSON, not the compressed
+representation. Installation accepts compressed or legacy plain transfers,
+limits decompression to the expected release size, verifies the original digest,
+and installs the same files into the same digest-addressed directory. Warm reuse
+still verifies installed files without downloading. A failed transfer falls back
+to the existing verified plain editor staging; no client implementation, tool
+catalog, model instruction or prompt-cache prefix changes.
+
 After lazy box establishment, credential mint/join, client publication, and run
 credential materialization overlap. They share no inputs that require serial
 execution. All started operations settle before any error is propagated or setup
