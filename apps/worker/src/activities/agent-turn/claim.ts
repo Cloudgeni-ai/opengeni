@@ -14,7 +14,6 @@ import {
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
   requireSession,
-  type AppendEventInput,
   type ApiIntegrationRuntime,
   type CanonicalTurnStartupMilestoneReceipt,
   type ClaimSessionWorkForAttemptInput,
@@ -92,6 +91,8 @@ import type {
   TurnSettleFn,
   TurnSettleInput,
 } from "./turn-context";
+import type { TurnEventPublisher } from "./model-usage";
+import { createTurnEventLane } from "./turn-event-lane";
 
 export type ClaimTurnDeps = {
   /** Optional read-only hint; run owns its promise even if admission later exits. */
@@ -672,11 +673,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       });
     }
   };
-  eventing.publish = async (
-    events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
-    immediate = false,
-    mutate,
-  ) => {
+  const append: TurnEventPublisher = async (events, immediate = false, mutate) => {
     const inputs = events.map((event) => ({
       ...event,
       payload: event.payload,
@@ -723,6 +720,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }
     return appended;
   };
+  // Progress receipts go out in the background; awaited appends and the
+  // settlement start after the receipts issued before them.
+  const eventLane = createTurnEventLane();
+  eventing.publish = (events, immediate, mutate) =>
+    eventLane.run(() => append(events, immediate, mutate));
+  eventing.publishInBackground = (events, options) => {
+    eventLane.runInBackground(() =>
+      options?.measureDelivery ? options.measureDelivery(() => append(events)) : append(events),
+    );
+  };
+  eventing.backgroundEventsSettled = () => eventLane.backgroundSettled();
   const settle = async (
     inputSettlement: TurnSettleInput & { requirePendingSteer?: boolean },
   ): Promise<boolean | "pending_steer_withdrawn"> => {
@@ -805,7 +813,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     });
     return true;
   };
-  eventing.settle = settle as TurnSettleFn;
+  // The settlement's events follow the progress receipts issued before it.
+  eventing.settle = ((inputSettlement: Parameters<typeof settle>[0]) =>
+    eventLane.run(() => settle(inputSettlement))) as TurnSettleFn;
   activityContext?.heartbeat({
     ...heartbeatDetails,
     phase: "turn_started",

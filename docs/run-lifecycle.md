@@ -5108,6 +5108,19 @@ operation's result. `startup_phase_delivery` measures that batch delivery, and
 remaining wait in the visible `credential_mint` row. Shared rig claim/join time
 remains covered by the existing shared-preparation metric.
 
+These startup checkpoints and receipts are progress only: nothing reads them
+back before the first model request, so startup does not wait for their
+delivery. Each attempt writes its events through one ordered lane. A checkpoint
+or receipt starts its append at once, after every append the attempt already
+issued, and the preparation continues; every awaited append (the
+`agent.model.request` started audit among them) and the turn settlement start
+only after the checkpoints issued before them. The event log therefore keeps
+the order the work produced, and the audit still commits before the request
+leaves the worker. A checkpoint that cannot be delivered does not fail the
+turn; a fenced attempt is still refused by its next awaited append. Activity
+finalization waits for any checkpoint still in flight. `startup_phase_delivery`
+measures only the append itself, not time spent queued behind earlier appends.
+
 After lazy box establishment, credential mint/join, client publication, and run
 credential materialization overlap. They share no inputs that require serial
 execution. All started operations settle before any error is propagated or setup

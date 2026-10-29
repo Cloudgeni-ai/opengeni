@@ -1,4 +1,5 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
+import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
@@ -932,7 +933,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
     count: githubRestMcp.tools.length,
   });
-  await eventing.publish!([
+  await publishStartupProgress(eventing, [
     {
       type: "turn.startup.phase.started",
       payload: { phase: "tools" },
@@ -1201,7 +1202,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       durationSeconds: toolPreparationDurationMs / 1_000,
       count: githubRestMcp.tools.length,
     });
-    await eventing.publish!([
+    await publishStartupProgress(eventing, [
       {
         type:
           toolPreparationOutcome === "completed"
