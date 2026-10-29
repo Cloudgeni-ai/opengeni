@@ -2114,6 +2114,11 @@ export const BrowserObservation = /* @__PURE__ */ defineSchema(() =>
       diagnostics: InteractionDiagnosticSummary,
       dialog: BrowserDialog.nullable(),
       observedAt: primitives.string.datetime({ offset: true }),
+      /** A plain line about what happened to this tab that its page cannot
+       * show, for example that a browser relaunch reloaded it. Given once,
+       * and only to a caller that asked with
+       * BROWSER_OBSERVATION_NOTICES_PARAMETER. */
+      notice: z.string().min(1).max(1_024).optional(),
     })
     .strict(),
 );
@@ -2334,8 +2339,9 @@ export const ComputerLocator = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerLocator = z.infer<typeof ComputerLocator>;
 
-/** Web-platform permissions which a managed browser can set for the exact
- * top-level origin currently fenced by a BrowserActionCommand. Names remain
+/** Web-platform permissions which a browser can set for the exact top-level
+ * origin currently fenced by a BrowserActionCommand (attached Chrome: camera,
+ * microphone, geolocation and notifications only). Names remain
  * provider-neutral; drivers map them to their native permission descriptors. */
 export const BrowserPermission = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -3408,6 +3414,15 @@ export const BROWSER_ACTION_NOTE_KIND_VERSIONS = {
 /** The newest receipt-notes version; callers send it as the value of
  * BROWSER_ACTION_RECEIPT_NOTES_PARAMETER. */
 export const BROWSER_ACTION_RECEIPT_NOTES_VERSION = 2;
+
+/** Query parameter (value "1") by which a caller asks a browser controller
+ * for BrowserObservation.notice on the observation it returns: from an
+ * observation, a tab selection, or an action's receipt. A notice is given
+ * once, to the first caller that asks, so only the agent's own tools ask; a
+ * person's viewer and other readers neither receive nor use one up.
+ * Controllers that predate the field ignore the parameter, and callers that
+ * do not send it never receive the field. */
+export const BROWSER_OBSERVATION_NOTICES_PARAMETER = "notices";
 
 export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z

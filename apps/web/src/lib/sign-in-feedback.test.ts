@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  organizationSecurityReturnPath,
   readSignInCallbackError,
   securityReauthenticationPath,
   signInCallbackError,
@@ -35,6 +36,19 @@ test("Security reauthentication preserves only a bounded outcome on a fixed loca
     "/settings/security",
   );
   expect(securityReauthenticationPath("?signInMethod=arbitrary")).toBe("/settings/security");
+});
+
+test("signing in again from Security & data returns there, carrying nothing else", () => {
+  const workspace = "11111111-1111-4111-8111-111111111111";
+  const page = `/workspaces/${workspace}/organization`;
+  expect(
+    organizationSecurityReturnPath(page, "?section=security&returnTo=https://evil.example"),
+  ).toBe(`${page}?section=security`);
+  expect(organizationSecurityReturnPath(page, "?section=billing")).toBeNull();
+  expect(
+    organizationSecurityReturnPath(`/workspaces/x/organization`, "?section=security"),
+  ).toBeNull();
+  expect(organizationSecurityReturnPath(`${page}/other`, "?section=security")).toBeNull();
 });
 
 test("integration callbacks and success hints cannot claim a login change", () => {

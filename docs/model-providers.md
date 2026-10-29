@@ -472,7 +472,7 @@ managed-provider slice of a catalog document:
   "opperModels": [
     {
       "upstreamModelId": "aws/claude-opus-5-5",
-      "label": "Claude Opus 5.5 (EU)",
+      "label": "Claude Opus 5.5",
       "shortLabel": "Opus 5.5",
       "capabilities": { "...": "complete V1 capabilities" },
       "contextWindowTokens": 1000000,
@@ -1095,11 +1095,13 @@ Reviewed 2026-10-05 against Opper's catalogue
 (`GET https://api.opper.ai/v3/compat/models`; each entry's `opper.reasoning`
 lists supported efforts and `opper.capabilities` its inputs) and probed live end
 to end. The starter pins an EU-resident route so Opper never pools it onto a
-non-EU provider:
+non-EU provider. Its label doesn't say EU: EU status comes from the route's
+residency record (see [eu-only-inference.md](eu-only-inference.md)), never from
+a name.
 
 | Product              | Upstream route (Opper id) | Served by / inference                           | Context / max output | Opper list price (per 1M): input / cached input / cache write / output | Opengeni debit |
 | -------------------- | ------------------------- | ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------- | -------------- |
-| Claude Opus 5.5 (EU) | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
+| Claude Opus 5.5      | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
 
 Product ids are `opper/aws/claude-opus-5-5` and `workspace-opper/aws/claude-opus-5-5`.
 Effective context is the raw window minus Opper's max output (872,000);
@@ -1467,6 +1469,22 @@ resolved provider declares hosted web search runnable, regardless of whether
 the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
+
+Registry models may set `hostedWebSearchContextSize` to `low`, `medium`, or
+`high` for Responses routes that support `search_context_size`. The worker
+passes this static route setting to the hosted search tool. Omission preserves
+the SDK's current `medium` default byte-for-byte; it does not add a new field
+to the executable definition. The option neither enables search nor changes
+reasoning effort, tool choice, evidence includes, or answer-length policy.
+There is no session override or automatic lookup-turn classifier. Other
+provider adapters are not claimed to support this Responses-specific budget.
+
+An explicit size participates in the model definition digest. Finish accepted
+turns before changing the route: a turn accepted with another size fails the
+existing definition-mismatch check rather than silently changing its tools
+on a later request. Changing the size can invalidate the provider's tool-prefix
+cache for new turns. A smaller context can omit useful evidence or cause extra
+searches; compare latency, token usage and answer quality before enabling it.
 
 Claude models use Anthropic's server-side search through the same hosted
 capability (see [web search](web-search.md#claudes-server-side-search)).

@@ -335,6 +335,35 @@ every live route is refused, so recorders don't start one), video funding option
 (beside `reason`). Agents are not offered tools that are switched off, and the
 session's effective tools omit them.
 
+## In the app
+
+- **Organization settings > Security & data** shows **EU-only inference** to
+  every member. Owners and admins turn it on. Turning it off is offered only
+  when the API answers `canTurnOff` (an owner or admin in a browser) and asks
+  for confirmation first. A stale version (`409`) reloads the setting; while
+  the deployment does not take changes yet (`503`) the app says so.
+  Turning it off needs a recent sign-in: on `403` with
+  `SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED` the confirmation shows the
+  server's message and offers **Sign in again** (the browser-account sign-in
+  window, or sign out and back in), then **Turn off** again.
+- Every model picker shows a model whose availability reason is
+  `region_restricted` as **Not supported in EU** and does not let it be chosen.
+- A feature reported with `region_restricted` (from `inferenceFeatures`, agent
+  capabilities, live voice, transcription and live transcript models and
+  errors, video funding) shows **Not supported in EU** and is switched off.
+  Surfaces read the reason
+  through one helper, `inferenceFeatureRestriction` / `regionRestrictedText` in
+  `@opengeni/react`.
+  A feature with no route at all (`unavailableReason: null`) keeps its usual
+  unavailable state (hidden or off) and never says EU. When every voice model
+  is `region_restricted`, live voice stays visible, switched off; with no voice
+  model configured it is hidden as before. Fast code search shows when the
+  deployment offers it or when `code_search` is `region_restricted`.
+- The app reads these lists for the open workspace
+  (`GET /v1/config/client?workspaceId=`), again when the workspace changes,
+  when the window regains focus and after the setting changes.
+- No label says EU: names and labels never decide residency.
+
 ### Recording the region
 
 Usage events for side-feature calls (web search, live voice, transcription,

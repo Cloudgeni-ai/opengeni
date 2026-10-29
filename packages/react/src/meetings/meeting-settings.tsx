@@ -3,6 +3,7 @@
 // people are recognized by voice. All live under the workspace's
 // `recordings` settings, which a patch replaces as a whole.
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { regionRestrictedText } from "../inference-region";
 import { useState, type ComponentProps } from "react";
 import { toast } from "sonner";
 
@@ -55,6 +56,8 @@ export function transcriptionModelUnavailableReason(
   entry: RecordingTranscriptionModel,
   msg: OpenGeniText = defaultText,
 ): string {
+  const regionRestricted = regionRestrictedText(msg, entry.unavailableReason);
+  if (regionRestricted) return regionRestricted;
   const providerName = entry.providerName;
   switch (entry.funding) {
     case "workspace_subscription":
@@ -64,6 +67,21 @@ export function transcriptionModelUnavailableReason(
     case "deployment":
       return msg("meetings.settings.providernameIsnTAvailableHere", { providerName });
   }
+}
+
+/**
+ * "Not supported in EU" when no live model is available and the server
+ * switched them off for the region, otherwise null.
+ */
+export function liveTranscriptRestriction(
+  liveModels: readonly Pick<RecordingTranscriptionModel, "available" | "unavailableReason">[],
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (liveModels.some((entry) => entry.available)) return null;
+  return regionRestrictedText(
+    msg,
+    liveModels.find((entry) => entry.unavailableReason)?.unavailableReason,
+  );
 }
 
 /** "30 days", "1 year", "2 years". */
@@ -248,6 +266,7 @@ function MeetingDefaultsViewContent({
   const liveTranscript = current.liveTranscript === true;
   const liveModel = models.liveModels[0] ?? null;
   const liveAvailable = models.liveModels.some((entry) => entry.available);
+  const liveRestricted = liveTranscriptRestriction(models.liveModels, msg);
   const chooseLiveTranscript = (next: boolean) => {
     if (next === liveTranscript) return;
     const { liveTranscript: _previous, ...rest } = current;
@@ -443,17 +462,20 @@ function MeetingDefaultsViewContent({
       {liveModel ? (
         <SettingRow
           label={msg("meetings.settings.liveTranscript")}
-          description={msg("meetings.settings.showsWhatSSaidWhile", {
-            value:
-              liveModel.usdPerHour !== null
-                ? msg("meetings.settings.providernameChargesAboutValuePer", {
-                    providerName: liveModel.providerName,
-                    value: liveModel.usdPerHour.toFixed(2),
-                  })
-                : "",
-          })}
+          description={
+            liveRestricted ??
+            msg("meetings.settings.showsWhatSSaidWhile", {
+              value:
+                liveModel.usdPerHour !== null
+                  ? msg("meetings.settings.providernameChargesAboutValuePer", {
+                      providerName: liveModel.providerName,
+                      value: liveModel.usdPerHour.toFixed(2),
+                    })
+                  : "",
+            })
+          }
           hint={
-            !models.loading && !liveAvailable ? (
+            !models.loading && !liveAvailable && !liveRestricted ? (
               onConnectModels ? (
                 <SettingRowLink onClick={onConnectModels}>
                   {msg("meetings.settings.connectProvidernameToShowA", {
@@ -470,10 +492,11 @@ function MeetingDefaultsViewContent({
           control={
             <Switch
               aria-label={msg("meetings.settings.liveTranscript")}
-              checked={liveTranscript}
+              checked={liveTranscript && !liveRestricted}
               pending={saving}
-              disabled={!canManage}
-              {...(reason ? { disabledReason: reason } : {})}
+              disabled={!canManage || liveRestricted !== null}
+              // The description already says "Not supported in EU".
+              {...(!liveRestricted && reason ? { disabledReason: reason } : {})}
               onCheckedChange={chooseLiveTranscript}
             />
           }

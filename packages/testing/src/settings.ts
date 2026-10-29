@@ -192,6 +192,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     privacyOnlyMeAllowed: true,
     privacyWorkspaceDefaultRequired: false,
     privacyAdminScheduleSummariesRequired: false,
+    privacyChatShareLinksAllowed: true,
     integrationsOauthClientsJson: "{}",
     slackBotDisplayName: "Opengeni",
     slackCommand: "/opengeni",

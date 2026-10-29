@@ -3144,13 +3144,14 @@ describe("interaction attempt tools", () => {
       machines: {
         bridges?: Array<{ enrollmentId: string; sandboxId: string | null; machineName: string }>;
         activeSandboxId?: string | null;
+        sessions?: BrowserSession[];
       } = {},
     ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
         transport: {
           ...partialTransport({
-            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            listBrowserSessions: async () => ({ revision: 0, sessions: machines.sessions ?? [] }),
             listAttachedBrowsers: async () => ({
               revision: 1,
               bridges: (machines.bridges ?? []).map((bridge) => ({
@@ -3202,6 +3203,49 @@ describe("interaction attempt tools", () => {
         attachedProfile: { id: only.id, name: "Personal" },
       });
       expect(result.structuredContent).not.toHaveProperty("otherAttachedProfiles");
+    });
+
+    const liveSessionOn = (deviceId: string) => ({
+      ...discoveredBrowserSession(randomUUID(), sessionId),
+      placement: { kind: "attached_device" as const, deviceId },
+    });
+
+    test("does not reuse a session on a profile that has disconnected", async () => {
+      const connected = profile("Work", "2026-10-15T09:00:00.000Z");
+      const gone = profile("Personal", "2026-10-15T10:00:00.000Z", { state: "disconnected" });
+      const stale = liveSessionOn(gone.id);
+      const { result, createRequest } = await open([connected, gone], undefined, {
+        sessions: [stale],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: connected.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: connected.id, name: "Work" },
+      });
+      expect(JSON.stringify(result.structuredContent)).not.toContain(stale.id);
+    });
+
+    test("still reuses a session on a connected profile", async () => {
+      const connected = profile("Work", "2026-10-15T09:00:00.000Z");
+      const live = liveSessionOn(connected.id);
+      const { result, createRequest } = await open([connected], undefined, {
+        sessions: [live],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(createRequest).toBeNull();
+      expect(JSON.stringify(result.structuredContent)).toContain(live.id);
+    });
+
+    test("says no profile is connected rather than reusing a session on a disconnected one", async () => {
+      const gone = profile("Personal", "2026-10-15T10:00:00.000Z", { state: "disconnected" });
+      const stale = liveSessionOn(gone.id);
+      const { result, createRequest } = await open([gone], undefined, { sessions: [stale] });
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
+      expect(JSON.stringify(result.structuredContent)).not.toContain(stale.id);
     });
 
     test("opens the most recently active profile and names the others", async () => {
@@ -3933,6 +3977,54 @@ describe("interaction attempt tools", () => {
     expect(observed.isError).toBeFalsy();
     expect(observed.structuredContent).toMatchObject({ dialog });
     expect(observed.content.at(-1)).toEqual({ type: "text", text: note });
+  });
+
+  test("a notice that a relaunch reloaded the tab reaches the model in every view", async () => {
+    const target = browserTarget();
+    const notice =
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+    const observation = { ...browserObservation(target), notice };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) =>
+          browserReceipt(value.operationId, observation),
+        observeBrowserTarget: async () => observation,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act", "browser_observe"],
+      permissions: ["sessions:control", "sessions:read"],
+    });
+    const tool = (name: string) =>
+      definitions.find((definition) => definition.modelName === `interaction__${name}`)!;
+    const text = (result: { content: readonly { type: string; text?: string }[] }) =>
+      result.content.flatMap((part) => (part.type === "text" && part.text ? [part.text] : []));
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    for (const view of ["compact", "full"] as const) {
+      const observed = await tool("browser_observe").execute(
+        { browserSessionId, targetId: target.id, view },
+        context(),
+      );
+      expect(observed.isError).toBeFalsy();
+      expect(observed.structuredContent).toMatchObject({ notice });
+      const lines = text(observed).join("\n").split("\n");
+      expect(lines[lines.findIndex((line) => line.startsWith(`Tab ${target.id}`)) + 1]).toBe(
+        notice,
+      );
+    }
+    const acted = await tool("browser_act").execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.com/next" },
+      },
+      context(),
+    );
+    expect(acted.isError).toBeFalsy();
+    expect(text(acted).join("\n")).toContain(notice);
   });
 
   test("an upload by workspace path publishes each file once per operation and dispatches File IDs", async () => {

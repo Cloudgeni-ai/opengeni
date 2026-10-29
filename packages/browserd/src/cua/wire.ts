@@ -147,6 +147,9 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // A web <select> whose menu would bring the browser in front; nothing was
   // sent, and set_value chooses its options.
   select_menu_would_raise_window: "unsupported",
+  // An option of a dropdown with no text to choose it by, which a press in
+  // the background could open the menu with; nothing was sent.
+  popup_option_without_text: "unsupported",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can

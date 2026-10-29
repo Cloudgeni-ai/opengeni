@@ -505,6 +505,7 @@ describe("BrowserSupervisor", () => {
                 tabs: [
                   { targetId: created.observation.target.id, replacementId: recovered[0]!.id },
                 ],
+                restoredTargetIds: [recovered[0]!.id],
               },
             },
           ]);
@@ -3563,6 +3564,7 @@ describe("same-working-directory controller restart", () => {
               reason: "idle_release",
               idleReleaseMinutes: 1,
               tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+              restoredTargetIds: [replacement!.id],
             },
           },
         ]);
@@ -3609,6 +3611,7 @@ describe("same-working-directory controller restart", () => {
               reason: "idle_release",
               idleReleaseMinutes: 1,
               tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+              restoredTargetIds: [replacement!.id],
             },
           },
         ]);
@@ -3707,6 +3710,7 @@ describe("same-working-directory controller restart", () => {
             relaunched: {
               reason: "controller_restart",
               tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+              restoredTargetIds: [replacement!.id],
             },
           },
         ]);

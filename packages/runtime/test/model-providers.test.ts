@@ -67,6 +67,66 @@ import { callModelInputFilterForSettings } from "../src/model-input";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 describe("Azure hosted-search evidence continuity", () => {
+  test("route context budget changes the search wire field without changing evidence or effort", async () => {
+    const requests: Array<Record<string, any>> = [];
+    const provider = {
+      id: "fixture",
+      label: "Fixture",
+      kind: "api-key",
+      api: "responses",
+      builtin: false,
+      wireProfile: "azure-openai",
+    } as const;
+    const client = new ReplayableJsonOpenAI(
+      {
+        apiKey: "fixture",
+        baseURL: "https://fixture.example/v1",
+        maxRetries: 0,
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(await requestBodyText(init?.body)));
+          return Response.json({
+            id: "resp_fixture",
+            object: "response",
+            status: "completed",
+            output: [responseMessage("msg_fixture", "Done")],
+            usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 },
+          });
+        }) as typeof fetch,
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    for (const size of [undefined, "low"] as const) {
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+        model: new OpenGeniResponsesModel(client, "reasoning-fixture", provider),
+        reasoningEffort: "medium",
+        hostedWebSearch: true,
+        encryptedReasoning: true,
+        ...(size === undefined ? {} : { hostedWebSearchContextSize: size }),
+      });
+      await new Runner({ tracingDisabled: true }).run(agent, "Find synthetic documentation", {
+        maxTurns: 1,
+      });
+    }
+    expect(requests).toHaveLength(2);
+    const baseline = requests[0]!;
+    const candidate = requests[1]!;
+    expect(baseline.tools.find((tool: any) => tool.type === "web_search").search_context_size).toBe(
+      "medium",
+    );
+    expect(candidate.tools).toEqual(
+      baseline.tools.map((tool: any) =>
+        tool.type === "web_search" ? { ...tool, search_context_size: "low" } : tool,
+      ),
+    );
+    expect(candidate.include).toEqual(baseline.include);
+    expect(candidate.include).toContain("web_search_call.results");
+    expect(candidate.include).toContain("web_search_call.action.sources");
+    expect(candidate.reasoning).toEqual(baseline.reasoning);
+    expect(candidate.reasoning.effort).toBe("medium");
+    expect(candidate.input).toEqual(baseline.input);
+    expect(candidate.tool_choice).toEqual(baseline.tool_choice);
+  });
+
   test("merges supported includes copy-on-write only for attached Azure native search", () => {
     for (const effort of [undefined, "none", "", "medium"]) {
       const include = Object.freeze(["reasoning.encrypted_content"]);

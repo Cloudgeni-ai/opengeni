@@ -728,6 +728,10 @@ const SettingsSchema = z.object({
   privacyOnlyMeAllowed: EnvBoolean.default(true),
   privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
   privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
+  // Read-only chat share links: a person can create a link to a chat that
+  // anyone holding it can read without signing in. Off, nobody can create
+  // one and existing links stop opening.
+  privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -3508,6 +3512,7 @@ const RegistryModelSchema = z
     toolOutputTruncationTokens: z.number().int().positive().optional(),
     reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
+    hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     // Where this route processes data, overriding the provider's declaration.
@@ -4482,6 +4487,8 @@ export interface ConfiguredModel {
   toolOutputTruncationTokens?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
+  /** Operator route setting; absent preserves the hosted-search SDK default. */
+  hostedWebSearchContextSize?: "low" | "medium" | "high" | undefined;
 }
 
 /**
@@ -4848,7 +4855,7 @@ export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
     upstreamModelId: "aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     aliases: [],
     capabilities: opperCapabilities({
@@ -5678,6 +5685,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     privacyAdminScheduleSummariesRequired: optional(
       "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
     ),
+    privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
@@ -8689,6 +8697,9 @@ function definitionVersionFor(
     // changing it; it is intentionally not a second executable-definition
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
+    ...(model.hostedWebSearchContextSize === undefined
+      ? {}
+      : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
     pricing: model.pricing ?? null,
     // Where an operator declares a route processes data is executable
     // identity: moving it fails accepted turns instead of silently moving them.
@@ -9479,6 +9490,9 @@ export function configuredModels(
             : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
           reasoningEffort: capabilities.reasoning.runnable,
           hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+          ...(model.hostedWebSearchContextSize === undefined
+            ? {}
+            : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
         }),
       );
     }

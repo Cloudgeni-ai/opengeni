@@ -235,6 +235,16 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
  * even when the server used up most of NAVIGATION_COMMIT_TIMEOUT_MS. */
 const NAVIGATION_COMMIT_GRACE_MS = 2_000;
 const NAVIGATION_COMMIT_POLL_MS = 25;
+/** Back passes over at most this many history entries whose page navigates
+ * on by itself as soon as it opens (a redirect step of a sign-in flow, say). */
+const HISTORY_REDIRECT_SKIPS = 3;
+/** How many pages, one sending the tab on to the next by itself, a Back step
+ * follows to see where it ends. */
+const HISTORY_REDIRECT_HOPS = 4;
+/** The most a Back step waits for its page's own start-up code to run. It
+ * normally ends in a few milliseconds; this only bounds a page whose
+ * scripts keep its event loop busy. */
+const HISTORY_STARTUP_LIMIT_MS = 1_000;
 /** Chromium's load error for an HTTP error status whose response had no body. */
 const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 /** Recent main-frame loaders remembered per tab, to recognize a navigation's
@@ -395,6 +405,9 @@ export function accessibilityRebuildWanted(input: {
   );
 }
 type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
+/** Where a browser lets a session set permissions only in tabs it opened. */
+export const PERMISSION_OPENED_TABS_ONLY =
+  "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.";
 const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
   geolocation: "geolocation",
   notifications: "notifications",
@@ -651,6 +664,9 @@ type TargetState = {
   sessionId: string;
   authorityGeneration: string;
   actionEffectCount: number;
+  /** This attachment started the page of a reopened tab Chrome had not
+   * loaded; tab details read before it describe the tab before its page. */
+  startedRestoredPage?: true;
   createdAt: string;
   frame: MainFrame;
   documentGeneration: string;
@@ -665,6 +681,9 @@ type TargetState = {
   /** Counts main-frame commits, cross- and same-document alike, so a history
    * traversal can wait for the entry it asked for to commit. */
   mainFrameCommits: number;
+  /** Counts the main-frame documents the tab switched to, so a Back step can
+   * tell the page it opened from one that page went on to by itself. */
+  documentCommits: number;
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
@@ -823,7 +842,11 @@ export type AgentBrowserDriverOptions = {
   focusEmulation?: boolean;
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
-  permissionControl?: boolean;
+  /** Whether permission actions work. `"opened_tabs"`: only in a tab this
+   * session opened and no other session is using, and the command is sent on
+   * that tab's session so the browser knows the exact tab (a browser that is
+   * the person's own, where every other tab is theirs). */
+  permissionControl?: boolean | "opened_tabs";
   /** Experimental ephemeral context lease. Never a durable browser profile. */
   browserContextId?: string;
   /** Headless shell has no chrome://version page. Read its real Client Hints
@@ -896,6 +919,32 @@ export type GoneBrowserTarget =
 
 const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
 
+/** Why a relaunched browser stopped, as a clause: "this browser was stopped
+ * after going unused for 10 minutes and relaunched on its next call". */
+function relaunchText(relaunch: { reason: BrowserRelaunchReason; idleReleaseMinutes?: number }) {
+  const minutes = relaunch.idleReleaseMinutes;
+  return relaunch.reason === "idle_release"
+    ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
+    : relaunch.reason === "controller_restart"
+      ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
+      : relaunch.reason === "browser_lost"
+        ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
+        : "this browser restarted to save its profile state";
+}
+
+/** A tab a relaunched browser reopened under its earlier ID: its page loaded
+ * again, so whatever the page held only in memory is gone. */
+export type ReloadedBrowserTab = { reason: BrowserRelaunchReason; idleReleaseMinutes?: number };
+
+const RELOADED_PAGE =
+  "so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone";
+
+/** The observation notice for a tab a relaunch reloaded. */
+export function reloadedTabNotice(reloaded: ReloadedBrowserTab): string {
+  const why = relaunchText(reloaded);
+  return `${why.charAt(0).toUpperCase()}${why.slice(1)}, ${RELOADED_PAGE}.`;
+}
+
 /** The answer for a tab ID that names no open tab: why it is gone when the
  * driver knows, and how to carry on. Always starts "browser target does not
  * exist", which callers match. */
@@ -909,16 +958,7 @@ export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string
       : "by its page, or by a person or agent using this browser";
     return `browser target does not exist: this tab was closed at ${gone.at} ${by}; ${LIST_CURRENT_TABS}`;
   }
-  const minutes = gone.idleReleaseMinutes;
-  const why =
-    gone.reason === "idle_release"
-      ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
-      : gone.reason === "controller_restart"
-        ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
-        : gone.reason === "browser_lost"
-          ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
-          : "this browser restarted to save its profile state";
-  return `browser target does not exist: ${why}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
+  return `browser target does not exist: ${relaunchText(gone)}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
 }
 
 function hasBrowserEmulation(
@@ -968,6 +1008,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** Tabs that vanished while this driver knew them, or that a relaunch
    * replaced, most recent last: a later call naming one learns why. */
   private readonly goneTargets = new Map<string, GoneBrowserTarget>();
+  /** Tabs a relaunch reopened under their earlier IDs whose reload the agent
+   * has not been told of yet, by tab ID. The next observation the agent's
+   * tools receive for one says so. */
+  private readonly reloadedTabs = new Map<string, ReloadedBrowserTab>();
   /** Tabs a close-tab call of this driver is closing. */
   private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
@@ -980,7 +1024,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private focusEmulation: boolean;
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
-  private readonly permissionControl: boolean;
+  private readonly permissionControl: boolean | "opened_tabs";
   private readonly browserContextId: string | undefined;
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
@@ -1014,6 +1058,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly attachingSessions = new Map<string, string>();
   /** Tabs whose renderer process died. Cleared when the tab attaches healthily again. */
   private readonly crashedTargets = new Set<string>();
+  /** Tabs a relaunch reopened that have not attached since, by the browser's
+   * own ID. Chrome restores only the first few tabs' pages and leaves the
+   * rest without a renderer until they are used, which a first attachment
+   * would otherwise take for a crash. The value is when a load this driver
+   * started stops being waited for; null before one started. */
+  private readonly restoredTargets = new Map<string, number | null>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
@@ -1766,6 +1816,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** The http(s) URL an error page failed to load, read from its current
    * history entry. Null when it can't be read; the caller keeps the error URL. */
+  async errorPageUrl(tabId: string): Promise<string | null> {
+    return await this.errorPageDestination(this.browserTargetIdOf(tabId));
+  }
+
+  /** errorPageUrl by the browser's own target ID. */
   private async errorPageDestination(targetId: string): Promise<string | null> {
     try {
       const connection = await this.ensureConnection();
@@ -3591,8 +3646,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: { read?: boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
-    const info = await this.requireTargetInfo(connection, targetId);
+    let info = await this.requireTargetInfo(connection, targetId);
+    const attached = this.states.get(targetId);
     const state = await this.ensureTargetState(info);
+    if (state !== attached && state.startedRestoredPage) {
+      info = await this.requireTargetInfo(connection, targetId);
+    }
     const result = state.tail.then(async () => {
       this.assertCurrentTargetState(state);
       state.nodeRoute = null;
@@ -3683,6 +3742,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // replace the real initialization outcome.
     void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
+    let loadingRestored = false;
     const viewport = this.viewportFor(info.targetId);
     try {
       const initialized = (async () => {
@@ -3711,6 +3771,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (!outcome) {
         // Detaching below ends the enables still waiting on the dead renderer.
         void initialized.catch(() => undefined);
+        const loadUntil = this.restoredTargets.get(info.targetId);
+        if (loadUntil === null || (loadUntil !== undefined && Date.now() < loadUntil)) {
+          // A reopened tab Chrome has not loaded yet: load its page now, as
+          // switching to it would but without activating it, and attach
+          // again once it has a renderer.
+          if (loadUntil === null) {
+            this.restoredTargets.set(info.targetId, Date.now() + RESTORED_TAB_LOAD_TIMEOUT_MS);
+            await connection
+              .send("Page.reload", {}, { sessionId, timeoutMs: RESTORED_TAB_RELOAD_TIMEOUT_MS })
+              .catch(() => undefined);
+          }
+          loadingRestored = true;
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser tab is loading its page",
+            true,
+          );
+        }
+        this.restoredTargets.delete(info.targetId);
         this.crashedTargets.add(info.targetId);
         throw tabCrashedError();
       }
@@ -3731,6 +3810,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
         .catch(() => undefined);
+      if (loadingRestored) {
+        await delay(RESTORED_TAB_ATTACH_INTERVAL_MS);
+        return await this.attachTarget(info);
+      }
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
         throw tabNotRespondingError(error);
       throw error;
@@ -3740,11 +3823,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.attachingSessions.delete(info.targetId);
     }
     this.crashedTargets.delete(info.targetId);
+    // A reopened tab whose page this attachment started shows it once it
+    // has loaded, as a tab Chrome restored itself does.
+    const startedRestoredLoad = typeof this.restoredTargets.get(info.targetId) === "number";
+    this.restoredTargets.delete(info.targetId);
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
       authorityGeneration,
       actionEffectCount: 0,
+      ...(startedRestoredLoad ? { startedRestoredPage: true as const } : {}),
       unsettledHitTargetGuards: [],
       createdAt: this.firstSeen(info.targetId),
       frame,
@@ -3763,6 +3851,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       committedLoaders: [frame.loaderId],
       abandonedLoaders: [],
       mainFrameCommits: 0,
+      documentCommits: 0,
       inputFence: null,
       accessibility: null,
       accessibilityRebuiltAt: 0,
@@ -3885,7 +3974,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (error instanceof CdpTransportError) throw error;
       }
     }
+    if (startedRestoredLoad) {
+      // Best effort: a page still loading after this is observed as it is.
+      await this.waitForRestoredPage(state, info.url).catch(() => undefined);
+    }
     return state;
+  }
+
+  /** Wait until a reopened tab whose page this driver started shows that
+   * page (not the empty document a new renderer starts with) and has parsed
+   * it, as long as RESTORED_TAB_LOAD_TIMEOUT_MS. */
+  private async waitForRestoredPage(state: TargetState, url: string): Promise<void> {
+    const blank = isBlankTabUrl(url);
+    const deadline = Date.now() + RESTORED_TAB_LOAD_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const value = await this.evaluate(
+          state,
+          `document.readyState !== "loading" && (${blank} || location.href !== "about:blank")`,
+        );
+        if (value === true) return;
+      } catch (error) {
+        if (!missingExecutionContext(error)) throw error;
+      }
+      await delay(25);
+    }
   }
 
   /**
@@ -5629,6 +5742,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     state.frame = frame;
     state.mainFrameCommits += 1;
+    state.documentCommits += 1;
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
       state.authorityGeneration,
@@ -6290,6 +6404,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "type":
         if (action.locator) {
           const node = await this.resolveActionLocator(state, action.locator);
+          // Check the target before focusing it: focus is an input effect,
+          // so a refusal after it would surface as an unknown outcome.
+          if (
+            action.text &&
+            action.mode !== "keys" &&
+            this.engine !== "lightpanda" &&
+            (await this.callOnNode(state, node.backendDOMNodeId, TEXT_INSERT_TARGET_FUNCTION, [
+              { value: false },
+            ])) === false
+          ) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+            );
+          }
           await this.focusNode(state, node.backendDOMNodeId);
         }
         if (
@@ -6304,17 +6433,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
           );
         }
+        if (
+          action.text &&
+          action.mode !== "keys" &&
+          this.engine !== "lightpanda" &&
+          (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+        ) {
+          // Chromium drops inserted text without any event when the focused
+          // element is not a text field (a canvas, a button, the page
+          // itself), so the action would report text that never arrived.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+          );
+        }
         if (action.text && action.mode === "keys") {
           // One key press per character for split one-time-code boxes and
           // pages that listen for keydown and move focus themselves.
           // Such pages usually move focus a frame after the key (React
           // effects), so the next key waits for that frame; sent at once,
           // keys land in the old box and overwrite or drop characters.
+          // A character with no US key goes as text only. A text field takes
+          // it; a page that reads physical keys (a remote desktop) gets
+          // nothing, so say which characters may not have arrived. Focus is
+          // checked as each one is sent: earlier keys may have opened an
+          // editor (a grid cell).
+          const mayBeLost = new Set<string>();
           let first = true;
           for (const character of action.text) {
             if (!first) await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
             first = false;
-            await this.pressKey(state, characterKey(character));
+            const key = characterKey(character);
+            if (
+              key.code === "" &&
+              this.engine !== "lightpanda" &&
+              !mayBeLost.has(key.text) &&
+              (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+            )
+              mayBeLost.add(key.text);
+            await this.pressKey(state, key);
+          }
+          if (mayBeLost.size > 0) {
+            const characters = [...mayBeLost];
+            throw new InteractionOutcomeUnknownDriverError(
+              "outcome_unknown",
+              `${TYPE_KEYS_TEXT_ONLY_MESSAGE}${characters
+                .slice(0, 20)
+                .map((character) => JSON.stringify(character))
+                .join(", ")}${characters.length > 20 ? ", …" : ""}`,
+            );
           }
           return;
         }
@@ -6910,15 +7077,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const origin = webOrigin(state.frame.url);
+    const inOpenedTab = this.permissionControl === "opened_tabs";
+    if (
+      inOpenedTab &&
+      (!this.createdTargetIds.has(state.targetId) ||
+        this.ownedTabs?.inUseElsewhere?.(state.targetId) === true)
+    ) {
+      throw new InteractionDefiniteDriverError("permission_denied", PERMISSION_OPENED_TABS_ONLY);
+    }
     try {
       await (
         await this.ensureConnection()
-      ).send("Browser.setPermission", {
-        ...this.contextScope(),
-        permission: { name: CDP_PERMISSION_NAMES[action.permission] },
-        setting: action.setting,
-        origin,
-      });
+      ).send(
+        "Browser.setPermission",
+        {
+          ...this.contextScope(),
+          permission: { name: CDP_PERMISSION_NAMES[action.permission] },
+          setting: action.setting,
+          origin,
+        },
+        inOpenedTab ? { sessionId: state.sessionId } : undefined,
+      );
     } catch (error) {
       if (error instanceof CdpProtocolError) {
         throw new InteractionDefiniteDriverError(
@@ -8673,24 +8852,71 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async pressKey(state: TargetState, key: ParsedKey): Promise<void> {
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-      ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
-      ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
-        ? { commands: ["selectAll"] }
-        : {}),
-    });
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-    });
+    // Each modifier goes down as its own key first and comes up last, as a
+    // person presses it: pages that track physical keys (remote-desktop
+    // viewers sending scancodes) only see a modifier that was pressed.
+    const modifiers = MODIFIER_KEYS.filter((modifier) => (key.modifiers & modifier.bit) !== 0);
+    const pressed: (typeof MODIFIER_KEYS)[number][] = [];
+    let held = 0;
+    const keyUp = { type: "keyUp", key: key.key, code: key.code, modifiers: key.modifiers };
+    const releaseModifier = (modifier: (typeof MODIFIER_KEYS)[number]) => {
+      held &= ~modifier.bit;
+      return this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: modifier.key,
+        code: modifier.code,
+        modifiers: held,
+        windowsVirtualKeyCode: modifier.keyCode,
+        location: 1,
+      });
+    };
+    let keyDown = false;
+    try {
+      for (const modifier of modifiers) {
+        // Counted as down before it is sent: a send that fails may still
+        // have reached the page.
+        pressed.push(modifier);
+        held |= modifier.bit;
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: modifier.key,
+          code: modifier.code,
+          modifiers: held,
+          windowsVirtualKeyCode: modifier.keyCode,
+          location: 1,
+        });
+      }
+      keyDown = true;
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: key.key,
+        code: key.code,
+        modifiers: key.modifiers,
+        windowsVirtualKeyCode: key.keyCode,
+        ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
+        ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
+          ? { commands: ["selectAll"] }
+          : {}),
+      });
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        ...keyUp,
+        windowsVirtualKeyCode: key.keyCode,
+      });
+      keyDown = false;
+      while (pressed.length) await releaseModifier(pressed.pop()!);
+    } catch (error) {
+      // Release whatever may be down, so no key stays held on the page (a
+      // remote desktop would keep Ctrl or Shift pressed), then report the
+      // original failure.
+      if (keyDown) {
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          ...keyUp,
+          windowsVirtualKeyCode: key.keyCode,
+        }).catch(() => undefined);
+      }
+      while (pressed.length) await releaseModifier(pressed.pop()!).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async dragNodes(
@@ -9034,26 +9260,98 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Lightpanda does not support safe Back/Forward history; navigate to an explicit URL",
       );
     }
-    const history = await this.sendActionTarget<{
-      currentIndex?: unknown;
-      entries?: unknown;
-    }>(state, "Page.getNavigationHistory", {});
-    const nextIndex =
-      typeof history.currentIndex === "number"
-        ? history.currentIndex + (direction === "back" ? -1 : 1)
-        : -1;
-    const entries = Array.isArray(history.entries) ? history.entries : [];
-    const entry = entries[nextIndex];
-    if (!isRecord(entry) || typeof entry.id !== "number") {
+    const startedAt = Date.now();
+    const deadline = startedAt + DEFAULT_ACTION_TIMEOUT_MS;
+    const effectsBefore = state.actionEffectCount;
+    const history = await this.navigationHistory(state);
+    const start = history.entries[history.index];
+    let index = history.index + (direction === "back" ? -1 : 1);
+    // A page can add entries for the URL it already shows without the
+    // person's input, as some sign-in pages do as they open. Going back to
+    // one changes nothing visible, so Back passes over them, as Chromium's
+    // own Back button does. Entries made after input (a dialog that closes
+    // on Back) stay single steps.
+    if (
+      direction === "back" &&
+      start &&
+      history.entries[index]?.url === start.url &&
+      !(await this.documentActivated(state))
+    ) {
+      while (history.entries[index]?.url === start.url) index -= 1;
+    }
+    if (!Number.isFinite(history.entries[index]?.id)) {
       throw new InteractionDefiniteDriverError(
         "invalid_action",
         `browser target has no ${direction} history entry`,
       );
     }
+    for (let skipped = 0; ; skipped += 1) {
+      const entry = history.entries[index]!;
+      const documentsBefore = state.documentCommits;
+      await this.stepToHistoryEntry(state, entry.id, skipped === 0 ? startedAt : Date.now());
+      if (direction === "forward") return;
+      if (!(await this.returnedToStart(state, documentsBefore, index, entry, start))) return;
+      // The page sent the tab back to where Back started by itself as soon
+      // as it opened: it is a redirect step, so going back to it changes
+      // nothing. Go to the entry before it instead. A redirect only adds or
+      // replaces entries from this one on, so the earlier ones are unchanged.
+      // A page that sends the tab anywhere else is where Back goes, as in a
+      // person's browser.
+      const earlier = history.entries[index - 1];
+      if (!earlier || skipped + 1 >= HISTORY_REDIRECT_SKIPS || Date.now() >= deadline) {
+        // The outcome is known: the tab went on to a page by itself, and the
+        // failure's observation shows which. Nothing is left to replay.
+        state.actionEffectCount = effectsBefore;
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `going back opened ${entry.url}, which went on to ${state.frame.url} by itself; ${
+            earlier
+              ? `navigate to the page before it, ${earlier.url}, instead`
+              : "there is no earlier page in this tab's history, so navigate to a URL instead"
+          }`,
+        );
+      }
+      index -= 1;
+    }
+  }
+
+  /** The tab's history entries and the index of the one it shows. */
+  private async navigationHistory(
+    state: TargetState,
+  ): Promise<{ index: number; entries: { id: number; url: string }[] }> {
+    const history = await this.sendActionTarget<{
+      currentIndex?: unknown;
+      entries?: unknown;
+    }>(state, "Page.getNavigationHistory", {});
+    const entries = (Array.isArray(history.entries) ? history.entries : []).map((entry) =>
+      isRecord(entry) && typeof entry.id === "number"
+        ? { id: entry.id, url: typeof entry.url === "string" ? entry.url : "" }
+        : { id: Number.NaN, url: "" },
+    );
+    const index = typeof history.currentIndex === "number" ? history.currentIndex : -1;
+    return { index, entries };
+  }
+
+  /** Whether the page has had the person's (or the agent's) input since it
+   * loaded. Unknown counts as yes, so Back then takes a single step. */
+  private async documentActivated(state: TargetState): Promise<boolean> {
+    try {
+      return (
+        (await this.evaluate(state, "navigator.userActivation?.hasBeenActive ?? true")) !== false
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private async stepToHistoryEntry(
+    state: TargetState,
+    entryId: number,
+    startedAt: number,
+  ): Promise<void> {
     const commitsBefore = state.mainFrameCommits;
     const loaderBefore = state.frame.loaderId;
-    const startedAt = Date.now();
-    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId });
     // The entry commits after Chromium answered: a new document, a page the
     // back/forward cache restores, or a same-document entry (pushState).
     const committed = () => state.mainFrameCommits !== commitsBefore;
@@ -9067,6 +9365,54 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
+  }
+
+  /**
+   * Whether the page a Back step opened sent the tab on by itself, right away,
+   * to the page Back started from: the same origin and path (a sign-in page
+   * often gains new query parameters), in a document committed after the
+   * step's own, for a different entry or URL. A page that reloads itself as it
+   * is shown again stays where it is.
+   *
+   * A same-document step (pushState) loads nothing, so nothing is watched.
+   * Otherwise the page's start-up code is let run: what its scripts do as
+   * they load, on DOMContentLoaded and, when the page has already loaded, on
+   * load and pageshow (a page restored from the back/forward cache runs those
+   * again), each followed by their zero-delay timers. A page still loading
+   * images or other subresources is not waited for.
+   */
+  private async returnedToStart(
+    state: TargetState,
+    documentsBefore: number,
+    index: number,
+    entry: { id: number; url: string },
+    start: { url: string } | undefined,
+  ): Promise<boolean> {
+    if (!start || state.documentCommits === documentsBefore) return false;
+    for (let hop = 0; hop < HISTORY_REDIRECT_HOPS && !state.dialog; hop += 1) {
+      const documents = state.documentCommits;
+      if (!state.navigationPending) {
+        try {
+          await this.sendTarget(
+            state,
+            "Runtime.evaluate",
+            { expression: PAGE_STARTUP_SETTLED_EXPRESSION, awaitPromise: true },
+            { timeoutMs: HISTORY_STARTUP_LIMIT_MS },
+          );
+        } catch {
+          // A page that sends the tab on takes its context with it, and a
+          // busy one runs out the limit; the checks below see where it is.
+        }
+      }
+      if (state.dialog) return false;
+      if (state.navigationPending) await this.settleActionNavigation(state);
+      await this.refreshFrame(state);
+      if (state.documentCommits === documents) break;
+    }
+    if (state.dialog || state.documentCommits - documentsBefore < 2) return false;
+    if (!sameOriginAndPath(state.frame.url, start.url)) return false;
+    const now = await this.navigationHistory(state);
+    return now.index !== index || now.entries[now.index]?.url !== entry.url;
   }
 
   private async waitForCondition(
@@ -9742,11 +10088,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private rememberGoneTarget(tabId: string, gone: GoneBrowserTarget): void {
+    this.reloadedTabs.delete(tabId);
     this.goneTargets.delete(tabId);
     this.goneTargets.set(tabId, gone);
     while (this.goneTargets.size > MAX_GONE_TARGETS) {
       this.goneTargets.delete(this.goneTargets.keys().next().value!);
     }
+  }
+
+  /** The notice for an observation of this tab the agent receives, when a
+   * relaunch reloaded its page and the agent was not told yet; said once. */
+  takeReloadedTabNotice(tabId: string): string | null {
+    const reloaded = this.reloadedTabs.get(tabId) ?? null;
+    this.reloadedTabs.delete(tabId);
+    return reloaded ? reloadedTabNotice(reloaded) : null;
   }
 
   /**
@@ -9780,15 +10135,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** The browser this driver runs replaced an earlier one and reopened its
    * tabs. Each reopened tab keeps its earlier ID; a call naming an earlier tab
-   * that no reopened tab shows learns why it is gone. */
+   * that no reopened tab shows learns why it is gone, and the first result
+   * about a reopened tab says that its page reloaded. */
   noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    this.restoredTargets.clear();
+    for (const targetId of relaunched.restoredTargetIds ??
+      relaunched.tabs.flatMap((tab) => (tab.replacementId ? [tab.replacementId] : []))) {
+      if (!this.states.has(targetId)) this.restoredTargets.set(targetId, null);
+    }
     this.adoptTabIds(
       relaunched.tabs.flatMap((tab) =>
         tab.replacementId ? [{ tabId: tab.targetId, browserTargetId: tab.replacementId }] : [],
       ),
     );
+    const reloaded: ReloadedBrowserTab = {
+      reason: relaunched.reason,
+      ...(relaunched.idleReleaseMinutes !== undefined
+        ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
+        : {}),
+    };
     for (const tab of relaunched.tabs) {
-      if (this.browserIdsByTabId.has(tab.targetId)) continue;
+      if (this.browserIdsByTabId.has(tab.targetId)) {
+        // Reopened under its earlier ID: the same page, loaded again.
+        if (this.browserIdsByTabId.get(tab.targetId) === tab.replacementId) {
+          this.reloadedTabs.set(tab.targetId, reloaded);
+        }
+        continue;
+      }
       this.rememberGoneTarget(tab.targetId, {
         kind: "relaunched",
         reason: relaunched.reason,
@@ -10055,6 +10428,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
       this.targetViewports.delete(targetId);
+      this.restoredTargets.delete(targetId);
     }
   }
 
@@ -10104,6 +10478,13 @@ function tabCrashedError(): InteractionDefiniteDriverError {
     false,
   );
 }
+
+/** How long a reopened tab Chrome had not loaded yet gets to start a
+ * renderer once its load was asked for, and how often attachment retries
+ * meanwhile. A tab still without one after that is reported as crashed. */
+const RESTORED_TAB_LOAD_TIMEOUT_MS = 10_000;
+const RESTORED_TAB_RELOAD_TIMEOUT_MS = 2_000;
+const RESTORED_TAB_ATTACH_INTERVAL_MS = 100;
 
 /** How long a runtime continuing a session in the person's own browser waits
  * for the tab the session was using before it opens a new one instead. A
@@ -10221,6 +10602,17 @@ function absoluteTargetUrl(value: unknown): string | null {
     return new URL(value).href.length > 0 ? value : null;
   } catch {
     return null;
+  }
+}
+
+/** Whether two URLs name the same page, ignoring query and fragment. */
+function sameOriginAndPath(left: string, right: string): boolean {
+  try {
+    const a = new URL(left);
+    const b = new URL(right);
+    return a.origin === b.origin && a.pathname === b.pathname;
+  } catch {
+    return left === right;
   }
 }
 
@@ -10453,7 +10845,49 @@ type ParsedKey = {
   text: string;
 };
 
-/** A literal character as one key press (typed with `type.mode: "keys"`). */
+// The keys of a US keyboard that give printable ASCII characters other than
+// letters and digits, as [unshifted, shifted, code, Windows virtual key code].
+const US_SYMBOL_KEYS: readonly (readonly [string, string, string, number])[] = [
+  ["1", "!", "Digit1", 49],
+  ["2", "@", "Digit2", 50],
+  ["3", "#", "Digit3", 51],
+  ["4", "$", "Digit4", 52],
+  ["5", "%", "Digit5", 53],
+  ["6", "^", "Digit6", 54],
+  ["7", "&", "Digit7", 55],
+  ["8", "*", "Digit8", 56],
+  ["9", "(", "Digit9", 57],
+  ["0", ")", "Digit0", 48],
+  ["`", "~", "Backquote", 192],
+  ["-", "_", "Minus", 189],
+  ["=", "+", "Equal", 187],
+  ["[", "{", "BracketLeft", 219],
+  ["]", "}", "BracketRight", 221],
+  ["\\", "|", "Backslash", 220],
+  [";", ":", "Semicolon", 186],
+  ["'", '"', "Quote", 222],
+  [",", "<", "Comma", 188],
+  [".", ">", "Period", 190],
+  ["/", "?", "Slash", 191],
+];
+
+const US_SYMBOL_KEY_BY_CHARACTER = new Map<
+  string,
+  { code: string; keyCode: number; shift: boolean }
+>(
+  US_SYMBOL_KEYS.flatMap(([plain, shifted, code, keyCode]) => [
+    [plain, { code, keyCode, shift: false }],
+    [shifted, { code, keyCode, shift: true }],
+  ]),
+);
+
+const SHIFT_MODIFIER = 8;
+
+/** A literal character as one key press (typed with `type.mode: "keys"`): the
+ * key a person presses for it on a US keyboard, with Shift held when that key
+ * needs it, so that pages reading physical keys and Shift (remote-desktop
+ * viewers) get the same character as pages reading the key's text. Other
+ * characters are sent as text with no physical key. */
 function characterKey(character: string): ParsedKey {
   if (character === "\n" || character === "\r") {
     return { key: "Enter", code: "Enter", keyCode: 13, modifiers: 0, text: "\r" };
@@ -10474,12 +10908,30 @@ function characterKey(character: string): ParsedKey {
       key: character,
       code: `Key${upper}`,
       keyCode: upper.charCodeAt(0),
-      modifiers: 0,
+      modifiers: character === upper ? SHIFT_MODIFIER : 0,
+      text: character,
+    };
+  }
+  const symbol = US_SYMBOL_KEY_BY_CHARACTER.get(character);
+  if (symbol) {
+    return {
+      key: character,
+      code: symbol.code,
+      keyCode: symbol.keyCode,
+      modifiers: symbol.shift ? SHIFT_MODIFIER : 0,
       text: character,
     };
   }
   return { key: character, code: "", keyCode: 0, modifiers: 0, text: character };
 }
+
+// The modifier keys behind the CDP modifier bits, in the order they go down.
+const MODIFIER_KEYS: readonly { bit: number; key: string; code: string; keyCode: number }[] = [
+  { bit: 2, key: "Control", code: "ControlLeft", keyCode: 17 },
+  { bit: 1, key: "Alt", code: "AltLeft", keyCode: 18 },
+  { bit: 4, key: "Meta", code: "MetaLeft", keyCode: 91 },
+  { bit: SHIFT_MODIFIER, key: "Shift", code: "ShiftLeft", keyCode: 16 },
+];
 
 /** Replace `{{secret:…}}` references with the controller-private values right
  * before dispatch. The returned command no longer carries the side map, so
@@ -10525,11 +10977,22 @@ function parseKey(input: string, mac: boolean): ParsedKey {
     throw new InteractionDefiniteDriverError("invalid_action", "browser key is unsupported");
   }
   const upper = rawKey.toUpperCase();
+  // A digit or symbol is the key that gives it on a US keyboard, with Shift
+  // held when that key needs it, as typed text is.
+  const symbol = /[a-z]/iu.test(rawKey) ? undefined : US_SYMBOL_KEY_BY_CHARACTER.get(rawKey);
+  // A letter in a key combination is the key a browser reports for it:
+  // lowercase unless Shift is held, whichever case was written.
+  const letterKey =
+    /^[a-z]$/iu.test(rawKey) && modifiers !== 0
+      ? (modifiers & SHIFT_MODIFIER) !== 0
+        ? upper
+        : rawKey.toLowerCase()
+      : rawKey;
   return {
-    key: rawKey,
-    code: /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
-    keyCode: upper.codePointAt(0) ?? 0,
-    modifiers,
+    key: letterKey,
+    code: symbol ? symbol.code : /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
+    keyCode: symbol ? symbol.keyCode : (upper.codePointAt(0) ?? 0),
+    modifiers: symbol?.shift ? modifiers | SHIFT_MODIFIER : modifiers,
     text: modifiers === 0 ? rawKey : "",
   };
 }
@@ -10629,6 +11092,19 @@ const LATE_REQUEST_FRAME_EXPRESSION = `new Promise((resolve) => {
 })`;
 // The response handler runs after the network layer reports the load finished.
 const ACTION_RESPONSE_APPLY_MS = 50;
+
+/** Resolves once a page's start-up code has run: its scripts and
+ * DOMContentLoaded handlers, and, when the page has finished loading, its load
+ * and pageshow handlers, each followed by the zero-delay timers they set. A
+ * page still loading subresources resolves without waiting for its load. */
+const PAGE_STARTUP_SETTLED_EXPRESSION = `new Promise((resolve) => {
+  const after = (next) => setTimeout(next, 0);
+  const settle = () =>
+    after(() => (document.readyState === "complete" ? after(resolve) : resolve()));
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", settle, { once: true });
+  else settle();
+})`;
 
 // Waits until no finite animation is running, then lets animationend
 // handlers commit their DOM removal (which can chain another animation).
@@ -11972,6 +12448,44 @@ const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
   }
   return (${COPY_BROWSER_TEXT_FUNCTION}).call(element, content);
 }`;
+
+const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
+  "the target is not a text field, so inserted text would not arrive and nothing was typed; type into a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
+
+const TYPE_KEYS_TEXT_ONLY_MESSAGE =
+  "keys were sent, but these characters have no US keyboard key, so a canvas or remote desktop reading key presses may not have received them: ";
+
+/** Whether inserted text can reach an element: true for a text field,
+ * editable content or an EditContext element (code editors), false for an
+ * element that takes no text (the page itself, a canvas, a button), null
+ * for a frame, a plugin or a shadow host whose focused part this document
+ * cannot see. With `focused`, `this` is a document's active element and the
+ * check follows focus into open shadow roots and same-origin frames. Without
+ * it, `this` is about to be focused, and an element holding a text field is
+ * null: focusing it may move focus into that field. */
+const TEXT_INSERT_TARGET_FUNCTION = `function (focused) { try {
+  let element = this;
+  while (focused && element) {
+    if (element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
+    else if ((element.localName === "iframe" || element.localName === "frame") && element.contentDocument && element.contentDocument.activeElement) element = element.contentDocument.activeElement;
+    else break;
+  }
+  if (!element || element.nodeType !== 1) return false;
+  const owner = element.ownerDocument;
+  const textField = (node) => node.isContentEditable || !!node.editContext || node.localName === "textarea" || (node.localName === "input" && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(node.type));
+  const holdsTextField = (root) => [...root.querySelectorAll("*")].some((node) => textField(node) || (node.shadowRoot && holdsTextField(node.shadowRoot)));
+  if (owner.designMode === "on" || textField(element)) return true;
+  if (element === owner.body || element === owner.documentElement) return false;
+  const tag = element.localName;
+  if (tag === "input") return false;
+  if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-") || element.shadowRoot) return null;
+  if (!focused && holdsTextField(element)) return null;
+  // An element focused in its own right takes no text. A shadow host focused
+  // for a field inside its closed shadow root is not focusable itself.
+  return element.tabIndex >= 0 || element.hasAttribute("tabindex") ? false : null;
+} catch { return null; } }`;
+
+const TEXT_INSERT_TARGET_EXPRESSION = `(${TEXT_INSERT_TARGET_FUNCTION}).call(document.activeElement, true)`;
 
 const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
   const element = document.activeElement;

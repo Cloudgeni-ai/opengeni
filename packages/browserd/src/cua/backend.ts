@@ -1449,11 +1449,26 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendError | null> {
     const target = this.targetsById.get(targetId);
     if (!target) return null;
-    // CUA's wording names an input mode this tool does not offer.
+    // CUA's wording names an input mode this tool does not offer. The
+    // window's own focus action opens the way to the menu, so name it with
+    // the window's target: the dropdown lists a focus action too, which only
+    // moves the keyboard focus. Not where that focus would be refused (see
+    // dispatchFocus): then set_value is the way.
     if (cuaCode === "select_menu_would_raise_window")
       return new ComputerBackendError(
         code,
-        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+        `Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text${
+          this.identity.platform === "macos" && this.recentPersonInput() === undefined
+            ? `; to open the menu itself, first bring the window to the front with the action {type:'focus',targetId:'${targetId}'} (focus on the dropdown's ref only moves the keyboard focus), then invoke it again`
+            : ""
+        }`,
+        false,
+        false,
+      );
+    if (cuaCode === "popup_option_without_text")
+      return new ComputerBackendError(
+        code,
+        "That option has no text to choose it by, and pressing it in the background can open its dropdown's menu, so nothing was sent. Choose an option with set_value on the dropdown's ref and the option's text",
         false,
         false,
       );
