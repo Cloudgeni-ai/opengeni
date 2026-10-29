@@ -33,6 +33,7 @@ import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
   hasIntegrationAdminPermission,
+  MissingPermissionRefusal,
   requireAccessGrant,
   requireIntegrationSetupAuthorization,
   requireMemberIntegrationSetupAllowed,
@@ -52,6 +53,7 @@ import {
   getPluginPackageUninstallPreview,
   PluginUninstallPreviewChangedError,
   integrationBindingKey,
+  IntegrationChangeRequiresAdminError,
   installApiIntegration,
   installPluginMcpReference,
   installPortableSkill,
@@ -210,7 +212,8 @@ export function registerPluginRoutes(
     const access = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const { grant } = access;
     const payload = await parseRequestJson(c, InstallPluginRequest);
-    if (!hasIntegrationAdminPermission(grant))
+    const memberCreate = !hasIntegrationAdminPermission(grant);
+    if (memberCreate)
       await requireMemberIntegrationSetupAllowed(deps.db, {
         accountId: grant.accountId,
         workspaceId,
@@ -225,7 +228,13 @@ export function registerPluginRoutes(
       subjectId: grant.subjectId,
       url: payload.url,
       bindings: payload.bindings,
+      ...(memberCreate ? { memberCreate: true } : {}),
     });
+    // Members add plugins; updating one that is already installed stays with admins.
+    if (memberCreate && resolved.preview.installed)
+      throw new MissingPermissionRefusal("capabilities:manage", {
+        message: "This plugin is already installed. Only an admin can update it.",
+      });
     if (resolved.preview.manifestDigest !== payload.expectedManifestDigest) {
       throw new HTTPException(409, {
         message: "The Plugin manifest changed after preview. Review the new components.",
@@ -339,6 +348,10 @@ export function registerPluginRoutes(
       }).catch(() => undefined);
       if (error instanceof SkillSourceRemovalAuthorityError)
         throw new HTTPException(403, { message: error.message });
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", {
+          message: `Plugin component ${activeComponentKey} would change an integration that is already set up. Only an admin can install this plugin.`,
+        });
       if (error instanceof HTTPException) throw error;
       if (error instanceof CapabilityComponentVersionConflictError) {
         throw new HTTPException(409, {
@@ -423,6 +436,8 @@ async function resolvePluginPackage(input: {
   subjectId: string;
   skillActor?: () => SkillActor;
   url: string;
+  /** A member's install: every component is create only (see installApiIntegration). */
+  memberCreate?: boolean;
   bindings: Record<
     string,
     {
@@ -621,6 +636,7 @@ async function resolvePluginPackage(input: {
             ownership: connection?.subjectId ? "subject" : "workspace",
             revision: resolved.revision,
             owner: { kind: "plugin", id: ownerPluginInstallationId, removable: true },
+            ...(input.memberCreate ? { memberCreate: true } : {}),
           });
           return {
             facetInstallationIds: [
@@ -733,6 +749,7 @@ async function resolvePluginPackage(input: {
                 ? "unknown"
                 : "none",
           digest,
+          ...(input.memberCreate ? { memberCreate: true } : {}),
         });
         return { facetInstallationIds: [installed.facetInstallationId] };
       },

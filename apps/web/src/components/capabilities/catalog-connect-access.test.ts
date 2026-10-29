@@ -80,6 +80,21 @@ describe("who may connect from a connection's page", () => {
     });
   });
 
+  test("when the organization keeps turning integrations on for admins, a member asks one", () => {
+    for (const item of [custom, reviewed])
+      expect(catalogConnectAccess(item, member, "shared", "admins").blocked?.title).toBe(
+        `Ask an admin to turn on ${item.name}`,
+      );
+    expect(
+      catalogConnectAccess(reviewed, { permissions: ["connections:personal"] }, "shared", "admins")
+        .blocked?.title,
+    ).toBe("Ask an admin to turn on Notion");
+    expect(catalogConnectAccess(custom, admin, "shared", "admins")).toEqual({
+      personalOnly: false,
+      blocked: null,
+    });
+  });
+
   test("in a Personal workspace everything connected is only yours, with no workspace choice", () => {
     for (const item of [custom, reviewed])
       expect(catalogConnectAccess(item, admin, "personal").personalOnly).toBe(true);

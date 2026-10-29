@@ -426,6 +426,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [workspaceCapabilityCatalog, setWorkspaceCapabilityCatalog] = useState<
     CapabilityCatalogItem[]
   >([]);
+  // Who the organization lets turn integrations on, read with the catalog.
+  const [workspaceMemberIntegrationSetup, setWorkspaceMemberIntegrationSetup] = useState<
+    "members" | "admins" | undefined
+  >(undefined);
   const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
   const [workspaceMcpCatalogLoadedSuccessfully, setWorkspaceMcpCatalogLoadedSuccessfully] =
     useState(false);
@@ -572,6 +576,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     setPersonalGitHubAuthorityCache(null);
     setWorkspaceMcpServers([]);
     setWorkspaceCapabilityCatalog([]);
+    setWorkspaceMemberIntegrationSetup(undefined);
     setWorkspaceMcpCatalogReady(false);
     setWorkspaceMcpCatalogLoadedSuccessfully(false);
   }, []);
@@ -1772,6 +1777,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           ),
         );
         setWorkspaceCapabilityCatalog(catalog.items);
+        setWorkspaceMemberIntegrationSetup(catalog.memberIntegrationSetup);
         setWorkspaceMcpCatalogLoadedSuccessfully(true);
         setWorkspaceMcpCatalogReady(true);
       } catch (error) {
@@ -2603,6 +2609,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           workspaceMcpCatalogReady,
           workspaceMcpCatalogLoadedSuccessfully,
           workspaceCapabilityCatalog,
+          workspaceMemberIntegrationSetup,
           currentResources,
           repositoryValidationError,
           workspaceStateOwnerId,
@@ -2729,6 +2736,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     workspaceMcpCatalogReady,
     workspaceMcpCatalogLoadedSuccessfully,
     workspaceCapabilityCatalog,
+    workspaceMemberIntegrationSetup,
     workspaceStateOwnerId,
     workspaces,
   ]);

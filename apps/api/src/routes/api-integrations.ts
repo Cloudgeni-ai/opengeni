@@ -38,6 +38,7 @@ import {
   getConnectionMetadata,
   getApiIntegrationReconciliationSnapshot,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
@@ -347,13 +348,19 @@ export function registerApiIntegrationRoutes(
       subjectId: grant.subjectId,
       payload,
     });
-    const installation = validatedIntegrationInstallInput(grant, workspaceId, payload, resolved);
+    const installation = {
+      ...validatedIntegrationInstallInput(grant, workspaceId, payload, resolved),
+      // Members only add: an instance already set up stays with admins.
+      ...(hasIntegrationAdminPermission(grant) ? {} : { memberCreate: true }),
+    };
     try {
       return c.json(
         InstalledApiIntegration.parse(await installApiIntegration(deps.db, installation)),
         payload.expectedInstanceVersion === undefined ? 201 : 200,
       );
     } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       if (error instanceof ApiIntegrationConnectionReferenceError) {
         throw new HTTPException(error.reason === "not_found" ? 404 : 422, {
           message: error.reason === "not_found" ? "connection not found" : error.message,

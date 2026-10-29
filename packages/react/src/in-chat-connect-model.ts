@@ -72,12 +72,16 @@ export function useChatConnectionsAllowed(client: Partial<ClientConfigFlagsSourc
 /**
  * Whether this person may finish an agent's prepared key setup: it saves a
  * credential and turns the server on if it is not on yet, which members may
- * do (`connections:write`), as the API decides.
+ * do (`connections:write`) unless their organization keeps turning
+ * integrations on for admins, as the API decides.
  */
 export function canFinishPreparedMcpSetup(support: InChatConnectSupport): boolean {
   if (support.status !== "ready") return false;
   const can = (permission: Permission) =>
     support.permissions.has(permission) ||
     (support.permissionMode !== "explicit" && support.permissions.has("workspace:admin"));
-  return can("connections:write");
+  return (
+    can("connections:write") &&
+    (support.memberIntegrationSetup !== "admins" || can("capabilities:manage"))
+  );
 }

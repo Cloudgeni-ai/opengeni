@@ -16,7 +16,9 @@ allowlist, and `personalIntegrationSetup: "admins"`) still decides.
 What stays integration administration (`capabilities:manage`): connector and
 session-MCP tool permissions (Allow/Ask/Block), `autoApprovedTools` and any
 explicit MCP `requireApproval` other than `true`, changing an integration that
-is already on, and turning one off for everyone. Shared-workspace admins
+is already set up (updating a plugin or a custom API to a new revision,
+reconnecting or rebinding a shared account, or turning a server back on), and
+turning one off for everyone. Members can remove what an admin added. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.

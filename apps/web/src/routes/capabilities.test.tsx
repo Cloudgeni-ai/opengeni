@@ -21,7 +21,7 @@ import {
 } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { capabilityStateChip } from "@opengeni/react/app/lib/capabilities";
 import {
-  canManageApiIntegrations,
+  apiIntegrationAccess,
   fetchOAuthReturnRows,
   integrationQuickConnect,
   integrationRowBusy,
@@ -220,19 +220,18 @@ describe("Slack integration authority", () => {
     expect(canManageSlackReactionSummon(accessContext(["workspace:admin"]), "workspace-a")).toBe(
       true,
     );
-    expect(canManageApiIntegrations(accessContext(["connections:write"]), "workspace-a")).toBe(
-      true,
-    );
-    expect(canManageApiIntegrations(accessContext(["connections:read"]), "workspace-a")).toBe(
-      false,
-    );
-    expect(canManageApiIntegrations(accessContext(["connections:personal"]), "workspace-a")).toBe(
-      false,
-    );
-    expect(canManageApiIntegrations(accessContext(["capabilities:manage"]), "workspace-a")).toBe(
-      true,
-    );
-    expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
+    const access = (permissions: string[], policy?: "members" | "admins") =>
+      apiIntegrationAccess(accessContext(permissions), "workspace-a", policy);
+    expect(access(["connections:write"])).toEqual({ add: true, manage: true, change: false });
+    expect(access(["connections:write"], "admins")).toEqual({
+      add: false,
+      manage: true,
+      change: false,
+    });
+    for (const permissions of [["connections:read"], ["connections:personal"]])
+      expect(access(permissions)).toEqual({ add: false, manage: false, change: false });
+    for (const permissions of [["capabilities:manage"], ["workspace:admin"]])
+      expect(access(permissions, "admins")).toEqual({ add: true, manage: true, change: true });
   });
 });
 

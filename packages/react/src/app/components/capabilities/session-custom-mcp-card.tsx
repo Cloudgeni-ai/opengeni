@@ -74,7 +74,11 @@ function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
       active = false;
     };
   }, [context.client, workspaceId, proposal.endpointUrl, onRegistered]);
-  const canManage = canAddWorkspaceIntegrations(context.accessContext, workspaceId);
+  const canManage = canAddWorkspaceIntegrations(
+    context.accessContext,
+    workspaceId,
+    context.workspaceMemberIntegrationSetup,
+  );
   const validUrl = (() => {
     try {
       const parsed = new URL(url.trim());

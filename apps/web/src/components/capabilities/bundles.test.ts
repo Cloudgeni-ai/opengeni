@@ -7,6 +7,7 @@ import {
   filterBundleRows,
   importedSkillBundleRow,
   pluginBundleRow,
+  pluginUpdateUnavailable,
   sortBundleRows,
   type BundleRow,
 } from "./bundles";
@@ -138,6 +139,26 @@ describe("bundle rows", () => {
     if (footer.kind !== "actions") throw new Error("expected an actions footer");
     expect(footer.primary?.disabled).toBe(true);
     expect(footer.primary?.unavailableReason).toContain("did not retain a source URL");
+  });
+
+  test("a member removes an installed Plugin, and only an admin updates it", () => {
+    const row = pluginBundleRow(installedPlugin(), {
+      canManage: true,
+      canUpdate: false,
+      busy: false,
+      onUpdate: () => {},
+      onRemove: () => {},
+    });
+    if (row.detail.kind !== "sheet") throw new Error("expected a sheet detail");
+    const footer = row.detail.model.footer;
+    if (footer.kind !== "actions") throw new Error("expected an actions footer");
+    expect(footer.primary?.disabled).toBe(true);
+    expect(footer.primary?.unavailableReason).toBe("Only an admin can update this plugin.");
+    expect(footer.secondary?.label).toBe("Remove");
+    expect(pluginUpdateUnavailable(installedPlugin(), false)).toEqual({
+      updateUnavailableReason: "Only an admin can update this plugin.",
+    });
+    expect(pluginUpdateUnavailable(installedPlugin(), true)).toEqual({});
   });
 
   test("every row carries its taxonomy as a spoken accessible detail", () => {

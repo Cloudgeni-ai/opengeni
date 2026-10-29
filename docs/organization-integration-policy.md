@@ -30,13 +30,17 @@ allowlist.
   person in with OAuth for personal accounts. Members holding
   `connections:write` may also add anything else: custom MCP servers, API
   integrations and plugins, with personal or shared connections. Both are
-  create-only, only within the rest of this policy, and never set tool approval
-  or change, reconfigure or turn off an integration that is already on.
+  create-only and only within the rest of this policy: they never set tool
+  approval, update an integration, plugin or account that is already set up,
+  turn one back on that an admin turned off, or turn one off for everyone.
 - `admins`: only people who manage integrations (`capabilities:manage`) turn
   integrations on, add MCP servers or API integrations, or install plugins.
   Members can still connect their own accounts to integrations that are on,
   configure their sources, and remove them.
 
+The workspace catalog (`GET /v1/workspaces/{workspaceId}/capabilities`)
+returns this setting as `memberIntegrationSetup`, so clients offer members only
+the setup the API will accept.
 Once on, the integration is visible to the workspace's other members as an
 optional integration that each of them must connect with their own account.
 Nobody gets access to anyone else's account. Workspace and organization admins

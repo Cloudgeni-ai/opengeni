@@ -212,7 +212,7 @@ describe("BundlesSection", () => {
     const rendered = await renderSection({ canManage: false });
     try {
       expect(rendered.container.textContent).toContain(
-        "Members can install, update, and remove these items.",
+        "Ask a workspace admin to install or update these items.",
       );
       // Every header action needs a member's permission; none of them
       // may sit live directly under the sentence that says so.
@@ -230,9 +230,7 @@ describe("BundlesSection", () => {
   test("someone who manages Skills but can't add integrations is told who installs plugins", async () => {
     const rendered = await renderSection({ canManage: true, canManagePlugins: false });
     try {
-      expect(rendered.container.textContent).toContain(
-        "Members can install, update, and remove plugins.",
-      );
+      expect(rendered.container.textContent).toContain("Ask a workspace admin to install plugins.");
       expect(rendered.container.textContent).not.toContain("these items");
       const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
         candidate.textContent?.includes("Import plugin"),

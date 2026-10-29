@@ -119,6 +119,39 @@ describe("personal integration setup", () => {
       expect(canAddIntegrations({ permissions })).toBe(false);
   });
 
+  test("an organization that keeps turning integrations on for admins: members are offered nothing new", () => {
+    const member = { permissions: ["connections:read", "connections:write"] };
+    const narrow = { permissions: ["connections:read", "connections:personal"] };
+    const admin = { permissions: ["workspace:admin"] };
+    expect(canAddIntegrations(member, "admins")).toBe(false);
+    expect(canAddIntegrations(member, "members")).toBe(true);
+    expect(canAddIntegrations(admin, "admins")).toBe(true);
+    expect(personalIntegrationSetupAccess(member, reviewed, "admins")).toBeNull();
+    expect(personalIntegrationSetupAccess(narrow, reviewed, "admins")).toBeNull();
+    expect(personalIntegrationSetupAccess(admin, reviewed, "admins")).toBe("any");
+    // Connecting one's own account to what is already on changes no installation.
+    const on = { ...reviewed, enabled: true, connectionRef: { subjectScope: "subject" } };
+    expect(personalIntegrationSetupAccess(narrow, on, "admins")).toBe("personal");
+
+    const chat = ["workspace:read", "sessions:read", "sessions:control"];
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, "connections:write"] },
+        "plugin:x/y",
+        undefined,
+        "admins",
+      ),
+    ).toEqual({ kind: "unavailable" });
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, ...member.permissions] },
+        "mcp:gmail",
+        reviewed,
+        "admins",
+      ),
+    ).toEqual({ kind: "unavailable" });
+  });
+
   test("in-chat setup: a member's card can install a plugin", () => {
     const chat = ["workspace:read", "sessions:read", "sessions:control"];
     expect(

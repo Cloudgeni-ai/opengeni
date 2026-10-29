@@ -197,6 +197,19 @@ beforeAll(async () => {
             cacheToolsList: false,
           },
           {
+            id: "member_shared_mcp",
+            name: "Member shared MCP",
+            url: "https://member-shared.example.com/mcp",
+            cacheToolsList: false,
+            requireApproval: false,
+          },
+          {
+            id: "member_new_mcp",
+            name: "Member new MCP",
+            url: "https://member-new.example.com/mcp",
+            cacheToolsList: false,
+          },
+          {
             id: "personal_mcp",
             name: "Personal MCP",
             url: "https://personal.example.com/mcp",
@@ -238,6 +251,15 @@ beforeAll(async () => {
         if (url === "https://127.0.0.1/plugin-missing-mcp.json") {
           return Response.json(mcpOnlyPlugin("example/plugin-missing-mcp", "missing_mcp"));
         }
+        if (url === "https://127.0.0.1/plugin-admin-shared-mcp.json") {
+          return Response.json(mcpOnlyPlugin("example/plugin-admin-shared", "member_shared_mcp"));
+        }
+        if (url === "https://127.0.0.1/plugin-member-shared-mcp.json") {
+          return Response.json(mcpOnlyPlugin("example/plugin-member-shared", "member_shared_mcp"));
+        }
+        if (url === "https://127.0.0.1/plugin-member-new-mcp.json") {
+          return Response.json(mcpOnlyPlugin("example/plugin-member-new", "member_new_mcp"));
+        }
         if (url === "https://127.0.0.1/inventory.json") {
           return Response.json(openApiDocument());
         }
@@ -253,22 +275,25 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function authorization(): Promise<string> {
+const ADMIN = ["workspace:read", "capabilities:manage"];
+const MEMBER = ["workspace:read", "connections:read", "connections:write"];
+
+async function authorization(permissions: string[] = ADMIN): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId,
     workspaceId,
     subjectId,
-    permissions: ["workspace:read", "capabilities:manage"],
+    permissions: permissions as never,
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   })}`;
 }
 
-async function request(path: string, init: RequestInit = {}) {
+async function request(path: string, init: RequestInit = {}, permissions: string[] = ADMIN) {
   return await app.request(`http://x/v1/workspaces/${workspaceId}${path}`, {
     ...init,
     headers: {
-      authorization: await authorization(),
+      authorization: await authorization(permissions),
       "content-type": "application/json",
       ...init.headers,
     },
@@ -287,20 +312,29 @@ async function preview(url: string): Promise<PluginPreview> {
   return (await response.json()) as PluginPreview;
 }
 
-async function installResponse(url: string, previewed: PluginPreview, idempotencyKey: string) {
+async function installResponse(
+  url: string,
+  previewed: PluginPreview,
+  idempotencyKey: string,
+  permissions: string[] = ADMIN,
+) {
   const expectedComponents = previewed.components.map(({ key, digest }) => ({ key, digest }));
-  return await request("/plugins/install", {
-    method: "POST",
-    body: JSON.stringify({
-      url,
-      expectedManifestDigest: previewed.manifestDigest,
-      expectedComponents,
-      idempotencyKey,
-      ...(previewed.installationVersion
-        ? { expectedInstallationVersion: previewed.installationVersion }
-        : {}),
-    }),
-  });
+  return await request(
+    "/plugins/install",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        url,
+        expectedManifestDigest: previewed.manifestDigest,
+        expectedComponents,
+        idempotencyKey,
+        ...(previewed.installationVersion
+          ? { expectedInstallationVersion: previewed.installationVersion }
+          : {}),
+      }),
+    },
+    permissions,
+  );
 }
 
 async function install(url: string, previewed: PluginPreview, idempotencyKey: string) {
@@ -877,4 +911,47 @@ describe("Plugin routes", () => {
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual(receipt);
   }, 120_000);
+
+  test("a member adds a new plugin, never updates one or rewrites a configured server", async () => {
+    if (!available || !shared) return;
+    const status = async (capabilityId: string) => {
+      const [row] = await shared!.admin<{ status: string; config: Record<string, unknown> }[]>`
+        select status, config from capability_installations
+        where workspace_id = ${workspaceId} and capability_id = ${capabilityId}`;
+      return row ?? null;
+    };
+    // A member adds a plugin whose components are all new.
+    const newUrl = "https://127.0.0.1/plugin-member-new-mcp.json";
+    const added = await installResponse(newUrl, await preview(newUrl), crypto.randomUUID(), MEMBER);
+    expect(added.status).toBe(201);
+    expect((await status("mcp:configured:member_new_mcp"))?.status).toBe("active");
+    // Updating it once it is installed stays with admins.
+    const update = await installResponse(
+      newUrl,
+      await preview(newUrl),
+      crypto.randomUUID(),
+      MEMBER,
+    );
+    expect(update.status).toBe(403);
+    expect(await update.text()).toContain("Only an admin can update it");
+
+    // An admin's plugin set up a configured server, then an admin turned it off.
+    const adminUrl = "https://127.0.0.1/plugin-admin-shared-mcp.json";
+    await install(adminUrl, await preview(adminUrl), crypto.randomUUID());
+    await shared.admin`update capability_installations set status = 'disabled'
+      where workspace_id = ${workspaceId} and capability_id = 'mcp:configured:member_shared_mcp'`;
+    const before = await status("mcp:configured:member_shared_mcp");
+    // A member's other plugin with the same server never turns it back on or rewrites it.
+    const memberUrl = "https://127.0.0.1/plugin-member-shared-mcp.json";
+    const refused = await installResponse(
+      memberUrl,
+      await preview(memberUrl),
+      crypto.randomUUID(),
+      MEMBER,
+    );
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("Only an admin can install this plugin");
+    expect(await status("mcp:configured:member_shared_mcp")).toEqual(before);
+    expect(before?.status).toBe("disabled");
+  }, 60_000);
 });

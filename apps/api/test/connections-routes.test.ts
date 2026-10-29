@@ -873,7 +873,9 @@ describe("connections routes", () => {
     const installations = await listCapabilityInstallations(client.db, workspace.workspaceId);
     expect(installations).toHaveLength(1);
     // A member's setup never chooses tools that run without asking.
-    expect(installations[0]!.config).not.toMatchObject({ requireApproval: false });
+    const config = installations[0]!.config as Record<string, unknown>;
+    expect([undefined, true]).toContain(config.requireApproval);
+    expect(config.autoApprovedTools ?? []).toEqual([]);
 
     revoke = true;
     const second = await begin("https://prepared-two.example.test/mcp");

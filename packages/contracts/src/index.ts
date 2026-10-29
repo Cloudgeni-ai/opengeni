@@ -14583,6 +14583,11 @@ export const CapabilityCatalogResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(CapabilityCatalogItem),
     installations: z.array(CapabilityInstallation),
+    /**
+     * Who the organization lets turn integrations on: members (the default)
+     * or only integration admins. Older servers omit it; treat that as members.
+     */
+    memberIntegrationSetup: z.enum(["members", "admins"]).optional(),
   }),
 );
 export type CapabilityCatalogResponse = z.infer<typeof CapabilityCatalogResponse>;

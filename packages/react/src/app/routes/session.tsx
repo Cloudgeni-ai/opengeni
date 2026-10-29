@@ -1160,7 +1160,12 @@ export function SessionRoute({
         const catalogItem = context.workspaceCapabilityCatalog.find(
           (candidate) => candidate.id === item.capability?.id,
         );
-        const canInstall = canConnectWorkspaceMcpFromChat(context.accessContext, workspaceId);
+        const canInstall = canConnectWorkspaceMcpFromChat(
+          context.accessContext,
+          workspaceId,
+          catalogItem,
+          context.workspaceMemberIntegrationSetup,
+        );
         const mcpUrl = catalogItem?.mcpUrl ?? catalogItem?.endpointUrl ?? null;
         if (
           canInstall &&
@@ -1225,6 +1230,7 @@ export function SessionRoute({
       context.accessContext,
       context.client,
       context.workspaceCapabilityCatalog,
+      context.workspaceMemberIntegrationSetup,
       workspaceId,
       reconnectTransport,
     ],

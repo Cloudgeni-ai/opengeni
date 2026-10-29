@@ -65,6 +65,7 @@ export function catalogConnectAccess(
   item: CapabilityCatalogItem,
   grant: SetupGrant | null | undefined,
   workspaceKind: "personal" | "shared" | null | undefined,
+  memberIntegrationSetup?: "members" | "admins",
 ): CatalogConnectAccess {
   const fixedPersonal =
     workspaceKind === "personal" ||
@@ -72,7 +73,7 @@ export function catalogConnectAccess(
     (item.enabled && item.connectionRef?.subjectScope === "subject");
   if (!grant || item.kind !== "mcp" || item.enabled)
     return { personalOnly: fixedPersonal, blocked: null };
-  const access = personalIntegrationSetupAccess(grant, item);
+  const access = personalIntegrationSetupAccess(grant, item, memberIntegrationSetup);
   if (access) return { personalOnly: fixedPersonal || access === "personal", blocked: null };
   const canConnectOwn =
     grant.permissions.includes(PERSONAL_INTEGRATION_SETUP_PERMISSION) ||

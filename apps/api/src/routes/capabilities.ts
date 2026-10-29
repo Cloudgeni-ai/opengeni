@@ -41,6 +41,7 @@ import { z } from "zod";
 import { discoverablePlugins } from "../integrations/marketplace-plugin-catalog";
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
 import { parseRequestJson } from "../http/request-body";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 
 export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -92,16 +93,24 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    // Lets clients offer member setup only when the organization allows it.
+    // The routes enforce it either way, so a failed read just omits it.
+    const memberIntegrationSetup = await withOrganizationIntegrationPolicyFence(
+      db,
+      { accountId: grant.accountId, workspaceId },
+      async (_tx, policy) => policy.personalIntegrationSetup,
+    ).catch(() => undefined);
     return c.json(
-      CapabilityCatalogResponse.parse(
-        await buildCapabilityCatalog({
+      CapabilityCatalogResponse.parse({
+        ...(await buildCapabilityCatalog({
           db,
           workspaceId,
           settings,
           subjectId: grant.subjectId,
           accountId: grant.accountId,
-        }),
-      ),
+        })),
+        ...(memberIntegrationSetup ? { memberIntegrationSetup } : {}),
+      }),
     );
   });
 

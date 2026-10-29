@@ -22,7 +22,9 @@ import type {
 export function CustomApiSection({
   instances,
   connections,
+  canAdd,
   canManage,
+  canChange,
   busyKey,
   onConnect,
   onUpdate,
@@ -31,7 +33,12 @@ export function CustomApiSection({
 }: {
   instances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
+  /** Connect a new custom API (members, unless their organization keeps it for admins). */
+  canAdd: boolean;
+  /** Remove an instance. */
   canManage: boolean;
+  /** Reconnect or update an instance that is already set up (integration admins). */
+  canChange: boolean;
   busyKey: string | null;
   onConnect: () => void;
   onUpdate: (instance: ApiIntegrationInstallationSummary) => void;
@@ -66,7 +73,7 @@ export function CustomApiSection({
           size="sm"
           className="pointer-coarse:min-h-11"
           onClick={onConnect}
-          disabled={!canManage || busyKey !== null}
+          disabled={!canAdd || busyKey !== null}
         >
           Connect custom API
         </Button>
@@ -158,7 +165,7 @@ export function CustomApiSection({
                         variant="outline"
                         size="xs"
                         className="pointer-coarse:min-h-11"
-                        disabled={!canManage || busyKey !== null}
+                        disabled={!canChange || busyKey !== null}
                         onClick={() => onReconnect(instance)}
                       >
                         <RotateCwIcon />
@@ -170,7 +177,7 @@ export function CustomApiSection({
                       variant="outline"
                       size="xs"
                       className="pointer-coarse:min-h-11"
-                      disabled={!canManage || busyKey !== null}
+                      disabled={!canChange || busyKey !== null}
                       onClick={() => onUpdate(instance)}
                     >
                       <RefreshCwIcon />

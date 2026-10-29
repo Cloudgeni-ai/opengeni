@@ -31,6 +31,7 @@ import {
   listPendingConnectAttempts,
   withWorkspaceSubjectRls,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   listConnectionsMetadata,
   getConnectionMetadata,
   listInstalledApiIntegrations,
@@ -1407,12 +1408,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
           let installation: ReturnType<typeof validatedIntegrationInstallInput>;
           try {
-            installation = validatedIntegrationInstallInput(
-              authorization.grant,
-              workspaceId,
-              payload,
-              resolved,
-            );
+            installation = {
+              ...validatedIntegrationInstallInput(
+                authorization.grant,
+                workspaceId,
+                payload,
+                resolved,
+              ),
+              // A member's add is create only. Reconnecting one's own account
+              // (connections:personal) keeps its own rules.
+              ...(memberSetup && advancePermission !== "connections:personal"
+                ? { memberCreate: true }
+                : {}),
+            };
           } catch (error) {
             // The shared validator's 409 means the reviewed source changed.
             // No installation write has run; persist a fresh, unselected preview.
@@ -1422,7 +1430,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           return {
             commit: async (tx) => {
-              await installApiIntegration(tx, installation);
+              await installApiIntegration(tx, installation).catch((error: unknown) => {
+                if (error instanceof IntegrationChangeRequiresAdminError)
+                  throw new MissingPermissionRefusal("capabilities:manage", {
+                    message: error.message,
+                  });
+                throw error;
+              });
               return {
                 ...attempt,
                 error: undefined,
