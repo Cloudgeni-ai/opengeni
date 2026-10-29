@@ -1319,6 +1319,9 @@ export function createInteractionAttemptToolDefinitions(
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
   });
+  // Whether a computer_open result already named the person's own online
+  // computers in this attempt: once is enough to choose.
+  let personalComputersNamed = false;
   const currentComputer = new CurrentComputerWindow({
     latestLiveSession: async () =>
       newestRelevant(
@@ -2779,6 +2782,14 @@ export function createInteractionAttemptToolDefinitions(
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
+      // An open that names no computer and no machine lands on the chat's
+      // current one, which may be its own cloud computer while the person
+      // asked about theirs. Their online computers are read alongside, so
+      // the result can name them; a failed read names none.
+      const personalComputers =
+        !value.computerSessionId && !value.placement && !personalComputersNamed
+          ? onlinePersonalComputers(input.transport, input.workspaceId, input.sessionId)
+          : Promise.resolve([]);
       const { unavailable, ...opened } = await reportingChatMove(
         chatMove,
         async () =>
@@ -2805,6 +2816,11 @@ export function createInteractionAttemptToolDefinitions(
       const notes: Array<{ type: "text"; text: string }> = chatMove.moved
         ? [{ type: "text", text: CHAT_MOVED_NOTE }]
         : [];
+      const computers = await personalComputers;
+      if (computers.length > 0 && opened.session.placement.kind === "sandbox_group") {
+        personalComputersNamed = true;
+        notes.push({ type: "text", text: personalComputersNote(computers) });
+      }
       // Its screen is locked or shows another user's session: nothing on it
       // can be read, launched, captured or clicked, so say why and do nothing.
       if (unavailable)
@@ -3470,6 +3486,57 @@ function onOfflineMachine(
 
 /** The most records of each kind the model sees from one discovery. */
 const DISCOVERY_MODEL_LIST_LIMIT = 50;
+
+/** The most of the person's computers one computer_open result names. */
+const PERSONAL_COMPUTERS_NAMED_LIMIT = 3;
+
+type PersonalComputer = { name: string; os: string; sandboxId: string };
+
+/**
+ * The person's own Connected Machines (connected for themselves, not shared
+ * with the workspace) that are online with a screen, as the person who
+ * started the turn sees them. Empty when there are none or they cannot be
+ * listed: naming them only helps, so a failed read must not fail an open.
+ */
+async function onlinePersonalComputers(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<PersonalComputer[]> {
+  if (!transport.listMachines) return [];
+  try {
+    const listed = await transport.listMachines(workspaceId, { sessionId });
+    return listed.machines
+      .filter(
+        (machine) =>
+          machine.kind === "selfhosted" &&
+          !machine.isSessionGroup &&
+          machine.scope === "user" &&
+          machine.state === "online" &&
+          machine.hasDisplay,
+      )
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((machine) => ({ name: machine.name, os: machine.os, sandboxId: machine.sandboxId }));
+  } catch {
+    return [];
+  }
+}
+
+/** The line a computer_open result adds when it opened the chat's own cloud
+ * computer while the person has computers of their own online: a request
+ * about "my computer" means one of theirs, which one more open reaches. */
+function personalComputersNote(computers: readonly PersonalComputer[]): string {
+  const one = computers.length === 1;
+  const named = computers
+    .slice(0, PERSONAL_COMPUTERS_NAMED_LIMIT)
+    .map(
+      (computer) =>
+        `${JSON.stringify(computer.name)} (${computer.os}), placement {"kind":"connected_machine","sandboxId":"${computer.sandboxId}"}`,
+    )
+    .join("; ");
+  return `This is this chat's own cloud computer, not the person's. Their online computer${one ? "" : "s"}: ${named}. To use ${one ? "it" : "one"}, call computer_open with ${one ? "that" : "its"} placement; this chat then runs there.`;
+}
+
 /** The most bytes a model caller's discovery result serializes to: its
  * structured records, its compact text (as escaped JSON) and the note, well
  * below the 1 MiB model-visible limit, so it is never spilled to a file. */

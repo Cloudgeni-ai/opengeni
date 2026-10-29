@@ -8694,6 +8694,120 @@ describe("open reuses only a session on the chat's current machine", () => {
     expect(again.content.map((part) => (part as { text?: string }).text)).not.toContain(movedNote);
   });
 
+  // A computer opened on the chat's own cloud computer while the person has a
+  // computer of their own online names theirs, so a request about "my
+  // computer" reaches it in one more open instead of working in the wrong place.
+  test("computer_open on the chat's own computer names the person's online computers once", async () => {
+    const personalPc = randomUUID();
+    const machine = (
+      name: string,
+      overrides: Partial<{ scope: string; state: string; hasDisplay: boolean; os: string }> = {},
+    ) => ({
+      sandboxId: name === "Windows PC" ? personalPc : randomUUID(),
+      enrollmentId: randomUUID(),
+      scope: "user",
+      name,
+      kind: "selfhosted",
+      state: "online",
+      active: false,
+      isSessionGroup: false,
+      os: "windows",
+      arch: "x86_64",
+      hasDisplay: true,
+      ...overrides,
+    });
+    let machines: unknown[] = [];
+    let machinesFail = false;
+    let machineReads = 0;
+    let activeSandboxId: string | null = null;
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const there = discoveredComputerSession(randomUUID(), sessionId);
+    there.placement = { kind: "connected_machine", sandboxId: oldMachine };
+    const definitions = () =>
+      createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [home, there] }),
+            getComputerSession: async () => home,
+            createComputerSession: async () => {
+              throw new Error("an existing session is reused");
+            },
+          }),
+          getSession: async () =>
+            ({ id: sessionId, sandboxGroupId: groupId, activeSandboxId }) as never,
+          listMachines: async () => {
+            machineReads += 1;
+            if (machinesFail) throw new OpenGeniApiError(503, "unavailable");
+            return { activeSandboxId, activeEpoch: 1, machines } as never;
+          },
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+    const texts = (result: { content: unknown[] }) =>
+      result.content.flatMap((part) => {
+        const text = (part as { text?: string }).text;
+        return text === undefined ? [] : [text];
+      });
+    const note = `This is this chat's own cloud computer, not the person's. Their online computer: "Windows PC" (windows), placement {"kind":"connected_machine","sandboxId":"${personalPc}"}. To use it, call computer_open with that placement; this chat then runs there.`;
+    machines = [
+      { ...machine("Session sandbox", { os: "linux" }), kind: "modal", isSessionGroup: true },
+      machine("Windows PC"),
+      // Shared with the workspace, offline, or without a screen: not named.
+      machine("Build server", { scope: "workspace", os: "linux" }),
+      machine("Old laptop", { state: "offline" }),
+      machine("Headless box", { hasDisplay: false, os: "linux" }),
+    ];
+
+    const attempt = definitions();
+    const first = await attempt[0]!.execute({}, context());
+    expect(first.isError).not.toBe(true);
+    expect((first.structuredContent as { session: ComputerSession }).session.id).toBe(home.id);
+    expect(texts(first)).toContain(note);
+    expect(new TextEncoder().encode(note).byteLength).toBe(273);
+    // Once per attempt: the next open of the same computer does not repeat it.
+    const second = await attempt[0]!.execute({}, context());
+    expect(texts(second)).not.toContain(note);
+
+    // Opening it by placement or session ID chose it already: no read, no note.
+    machineReads = 0;
+    for (const args of [
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
+      { computerSessionId: home.id },
+    ]) {
+      const chosen = await definitions()[0]!.execute(args, context());
+      expect(texts(chosen).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+    }
+    expect(machineReads).toBe(0);
+
+    // On one of the person's machines already: nothing to add.
+    activeSandboxId = oldMachine;
+    const onMachine = await definitions()[0]!.execute({}, context());
+    expect((onMachine.structuredContent as { session: ComputerSession }).session.id).toBe(there.id);
+    expect(texts(onMachine).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+    activeSandboxId = null;
+
+    // Several computers of theirs online: each is named, in name order.
+    const mac = machine("Studio Mac", { os: "macos" });
+    machines = [...machines, mac];
+    const both = await definitions()[0]!.execute({}, context());
+    expect(texts(both)).toContain(
+      `This is this chat's own cloud computer, not the person's. Their online computers: "Studio Mac" (macos), placement {"kind":"connected_machine","sandboxId":"${mac.sandboxId}"}; "Windows PC" (windows), placement {"kind":"connected_machine","sandboxId":"${personalPc}"}. To use one, call computer_open with its placement; this chat then runs there.`,
+    );
+    machines = machines.filter((entry) => (entry as { name: string }).name !== "Windows PC");
+    machines = machines.filter((entry) => entry !== mac);
+    // No computer of theirs online, or no machine list: the open is as before.
+    const none = await definitions()[0]!.execute({}, context());
+    expect(texts(none).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+    machinesFail = true;
+    const unlisted = await definitions()[0]!.execute({}, context());
+    expect(unlisted.isError).not.toBe(true);
+    expect(texts(unlisted).some((text) => text.startsWith("This is this chat's own"))).toBe(false);
+  });
+
   test("browser_open naming another machine moves the chat there before creating", async () => {
     const swaps: string[] = [];
     const createRequests: unknown[] = [];
