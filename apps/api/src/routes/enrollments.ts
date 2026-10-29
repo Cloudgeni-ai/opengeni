@@ -16,7 +16,7 @@
 //     the super-wildcard). Connecting or changing a machine then follows its
 //     scope (../sandbox/machine-authority.ts): a signed-in teammate connects
 //     their own Only me machine; workspace machines need enrollments:manage and
-//     organization machines also account:admin.
+//     organization machines also the organization's owner or an admin.
 //
 // The cross-workspace safety of an unauthenticated start: start binds the request
 // to a workspaceId the agent supplies, and ONLY a user holding a grant in THAT
