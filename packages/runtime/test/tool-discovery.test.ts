@@ -2195,6 +2195,42 @@ describe("plain tool names and unloaded candidates on every route", () => {
       "customer_request_drafts_convert_to_ticket",
     ])
       expect(loaded(await runtime.prepareSearch({ query }))).toEqual([forms[0]!]);
+
+    // The decision model reads each shortened sibling's full published name.
+    const seen: ToolDecisionInput[] = [];
+    const published = new Map(
+      ["ticket", "order", "quote"].map(
+        (kind, i) => [forms[i]!, `customer_request_drafts_convert_to_${kind}`] as const,
+      ),
+    );
+    const deciding = new LazyToolRuntime(
+      "codex_native",
+      new Set([REQUESTS]),
+      undefined,
+      new Set([REQUESTS]),
+      new Set(),
+      () => new Map(forms.map((name) => [name, REQUESTS])),
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      judge({ [forms[1]!]: 0.9 }, seen),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => published,
+    );
+    deciding.refresh(forms.map((name) => candidate(name, "Convert a customer request draft.")));
+    expect(
+      loaded(
+        await deciding.prepareSearch({ query: "turn the customer request draft into an order" }),
+      ),
+    ).toEqual([forms[1]!]);
+    expect(Object.fromEntries(seen[0]!.candidates.map((c) => [c.name, c.fullName]))).toEqual(
+      Object.fromEntries(published),
+    );
   });
 
   test("native routes say which close candidates an uncertain search did not load", async () => {

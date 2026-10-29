@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Project profiles</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // `?platform=browser` is the web app; otherwise the desktop app's window.
+      const platform = new URLSearchParams(location.search).get("platform") || "browser";
+      if (platform !== "browser")
+        window.opengeniDesktop = { version: 1, platform, capabilities: [] };
+    </script>
+    <script type="module" src="/test/project-profile-fixture.tsx"></script>
+  </body>
+</html>
