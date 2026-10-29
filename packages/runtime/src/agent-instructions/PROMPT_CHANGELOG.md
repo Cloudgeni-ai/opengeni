@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+A voice handoff answers in the user's language. When a person ends a realtime
+voice session, the remaining transcript reaches the agent as a message whose
+`<input>` is a fixed English note about the handoff. That note gains one last
+sentence (about 85 bytes): "Reply in the language the user spoke in the
+transcript, not the language of this note." Before, when the handoff was the
+only person message in a chat, the agent sometimes answered a Norwegian
+speaker in English, following the note instead of the transcript. No system
+prompt or tool text changes, and earlier messages are unaffected. The
+timeline also shows the handoff's stored notice, "Voice session ended…", in
+the reader's language instead of always in English.
+
 A blocked routine, reversible step no longer ends the turn with a question.
 Autonomy and persistence adds one general principle: take the conventional
 default without changing user or machine configuration, say which default was

@@ -638,7 +638,7 @@ export function buildTimeline(
           });
           break;
         }
-        const voiceMessage = realtimeVoiceMessage(payload);
+        const voiceMessage = realtimeVoiceMessage(t, payload);
         const sender = messageSender(payload.initiator);
         const humanInputDelegation = parseHumanInputDelegation(payload.modelContext);
         const userMessage: UserMessageItem = {
@@ -2036,7 +2036,15 @@ export function buildTimeline(
   return items;
 }
 
-function realtimeVoiceMessage(payload: Record<string, unknown>): {
+/**
+ * A voice request shows its transcript. A voice handoff's stored text is a
+ * fixed English notice, not something the person said, so it shows in the
+ * reader's language.
+ */
+function realtimeVoiceMessage(
+  t: OpenGeniText,
+  payload: Record<string, unknown>,
+): {
   text: string;
   presentation: {
     kind: "realtime_voice" | "realtime_voice_handoff";
@@ -2047,9 +2055,14 @@ function realtimeVoiceMessage(payload: Record<string, unknown>): {
   const visibleText = stringValue(payload.text);
   if (presentation.kind === "realtime_voice" || presentation.kind === "realtime_voice_handoff") {
     const context = stringValue(presentation.context);
-    return visibleText && context
-      ? { text: visibleText, presentation: { kind: presentation.kind, context } }
-      : null;
+    if (!visibleText || !context) return null;
+    return {
+      text:
+        presentation.kind === "realtime_voice_handoff"
+          ? t("timeline.projection.voiceSessionEnded")
+          : visibleText,
+      presentation: { kind: presentation.kind, context },
+    };
   }
   return null;
 }
