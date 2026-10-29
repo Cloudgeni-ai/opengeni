@@ -129,29 +129,32 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
             ...(await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!)),
           }
         : null;
-      const workspaceId = organization ? null : c.req.param("workspaceId")!;
-      // A private account on the core is authorized in the owner's Personal
-      // workspace, where the core keeps it, and refused (403) anywhere else.
+      const requestWorkspaceId = organization ? null : c.req.param("workspaceId")!;
+      // A private account lives on the core in its owner's Personal
+      // workspace; the person connects it from any workspace of the
+      // organization, and it is written there.
       const read: { grant?: Awaited<ReturnType<typeof requireAccessGrant>> } = {};
-      if (!actor) read.grant = await requireAccessGrant(c, deps, workspaceId!, "workspace:read");
-      if (workspaceId && parsed.data.scope === "user") {
+      if (!actor)
+        read.grant = await requireAccessGrant(c, deps, requestWorkspaceId!, "workspace:read");
+      if (requestWorkspaceId && parsed.data.scope === "user") {
         if (!read.grant) throw new Error("core Claude route without its read grant");
         await requireClaudeCorePersonalWorkspace(deps, {
           accountId: read.grant.accountId,
-          workspaceId,
           subjectId: read.grant.subjectId,
         });
       }
-      const authority = workspaceId
+      const authority = requestWorkspaceId
         ? await requireSubscriptionScopeMutation(
             c,
             deps,
-            workspaceId,
+            requestWorkspaceId,
             parsed.data.scope,
             "Claude",
-            "personal_workspace",
+            "own_personal_workspace",
           )
         : null;
+      // Where the account lives: this workspace, or the owner's Personal workspace.
+      const workspaceId = authority?.workspaceId ?? null;
       const accountId = actor?.organizationId ?? authority!.accountId;
       const subjectId = actor?.subjectId ?? authority!.subjectId;
       const encryptionKey = requireEnvironmentEncryption(deps.settings);

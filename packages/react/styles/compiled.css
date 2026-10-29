@@ -12483,6 +12483,11 @@
       padding-top: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).\[\&\>form\>header\]\:pt-4,:where(.og-root) .\[\&\>form\>header\]\:pt-4 {
+    &>form>header {
+      padding-top: calc(var(--spacing) * 4);
+    }
+  }
 :where(.og-root).\[\&\>img\]\:size-full,:where(.og-root) .\[\&\>img\]\:size-full {
     &>img {
       width: 100%;
