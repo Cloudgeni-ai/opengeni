@@ -13,6 +13,10 @@
 //! borrower about 2.6 GiB, while it holds about 3.4: about 0.8 GiB more
 //! than its bound, more than its guest's file cache, with the neighbour
 //! still clear of every limit.
+//!
+//! The hosts run on ordinary pages whatever profile the gate picked for
+//! the other tests: on huge pages nothing compresses and every sandbox is
+//! booked whole, so none borrows and there is nothing here to test.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,6 +27,8 @@ use super::*;
 const MIB: u64 = 1 << 20;
 
 const SHARE: &[&str] = &[
+    "--memory-profile",
+    "bare-metal",
     "--memory-total-mib",
     "6144",
     "--memory-low-mib",

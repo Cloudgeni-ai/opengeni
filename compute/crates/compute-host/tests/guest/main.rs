@@ -161,7 +161,11 @@ impl Host {
         state::private_dir(&root);
         let socket = root.join("agent.sock");
         let log = std::fs::File::create(root.join("agent.log")).unwrap();
+        // A test that needs one profile names it in `extra`; the others
+        // run on the one the gate picked.
         let profile = std::env::var("COMPUTE_TEST_PROFILE")
+            .ok()
+            .filter(|_| !extra.contains(&"--memory-profile"))
             .map(|name| vec!["--memory-profile".to_owned(), name])
             .unwrap_or_default();
         let child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
