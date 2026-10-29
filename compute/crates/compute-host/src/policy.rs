@@ -106,6 +106,32 @@ pub(super) fn memory_share(meminfo: &str, total_mib: Option<u64>) -> anyhow::Res
     Ok(mib << 20)
 }
 
+/// The sandboxes' share of host memory in MiB, if they have one:
+/// `--memory-total-mib` where given, else `COMPUTE_MEMORY_TOTAL_MIB` (`env`)
+/// where that is set and not empty, as a fleet host's `host.env` sets it
+/// (required on a shared machine: ADR 26). Empty is unset, so a `host.env`
+/// that leaves the line blank, as the example does, keeps all of the
+/// host's memory.
+pub(super) fn memory_total_mib(
+    flag: Option<u64>,
+    env: Option<&str>,
+) -> anyhow::Result<Option<u64>> {
+    if flag.is_some() {
+        return Ok(flag);
+    }
+    let Some(text) = env.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let mib = text
+        .parse::<u64>()
+        .ok()
+        .filter(|mib| *mib > 0)
+        .with_context(|| {
+            format!("COMPUTE_MEMORY_TOTAL_MIB={text} is not a number of MiB above 0")
+        })?;
+    Ok(Some(mib))
+}
+
 /// Bytes of guest memory the host promises its sandboxes at once:
 /// `capacity_mib` if given, else the huge-page pool where guest memory
 /// lives in it (nothing else on the host uses it), else the `total` bytes
@@ -571,5 +597,23 @@ mod tests {
             vms_memory_max(base, relief, share),
             Some(30 * GIB + GIB / 2)
         );
+    }
+
+    /// The share comes from the flag, else from `host.env`'s line, which
+    /// left blank means no share; a line that is no share is an error.
+    #[test]
+    fn the_share_is_the_flag_else_a_set_host_env_line() {
+        assert_eq!(memory_total_mib(Some(16), Some("32768")).unwrap(), Some(16));
+        assert_eq!(memory_total_mib(None, Some("32768")).unwrap(), Some(32_768));
+        assert_eq!(
+            memory_total_mib(None, Some(" 32768\n")).unwrap(),
+            Some(32_768)
+        );
+        assert_eq!(memory_total_mib(None, Some("")).unwrap(), None);
+        assert_eq!(memory_total_mib(None, Some("  ")).unwrap(), None);
+        assert_eq!(memory_total_mib(None, None).unwrap(), None);
+        for wrong in ["0", "abc", "-1", "32G"] {
+            assert!(memory_total_mib(None, Some(wrong)).is_err(), "{wrong}");
+        }
     }
 }

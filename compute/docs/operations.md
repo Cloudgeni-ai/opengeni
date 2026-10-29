@@ -349,6 +349,41 @@ installs three units:
   Firecracker, kernel and base image are there (`check-host`), and runs
   with `KillMode=process` so a restart leaves its VMs running.
 
+#### A host that shares its machine
+
+A host can run directly on a hypervisor, or any machine, that also runs
+other work ([ADR 26](adr/0026-a-host-that-shares-its-machine.md)): its
+sandboxes then get bare-metal memory faults and the Compressed level,
+with no host VM in between. Set `COMPUTE_MACHINE=shared` and the
+sandboxes' share of memory, `COMPUTE_MEMORY_TOTAL_MIB`, in `host.env`;
+leave the machine's other work room outside the share. Then:
+
+- the guard feeds systemd's watchdog of its own service instead of the
+  machine's, whose reset would end the other work too: `install.sh`
+  installs `compute-guard-shared.conf` as the guard's drop-in
+  (`WatchdogSec=3s`, `WatchdogSignal=SIGKILL`). systemd kills a guard that
+  stops feeding it, and after every end of the guard its stop hook
+  (`compute-host guard-stopped`) kills every VM, as a reset would, and
+  restarts the agent if it runs, which starts a new guard. An upgrade
+  hands the guard over instead (`compute-host hand-over-guard`), and the
+  VMs stay. The hook says in the guard's journal what it did;
+- `host-setup` loads no watchdog, leaves transparent huge pages as the
+  machine has them unless they are `always` (then `madvise`), and sizes
+  the swap file and zswap's pool from the share;
+- `check-host` refuses to start the agent while the guard's service lacks
+  the watchdog or the hook, and the guard refuses a `WatchdogSec=` longer
+  than 3 s.
+
+Let systemd feed the machine's hardware watchdog (`RuntimeWatchdogSec=`,
+for example `30s`): the guarantee rests on systemd running the guard's
+watchdog and hook, and a hardware watchdog resets the machine only if
+systemd itself stops. The other work can swap into compute's swap file
+under pressure; memory pinned for device passthrough never does, and a
+service kept out with `MemorySwapMax=0` does not. On a NixOS machine,
+declare the same units, drop-in and `host.env` instead of running
+`install.sh`, and hand the guard over with `compute-host hand-over-guard`
+when its binary changes, rather than letting a switch restart it.
+
 ### Opengeni's settings
 
 Opengeni's `compute` backend reads:
@@ -1007,6 +1042,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   moment it ended, so it is not handed over: it runs on until the host
   starts again from a template naming a release with the store (see
   below) or is replaced by a host made from one.
+  On a shared machine (Hosts, A host that shares its machine) the guard
+  feeds systemd's watchdog instead, and `install.sh` hands it over with
+  `compute-host hand-over-guard`: it marks the hand-over, so that the
+  guard's stop hook leaves the VMs to the new guard, and restarts the
+  service.
   Installing such an earlier release over a later one (a rollback)
   installs its unit, which keeps no descriptors, so systemd drops the
   stored one; the running guard then keeps the watchdog itself, like an

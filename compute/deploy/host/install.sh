@@ -38,6 +38,10 @@
 #     the host its certificate from the control service if it has none
 #     current (compute-host-certificate), then starts the setup and the
 #     guard if they are not running, and restarts the agent
+#   - on a machine the host shares (COMPUTE_MACHINE=shared in host.env,
+#     ADR 26), installs the guard's settings for it: systemd's watchdog of
+#     the guard's service instead of the machine's, and the stop hook that
+#     kills the VMs
 #
 # An upgrade is the same command with a newer bundle. Restarting the agent
 # leaves its VMs running (ADR 9); a guard running another binary is handed
@@ -227,6 +231,16 @@ for unit in compute-host-setup.service compute-guard.service compute-host.servic
   compute-host-certificate.service compute-host-certificate.timer; do
   install -m 644 "$here/$unit" "/etc/systemd/system/$unit"
 done
+machine=${COMPUTE_MACHINE:-dedicated}
+case "$machine" in
+  shared)
+    install -d -m 755 /etc/systemd/system/compute-guard.service.d
+    install -m 644 "$here/compute-guard-shared.conf" \
+      /etc/systemd/system/compute-guard.service.d/shared-machine.conf
+    ;;
+  dedicated) rm -f /etc/systemd/system/compute-guard.service.d/shared-machine.conf ;;
+  *) fail "COMPUTE_MACHINE must be dedicated or shared, not $machine" ;;
+esac
 # Releases before the control service issued certificates renewed them
 # with a script of their own.
 rm -f /usr/local/sbin/compute-host-certificate
@@ -247,14 +261,19 @@ if [ -n "$start" ]; then
   # it at whatever moment that is, so it runs on until the host starts
   # again or is replaced. Files are told apart by device and inode, which a
   # replaced binary's path does not change. The agent, restarted with the
-  # guard, joins once the new guard is ready.
+  # guard, joins once the new guard is ready. On a shared machine the guard
+  # feeds systemd's watchdog, and the hand-over is marked first, so that
+  # the guard's stop hook leaves the VMs to the new guard (ADR 26).
   if ! systemctl is-active -q compute-guard.service; then
     systemctl start compute-guard.service
   else
     guard_pid=$(systemctl show -p MainPID --value compute-guard.service)
     guard_runs=$(stat -L -c %d:%i "/proc/$guard_pid/exe" 2>/dev/null || true)
     if [ "$guard_runs" != "$(stat -L -c %d:%i /opt/compute/current/compute-host)" ]; then
-      if [ "$(systemctl show -p NFileDescriptorStore --value compute-guard.service)" -ge 1 ] 2>/dev/null; then
+      if [ "$machine" = shared ]; then
+        log "handing the guard over to release $version"
+        /opt/compute/current/compute-host hand-over-guard
+      elif [ "$(systemctl show -p NFileDescriptorStore --value compute-guard.service)" -ge 1 ] 2>/dev/null; then
         log "handing the guard over to release $version"
         systemctl restart compute-guard.service
       else
