@@ -17,7 +17,8 @@ export function configuredToolDecisionModel(input: {
       input.settings.decisionModelProvider ||
       input.settings.decisionModelId ||
       input.settings.decisionModelApiKey ||
-      input.settings.decisionModelBaseUrl
+      input.settings.decisionModelBaseUrl ||
+      input.settings.decisionModelAuth === "deployment_identity"
     )
       input.onUnavailable();
     return undefined;
