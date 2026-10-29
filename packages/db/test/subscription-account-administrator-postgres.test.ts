@@ -1,5 +1,5 @@
 /**
- * Migration 0956: an account administrator the API authenticated without an
+ * Migration 1103: an account administrator the API authenticated without an
  * organization membership (a deployment's configured access key, an
  * account-scoped key or a signed delegation with account:admin) administers
  * the organization's subscription connections, as an organization owner or
@@ -200,7 +200,7 @@ async function grantRuntimeExecute(): Promise<void> {
 }
 
 describe("before the follow-up release grants runtime EXECUTE", () => {
-  test("0956 leaves the grant to its owner, and the constraints are validated", async () => {
+  test("1103 leaves the grant to its owner, and the constraints are validated", async () => {
     const [acl] = await shared.admin<{ publicExecute: boolean; appExecute: boolean }[]>`
       select
         exists (

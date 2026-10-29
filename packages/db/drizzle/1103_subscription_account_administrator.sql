@@ -16,7 +16,7 @@
 -- runtime capability, and subscription_organization_admin() honours it:
 --
 -- 1. Capability kind 'account_administrator': one row per transaction,
---    account and subject. The constraints are replaced NOT VALID; 0957
+--    account and subject. The constraints are replaced NOT VALID; 1104
 --    validates them. Every existing row satisfies the new definitions.
 -- 2. grant_subscription_account_administrator(stamp): SECURITY DEFINER,
 --    never PUBLIC, created WITHOUT runtime EXECUTE: the previous release

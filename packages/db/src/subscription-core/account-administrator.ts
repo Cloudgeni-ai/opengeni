@@ -6,7 +6,7 @@ import { rawRows, setSubjectRlsContext, type Database } from "../database";
  * The request-local account:admin proof the API's access resolver mints for an
  * authenticated account administrator (the core access layer's
  * `AccountAdminAuthorizationStamp`). The database checks it against the
- * transaction's own account and subject before it records anything (0956).
+ * transaction's own account and subject before it records anything (1103).
  */
 export type SubscriptionAccountAdministratorStamp = Readonly<{
   authorizationId: string;
@@ -71,7 +71,7 @@ export async function recordSubscriptionAccountAdministrator(
   ) {
     return false;
   }
-  // 0956 creates the grant without runtime EXECUTE: the previous release
+  // 1103 creates the grant without runtime EXECUTE: the previous release
   // rejects a runtime grant on a definer it doesn't know, so a follow-up
   // release grants it. Until then this is "not yet", and the transaction
   // continues with membership authority only. The check is its own statement:

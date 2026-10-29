@@ -55,7 +55,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
  * scrub's reader and cell writer (1091) and the subscription
- * account-administrator grant (0956), which records a request's verified
+ * account-administrator grant (1103), which records a request's verified
  * account:admin proof for one transaction. Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -94,7 +94,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off. 1091 withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
- * only they reach as pending. 0956 withholds the subscription
+ * only they reach as pending. 1103 withholds the subscription
  * account-administrator grant; until it is granted, only organization
  * membership administrators administer the organization's subscription
  * accounts.
@@ -433,7 +433,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  // Migration 0956: the administration writer context the disconnect writer calls.
+  // Migration 1103: the administration writer context the disconnect writer calls.
   "subscription_core_administration_context(text, uuid, uuid, text)",
   // Migration 0871: the usage-history capture triggers and the appender they
   // run as their owner (triggers fire without the writing role holding EXECUTE).
@@ -1517,7 +1517,7 @@ export const SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES = [
 ] as const;
 
 /**
- * Migration 0956: the administration writer context in
+ * Migration 1103: the administration writer context in
  * opengeni_subscription_internal (the writer context without the person-only
  * subject rule). Only the owner-run disconnect writer calls it.
  */
@@ -4024,7 +4024,7 @@ export function evaluateRuntimeDatabasePosture(
       )
         ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
         : []),
-      // 0956 creates the account-administrator grant and the administration
+      // 1103 creates the account-administrator grant and the administration
       // context together.
       ...(posture.privateRoutines.some((routine) =>
         routine.name.startsWith("grant_subscription_account_administrator("),

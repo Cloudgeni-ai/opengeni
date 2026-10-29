@@ -592,7 +592,7 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
-      // 0956: created without runtime EXECUTE until its follow-up release.
+      // 1103: created without runtime EXECUTE until its follow-up release.
       {
         name: "grant_subscription_account_administrator(jsonb)",
         owner: "opengeni_migrator",
@@ -843,7 +843,7 @@ describe("runtime database posture evaluator", () => {
         ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
         ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
-        // The fixture includes 0956's grant, so its administration context is required.
+        // The fixture includes 1103's grant, so its administration context is required.
         ...runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
         ...names,
       ].map(ownerRoutine);
@@ -851,7 +851,7 @@ describe("runtime database posture evaluator", () => {
     };
     // Before 0717 none is required; after it all four are, safely.
     expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
-    // 0956's administration context is required once its grant exists.
+    // 1103's administration context is required once its grant exists.
     const withoutAdministration = withOwnerRoutines([]);
     withoutAdministration.subscriptionOwnerRoutines =
       withoutAdministration.subscriptionOwnerRoutines!.filter(
