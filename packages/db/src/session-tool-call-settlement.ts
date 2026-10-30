@@ -488,6 +488,12 @@ export async function closePendingSessionToolCallsInTransaction(
           unsupportedCallShape:
             resolution.interrupted && (!resolution.result || !resolution.rawCallIsValid),
         },
+        // The stored output was bounded like the live event; keep its marker.
+        ...(!resolution.notStarted &&
+        !resolution.interrupted &&
+        resolution.call.eventOutput?.truncation !== undefined
+          ? { truncation: resolution.call.eventOutput.truncation }
+          : {}),
       },
       payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
       occurredAt: input.now,

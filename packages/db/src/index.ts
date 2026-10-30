@@ -133,6 +133,7 @@ export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
   BROWSER_WAIT_HOLD_MAX_MS,
+  boundSessionEventPayloadForWrite,
   CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
   capabilitySetupCompletedSummary,
   type CapabilitySetupContinuationSkipReason,
@@ -43070,7 +43071,16 @@ export async function recordPendingSessionToolCallResultInTransaction(
     ? withLosslessContentWriteVersion(
         {
           ...resultUpdate,
-          eventOutput: { value: input.eventOutput },
+          // Kept only to replay the result's agent.toolCall.output event, which
+          // is bounded on write anyway; store it within the same bound. A tool
+          // can return far more than an event (or a single jsonb string, at
+          // most 256 MiB) can hold, and that must not fail the turn. Bounding
+          // the `{ value }` envelope keeps the value's own shape and records
+          // any omission in a sibling `truncation` that replay carries over.
+          eventOutput: boundSessionEventPayloadForWrite<schema.PendingToolCallEventOutput>(
+            "agent.toolCall.output",
+            { value: input.eventOutput },
+          ),
         },
         "eventOutput",
         "eventOutputCodecVersion",
