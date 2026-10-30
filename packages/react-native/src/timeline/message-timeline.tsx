@@ -24,6 +24,7 @@ import {
   formatRelativeTime,
   isAgentWorkHumanInput,
   isPreparingWork,
+  timelineTurnsWithOutput,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -68,6 +69,7 @@ import { Icon } from "./icon";
 import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
 import { NativeAuthNeededRow } from "./in-chat-connect";
 import { humanInputAnswerLines } from "./secret-field-model";
+import { answerReadingOffset } from "./reading-position";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
   ActivityRail,
@@ -210,12 +212,19 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     [t, props.items, props.events],
   );
   const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
   const sources = useMemo(() => annotationSources(items), [items]);
   useNativeTextAnnotation(sources, props.onAnnotate);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   // Opening on a moment starts away from the tip; the landing decides where.
   const following = useRef(!props.focusSequence);
+  const followTail = useRef(false);
+  const latestPrompt = useRef<string | null>(null);
+  const latestPromptGroup = groups.findLast(
+    (group) => group.kind === "item" && group.item.kind === "user-message",
+  );
+  latestPrompt.current = latestPromptGroup ? groupKey(latestPromptGroup) : null;
   // Only reader gestures change follow intent; layout-driven scroll events
   // (content growing before the first scroll-to-end) must not unstick it.
   const readerScrolling = useRef(false);
@@ -233,9 +242,6 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const scrollY = useRef(0);
   const sourceNodes = useRef(new Map<string, AnnotationSourceNode>()).current;
   const [flash, setFlash] = useState<AnnotationFlash | null>(null);
-  // Read when a reveal lands, after the keyboard has gone and the composer settled.
-  const overlayInsetBottom = useRef(0);
-  overlayInsetBottom.current = props.overlayInsetBottom ?? 0;
   const registerSource = useCallback(
     (sourceKey: string, node: AnnotationSourceNode | null) => {
       if (node) sourceNodes.set(sourceKey, node);
@@ -272,7 +278,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
             // Center the message in the space the composer leaves; a message
             // taller than that centers the quote instead, or shows its top.
             const y = scrollY.current + top - scrollTop;
-            const visible = (viewportHeight.current || 600) - overlayInsetBottom.current;
+            const visible = viewportHeight.current || 600;
             const first = anchor?.boxes[0];
             const last = anchor?.boxes[anchor.boxes.length - 1];
             const span =
@@ -308,8 +314,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
       if (!node || !scroller) return;
       scroller.measureInWindow((_scrollX, scrollTop, _scrollWidth, scrollHeight) => {
         node.measureInWindow((_x, top, _width, height) => {
-          const bottom =
-            Math.min(scrollTop + scrollHeight, keyboard.screenY) - overlayInsetBottom.current - 12;
+          const bottom = Math.min(scrollTop + scrollHeight, keyboard.screenY) - 12;
           const above = scrollTop + INLINE_INPUT_CONTEXT_PX;
           let delta = 0;
           if (top + height > bottom) delta = Math.min(top + height - bottom, top - scrollTop - 8);
@@ -440,6 +445,26 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   // offset by the added height (UIKit's maintainVisibleContentPosition fights
   // the reader's drag while live rows re-lay out, so it isn't used).
   const contentHeight = useRef(0);
+  const followAnswer = useCallback(
+    (animated = false) => {
+      if (!following.current) return;
+      const prompt = latestPrompt.current ? promptFrames.get(latestPrompt.current) : undefined;
+      // A durable prompt replacing its pending row lays out just after content
+      // size changes. Keep the current position until its frame is known.
+      if (!followTail.current && latestPrompt.current && !prompt) return;
+      const y = answerReadingOffset({
+        contentHeight: contentHeight.current,
+        viewportHeight: viewportHeight.current,
+        prompt,
+        followTail: followTail.current,
+      });
+      scrollY.current = y;
+      readerScrolling.current = false;
+      scrollRef.current?.scrollTo({ y, animated });
+      setShowJump(contentHeight.current - viewportHeight.current - y > 240);
+    },
+    [promptFrames],
+  );
   const firstGroupKey = useRef<string | null>(null);
   const prepended = useRef(false);
   const nextFirstKey = groups[0] ? groupKey(groups[0]) : null;
@@ -481,7 +506,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
       const distance = measure(event);
       // Mid-drag only releases follow; the drag's end decides whether to resume it.
       if (readerScrolling.current && distance >= 48) following.current = false;
-      setShowJump(distance > 240 && !following.current);
+      setShowJump(distance > 240 && (!following.current || !followTail.current));
       const { contentOffset, layoutMeasurement } = event.nativeEvent;
       scrollY.current = contentOffset.y;
       // The reader is approaching the oldest loaded row: fetch the window before it.
@@ -501,8 +526,11 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const onScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      // UIKit also reports momentum completion for our animated scrolls. Only
+      // a person's gesture can switch from reading the answer to following its tail.
+      if (!readerScrolling.current) return;
       following.current = measure(event) < 48;
-      readerScrolling.current = false;
+      followTail.current = following.current;
     },
     [measure],
   );
@@ -526,20 +554,21 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
         }
       }
-      if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+      followAnswer();
       // A short window can't be scrolled, so it could never reach the top: keep loading.
       if (viewportHeight.current > 0 && height < viewportHeight.current + OLDER_HISTORY_PREFETCH_PX)
         requestOlder();
     },
-    [requestOlder],
+    [requestOlder, followAnswer],
   );
   const followLatestSignal = props.followLatestSignal ?? 0;
   useEffect(() => {
     if (!followLatestSignal) return;
     following.current = true;
+    followTail.current = false;
     setShowJump(false);
-    scrollRef.current?.scrollToEnd({ animated: true });
-  }, [followLatestSignal]);
+    followAnswer(true);
+  }, [followLatestSignal, followAnswer]);
   // Landing on a moment: each group's offset, read as it lays out.
   const groupTops = useRef(new Map<string, number>()).current;
   const landed = useRef<number | null>(null);
@@ -586,6 +615,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     ],
   );
   const context: GroupContext = {
+    turnsWithOutput,
     facets: props.facets,
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,
@@ -603,9 +633,19 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           <FoldMemoryProvider value={foldMemory}>
             <StickyWorkHeaderProvider value={registerSticky}>
               <ReleaseFollowProvider value={releaseFollow}>
-                <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
+                <View
+                  style={[
+                    {
+                      flex: 1,
+                      backgroundColor: theme.colors.bg,
+                      paddingBottom: props.overlayInsetBottom ?? 0,
+                    },
+                    props.style,
+                  ]}
+                >
                   <ScrollView
                     ref={scrollRef}
+                    style={{ flex: 1 }}
                     onScroll={onScroll}
                     onScrollBeginDrag={() => {
                       readerScrolling.current = true;
@@ -615,10 +655,13 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                       following.current = false;
                     }}
                     onScrollEndDrag={onScrollEnd}
-                    onMomentumScrollEnd={onScrollEnd}
+                    onMomentumScrollEnd={(event) => {
+                      onScrollEnd(event);
+                      readerScrolling.current = false;
+                    }}
                     onLayout={(event: LayoutChangeEvent) => {
                       viewportHeight.current = event.nativeEvent.layout.height;
-                      if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+                      followAnswer();
                     }}
                     scrollEventThrottle={32}
                     onContentSizeChange={onContentSizeChange}
@@ -628,7 +671,10 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                       paddingTop: props.contentInsetTop ?? 16,
                       paddingHorizontal: 16,
                       paddingBottom:
-                        (props.contentInsetBottom ?? 24) + (inlineInput?.keyboard ?? 0),
+                        Math.max(
+                          0,
+                          (props.contentInsetBottom ?? 24) - (props.overlayInsetBottom ?? 0),
+                        ) + (inlineInput?.keyboard ?? 0),
                       gap: ROW_GAP_PX,
                       flexGrow: 1,
                     }}
@@ -662,7 +708,10 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                           style={folded ? { display: "none" } : undefined}
                           onLayout={(event) => {
                             const { y, height } = event.nativeEvent.layout;
-                            if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
+                            if (prompt) {
+                              promptFrames.set(key, { top: y, bottom: y + height });
+                              followAnswer();
+                            }
                             if (liveNote && !folded && height > 0) {
                               liveNoteHeights.set(noteId, height);
                             }
@@ -695,20 +744,17 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                       {stickyHeaders.get(pinned.key)!.render()}
                     </View>
                   ) : null}
-                  {/* Web timeline navigation: two identical small round arrow buttons at
-              fixed, centered spots that never dodge the content beneath them. */}
-                  {questionNav && !editingInline ? (
-                    <View
-                      pointerEvents="box-none"
-                      style={{
-                        position: "absolute",
-                        // Below a pinned work header so that strip stays a full-width target.
-                        top: pinned ? pinned.height + pinned.offset + 8 : 12,
-                        left: 0,
-                        right: 0,
-                        alignItems: "center",
-                      }}
-                    >
+                  {/* Navigation owns a lane outside the reading viewport, above the composer. */}
+                  <View
+                    style={{
+                      height: 44,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 12,
+                    }}
+                  >
+                    {questionNav && !editingInline ? (
                       <NavButton
                         icon="arrow-up"
                         label={m.backToYourMessage}
@@ -722,29 +768,19 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                           });
                         }}
                       />
-                    </View>
-                  ) : null}
-                  {showJump && !editingInline ? (
-                    <View
-                      pointerEvents="box-none"
-                      style={{
-                        position: "absolute",
-                        bottom: (props.overlayInsetBottom ?? 0) + 12,
-                        left: 0,
-                        right: 0,
-                        alignItems: "center",
-                      }}
-                    >
+                    ) : null}
+                    {showJump && !editingInline ? (
                       <NavButton
                         icon="arrow-down"
                         label={m.jumpToLatest}
                         onPress={() => {
                           following.current = true;
-                          scrollRef.current?.scrollToEnd({ animated: true });
+                          followTail.current = true;
+                          followAnswer(true);
                         }}
                       />
-                    </View>
-                  ) : null}
+                    ) : null}
+                  </View>
                 </View>
               </ReleaseFollowProvider>
             </StickyWorkHeaderProvider>
@@ -794,6 +830,7 @@ function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPr
 }
 
 type GroupContext = {
+  turnsWithOutput: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
@@ -842,8 +879,22 @@ function TimelineGroupView({
   const t = useOpenGeniText();
   switch (group.kind) {
     case "activity": {
+      const startupDismissed =
+        insideTurn ||
+        group.items.some((item) => item.turnId && context.turnsWithOutput.has(item.turnId));
+      if (
+        !insideTurn &&
+        startupDismissed &&
+        group.items.every(
+          (item) =>
+            item.kind === "startup-phase" &&
+            item.status !== "failed" &&
+            item.status !== "cancelled",
+        )
+      )
+        return null;
       if (group.work) {
-        if (isPreparingWork(group, { startupDetails: false, startupDismissed: insideTurn })) {
+        if (isPreparingWork(group, { startupDetails: false, startupDismissed })) {
           return (
             <ActivityRail
               items={group.items}
@@ -910,7 +961,13 @@ function TimelineGroupView({
             item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
         );
       if (preparationOnly) {
-        return <ActivityRail items={group.items} renderPreparing={context.renderPreparing} />;
+        return (
+          <ActivityRail
+            items={group.items}
+            startupActive={startupDismissed ? false : undefined}
+            renderPreparing={context.renderPreparing}
+          />
+        );
       }
       if (insideTurn) {
         return <ActivityRail items={group.items} startupActive={false} />;

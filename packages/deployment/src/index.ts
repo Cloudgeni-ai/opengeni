@@ -231,10 +231,13 @@ export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
  * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
  * after every API and worker image understands the `event` run trigger.
  * OPENGENI_WEBHOOK_BASE_URL is the public address webhooks are sent to when it
- * is not OPENGENI_PUBLIC_BASE_URL. */
+ * is not OPENGENI_PUBLIC_BASE_URL.
+ * OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH caps chains of automations waking each
+ * other (default 3). */
 export const EVENT_TRIGGERS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_EVENT_TRIGGERS_ENABLED",
   "OPENGENI_WEBHOOK_BASE_URL",
+  "OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH",
 ];
 
 /** Agent configuration rollout switches (sessions.agent_config, migration
@@ -284,6 +287,7 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_DECISION_MODEL_ID",
   "OPENGENI_DECISION_MODEL_API_KEY",
   "OPENGENI_DECISION_MODEL_BASE_URL",
+  "OPENGENI_DECISION_MODEL_AUTH",
   "OPENGENI_JEV_API_KEY",
   "OPENGENI_JEV_BASE_URL",
   "OPENGENI_JEV_MODEL",

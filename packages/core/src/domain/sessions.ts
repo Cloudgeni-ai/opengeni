@@ -2072,6 +2072,7 @@ function finalizePostUserMessageTurn(
           model: result.draft.model,
           reasoningEffort: result.draft.reasoningEffort as ReasoningEffort,
           latencyMode: result.draft.latencyMode as ComposerDraft["latencyMode"],
+          policyFollowsSession: result.draft.policyFollowsSession,
           sourceTurnId: result.draft.sourceTurnId,
           sourceTurnVersion: result.draft.sourceTurnVersion,
           updatedAt: result.draft.updatedAt.toISOString(),
@@ -4026,9 +4027,7 @@ async function createSessionForRequestInFileScope(
     });
   }
   const initialLearningScope =
-    effectiveVisibility === "user_private" ||
-    sessionScope.memoryScope === "user" ||
-    workspace.kind === "personal"
+    effectiveVisibility === "user_private" || sessionScope.memoryScope === "user"
       ? ("personal" as const)
       : ("workspace" as const);
   const initialLearningActor = initialLearningContext?.actor;

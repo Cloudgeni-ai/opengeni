@@ -650,8 +650,10 @@ describe("Codex capacity on the shared core", () => {
       return true;
     };
     const outcome = await selectCodexTurnCapacity(deps);
-    // A core wait defers maintenance with its request preserved (legacy
-    // compaction parity) instead of parking on a capacity waiter.
+    // A core wait defers maintenance instead of parking on a capacity waiter.
+    // The settlement keeps an operator request and drops a proactive one,
+    // deciding from the label under the session lock (it rewrites
+    // `requestPreserved` to match).
     expect(outcome).toEqual({
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
@@ -672,6 +674,7 @@ describe("Codex capacity on the shared core", () => {
         turnStatus: "cancelled",
         sessionStatus: "idle",
         activeTurnId: null,
+        dropProactiveCompactionRequest: true,
       },
     ]);
     expect(db.placeSubscriptionCoreCodexTurn).toHaveBeenCalledTimes(1);

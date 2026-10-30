@@ -45,9 +45,11 @@ export async function submitComposerDraftForRequest(
     timeZone: input.timeZone ?? null,
     resources: [...input.resources, ...additionalResources],
     ...(additionalResources.length > 0 ? { composerDraftResources: input.resources } : {}),
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode,
+    // A draft that follows the chat's settings is sent without them, so the
+    // turn runs on the chat's current settings.
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
+    ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     connectionAccounts: input.connectionAccounts,
 

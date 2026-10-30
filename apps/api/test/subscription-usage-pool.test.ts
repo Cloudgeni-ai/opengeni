@@ -31,7 +31,7 @@ mock.module("@opengeni/core", () => ({
   },
 }));
 mock.module("../src/routes/codex", () => ({
-  requireOrganizationCodexHuman: async () => {
+  requireOrganizationSubscriptionAdministrator: async () => {
     if (!authorized) throw new HTTPException(403);
     return { subjectId: "user:admin" };
   },

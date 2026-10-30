@@ -35,6 +35,7 @@ fn watermarks() -> MemoryPolicy {
         high_watermark: 5 * GIB,
         compressed_percent: 30,
         balloon_grace: Duration::from_secs(2),
+        outgrowth: None,
     }
 }
 
@@ -45,16 +46,16 @@ struct Rig {
 
 impl Rig {
     fn new(admission: Option<Admission>, memory: Option<MemoryPolicy>) -> Self {
-        Self::with(HostPolicy {
+        Self::with(&HostPolicy {
             admission,
             memory,
             ..HostPolicy::default()
         })
     }
 
-    fn with(policy: HostPolicy) -> Self {
+    fn with(policy: &HostPolicy) -> Self {
         Self {
-            host: Host::new(policy).unwrap(),
+            host: Host::new(*policy).unwrap(),
             now: At::ZERO,
         }
     }
@@ -365,7 +366,7 @@ fn a_filling_spare_that_could_not_be_ended_keeps_its_claim_until_it_is_gone() {
 
 #[test]
 fn what_a_spare_may_write_is_booked_on_disk_until_a_reading_after_it_ends() {
-    let mut rig = Rig::with(HostPolicy {
+    let mut rig = Rig::with(&HostPolicy {
         disk: Some(DiskPolicy {
             reserve: GIB,
             reserve_inodes: 100,

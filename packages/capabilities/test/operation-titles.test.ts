@@ -43,6 +43,8 @@ test("everyday Microsoft 365 operations read as plain actions", () => {
   expect(
     integrationOperationDisplayTitle("me.sendMail", { serverUrl: "https://graph.microsoft.us" }),
   ).toBe("Send an email");
+  // Actions on another user's mailbox name that user first.
+  expect(integrationOperationDisplayTitle("users.user.sendMail", graph)).toBe("Send an email");
 });
 
 test("Microsoft 365 phrasing stays on Microsoft Graph", () => {
@@ -50,6 +52,27 @@ test("Microsoft 365 phrasing stays on Microsoft Graph", () => {
   expect(integrationOperationDisplayTitle("GetEvents", stripe)).toBe("Read events");
   expect(integrationOperationDisplayTitle("getSchedule", { method: "post" })).toBe("Read schedule");
   expect(integrationOperationDisplayTitle("me.sendMail")).toBe("Send mail");
+});
+
+test("ids named after their method and path read like that route", () => {
+  const cases: Record<string, readonly [string, string]> = {
+    PostCharges: ["post", "Create charge"],
+    PostChargesCharge: ["post", "Update charge"],
+    GetChargesCharge: ["get", "Read charge"],
+    GetCharges: ["get", "Read charges"],
+    DeleteCustomersCustomer: ["delete", "Delete customer"],
+    PostChargesChargeCapture: ["post", "Capture charge"],
+    PostRefundsRefundCancel: ["post", "Cancel refund"],
+    PostCheckoutSessionsSessionExpire: ["post", "Expire checkout session"],
+    PostCustomersCustomerBalanceTransactions: ["post", "Create balance transaction"],
+    GetCustomersCustomerSourcesId: ["get", "Read source"],
+    GetBalanceHistory: ["get", "Read balance history"],
+  };
+  for (const [key, [method, title]] of Object.entries(cases))
+    expect(integrationOperationDisplayTitle(key, { method })).toBe(title);
+  // Without a matching method, or with a lookup phrase, ids read as before.
+  expect(integrationOperationDisplayTitle("PostCharges")).toBe("Post charges");
+  expect(integrationOperationDisplayTitle("GetPetById", { method: "get" })).toBe("Read pet by id");
 });
 
 test("other operation ids read as their verb and object", () => {

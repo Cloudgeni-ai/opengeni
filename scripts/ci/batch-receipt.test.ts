@@ -444,6 +444,34 @@ describe("ci.yml records the batch result", () => {
     expect(step.run).toBe("bun scripts/ci/batch-receipt.ts");
   });
 
+  test("the cadence never cancels a batcher landing and keeps every other deferral", () => {
+    const cadence = ci.jobs["main-ci-cadence"];
+    expect(cadence.needs).toEqual(["batch-receipt"]);
+    const receipt = (result: string, kind: string) => ({
+      "batch-receipt": { result, outputs: { kind } },
+    });
+    const deferred = { MAIN_CI_DEFERRED: "true" };
+    const run = (github: object, needs: object, vars: object = deferred) =>
+      evaluate(cadence.if, { github, needs, vars });
+    expect(run(mainPush(), receipt("success", "attested"))).toBe(false);
+    expect(run(mainPush(), receipt("success", "intermediate"))).toBe(false);
+    // Direct pushes and unreadable evidence stay deferred.
+    expect(run(mainPush(), receipt("success", "full"))).toBe(true);
+    expect(run(mainPush(), receipt("failure", ""))).toBe(true);
+    expect(run(mainPush(), receipt("failure", "attested"))).toBe(true);
+    // Unchanged: re-runs, Version merges and the variable switch.
+    expect(run(mainPush(undefined, 2), receipt("success", "full"))).toBe(false);
+    expect(run(mainPush("chore: version packages"), receipt("success", "full"))).toBe(false);
+    expect(run(mainPush(), receipt("success", "full"), {})).toBe(false);
+    expect(
+      evaluate(
+        cadence.if,
+        { github: mainPush(), needs: receipt("success", "full"), vars: deferred },
+        true,
+      ),
+    ).toBe(false);
+  });
+
   test("an intermediate member runs nothing else and is never red", () => {
     const intermediate = {
       "batch-receipt": { result: "success", outputs: { kind: "intermediate" } },

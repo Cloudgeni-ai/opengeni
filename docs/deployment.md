@@ -25,7 +25,9 @@ migration, upgrade every API and worker, then set
 public webhook intake at `/v1/webhooks/events/:routeId` and event runs. While it
 is off, the intake answers 404, automations cannot be given event triggers, and
 no event runs start; stored deliveries and events still expire on schedule
-(delivery bodies after 7 days, events after 30). See
+(delivery bodies after 7 days, events after 30). Automations that wake each
+other through Opengeni's own events (migration 1105) stop after
+`OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH` levels, default 3. See
 [automations and events](design/automations-and-events.md).
 
 Webhook senders and the GitHub App are given addresses under
@@ -1433,12 +1435,10 @@ passkey as a usable sign-in method.
 
 Passkeys ship in two releases. The previous release's readiness check refuses
 runtime access to a table and routine it doesn't know, so 0998 withholds both
-from the runtime role and provisioning keeps them withheld; until then the
-server offers no passkeys (client config reports `passkeySignIn: false`) and
-the sign-in-method routes refuse passkey changes. A later migration grants
-them once a release containing 0998 is the previous release, and passkeys turn
-on by themselves within a minute of that grant. Granting them by hand does not
-stick: provisioning revokes them again.
+from the runtime role; a release with 0998 but not 1110 offers no passkeys
+(client config reports `passkeySignIn: false`). Rolling migration 1110 grants
+them, and readiness requires them from then on. A release that still has the
+0998 gate turns passkeys on within a minute of seeing the grant.
 
 - Anyone signed in can add passkeys under their sign-in methods and sign in
   with one instead of a password. Removing the last usable method is refused as
