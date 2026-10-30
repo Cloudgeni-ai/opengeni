@@ -27745,9 +27745,10 @@ export async function readSubscriptionCoreCodexResetAuthority(
  * post-resolution gate (a blocked provider never reaches a model call and
  * never silently remaps).
  *
- * A workspace row is the workspace's own choice. Without one, the workspace
- * follows its organization's default allowlist (organization_model_defaults);
- * with neither, every model is allowed.
+ * The organization's allowlist (organization_model_defaults) is a ceiling for
+ * every workspace in it. A workspace row only narrows it: a model must pass
+ * both. Without a row the workspace uses the organization's list as is; with
+ * neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
@@ -27769,10 +27770,33 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
 
+/** One allowlist narrowed by another; null allows everything. */
+function narrowAllowlist(ceiling: string[] | null, own: string[] | null): string[] | null {
+  if (ceiling === null) return own;
+  if (own === null) return ceiling;
+  const allowed = new Set(ceiling);
+  return own.filter((id) => allowed.has(id));
+}
+
 /**
- * The workspace's own policy row and the organization default it would
- * follow without one. `organization` is null when the organization allows
- * every model.
+ * What a workspace may use: its own allowlists within the organization's. A
+ * model passes only when both allow its provider and both allow the model.
+ */
+function narrowWorkspaceModelPolicy(
+  organization: WorkspaceModelPolicy | null,
+  workspace: WorkspaceModelPolicy | null,
+): WorkspaceModelPolicy | null {
+  if (!organization) return workspace;
+  if (!workspace) return organization;
+  return {
+    allowedProviders: narrowAllowlist(organization.allowedProviders, workspace.allowedProviders),
+    allowedModels: narrowAllowlist(organization.allowedModels, workspace.allowedModels),
+  };
+}
+
+/**
+ * The workspace's own policy row and the organization's ceiling above it.
+ * `organization` is null when the organization allows every model.
  */
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
@@ -27823,17 +27847,23 @@ export async function getWorkspaceModelPolicyLayers(
 }
 
 /**
- * The policy this workspace runs with: the allowlists of its own row, else of
- * its organization's default, plus its credit switch. Null only when nothing
- * is restricted (every model allowed and credits on).
+ * The policy this workspace runs with: its own allowlists narrowed within its
+ * organization's, plus its credit switch. Null only when nothing is
+ * restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
 ): Promise<EffectiveWorkspaceModelPolicy | null> {
-  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  const allowlists = layers.workspace ?? layers.organization;
-  if (!allowlists && layers.allowCreditModels) return null;
+  return effectiveWorkspaceModelPolicy(await getWorkspaceModelPolicyLayers(db, workspaceId));
+}
+
+/** The policy a workspace runs with, from its already-read layers. */
+function effectiveWorkspaceModelPolicy(
+  layers: Awaited<ReturnType<typeof getWorkspaceModelPolicyLayers>>,
+): EffectiveWorkspaceModelPolicy | null {
+  const allowlists = narrowWorkspaceModelPolicy(layers.organization, layers.workspace);
+  if (!restrictsAnything(allowlists) && layers.allowCreditModels) return null;
   return {
     allowedProviders: allowlists?.allowedProviders ?? null,
     allowedModels: allowlists?.allowedModels ?? null,
@@ -27841,7 +27871,7 @@ export async function getWorkspaceModelPolicy(
   };
 }
 
-/** Remove the workspace's own policy so it follows its organization's default. */
+/** Remove the workspace's own policy so it uses its organization's list as is. */
 export async function deleteWorkspaceModelPolicy(
   db: Database,
   input: { accountId: string; workspaceId: string },
@@ -27859,8 +27889,8 @@ export async function deleteWorkspaceModelPolicy(
 
 /**
  * Create or replace the workspace's own model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as the workspace's
- * explicit choice to allow every model even when its organization restricts.
+ * clears that restriction. It only ever narrows the organization's list, so
+ * {null, null} allows exactly what the organization allows.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,

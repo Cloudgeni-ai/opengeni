@@ -6173,7 +6173,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Remove the workspace's own allowlist so it follows its organization's default. */
+  /** Remove the workspace's own allowlist so it uses its organization's list as is. */
   async deleteWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "DELETE",
