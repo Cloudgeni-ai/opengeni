@@ -5560,9 +5560,6 @@
 :where(.og-root).opacity-50,:where(.og-root) .opacity-50 {
     opacity: 50%;
   }
-:where(.og-root).opacity-55,:where(.og-root) .opacity-55 {
-    opacity: 55%;
-  }
 :where(.og-root).opacity-60,:where(.og-root) .opacity-60 {
     opacity: 60%;
   }
