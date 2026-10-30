@@ -60,7 +60,7 @@ type OpenSuffixSettle = (input: {
 /**
  * How a re-freeze records interaction_request_human calls of the same pause
  * that hold no intervention yet: a call refused while another refusal
- * resumed the turn (one decision resumes a pause) is passed to the
+ * resumed the turn (a pause records one refusal at a time) is passed to the
  * settlement again, so it is recorded or refused as its own result.
  */
 export type OpenSuffixInteractionRequests = {

@@ -3141,6 +3141,7 @@ describe("runtime event normalization", () => {
       spillOversizedModelToolResult?: SpillOversizedModelToolResult;
       unattended?: boolean;
       unattendedNow?: boolean;
+      approvedToolCallIds?: string[];
     }) {
       const mcp = startTestMcpServer({
         toolResultIsError: input.toolResultIsError,
@@ -3239,6 +3240,7 @@ describe("runtime event normalization", () => {
         connectorActionPolicy: hooks,
         ...(input.unattended ? { unattended: true } : {}),
         ...(input.unattendedNow ? { unattendedNow: true } : {}),
+        ...(input.approvedToolCallIds ? { approvedToolCallIds: input.approvedToolCallIds } : {}),
       });
       return { agent, calls, mcp, prepared, settings };
     }
@@ -3286,6 +3288,37 @@ describe("runtime event normalization", () => {
     );
 
     test("an unattended session runs calls its policy allows", async () => {
+      {
+        // A resume that applies several recorded decisions runs every
+        // approved call, not only its trigger's; others are still refused.
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          unattendedNow: true,
+          approvedToolCallIds: ["approved-sibling"],
+        });
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          await tool.needsApproval(new RunContext(), { query: "q" }, "approved-sibling");
+          const approved = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "approved-sibling" },
+          } as any);
+          expect(JSON.stringify(approved)).not.toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+          expect(await tool.needsApproval(new RunContext(), { query: "q" }, "undecided")).toBe(
+            false,
+          );
+          const refused = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "undecided" },
+          } as any);
+          expect(JSON.stringify(refused)).toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
       {
         const fixture = await connectorPolicyFixture({
           connectorDecision: "allow",
