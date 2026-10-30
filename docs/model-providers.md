@@ -237,7 +237,7 @@ singleton owns membership.
 ### Customer OpenAI and Azure OpenAI keys
 
 The web console offers **OpenAI** and **Azure OpenAI** in the model step after
-organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+organization setup and in **Workspace settings → Models → OpenAI, Azure OpenAI and compatible endpoints**. OpenAI
 asks for an API key, with the model preselected and an optional Change model
 control. Azure asks for an API key, resource endpoint
 (`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
@@ -271,6 +271,63 @@ key for that turn. Revocation or an identity mismatch fails closed. Missing
 customer connections never fall back to deployment credentials. Customer routes
 use conservative text/function capabilities; hosted tools and reasoning controls
 are not enabled implicitly for an arbitrary Azure deployment name.
+
+#### A workspace's own OpenAI-compatible endpoint
+
+**Workspace settings → Models** also offers **Connect an OpenAI-compatible
+endpoint**, for any provider or self-run server whose API follows OpenAI's Chat
+Completions or Responses format. It asks for an optional name, the API's HTTPS
+base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
+or `/responses` path is trimmed), an API key, the model ID exactly as the
+provider lists it under `/models` (IDs such as `org/model:tag` are accepted),
+and the API format (Chat Completions by default, or Responses). Connect each
+model you want to use as its own connection.
+
+It is the same workspace-owned rail as OpenAI and Azure OpenAI above, with
+`credentialRole: "direct_openai_compatible"` and
+`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label? }`.
+`providerDomain` must be the base URL's host. Over the API:
+
+```json
+{
+  "providerDomain": "api.example.com",
+  "kind": "api_key",
+  "subjectId": null,
+  "credential": { "apiKey": "<the provider key>" },
+  "grantedScopes": [],
+  "operationId": "<uuid>",
+  "verifyModelAccess": true,
+  "metadata": {
+    "credentialRole": "direct_openai_compatible",
+    "credentialLabel": "Example",
+    "directModelProvider": {
+      "provider": "openai_compatible",
+      "baseUrl": "https://api.example.com/v1",
+      "model": "example-model",
+      "api": "chat",
+      "label": "Example"
+    }
+  }
+}
+```
+
+The setup check sends one short message (32 output tokens maximum, no tools)
+to `/chat/completions` or `/responses`. Because the URL is chosen by the
+workspace, the check and every model request resolve its host once, refuse
+private and special-use addresses (operators can allow private targets with
+the existing private integration targets setting), pin the connection to the
+vetted addresses, and never follow redirects. The base URL must be HTTPS with
+no credentials, query, or fragment, and IP literals and single-label or
+`.local`/`.internal` hosts are refused when the connection is saved.
+
+Model IDs are `workspace-compatible-<connection id>/<version>/<model>`. The key
+is sent only to that base URL and only for that workspace's turns. Usage is
+billed by the provider and uses no Opengeni credits. The route gets the
+conservative text, function-calling and SSE capabilities every compatible API
+shares; no hosted tools, reasoning controls or images are assumed, the model
+SDK does not retry a failed request on its own, and no price is inferred from
+the model ID. Its residency is recorded as unknown, so deployments that
+require EU-only inference refuse these routes.
 
 #### Organization OpenAI and Azure OpenAI
 
@@ -381,8 +438,11 @@ provider hook `apps/web/src/components/organization-model-provider-connection.ts
 | Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
 | SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
-Workspace BYOK for an arbitrary OpenAI-compatible server is not a registry
-switch. Voice input, image, and video use separate provider settings.
+A workspace connects its own OpenAI-compatible server through the encrypted
+workspace connection described in
+[A workspace's own OpenAI-compatible endpoint](#a-workspaces-own-openai-compatible-endpoint),
+not through this registry. Voice input, image, and video use separate provider
+settings.
 
 ### Compatibility
 
@@ -738,7 +798,7 @@ derives both from the provider kind:
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
 | Deployment Opper                     | deployment                    | deployment             | Opengeni credits |
 | Workspace Opper                      | workspace connection          | workspace              | external         |
-| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI / OpenAI-compatible | workspace connection | workspace | external |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 | Organization Opper                  | organization connection       | organization           | external         |

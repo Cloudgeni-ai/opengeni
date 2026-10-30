@@ -8425,6 +8425,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "cursor",
       "groupBy",
       "limit",
+      "order",
       "query",
       "sessionId"
     ],

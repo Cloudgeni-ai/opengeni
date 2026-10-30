@@ -47,6 +47,7 @@ describe("policyChargesCreditsForModel", () => {
       "organization-claude-subscription/claude-fixture",
       "workspace-openai-0b0c/gpt-6-sol",
       "workspace-azure-openai-0b0c/gpt-6-sol",
+      "workspace-compatible-0b0c/1/org/model:tag",
     ]) {
       expect(policyChargesCreditsForModel(settings, modelId)).toBe(false);
     }

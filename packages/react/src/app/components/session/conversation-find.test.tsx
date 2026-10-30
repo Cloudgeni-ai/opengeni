@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, type ComponentType } from "react";
 import { createRoot } from "react-dom/client";
@@ -25,7 +25,128 @@ const page: ConversationSearchPage = {
   matchedOccurrenceCount: 3,
   countIsExact: true,
 };
-const client = { searchSessionMessages: async () => page };
+type SearchRequest = {
+  query: string;
+  sessionId?: string;
+  order?: "oldest" | "newest";
+  limit?: number;
+  cursor?: string;
+};
+let search: (
+  workspaceId: string,
+  request: SearchRequest,
+) => Promise<ConversationSearchPage> = async () => page;
+const client = {
+  searchSessionMessages: (workspaceId: string, request: SearchRequest) =>
+    search(workspaceId, request),
+};
+
+/** A paged in-memory search API with the server's traversal orders: newest
+ * visits messages newest first, occurrences inside a message in text order. */
+function pagedSearch(occurrences: Array<{ sequence: number; offset: number }>) {
+  const requests: SearchRequest[] = [];
+  const respond = async (_workspaceId: string, request: SearchRequest) => {
+    requests.push(request);
+    const ordered = [...occurrences].sort((a, b) =>
+      request.order === "newest"
+        ? b.sequence - a.sequence || a.offset - b.offset
+        : a.sequence - b.sequence || a.offset - b.offset,
+    );
+    const start = request.cursor ? Number(request.cursor) : 0;
+    const slice = ordered.slice(start, start + (request.limit ?? 20));
+    const end = start + slice.length;
+    const hasMore = end < ordered.length;
+    return {
+      matches: slice.map((occurrence) => ({
+        sessionId: "session",
+        sessionTitle: "Session",
+        eventId: `event-${occurrence.sequence}`,
+        sequence: occurrence.sequence,
+        turnId: null,
+        role: "user" as const,
+        messageId: null,
+        messageMatchOffset: occurrence.offset,
+        snippet: { text: "needle", matchStart: 0, matchEnd: 6 },
+      })),
+      nextCursor: hasMore ? String(end) : null,
+      hasMore,
+      scannedMessages: end,
+      matchedMessageCount: end,
+      matchedOccurrenceCount: end,
+      countIsExact: !hasMore,
+    };
+  };
+  return { requests, respond };
+}
+
+async function mountFind(initial: SessionSearchRoute) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const targets: Array<TimelineSearchTarget | null> = [];
+  const jumps: number[] = [];
+  const onTarget = (target: TimelineSearchTarget | null) => targets.push(target);
+  const onJump = async (sequence: number) => {
+    jumps.push(sequence);
+    return true;
+  };
+  const onClose = () => {};
+  const render = (open: boolean) =>
+    act(async () =>
+      root.render(
+        <ConversationFind
+          workspaceId="workspace"
+          sessionId="session"
+          open={open}
+          focusRevision={0}
+          initial={initial}
+          showBackToSessionSearch={false}
+          onTarget={onTarget}
+          onJump={onJump}
+          onClose={onClose}
+        />,
+      ),
+    );
+  await render(true);
+  // The visible counter; a spoken alternative, when present, is separate.
+  const counter = () => {
+    const status = host.querySelector('[role="status"]');
+    return (
+      status?.querySelector('[aria-hidden="true"]')?.textContent ??
+      status?.textContent ??
+      ""
+    ).trim();
+  };
+  const settle = async (until: () => boolean) => {
+    for (let attempt = 0; attempt < 400 && !until(); attempt++)
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      });
+    expect(until()).toBe(true);
+  };
+  const press = (key: string, shiftKey = false) =>
+    act(async () => {
+      host
+        .querySelector("input")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true }));
+    });
+  const click = (label: string) =>
+    act(async () => host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
+  return {
+    host,
+    targets,
+    jumps,
+    counter,
+    settle,
+    press,
+    click,
+    render,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      host.remove();
+    },
+  };
+}
 let ConversationFind: ComponentType<{
   workspaceId: string;
   sessionId: string;
@@ -47,6 +168,9 @@ beforeAll(async () => {
     useAppContext: () => ({ client, accessContext: { subjectId: "reader" } }),
   }));
   ConversationFind = (await import("./conversation-find")).default;
+});
+afterEach(() => {
+  search = async () => page;
 });
 afterAll(() => {
   mock.restore();
@@ -131,12 +255,13 @@ test("an authority scope change discards a pending replacement-route occurrence"
   try {
     await render("original", { find: "old", matchSequence: 7, matchOffset: 12 });
     await flush();
-    await render("original", { find: "new", matchSequence: 7, matchOffset: 24 });
-    await render("other", { find: "new", matchSequence: 7, matchOffset: 24 });
+    await render("original", { find: "new", matchSequence: 7, matchOffset: 12 });
+    await render("other", { find: "new", matchSequence: 7, matchOffset: 12 });
     await flush(300);
     await flush();
-    expect(targets.at(-1)).toMatchObject({ query: "new", offset: 0 });
-    expect(host.textContent).toContain("1 / 3");
+    // The discarded occurrence gives way to the ordinary start: the newest match.
+    expect(targets.at(-1)).toMatchObject({ query: "new", offset: 24 });
+    expect(host.textContent).toContain("3 / 3");
   } finally {
     await act(async () => root.unmount());
     host.remove();
@@ -316,5 +441,186 @@ test("return link appears only while the find bar was opened from session search
   } finally {
     await act(async () => root.unmount());
     host.remove();
+  }
+});
+
+test("Find starts at the newest match and counts the whole session, not the first 50", async () => {
+  const server = pagedSearch(
+    Array.from({ length: 120 }, (_, index) => ({ sequence: index + 1, offset: 4 })),
+  );
+  search = server.respond;
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "120 / 120");
+    expect(find.targets.at(-1)).toMatchObject({ sequence: 120, offset: 4, query: "needle" });
+    expect(find.jumps).toEqual([120]);
+    expect(server.requests.every((request) => request.order === "newest")).toBe(true);
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("Previous from the first match wraps to the newest and Next from the newest wraps to the first", async () => {
+  search = pagedSearch(
+    Array.from({ length: 120 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  ).respond;
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "120 / 120");
+    await find.press("Enter");
+    await find.settle(() => find.counter() === "1 / 120");
+    expect(find.targets.at(-1)?.sequence).toBe(1);
+    await find.press("Enter", true);
+    await find.settle(() => find.counter() === "120 / 120");
+    expect(find.targets.at(-1)?.sequence).toBe(120);
+    await find.click("Previous match");
+    await find.settle(() => find.counter() === "119 / 120");
+    await find.click("Next match");
+    await find.settle(() => find.counter() === "120 / 120");
+    await find.click("Next match");
+    await find.settle(() => find.counter() === "1 / 120");
+    await find.click("Previous match");
+    await find.settle(() => find.counter() === "120 / 120");
+    expect(find.targets.at(-1)?.sequence).toBe(120);
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("a newest message with more matches than one page still lands on its last occurrence", async () => {
+  search = pagedSearch([
+    ...Array.from({ length: 4 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+    ...Array.from({ length: 70 }, (_, index) => ({ sequence: 5, offset: index * 10 })),
+  ]).respond;
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "74 / 74");
+    expect(find.targets.at(-1)).toMatchObject({ sequence: 5, offset: 690 });
+    await find.press("Enter", true);
+    await find.settle(() => find.counter() === "73 / 74");
+    expect(find.targets.at(-1)).toMatchObject({ sequence: 5, offset: 680 });
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("in a very long history the newest match comes first and the oldest stays reachable", async () => {
+  const server = pagedSearch(
+    Array.from({ length: 2_100 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  );
+  search = server.respond;
+  const find = await mountFind({ find: "needle" });
+  try {
+    // Background counting stops after many matches; the place is not known yet.
+    await find.settle(() => find.counter() === "? / 2050+");
+    expect(find.host.querySelector('[role="status"]')?.textContent).toContain(
+      "More than 2050 matches, still counting",
+    );
+    expect(find.targets.at(-1)?.sequence).toBe(2_100);
+    await find.press("Enter", true);
+    await find.settle(() => find.targets.at(-1)?.sequence === 2_099);
+    await find.press("Enter");
+    await find.settle(() => find.targets.at(-1)?.sequence === 2_100);
+    // Next from the newest wraps to the oldest match with one oldest-first
+    // request, without paging through the history in between.
+    const newestPages = server.requests.length;
+    await find.press("Enter");
+    await find.settle(() => find.counter() === "1 / 2050+");
+    expect(find.targets.at(-1)?.sequence).toBe(1);
+    expect(server.requests.slice(newestPages)).toEqual([
+      { query: "needle", sessionId: "session", order: "oldest", limit: 1 },
+    ]);
+    // Previous from the oldest wraps back to the newest, and Next returns.
+    await find.press("Enter", true);
+    await find.settle(() => find.targets.at(-1)?.sequence === 2_100);
+    await find.press("Enter");
+    await find.settle(() => find.targets.at(-1)?.sequence === 1);
+    expect(server.requests.length).toBe(newestPages + 1);
+    // Next from the oldest loads the history it skipped, then knows its place.
+    await find.press("Enter");
+    await find.settle(() => find.counter() === "2 / 2100");
+    expect(find.targets.at(-1)?.sequence).toBe(2);
+    expect(server.requests.at(-1)?.cursor).toBe("2050");
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("closing and reopening Find lands on the newest match and highlights it again", async () => {
+  search = pagedSearch(
+    Array.from({ length: 5 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  ).respond;
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "5 / 5");
+    await find.press("Enter", true);
+    await find.settle(() => find.counter() === "4 / 5");
+    await find.render(false);
+    expect(find.targets.at(-1)).toBeNull();
+    await find.render(true);
+    await find.settle(() => find.counter() === "5 / 5");
+    expect(find.targets.at(-1)).toMatchObject({ sequence: 5, query: "needle" });
+    expect(find.jumps.at(-1)).toBe(5);
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("a failed load during a move releases the arrows and Retry continues", async () => {
+  const server = pagedSearch(
+    Array.from({ length: 2_100 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  );
+  let failures = 1;
+  search = async (workspaceId, request) => {
+    if (request.order === "oldest" && failures-- > 0) throw new Error("network");
+    return server.respond(workspaceId, request);
+  };
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => find.counter() === "? / 2050+");
+    await find.press("Enter");
+    await find.settle(() => !!find.host.querySelector('[role="alert"]'));
+    // The move is dropped: no endless "Searching…", and the arrows work.
+    await find.settle(() => find.counter() === "? / 2050+");
+    expect(
+      find.host.querySelector<HTMLButtonElement>('[aria-label="Previous match"]')!.disabled,
+    ).toBe(false);
+    expect(find.targets.at(-1)?.sequence).toBe(2_100);
+    await act(async () =>
+      [...find.host.querySelectorAll("button")]
+        .find((button) => button.textContent === "Retry")!
+        .click(),
+    );
+    await find.settle(() => !find.host.querySelector('[role="alert"]'));
+    await find.press("Enter");
+    await find.settle(() => find.counter() === "1 / 2050+");
+    expect(find.targets.at(-1)?.sequence).toBe(1);
+  } finally {
+    await find.unmount();
+  }
+});
+
+test("a failed page keeps the matches found so far and Retry resumes after them", async () => {
+  const server = pagedSearch(
+    Array.from({ length: 80 }, (_, index) => ({ sequence: index + 1, offset: 0 })),
+  );
+  let failures = 1;
+  search = async (workspaceId, request) => {
+    if (request.cursor && failures-- > 0) throw new Error("network");
+    return server.respond(workspaceId, request);
+  };
+  const find = await mountFind({ find: "needle" });
+  try {
+    await find.settle(() => !!find.host.querySelector('[role="alert"]'));
+    expect(find.targets.at(-1)?.sequence).toBe(80);
+    await act(async () =>
+      [...find.host.querySelectorAll("button")]
+        .find((button) => button.textContent === "Retry")!
+        .click(),
+    );
+    await find.settle(() => find.counter() === "80 / 80");
+    expect(server.requests.map((request) => request.cursor)).toEqual([undefined, "50"]);
+  } finally {
+    await find.unmount();
   }
 });
