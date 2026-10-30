@@ -463,11 +463,11 @@ describe("renderPrivacyFacts", () => {
       ["docker", "runs on servers this deployment's operator runs (docker)"],
       [
         "none",
-        "- This chat has no sandbox for running commands. Other chats in the workspace may use a different sandbox.",
+        "- This chat has no cloud sandbox. Other chats in the workspace may use a different sandbox.",
       ],
       [
         "selfhosted",
-        "is a Connected Machine: a machine its owner connected to the workspace (its location is not known here).",
+        "is a Connected Machine (a machine its owner connected to the workspace; its location is not known here) or, when none is attached, the workspace's default sandbox.",
       ],
       [
         "compute",

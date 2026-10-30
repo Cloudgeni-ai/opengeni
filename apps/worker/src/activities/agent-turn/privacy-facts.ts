@@ -60,13 +60,13 @@ const SELF_HOSTED_SANDBOX_BACKENDS: ReadonlySet<string> = new Set(["docker", "lo
 /** One sentence on where this chat's sandbox runs. */
 function sandboxSentence(sandboxes: PrivacyFactsDeployment["sandboxes"]): string {
   const { backend, regions } = sandboxes;
-  if (backend === "none") return "This chat has no sandbox for running commands.";
+  if (backend === "none") return "This chat has no cloud sandbox.";
   return `This chat's sandbox, where the agent runs commands, ${sandboxPlacement(backend, regions)}`;
 }
 
 function sandboxPlacement(backend: string, regions: readonly string[] | null): string {
   if (backend === "selfhosted") {
-    return "is a Connected Machine: a machine its owner connected to the workspace (its location is not known here).";
+    return "is a Connected Machine (a machine its owner connected to the workspace; its location is not known here) or, when none is attached, the workspace's default sandbox.";
   }
   if (SELF_HOSTED_SANDBOX_BACKENDS.has(backend)) {
     return `runs on servers this deployment's operator runs (${backend}); their location is not declared (unknown).`;
