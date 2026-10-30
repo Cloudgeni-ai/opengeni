@@ -13,9 +13,18 @@ export const COMPACTION_FAILURE_TITLE = (t: OpenGeniText) =>
 export const COMPACTION_INTERRUPTED_TITLE = (t: OpenGeniText) =>
   t("timeline.compactionCopy.compactionInterrupted");
 
+/**
+ * Headline for an automatic idle checkpoint dropped because no subscription
+ * had capacity. Not a failure: the next turn compacts if still needed.
+ */
+export const COMPACTION_POSTPONED_TITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.compactionPostponed");
+
 /** Headline for a settled `skipped` compaction landmark. */
 export function compactionSkipTitle(t: OpenGeniText, reason: string | null): string {
-  return reason === "interrupted" ? COMPACTION_INTERRUPTED_TITLE(t) : COMPACTION_FAILURE_TITLE(t);
+  if (reason === "interrupted") return COMPACTION_INTERRUPTED_TITLE(t);
+  if (reason === "capacity_unavailable") return COMPACTION_POSTPONED_TITLE(t);
+  return COMPACTION_FAILURE_TITLE(t);
 }
 
 /** Why a definitive provider rejection repeats; shown behind Details. */
@@ -43,6 +52,8 @@ export function compactionSkipSubtitle(
       return t("timeline.compactionCopy.checkpointMadeNoProgress");
     case "interrupted":
       return t("timeline.compactionCopy.itWillRetryIfStill");
+    case "capacity_unavailable":
+      return t("timeline.compactionCopy.noSubscriptionCapacityRightNow");
     case "summarization_failed":
       return providerRejection
         ? t("timeline.compactionCopy.chatHistoryIsUnchangedIf")

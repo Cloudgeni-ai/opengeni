@@ -741,6 +741,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           producerSeq: ++producerSeq,
         }
       : undefined;
+    const dropProactiveCompactionRequest = inputSettlement.dropProactiveCompactionRequest
+      ? { producerId, producerSeq: ++producerSeq }
+      : undefined;
     const inputs = inputSettlement.events.map((event) => ({
       ...event,
       payload: event.payload,
@@ -773,6 +776,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+      ...(dropProactiveCompactionRequest ? { dropProactiveCompactionRequest } : {}),
       ...(inputSettlement.notStartedToolCallIds?.length
         ? { notStartedToolCallIds: inputSettlement.notStartedToolCallIds }
         : {}),

@@ -25,6 +25,7 @@ import {
   type SessionEventMutation,
   attachOpenSuffixToPendingToolCalls,
   isSessionCompactionRequested,
+  sessionCompactionRequestTrigger,
   hasPendingSteerForTurn,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
@@ -47,6 +48,7 @@ import {
   interruptionKindForCallItem,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
+  compactionThresholdTokens,
   findAnthropicRequestSizeError,
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
@@ -229,6 +231,10 @@ import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
 import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
+import {
+  requestIdleCompactionAfterCompletedTurn,
+  resolveCompactionRequestLabel,
+} from "./idle-compaction-request";
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
@@ -749,6 +755,17 @@ export async function runTurnStreamAttempt(
     recoverySignalTokens: number | null,
     requestSizeError?: AnthropicRequestSizeError | null,
   ) => {
+    // "operator" here means the compaction consumes the durable request. Its
+    // event and metric label is whoever asked: /compact, or the worker's own
+    // idle checkpoint request (proactive). A request that vanished keeps the
+    // operator label; the replacement transaction still requires it. The
+    // label is display truth only, so a failed read never fails compaction.
+    const label =
+      triggerLabel === "operator"
+        ? await resolveCompactionRequestLabel(() =>
+            sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId),
+          )
+        : triggerLabel;
     const outcome = await waitForTurnOperation(
       maybeCompactContext(
         db,
@@ -771,7 +788,7 @@ export async function runTurnStreamAttempt(
         {
           force: true,
           ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
-          trigger: triggerLabel,
+          trigger: label,
           ...(requestSizeError
             ? {
                 requestSizeRecovery: {
@@ -795,7 +812,7 @@ export async function runTurnStreamAttempt(
     );
     if (outcome.events.length > 0) {
       if (outcome.compacted) {
-        recordContextCompaction(observability, triggerLabel);
+        recordContextCompaction(observability, label);
       }
       await publishCompactionOutcomeEvents(outcome.events);
     }
@@ -2530,6 +2547,20 @@ export async function runTurnStreamAttempt(
       turnId: activeTurnId,
       turnAttemptId: input.attemptId,
       idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
+    });
+    // The turn is durably complete. If it left the session at the automatic
+    // threshold, ask for the checkpoint now: this workflow's next work peek
+    // claims it as standalone maintenance while the prompt cache is warm,
+    // instead of the person's next message waiting for it. Best effort.
+    await requestIdleCompactionAfterCompletedTurn({
+      db,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      enabled: settings.idleContextCompactionEnabled,
+      turn: { source: turn.source ?? "", initiatorKind: turn.initiator.kind },
+      thresholdTokens: compactionThresholdTokens(eventing.modelRunSettings),
+      logger: observability,
     });
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
