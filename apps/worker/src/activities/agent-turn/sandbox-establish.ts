@@ -1143,6 +1143,7 @@ export async function bindLazySandboxProvisioner(
             provider: deps.turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
             publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
           });
           try {
             // Post-provision prerequisites: independent authorities and storage.

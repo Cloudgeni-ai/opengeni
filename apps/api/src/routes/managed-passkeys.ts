@@ -293,12 +293,15 @@ export function registerManagedPasskeyRoutes(
       try {
         user = await runManagedAuthProvider("passkey", () =>
           runWithSignupChallenge(ceremony.signupChallengeVerified === true, () =>
-            internal.createUser({
-              id: userId,
-              email: passkeyOnlyAccountEmail(userId),
-              name: ceremony.name ?? "Passkey user",
-              emailVerified: true,
-            }),
+            internal.createUser(
+              {
+                id: userId,
+                email: passkeyOnlyAccountEmail(userId),
+                name: ceremony.name ?? "Passkey user",
+                emailVerified: true,
+              },
+              { method: "passkey" },
+            ),
           ),
         );
       } catch (error) {

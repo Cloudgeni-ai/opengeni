@@ -230,6 +230,7 @@ import {
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
+  findManagedAuthOAuthState,
 } from "./auth/managed-auth";
 import {
   adoptManagedAuthSession,
@@ -1238,9 +1239,7 @@ export function createAppComposition(deps: AppDependencies): {
       let signupChallengeVerified = false;
       if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
         const state = new URL(c.req.url).searchParams.get("state");
-        const stored = state
-          ? await (await managedAuth.$context).internalAdapter.findVerificationValue(state)
-          : null;
+        const stored = state ? await findManagedAuthOAuthState(managedAuth, state) : null;
         if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
           signupChallengeVerified = oauthSignupChallengeVerified(
             stored.value,

@@ -8,7 +8,11 @@
  * is the authority; these helpers only label what a person picks.
  */
 
-import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
+import {
+  normalizePermission,
+  organizationAccessPresetPermissions,
+  type Permission,
+} from "@opengeni/contracts";
 import type {
   OrganizationAccessPolicy,
   OrganizationAccessPreset,
@@ -50,7 +54,8 @@ export function presetPermissions(
 
 /** The preset these permissions match exactly, or custom. */
 export function presetFor(permissions: readonly string[]): OrganizationAccessPreset {
-  const wanted = new Set(permissions);
+  // Legacy variable-set names on older keys count as their canonical secrets permission.
+  const wanted = new Set(permissions.map(normalizePermission));
   // Connecting accounts includes connecting one's own (saved before it was separate).
   if (wanted.has("connections:write")) wanted.add("connections:personal");
   for (const preset of ["full", "read_only"] as const) {

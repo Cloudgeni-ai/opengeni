@@ -43,10 +43,19 @@ import { canonicalProviderDomain } from "./provider-domain";
 
 export const OFFICIAL_SLACK_MCP_URL = OPENGENI_PERSONAL_SLACK_MCP_URL;
 export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
-export const OFFICIAL_GMAIL_MCP_SCOPES = [
+/** A first Gmail connection asks only to read mail. */
+export const OFFICIAL_GMAIL_MCP_BASE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
+] as const;
+/** Asked for later, in the chat, when a tool call needs it. */
+export const OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/gmail.modify",
+] as const;
+/** Every Gmail scope the reviewed bridge can ever hold. */
+export const OFFICIAL_GMAIL_MCP_SCOPES = [
+  ...OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  ...OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES,
 ] as const;
 
 export const OFFICIAL_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
@@ -136,6 +145,14 @@ export type OAuthProviderProfile = {
   extraAuthorizeParams?: Readonly<Record<string, string>>;
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
+  /**
+   * Incremental consent. A first connection asks only for `requestedScopes`.
+   * Reconnecting an existing account asks for `requestedScopes`, the account's
+   * current grants and the additional access the reconnect requested, each
+   * bounded by this list. The provider must accept a scope list that includes
+   * scopes already granted (Google and Microsoft both do).
+   */
+  incrementalScopes?: readonly string[];
   /** Reviewed local bridge grant normalization and token verification. Catalog profiles cannot supply code. */
   normalizeGrantedScopes?: (scopes: readonly string[] | string) => string[];
   reportedScopesRequired?: boolean;
@@ -266,8 +283,11 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
     prompt: "consent",
   },
   // The Gmail PRM advertises broader grants, including full-mail access. The
-  // reviewed connector never lets a caller widen the capability contract.
-  requestedScopes: OFFICIAL_GMAIL_MCP_SCOPES,
+  // reviewed connector never lets a caller widen the capability contract: a
+  // first connection asks only to read mail, and drafting, sending or
+  // organizing mail is asked for in the chat when a tool call needs it.
+  requestedScopes: OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  incrementalScopes: OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
   fullRequestedScopesRequired: true,
