@@ -1127,6 +1127,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frameId: string;
       accessibility: CdpAccessibilitySnapshot | null;
       accessibilityBounded: boolean;
+      /** The ended attachment's drawn document; the same document has still drawn. */
+      inputDrawnDocument?: string;
     }
   >();
   private connection: BrowserCdpConnection | null = null;
@@ -3422,6 +3424,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               frameId: ended.frame.id,
               accessibility: ended.accessibility,
               accessibilityBounded: ended.accessibilityBounded,
+              ...(ended.inputDrawnDocument !== undefined
+                ? { inputDrawnDocument: ended.inputDrawnDocument }
+                : {}),
             });
           } else if (earlier?.replacedBy === replaced) {
             // An attachment that ended before it was ready knew nothing new.
@@ -4164,6 +4169,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       accessibilityNodeCount: null,
       accessibilityRebuildDue: true,
       accessibilityBounded: resumed?.accessibilityBounded ?? false,
+      // A resumed document keeps its generation, and a document that drew
+      // once still draws: input to it needs no new capture, which another
+      // extension's frame in the page could refuse.
+      ...(resumed?.inputDrawnDocument !== undefined
+        ? { inputDrawnDocument: resumed.inputDrawnDocument }
+        : {}),
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,

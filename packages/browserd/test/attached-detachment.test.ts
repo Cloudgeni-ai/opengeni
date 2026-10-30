@@ -289,6 +289,73 @@ test("an observation made before the tab's debugging ended still acts on its unc
   }
 });
 
+test("a background tab drawn before its debugging ended takes input on its unchanged page without a new capture", async () => {
+  // The agent's tab opened in the background and has never been shown, so
+  // the first input has it draw with a capture. A password manager's menu
+  // then ends the attachment, and while that frame is in the page Chrome
+  // refuses captures. The same document has still drawn.
+  const bridge = new DetachmentBridge();
+  let refuseCaptures = false;
+  bridge.beforeCommandReply = async (method) => {
+    if (method === "Page.captureScreenshot" && refuseCaptures)
+      throw new Error("Cannot access a chrome-extension:// URL of different extension");
+  };
+  const neverShown = bridge.request.bind(bridge);
+  bridge.request = async <T>(payload: Readonly<Record<string, unknown>>): Promise<T> => {
+    const expression = String((payload.params as Record<string, unknown>)?.expression ?? "");
+    if (
+      payload.method === "Page.createIsolatedWorld" &&
+      bridge.attached.has(String(payload.tabId))
+    ) {
+      bridge.commands.push(payload);
+      return { result: { executionContextId: 1 } } as T;
+    }
+    if (payload.method === "Runtime.evaluate" && expression.includes("visibility-state")) {
+      bridge.commands.push(payload);
+      return { result: { result: { value: false } } } as T;
+    }
+    return await neverShown<T>(payload);
+  };
+  const { connection, driver } = await fixture(bridge);
+  const click = (observation: Awaited<ReturnType<typeof driver.observe>>) =>
+    driver.dispatch({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: observation.browserSessionId,
+      controllerGeneration: observation.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration!,
+      expectedFrameId: observation.frameId,
+      observationMode: "none",
+      action: { type: "pointer", action: "click", x: 10, y: 10 },
+    });
+  const captures = () =>
+    bridge.commands.filter((c) => c.method === "Page.captureScreenshot").length;
+  const presses = () =>
+    bridge.commands.filter((c) => c.method === "Input.dispatchMouseEvent").length;
+  try {
+    const before = await driver.observe("7");
+    await click(before);
+    expect(captures()).toBeGreaterThan(0);
+    const pressed = presses();
+    expect(pressed).toBeGreaterThan(0);
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    refuseCaptures = true;
+    const captured = captures();
+    await click(before);
+    expect(captures()).toBe(captured);
+    expect(presses()).toBeGreaterThan(pressed);
+    expect(
+      bridge.commands.filter((c) => c.type === "debugger.attach" && c.tabId === "7"),
+    ).toHaveLength(2);
+  } finally {
+    connection.close();
+  }
+});
+
 for (const after of ["a lost and refused reattach", "an unresponsive tab"] as const)
   test(`an activation followed by ${after} is an unknown outcome, not a failure`, async () => {
     // The tab really was brought to the front before the failure, so the
