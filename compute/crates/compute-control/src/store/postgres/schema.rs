@@ -177,7 +177,9 @@ alter table compute_templates add column if not exists cpu_request_millis bigint
 ";
 
 /// Version 8: the pointers to the fleet's stored copies (ADR 25), each
-/// with its owner stamp and a version no other write is ever given, and,
+/// with its owner stamp (both numbers `u64` kept bit for bit, as a
+/// tombstone's save is `u64::MAX`) and a version no other write is ever
+/// given, and,
 /// once they were moved in from the object store, when and from where.
 const MIGRATION_8: &str = "
 create sequence if not exists compute_pointer_versions;

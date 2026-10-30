@@ -106,6 +106,19 @@ fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
 }
 
+/// A `u64` kept bit for bit in a `bigint`, every value fitting, for a
+/// number Postgres stores and matches but never orders: an owner stamp,
+/// whose tombstone carries `u64::MAX` (as every pointer a host wrote, in
+/// the object store or here, may).
+const fn bits(value: u64) -> i64 {
+    value.cast_signed()
+}
+
+/// The `u64` a `bigint` keeps bit for bit (see [`bits`]).
+const fn unbits(value: i64) -> u64 {
+    value.cast_unsigned()
+}
+
 const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone_ms";
 
 fn request_row(row: &Row) -> Result<RequestRow> {

@@ -1728,6 +1728,9 @@ fn stamp(epoch: u64, save: u64) -> Stamp {
     }
 }
 
+/// The save a deleted sandbox's tombstone carries.
+const TOMBSTONE_SAVE: u64 = u64::MAX;
+
 /// The latest change to any host row, as an import reads it before it
 /// reads the object store.
 async fn seen<S: Store>(store: &S) -> u64 {
@@ -1793,14 +1796,18 @@ async fn pointer_writes<S: Store>(store: S) {
     assert_eq!(landed.len(), 1, "{landed:?}");
 
     // An empty pointer, as an archive in flight or a tombstone keeps, is
-    // kept like any other, and versions never repeat across names.
+    // kept like any other, a tombstone's save (`u64::MAX`) as it is, and
+    // versions never repeat across names.
     let emptied = store
-        .write_pointer(&name, stamp(3, 0), b"", Some(landed[0]))
+        .write_pointer(&name, stamp(3, TOMBSTONE_SAVE), b"", Some(landed[0]))
         .await
         .unwrap()
         .expect("emptied");
     let kept = store.pointer(&name).await.unwrap().unwrap();
-    assert_eq!(kept.pointer, Vec::<u8>::new());
+    assert_eq!(
+        (kept.owner, kept.pointer.as_slice()),
+        (stamp(3, TOMBSTONE_SAVE), b"".as_slice())
+    );
     let other = format!("pointers/v3/images/{}", self::name());
     let elsewhere = store
         .write_pointer(&other, stamp(1, 1), b"other", None)
@@ -1888,6 +1895,7 @@ async fn importing<S: Store>(store: S) {
     // has.
     let kept = format!("pointers/v3/sandboxes/{}", name());
     let moved = format!("pointers/v3/sandboxes/{}", name());
+    let deleted = format!("pointers/v3/sandboxes/{}", name());
     let version = store
         .write_pointer(&kept, stamp(5, 5), b"kept", None)
         .await
@@ -1903,6 +1911,12 @@ async fn importing<S: Store>(store: S) {
             name: moved.clone(),
             owner: stamp(1, 2),
             pointer: b"moved".to_vec(),
+        },
+        // A deleted sandbox's tombstone.
+        Found {
+            name: deleted.clone(),
+            owner: stamp(3, TOMBSTONE_SAVE),
+            pointer: Vec::new(),
         },
     ];
 
@@ -1978,6 +1992,11 @@ async fn importing<S: Store>(store: S) {
         (stamp(1, 2), b"moved".as_slice())
     );
     assert!(row.version > version);
+    let tombstone = store.pointer(&deleted).await.unwrap().expect("imported");
+    assert_eq!(
+        (tombstone.owner, tombstone.pointer.as_slice()),
+        (stamp(3, TOMBSTONE_SAVE), b"".as_slice())
+    );
 
     // Once: a later import answers the first and changes nothing.
     let again = [Found {

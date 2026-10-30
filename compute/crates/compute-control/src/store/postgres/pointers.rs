@@ -11,22 +11,22 @@ use compute_fleet::{OwnerEpoch, Stamp};
 use deadpool_postgres::{GenericClient, Transaction};
 use tokio_postgres::Row;
 
-use super::{PostgresStore, big, corrupt, database, small};
+use super::{PostgresStore, big, bits, corrupt, database, small, unbits};
 use crate::store::{Found, Import, Imported, PointerRow, Result};
 
 /// The transaction-scoped advisory lock the import holds alone and
 /// registrations of hosts that keep pointers in the object store share.
 const IMPORT_LOCK: i64 = 7_231_403;
 
-fn pointer_row(row: &Row) -> Result<PointerRow> {
-    Ok(PointerRow {
+fn pointer_row(row: &Row) -> PointerRow {
+    PointerRow {
         owner: Stamp {
-            epoch: OwnerEpoch(small(row.get("owner_epoch"))?),
-            save: small(row.get("owner_save"))?,
+            epoch: OwnerEpoch(unbits(row.get("owner_epoch"))),
+            save: unbits(row.get("owner_save")),
         },
         pointer: row.get("pointer"),
         version: row.get("version"),
-    })
+    }
 }
 
 /// Whether a host that does or does not keep its pointers in the service
@@ -66,7 +66,8 @@ impl PostgresStore {
     }
 
     pub(super) async fn pointer_now(&self, name: &str) -> Result<Option<PointerRow>> {
-        self.client()
+        Ok(self
+            .client()
             .await?
             .query_opt(
                 "select owner_epoch, owner_save, pointer, version from compute_pointers \
@@ -76,8 +77,7 @@ impl PostgresStore {
             .await
             .map_err(database)?
             .as_ref()
-            .map(pointer_row)
-            .transpose()
+            .map(pointer_row))
     }
 
     pub(super) async fn write_pointer_now(
@@ -88,7 +88,7 @@ impl PostgresStore {
         on: Option<i64>,
     ) -> Result<Option<i64>> {
         let client = self.client().await?;
-        let (epoch, save) = (big(owner.epoch.0)?, big(owner.save)?);
+        let (epoch, save) = (bits(owner.epoch.0), bits(owner.save));
         let row = match on {
             None => {
                 client
@@ -214,16 +214,13 @@ impl PostgresStore {
 /// Keeps each of `found` the store has no pointer of, a pointer kept
 /// winning: how many it kept.
 async fn insert_absent(client: &impl GenericClient, found: &[Found]) -> Result<u64> {
-    let mut names = Vec::with_capacity(found.len());
-    let mut epochs = Vec::with_capacity(found.len());
-    let mut saves = Vec::with_capacity(found.len());
-    let mut pointers = Vec::with_capacity(found.len());
-    for found in found {
-        names.push(found.name.as_str());
-        epochs.push(big(found.owner.epoch.0)?);
-        saves.push(big(found.owner.save)?);
-        pointers.push(found.pointer.as_slice());
-    }
+    let names: Vec<&str> = found.iter().map(|found| found.name.as_str()).collect();
+    let epochs: Vec<i64> = found
+        .iter()
+        .map(|found| bits(found.owner.epoch.0))
+        .collect();
+    let saves: Vec<i64> = found.iter().map(|found| bits(found.owner.save)).collect();
+    let pointers: Vec<&[u8]> = found.iter().map(|found| found.pointer.as_slice()).collect();
     client
         .execute(
             "insert into compute_pointers (name, owner_epoch, owner_save, pointer, version) \
