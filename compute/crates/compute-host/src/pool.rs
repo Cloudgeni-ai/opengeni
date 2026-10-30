@@ -158,6 +158,11 @@ pub(crate) struct Sources {
     pub networked: bool,
     /// How guest memory is backed, as the engine describes it.
     pub memory: String,
+    /// The runtime new VMs run under (see [`compute_engine::Engine::runtime`]):
+    /// a template's clones wake under the runtime that saved it, so one
+    /// saved under another, before the host's kernel changed say, would
+    /// give every new sandbox an image this host may refuse.
+    pub runtime: String,
     /// The guest port that says a booted guest is ready for work: a guest
     /// image that answers elsewhere is another guest.
     pub ready_port: u32,
@@ -193,6 +198,7 @@ impl Sources {
             boot_args: self.boot_args.clone(),
             networked: self.networked,
             memory: self.memory.clone(),
+            runtime: self.runtime.clone(),
             ready_port: self.ready_port,
         })
     }
@@ -233,6 +239,7 @@ pub(crate) struct Inputs {
     boot_args: String,
     networked: bool,
     memory: String,
+    runtime: String,
     ready_port: u32,
 }
 

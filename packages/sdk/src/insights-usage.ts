@@ -27,7 +27,11 @@ export type {
   InsightsCallsResponse,
 } from "@opengeni/contracts/insights-usage";
 
-/** Custom selections require both inclusive UTC calendar days. */
+/**
+ * Custom selections take both bounds in one form: UTC calendar days
+ * (YYYY-MM-DD, `to` inclusive) or UTC instants (e.g. 2026-10-30T09:15Z, `to`
+ * exclusive). Rolling `1h`, `3h` and `24h` need no bounds.
+ */
 export type InsightsUsageWindowOptions =
   | { range?: Exclude<InsightsUsageRange, "custom">; from?: never; to?: never }
   | { range: "custom"; from: string; to: string };

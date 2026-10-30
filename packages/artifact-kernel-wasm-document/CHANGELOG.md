@@ -1,5 +1,11 @@
 # @opengeni/artifact-kernel-wasm-document
 
+## 6.2.1
+
+## 6.1.1
+
+## 6.0.2
+
 ## 5.5.1
 
 ## 5.4.2

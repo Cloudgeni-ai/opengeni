@@ -5263,6 +5263,16 @@ export const sessions = pgTable(
     importedArchiveNextOffset: integer("imported_archive_next_offset"),
     /** Never move this session's content to the idle-session archive. */
     keepLive: boolean("keep_live").notNull().default(false),
+    /** Changeable unattended setting (migration 1111); null defers to the create option. */
+    unattendedSetting: text("unattended_setting").$type<
+      "unattended" | "attended" | "unattended_by_default"
+    >(),
+    /**
+     * Set once at create when the setting starts the chat unattended
+     * (migration 1111); never updated, so the instructions and tools follow
+     * how the chat started. Null when it did not.
+     */
+    startedUnattended: boolean("started_unattended"),
     /** Idle-session archive lifecycle: null (live), archiving, or archived (read-only). */
     contentArchiveState: text("content_archive_state").$type<"archiving" | "archived">(),
     contentArchiveStartedAt: timestamp("content_archive_started_at", { withTimezone: true }),
@@ -8743,6 +8753,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
+    /** 1108: the machine the calling code ran on, when it was not the session's
+     *  active sandbox (a `run_on` exec). Paths in the call resolve there. */
+    callerExecutionSandboxId: uuid("caller_execution_sandbox_id"),
     state: text("state", {
       enum: [
         "queued",

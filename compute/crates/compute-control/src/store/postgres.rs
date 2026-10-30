@@ -17,14 +17,15 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked,
-    RequestRow, Result, SandboxRow, Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write,
-    admits, rule,
+    Admission, Admits, AgentRef, Collector, Counted, Found, HostRow, Import, Imported, Inserted,
+    LifecycleRow, Linked, PointerRow, RequestRow, Result, SandboxRow, Spec, Store, StoreError,
+    TEMPLATE_PREFIX, TemplateRow, Write, admits, rule,
 };
 
 mod connect;
 mod images;
 mod lifecycles;
+mod pointers;
 mod schema;
 mod templates;
 
@@ -103,6 +104,19 @@ fn big(value: u64) -> Result<i64> {
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
+}
+
+/// A `u64` kept bit for bit in a `bigint`, every value fitting, for a
+/// number Postgres stores and matches but never orders: an owner stamp,
+/// whose tombstone carries `u64::MAX` (as every pointer a host wrote, in
+/// the object store or here, may).
+const fn bits(value: u64) -> i64 {
+    value.cast_signed()
+}
+
+/// The `u64` a `bigint` keeps bit for bit (see [`bits`]).
+const fn unbits(value: i64) -> u64 {
+    value.cast_unsigned()
 }
 
 const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone_ms";
@@ -510,6 +524,9 @@ impl Store for PostgresStore {
     async fn register(&self, register: &Register) -> Result<Admission> {
         let mut client = self.client().await?;
         let tx = client.transaction().await.map_err(database)?;
+        if pointers::outdated(&tx, register.capacity.pointers_in_service).await? {
+            return Ok(Admission::Outdated);
+        }
         let found = tx
             .query_opt(
                 "select id, state, attempt, epoch, answer from compute_hosts \
@@ -549,9 +566,16 @@ impl Store for PostgresStore {
 
     async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
         // A renewal without a capacity keeps the one last heard.
-        let updated = self
-            .client()
-            .await?
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(database)?;
+        let in_service = renew
+            .capacity
+            .as_ref()
+            .is_none_or(|capacity| capacity.pointers_in_service);
+        if pointers::outdated(&tx, in_service).await? {
+            return Ok(false);
+        }
+        let updated = tx
             .execute(
                 "update compute_hosts set renewals = renewals + 1, seq = greatest(seq, $3), \
                  capacity = coalesce($4, capacity), changed = nextval('compute_changes') \
@@ -566,13 +590,17 @@ impl Store for PostgresStore {
             )
             .await
             .map_err(database)?;
+        tx.commit().await.map_err(database)?;
         Ok(updated == 1)
     }
 
     async fn report(&self, report: &Report, names: &[String]) -> Result<bool> {
-        let updated = self
-            .client()
-            .await?
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(database)?;
+        if pointers::outdated(&tx, report.capacity.pointers_in_service).await? {
+            return Ok(false);
+        }
+        let updated = tx
             .execute(
                 "update compute_hosts set capacity = $3, changed = nextval('compute_changes') \
                  where id = $1 and epoch = $2 and state <> 'lost' and name = any($4)",
@@ -585,6 +613,7 @@ impl Store for PostgresStore {
             )
             .await
             .map_err(database)?;
+        tx.commit().await.map_err(database)?;
         Ok(updated == 1)
     }
 
@@ -1048,6 +1077,50 @@ impl Store for PostgresStore {
 
     async fn collected(&self, image: ImageId, collector: &str) -> Result<()> {
         self.collected_now(image, collector).await
+    }
+
+    async fn registered(&self, epoch: u64, names: &[String]) -> Result<bool> {
+        self.registered_now(epoch, names).await
+    }
+
+    async fn pointer(&self, name: &str) -> Result<Option<PointerRow>> {
+        self.pointer_now(name).await
+    }
+
+    async fn write_pointer(
+        &self,
+        name: &str,
+        owner: compute_fleet::Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> Result<Option<i64>> {
+        self.write_pointer_now(name, owner, pointer, on).await
+    }
+
+    async fn pointer_names(&self) -> Result<Vec<String>> {
+        self.pointer_names_now().await
+    }
+
+    async fn pointers_imported(&self) -> Result<Option<Imported>> {
+        self.pointers_imported_now().await
+    }
+
+    async fn adopt_pointers(&self, found: &[Found]) -> Result<usize> {
+        self.adopt_pointers_now(found).await
+    }
+
+    async fn clock_ms(&self) -> Result<u64> {
+        self.clock_ms_now().await
+    }
+
+    async fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> Result<Import> {
+        self.import_pointers_now(found, from, at_ms, seen).await
     }
 }
 

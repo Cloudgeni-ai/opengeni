@@ -62,7 +62,10 @@ import {
   chooseMcpAuthorizeScopes,
   preferredOAuthSelfRegistration,
 } from "../src/integrations/oauth-client";
-import { builtInOAuthProfileByKey } from "../src/integrations/oauth-profiles";
+import {
+  OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  builtInOAuthProfileByKey,
+} from "../src/integrations/oauth-profiles";
 
 const DELEGATION_SECRET = "connections-routes-delegation-secret";
 const STATE_SECRET = "connections-routes-state-secret";
@@ -514,12 +517,19 @@ describe("official Gmail MCP OAuth compatibility", () => {
   });
 
   test("cannot be widened beyond the reviewed Gmail scopes by an OAuth start caller", () => {
+    const widening = {
+      mcpUrl: OFFICIAL_GMAIL_MCP_URL,
+      requested: ["https://mail.google.com/"],
+      challenged: undefined,
+      supported: ["https://mail.google.com/"],
+    };
+    // A first connection asks only for read access.
+    expect(chooseMcpAuthorizeScopes(widening)).toEqual([...OFFICIAL_GMAIL_MCP_BASE_SCOPES]);
+    // A reconnect never goes past the reviewed scopes, whatever it holds or asks for.
     expect(
       chooseMcpAuthorizeScopes({
-        mcpUrl: OFFICIAL_GMAIL_MCP_URL,
-        requested: ["https://mail.google.com/"],
-        challenged: undefined,
-        supported: ["https://mail.google.com/"],
+        ...widening,
+        reconnectGrantedScopes: [...OFFICIAL_GMAIL_MCP_SCOPES, "https://mail.google.com/"],
       }),
     ).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);
   });

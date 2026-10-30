@@ -59,13 +59,14 @@ import {
   costIsEstimate,
   costMicros,
   costUnknown,
+  bucketDay,
   formatBucket,
   formatChange,
   formatCount,
   formatMoney,
   formatMoneyAxis,
   formatPct,
-  formatUtc,
+  formatWindowEdge,
   inputTotal,
   payerName,
   priorLabel,
@@ -80,6 +81,9 @@ import { SitesUsageSection } from "./sites-usage-section";
 import { PartlyUnpricedMark, Quiet, Unpriced } from "./usage-values";
 import {
   activeFilterCount,
+  CUSTOM_MAX_MS,
+  customBoundMs,
+  minuteInstant,
   nextUsageSearch,
   usageMetric,
   usageQuery,
@@ -307,9 +311,13 @@ export function UsageDashboard(props: UsageDashboardProps) {
         )}
         <p className="text-xs leading-4.5 text-fg-subtle" data-insights-freshness>
           <span role="status">{stale ? "Refreshing… " : null}</span>
-          {formatUtc(usage.windowStart)} – {formatUtc(usage.windowEnd)}
-          {usage.dataThrough ? ` · Data through ${formatUtc(usage.dataThrough)}` : ""}. Plans and
-          your own API keys aren't charged by Opengeni; their amounts are list-price estimates.
+          {formatWindowEdge(usage.windowStart, usage.bucket)} –{" "}
+          {formatWindowEdge(usage.windowEnd, usage.bucket)}
+          {usage.dataThrough
+            ? ` · Data through ${formatWindowEdge(usage.dataThrough, usage.bucket)}`
+            : ""}
+          . Plans and your own API keys aren't charged by Opengeni; their amounts are list-price
+          estimates.
         </p>
       </div>
       {props.scope.kind === "workspace" ? (
@@ -462,7 +470,22 @@ function FilterBar(props: {
     });
   const ranges = RANGES.filter((range) => capabilities.ranges.includes(range.id));
   const custom = props.query.range === "custom";
-  const day = (iso: string) => iso.slice(0, 10);
+  // Custom bounds as milliseconds, whether the link holds instants or older UTC days.
+  const customStart = custom && props.query.from ? customBoundMs(props.query.from, "start") : null;
+  const customEnd = custom && props.query.to ? customBoundMs(props.query.to, "end") : null;
+  /** Keep the window ordered and within the server's limit by moving the other edge. */
+  const setCustom = (edge: "from" | "to", ms: number) => {
+    const start = customStart ?? ms;
+    const end = customEnd ?? ms;
+    const length = Math.min(Math.max(end - start, 60_000), CUSTOM_MAX_MS);
+    let from = edge === "from" ? ms : start;
+    let to = edge === "to" ? ms : end;
+    if (to <= from || to - from > CUSTOM_MAX_MS) {
+      if (edge === "from") to = from + length;
+      else from = to - length;
+    }
+    props.onChange({ range: "custom", from: minuteInstant(from), to: minuteInstant(to) });
+  };
 
   return (
     <div className="flex min-w-0 flex-col gap-2">
@@ -475,29 +498,30 @@ function FilterBar(props: {
             range === "custom"
               ? props.onChange({
                   range,
-                  from: day(props.usage.windowStart),
-                  to: day(props.usage.windowEnd),
+                  // Start from the window on screen, its end rounded up to the next minute.
+                  from: minuteInstant(Date.parse(props.usage.windowStart)),
+                  to: minuteInstant(Math.ceil(Date.parse(props.usage.windowEnd) / 60_000) * 60_000),
                 })
               : props.onChange({ range })
           }
-          options={ranges.map((range) => ({ value: range.id, label: range.label }))}
+          options={ranges.map((range) => ({
+            value: range.id,
+            label: range.label,
+            ...(range.group ? { group: range.group } : {}),
+          }))}
           className="w-40"
         />
-        {custom ? (
-          <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-            <DateField
-              label="From"
-              value={props.query.from ?? ""}
-              max={props.query.to}
-              onChange={(from) => props.onChange({ range: "custom", from })}
+        {custom && customStart !== null && customEnd !== null ? (
+          <span className="flex w-full min-w-0 flex-col gap-2 text-sm text-fg-muted sm:inline-flex sm:w-auto sm:flex-row sm:items-center sm:gap-1.5">
+            <DateTimeField
+              label="Start"
+              value={customStart}
+              onChange={(ms) => setCustom("from", ms)}
             />
-            <span aria-hidden="true">–</span>
-            <DateField
-              label="To"
-              value={props.query.to ?? ""}
-              min={props.query.from}
-              onChange={(to) => props.onChange({ range: "custom", to })}
-            />
+            <span aria-hidden="true" className="hidden sm:inline">
+              –
+            </span>
+            <DateTimeField label="End" value={customEnd} onChange={(ms) => setCustom("to", ms)} />
           </span>
         ) : null}
         {dimensions.length > 0 ? (
@@ -517,24 +541,27 @@ function FilterBar(props: {
   );
 }
 
-function DateField(props: {
-  label: string;
-  value: string;
-  min?: string | undefined;
-  max?: string | undefined;
-  onChange: (value: string) => void;
-}) {
+/** The browser's local date and time, YYYY-MM-DDTHH:MM, as datetime-local inputs use. */
+function localInputValue(ms: number): string {
+  const date = new Date(ms);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** A start or end in the viewer's own time; the dashboard sends it as a UTC instant. */
+function DateTimeField(props: { label: string; value: number; onChange: (ms: number) => void }) {
   return (
     <input
-      type="date"
+      type="datetime-local"
       aria-label={props.label}
-      value={props.value}
-      min={props.min}
-      max={props.max ?? new Date().toISOString().slice(0, 10)}
+      value={localInputValue(props.value)}
       onChange={(event) => {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(event.target.value)) props.onChange(event.target.value);
+        // Partial input (a cleared field) is ignored until it is a full date and time.
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(event.target.value)) return;
+        const ms = new Date(event.target.value).getTime();
+        if (Number.isFinite(ms)) props.onChange(ms);
       }}
-      className="h-8 rounded-[8px] border border-border bg-surface px-2 text-sm text-fg tabular-nums [color-scheme:inherit] focus-visible:border-border-strong focus-visible:outline-none"
+      className="h-8 min-w-0 rounded-[8px] border border-border bg-surface px-2 text-sm text-fg tabular-nums outline-hidden [color-scheme:inherit] focus-visible:border-border-strong focus-visible:ring-2 focus-visible:ring-fg/30"
     />
   );
 }
@@ -716,10 +743,8 @@ function OverTimePanel(props: {
     const bucketsOut: ChartBucket[] = usage.series.map((point) => ({
       key: point.start,
       label: formatBucket(point.start, usage.bucket),
-      title:
-        usage.bucket === "hour"
-          ? `${formatBucket(point.start, "day", true)}, ${formatBucket(point.start, "hour")} UTC`
-          : formatBucket(point.start, "day", true),
+      day: bucketDay(point.start, usage.bucket),
+      title: formatBucket(point.start, usage.bucket, true),
       values: {},
     }));
     const valueOf = (
@@ -800,7 +825,8 @@ function OverTimePanel(props: {
         : value.toLocaleString("en-US");
   const axis = (value: number) =>
     metric === "spend" ? formatMoneyAxis(value) : formatCount(value);
-  const unit = usage.bucket === "hour" ? "hour" : "day";
+  const unit =
+    usage.bucket === "five_minutes" ? "5 minutes" : usage.bucket === "hour" ? "hour" : "day";
 
   return (
     <section aria-label="Over time" className={cn(PANEL, "flex flex-col gap-4 p-4")}>
@@ -1268,6 +1294,8 @@ function RecentCalls(props: {
     props.scope.workspaceId ?? props.scope.accountId,
     props.query.filters,
     props.query.range,
+    props.query.from,
+    props.query.to,
   ]);
   // The older endpoints have no calls route; their calls come with the totals.
   const fetches = !props.legacyCalls && props.source === "usage";
@@ -1349,8 +1377,8 @@ function RecentCalls(props: {
                 minute: "2-digit",
                 second: "2-digit",
                 hour12: false,
-                timeZone: "UTC",
-              }) + " UTC",
+                timeZoneName: "short",
+              }),
             ]}
             cells={{
               model: (

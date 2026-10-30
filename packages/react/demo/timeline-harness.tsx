@@ -8,6 +8,7 @@ import {
   LightboxProvider,
   MessageTimeline,
   TimelineRow,
+  TooltipProvider,
   TurnSummary,
   type ActivityItem,
   type TimelineGroup,
@@ -333,4 +334,8 @@ function durationBetween(startedAt: string, endedAt: string): number | undefined
     : undefined;
 }
 
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(
+  <TooltipProvider>
+    <Harness />
+  </TooltipProvider>,
+);

@@ -50,6 +50,12 @@ spec:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: compute-database
+        {{- if .Values.computeControl.sweep.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: compute-sweep
+        {{- end }}
         {{- end }}
       ports:
         - protocol: TCP

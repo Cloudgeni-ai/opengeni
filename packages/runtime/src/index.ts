@@ -200,6 +200,8 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
+  UNATTENDED_PERSON_REFUSAL_TEXT,
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
@@ -426,6 +428,7 @@ import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptExperiments,
   type AgentPromptResources,
@@ -444,6 +447,7 @@ export {
   identityFromLegacyTemplate,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
   type AgentPromptExperiments,
@@ -2301,6 +2305,20 @@ export type BuildAgentOptions = {
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
   /**
+   * The session is unattended (frozen at create): no person will see or answer
+   * a question until the task ends. Both compositions say so, and the
+   * human-input tool is not attached. Omitted or false keeps today's bytes.
+   */
+  unattended?: boolean;
+  /**
+   * No person answers during this attempt (the chat's current setting, which
+   * can change after it starts). Only call-time behaviour follows it: a call
+   * that needs approval, a question and a hand-off to a person are refused
+   * with a tool result instead of waiting. The instructions and tools follow
+   * `unattended`, so earlier requests' text never changes.
+   */
+  unattendedNow?: boolean;
+  /**
    * Secret facts for this attempt. `referencesEnabled` is true when the host
    * resolves `{{secret:…}}` references (the secrets prompt module renders
    * only then). `hasActingHuman` admits Only-me secret questions;
@@ -2631,6 +2649,12 @@ export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
 
+/** Session-level facts the legacy CORE renders. Omitted keeps today's bytes. */
+export type CoreInstructionsSession = {
+  /** No person will see or answer a question until the task ends. */
+  unattended?: boolean | undefined;
+};
+
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
  * line (which names the opengeni__goal_* tools and is what keeps a long-running
@@ -2646,6 +2670,7 @@ export function coreInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
   experiments?: AgentPromptExperiments,
+  session?: CoreInstructionsSession,
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
@@ -2655,6 +2680,9 @@ export function coreInstructions(
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
     ...(rig ? rigInstructions(rig) : []),
+    // Unattended sessions (frozen at create): inside the non-bypassable CORE
+    // for the same reason. Absent for interactive sessions.
+    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE] : []),
   ];
 }
 
@@ -2671,8 +2699,9 @@ export function composeAgentInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
   experiments?: AgentPromptExperiments,
+  session?: CoreInstructionsSession,
 ): string {
-  const core = coreInstructions(workspaceEnvironment, rig, experiments).join(" ");
+  const core = coreInstructions(workspaceEnvironment, rig, experiments, session).join(" ");
   if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
     return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
   }
@@ -2747,6 +2776,7 @@ export function agentPromptResourcesFor(
     | "workspaceEnvironment"
     | "rig"
     | "secrets"
+    | "unattended"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2766,6 +2796,7 @@ export function agentPromptResourcesFor(
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
+    ...(options.unattended ? { unattended: true } : {}),
   };
 }
 
@@ -2793,11 +2824,15 @@ function inspectModularAgentInstructions(
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
   });
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
-    capabilities: config.capabilities,
+    // An unattended session gets no human-input tool, so no clause offers it.
+    capabilities: resources.unattended
+      ? { ...config.capabilities, humanInput: false }
+      : config.capabilities,
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
-    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    resources,
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
       : {}),
@@ -2833,16 +2868,19 @@ export function inspectPersistentAgentInstructions(
       options.workspaceEnvironment,
       options.rig,
       agentPromptExperimentsFor(settings).experiments,
+      options.unattended ? { unattended: true } : undefined,
     ),
     settings,
   );
   if (settings.experimentSystemPromptCacheSplit) {
     // The deployment persona with no workspace environment or sandbox
-    // environment is shared by every session; a workspace persona is not.
+    // environment is shared by every interactive session; a workspace
+    // persona is not.
     recordStableSystemPromptPrefix(
       personaTemplate === settings.agentInstructionsTemplate &&
         !options.workspaceEnvironment &&
-        !options.rig
+        !options.rig &&
+        !options.unattended
         ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
         : OPENGENI_OPERATIONAL_INSTRUCTIONS,
     );
@@ -3265,7 +3303,8 @@ export function buildOpenGeniAgent(
     webSearch:
       (options.hostedWebSearch ?? settings.webSearchEnabled) &&
       sideFeatureRouteRunnable(settings, "web_search.hosted"),
-    humanInput: options.humanInputEnabled !== false,
+    // Nobody answers in an unattended session, so a question would only park it.
+    humanInput: options.humanInputEnabled !== false && options.unattended !== true,
   });
   const hostedWebSearch = toolFamilies.webSearch;
   const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
@@ -3370,6 +3409,13 @@ export function buildOpenGeniAgent(
           {
             name: "validate_human_input_request",
             run: async ({ toolCall }) => {
+              // Switched to work without a person after the chat started: the
+              // tool stays (its list never changes) but nobody would answer.
+              if (options.unattendedNow) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  UNATTENDED_PERSON_REFUSAL_TEXT,
+                );
+              }
               let input: unknown;
               try {
                 input = JSON.parse(toolCall.arguments);
@@ -3541,9 +3587,16 @@ export function buildOpenGeniAgent(
     installInteractionInterventionPolicy(
       agent as unknown as ApprovalCapableAgent,
       options.approvedToolCallId,
+      options.unattendedNow === true,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+    if (options.unattendedNow) {
+      installUnattendedApprovalRefusal(
+        agent as unknown as ApprovalCapableAgent,
+        options.approvedToolCallId,
+      );
+    }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     // Last, so it masks exactly what every other wrapper hands to the model.
     if (options.secretValueMemory) {
@@ -3683,9 +3736,16 @@ export function buildOpenGeniAgent(
   installInteractionInterventionPolicy(
     agent as unknown as ApprovalCapableAgent,
     options.approvedToolCallId,
+    options.unattendedNow === true,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+  if (options.unattendedNow) {
+    installUnattendedApprovalRefusal(
+      agent as unknown as ApprovalCapableAgent,
+      options.approvedToolCallId,
+    );
+  }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   // Last, so it masks exactly what every other wrapper hands to the model.
   if (options.secretValueMemory) {
@@ -4058,6 +4118,74 @@ export function toolPreflightFailureOutput(error: unknown): {
       },
     ],
   };
+}
+
+/** Model-facing result for a call refused because nobody can approve it. */
+export function unattendedApprovalRefusalOutput(): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  return { isError: true, content: [{ type: "text", text: UNATTENDED_APPROVAL_REFUSAL_TEXT }] };
+}
+
+/**
+ * In an unattended session nobody answers an approval, so a call that would
+ * wait for one is refused at once instead: the SDK is told no approval is
+ * needed and the matching `invoke` returns the refusal without running any
+ * inner wrapper, so nothing executes and nothing is approved. Policy is read
+ * exactly as configured; only the wait is replaced. An already approved call
+ * (`approvedToolCallId`) keeps its normal path.
+ *
+ * Installed before preflight containment, which wraps it like any other
+ * Opengeni approval hook (so a throwing policy check stays contained), and
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installUnattendedApprovalRefusal(
+  agent: ApprovalCapableAgent,
+  approvedToolCallId?: string,
+): void {
+  const refused = new Set<string>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof needsApproval>[0],
+            parsedInput: Parameters<typeof needsApproval>[1],
+            callId: Parameters<typeof needsApproval>[2],
+          ) => {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (!callId || callId === approvedToolCallId) return required;
+            if (!required) {
+              refused.delete(callId);
+              return false;
+            }
+            refused.add(callId);
+            return false;
+          },
+        ),
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && refused.delete(callId)) {
+            return unattendedApprovalRefusalOutput() as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installUnattendedApprovalRefusal(cloned, approvedToolCallId);
+      return cloned;
+    };
+  }
 }
 
 /**
@@ -4519,6 +4647,7 @@ export function interactionRequestArgumentsProblem(serialized: string): string |
 function installInteractionInterventionPolicy(
   agent: ApprovalCapableAgent,
   approvedToolCallId?: string,
+  unattendedNow = false,
 ): void {
   const approvalRequiredCallIds = new Set<string>();
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -4541,6 +4670,13 @@ function installInteractionInterventionPolicy(
           defineToolInputGuardrail({
             name: "validate_interaction_request_human",
             run: async ({ toolCall }) => {
+              // Switched to work without a person after the chat started:
+              // nobody would act, so the hand-off is refused, not awaited.
+              if (unattendedNow) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  UNATTENDED_PERSON_REFUSAL_TEXT,
+                );
+              }
               const problem = interactionRequestArgumentsProblem(toolCall.arguments);
               return problem
                 ? ToolGuardrailFunctionOutputFactory.rejectContent(problem)
@@ -4582,7 +4718,7 @@ function installInteractionInterventionPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installInteractionInterventionPolicy(cloned, approvedToolCallId);
+      installInteractionInterventionPolicy(cloned, approvedToolCallId, unattendedNow);
       return cloned;
     };
   }
