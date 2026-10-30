@@ -145,6 +145,21 @@ export function managedAuthSignupEmailNotAllowed(
   );
 }
 
+/**
+ * A user-create refusal raised during an OAuth callback becomes the callback's
+ * `error=` redirect value. Better Auth 1.7 redirects with the error's code;
+ * the sign-in page and clients read the documented values (`signup_disabled`,
+ * `signup_email_not_allowed`, `signup_challenge_required`), which are each
+ * refusal's message with spaces as underscores, as Better Auth 1.6 built them.
+ * Refusals on every other path keep their typed JSON code.
+ */
+export function managedAuthOAuthCallbackRefusal(error: unknown, path: string | undefined): unknown {
+  if (!(error instanceof APIError) || !path?.startsWith("/callback/")) return error;
+  const message = error.body?.message ?? error.message;
+  if (!message) return error;
+  return new APIError(error.status, { code: message.split(" ").join("_"), message });
+}
+
 export function managedAuthUserCreateAdmission(
   settings: Pick<Settings, "environment" | "allowedUserEmails"> &
     Partial<Pick<Settings, "managedAuthNewSignupsEnabled" | "managedAuthRequireEmailVerification">>,
@@ -424,6 +439,21 @@ export function createManagedAuth(
       before: createManagedAuthEmailThrottleHook(
         db,
         settings.betterAuthSecret ?? MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY,
+        async ({ path, body }) => {
+          // Email sign-up refusals are decided before the endpoint runs:
+          // when email verification is required, Better Auth answers a 403
+          // from the user-create hook with its generic "check your email"
+          // success, which would hide these typed reasons. The user-create
+          // hook below stays the backstop for every other path. A deployment
+          // ceiling is left to Better Auth's own disableSignUp refusal.
+          if (path !== "/sign-up/email" || settings.managedAuthNewSignupsEnabled === false) return;
+          requireSignupChallenge(settings);
+          const email = (body as { email?: unknown } | undefined)?.email;
+          if (typeof email === "string" && managedAuthSignupEmailNotAllowed(settings, email)) {
+            throw new ManagedAuthSignupEmailNotAllowedError();
+          }
+          if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
+        },
       ),
     },
     advanced: {
@@ -774,21 +804,27 @@ export function createManagedAuth(
       },
       user: {
         create: {
-          before: async (user) => {
-            requireSignupChallenge(settings);
-            const admission = managedAuthUserCreateAdmission(
-              settings,
-              user,
-              currentManagedAuthProviderId(),
-            );
-            if (admission === false) {
-              if (managedAuthSignupEmailNotAllowed(settings, user.email)) {
-                throw new ManagedAuthSignupEmailNotAllowedError();
+          before: async (user, context) => {
+            try {
+              requireSignupChallenge(settings);
+              const admission = managedAuthUserCreateAdmission(
+                settings,
+                user,
+                currentManagedAuthProviderId(),
+              );
+              if (admission === false) {
+                if (managedAuthSignupEmailNotAllowed(settings, user.email)) {
+                  throw new ManagedAuthSignupEmailNotAllowedError();
+                }
+                return false;
               }
-              return false;
+              if (!(await newSignupsGate.signupsOpen())) {
+                throw new ManagedAuthNewSignupsPausedError();
+              }
+              return admission;
+            } catch (error) {
+              throw managedAuthOAuthCallbackRefusal(error, context?.path);
             }
-            if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
-            return admission;
           },
           after: async (user, context) => {
             await funnel?.recordSignUp(context);
@@ -819,6 +855,24 @@ export type ManagedAuthOAuthAttempt = {
 };
 
 /**
+ * Better Auth's database-backed OAuth state record for a callback's `state`
+ * value, or null. Better Auth keeps it in the verification table under
+ * `auth-state:<state>` (since 1.7; it does not export that key builder).
+ * Every Opengeni reader of OAuth state goes through here, so a future change
+ * to the key is one edit, and the integration tests that drive real OAuth
+ * callbacks fail loudly if it drifts.
+ */
+export async function findManagedAuthOAuthState(
+  auth: ManagedAuth,
+  state: string,
+): Promise<{ value: string; expiresAt: Date } | null> {
+  const verification = await (
+    await auth.$context
+  ).internalAdapter.findVerificationValue(`auth-state:${state}`);
+  return verification ?? null;
+}
+
+/**
  * Resolve Opengeni's server-only login transaction proof from Better Auth's
  * database-backed OAuth state before the provider callback consumes it.
  */
@@ -832,7 +886,7 @@ export async function resolveManagedAuthOAuthAttempt(
   if (!expectedOrigin) return null;
   const state = new URL(request.url).searchParams.get("state");
   if (!state) return null;
-  const verification = await (await auth.$context).internalAdapter.findVerificationValue(state);
+  const verification = await findManagedAuthOAuthState(auth, state);
   if (!verification?.value) return null;
   let parsed: unknown;
   try {

@@ -123,8 +123,8 @@ async function harness(newSignupsEnabled: boolean): Promise<Harness> {
     app,
     googleUser: (user) => {
       google.getUserInfo = async () => ({
-        user: { id: user.id, name: "Provider Human", email: user.email, emailVerified: true },
-        data: {},
+        user: { name: "Provider Human", email: user.email, emailVerified: true },
+        data: { sub: user.id },
       });
     },
   };
