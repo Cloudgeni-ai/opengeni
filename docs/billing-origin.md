@@ -103,15 +103,20 @@ unrestricted plan allowance: what API use may spend. It goes negative when a
 running API call settles past it, exactly like general debt today; the next
 top-up repays it first.
 
-Plan credit never repays that API debt. `BillingBalance.apiDebtMicros` is the
-negative part of credits, up to what API work has spent; app admission and
-plan allocation add it back, so app use keeps the whole allowance. The
-database applies the same rule with
-`opengeni_private.plan_app_general_balance`: period expiry removes the whole
-unused allowance and leaves the API debt as credit debt, and a new period's
-opening debt nets only older app debt. Debt is attributed to API use up to the
-API's lifetime spend, which can count a later app overrun as API debt when the
-account once paid for API use; that errs towards keeping plan credit.
+Plan credit never repays that API debt, nor own-key fee debt (see below).
+Negative credits up to what API work and own-key fees charged to credits have
+spent (a fee's `creditPaidMicros` and `unfundedMicros`, whatever its origin)
+are never repaid from plan credit; of that, own-key fee debt
+(`BillingBalance.byokFeeDebtMicros`) is owed first and the rest is
+`BillingBalance.apiDebtMicros`. App admission and plan allocation add both
+back, so app use keeps the whole allowance. The database applies the same
+cap with `opengeni_private.plan_app_general_balance`: period expiry removes
+the whole unused allowance and leaves that debt as credit debt, and a new
+period's opening debt nets only older app debt. The app's read and the
+database use the same figure, so a renewal never nets debt the app does not
+show. Debt is attributed to API use up to that lifetime spend, which can count
+a later app overrun as API debt when the account once paid for API use or
+own-key fees; that errs towards keeping plan credit.
 
 `plan_period_usage` ignores `usage_origin = 'api'` debits (and refunds of
 them), so API use never consumes the monthly allowance, and
@@ -231,26 +236,24 @@ settlement).
   `listEquivalentMicros`, `listEquivalentSource`, `feeBps`, and how it was
   funded (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`).
 - **Paid credit only:** the fee may draw on an active paid plan's credit (Pro,
-  Max) for app use, then on paid credits: credits that were paid for (top-ups
-  and operator credit grants, net of refunds and disputes, plus debt a paid
-  plan's period absorbed when it opened) and are still there
-  (`BillingBalance.paidPlanCreditMicros`, `paidCreditsMicros`). Ordinary
-  spending draws unpaid credits (unscoped promotional grants, refunds of
-  usage) first, in ledger order, so paid credit that was spent stays spent and
-  a later promotional grant never pays a fee. Usage a monthly unrestricted
-  plan allowance covered is left out of that walk, which can only understate
-  paid credits. The walk is read for fee decisions and whenever fees left
-  debt, never for accounts without fee debt. The Free plan's
-  monthly credit, signup credit and promotional credit never pay it: the fee
-  is a general debit and never draws on model-scoped grants, and Free monthly
-  credit is always model-scoped. API-origin fees come from credits only, like
-  all API use.
+  Max) for app use, then on paid credits (`BillingBalance.paidPlanCreditMicros`,
+  `paidCreditsMicros`). A plan that is not `active` (past due, unpaid) pays no
+  fee, and `plan_period_usage` counts only the fee's `planPaidMicros` against
+  the allowance, so a fee is never charged to both the plan and credits, and a
+  leftover unrestricted Free period never pays one. The Free plan's monthly
+  credit, signup credit and promotional credit never pay it: the fee is a
+  general debit and never draws on model-scoped grants. API-origin fees come
+  from credits only, like all API use.
 - **Fee debt:** admission only checks that paid credit is above zero, so
   parallel calls can settle past it. The excess (`unfundedMicros`) is fee debt
-  (`BillingBalance.byokFeeDebtMicros`) until paid credit covers it again: it
-  never draws plan or promotional credit (spendable figures add it back), no
+  (`BillingBalance.byokFeeDebtMicros`): what fees left unfunded less what
+  paid-for credit repaid since (`feeDebtRepaidMicros` receipts), so a later
+  shortfall such as a dispute clawback is never fee debt. It never draws plan
+  or promotional credit (spendable figures add it back) and plan credit never
+  repays it, not at period expiry and not in a new period's opening debt. No
   own-key call is admitted on paid credits while it is owed (app use may still
-  run on a paid plan's remaining credit), and the next top-up repays it first.
+  run on a paid plan's remaining credit). The next paid-for credit (a top-up,
+  operator credit grant or won dispute) repays fee debt first, then API debt.
   A response that reports no tokens has no list-price equivalent and pays no
   fee.
 - **Refusal:** with no paid credit an own-key call is refused before it runs:
@@ -266,11 +269,54 @@ pays neither credits nor the fee. Paid tools (sandbox time, web search,
 voice, image and video) keep their own credit charges with or without an own
 key.
 
-What counts as paid: `credit_topup` (a partially discounted coupon checkout
-records the full top-up, so its discount counts as paid) and
-`manual_credit_grant` (operators should use `grant` for goodwill credit that
-must not pay fees). Coupon redemptions that write `grant` never pay it, and
-neither does any other unscoped `grant`.
+### Paid credit
+
+Paid credit is credit the person paid for and has not spent:
+
+- **Paid for:** `credit_topup` net of a coupon's discount (the top-up's paid
+  share is `stripeAmountTotalCents / (stripeAmountTotalCents +
+  stripeDiscountCents)`; the discount is unpaid credit arriving with the
+  top-up), `manual_credit_grant` (operators should use `grant` for goodwill
+  credit that must not pay fees) and `credit_dispute_release` (as much as its
+  hold took from paid credit). `credit_refund` and `credit_dispute_hold` take
+  paid credit back first.
+- **Unpaid:** any other positive unscoped credit: coupon and other `grant`
+  rows, usage refunds, a top-up's discount.
+- **Spent:** own-key fees (`creditPaidMicros`), and ordinary spending that ran
+  past unpaid credit. Ordinary spending draws unpaid credit first, so paid
+  credit that was spent stays spent and a later promotional grant never pays
+  a fee. App use an unrestricted paid plan allowance covers never touches
+  credits, so it never spends paid credit, and a refund of it (which returns
+  plan credit) never adds any.
+
+There is no ledger walk. Each write that changes paid credit other than by
+plain spending records a receipt on its own row under the account lock
+(`packages/db/src/paid-credit.ts`): the paid credit it adds or removes
+(`paidCreditMicros`), fee debt it repays (`feeDebtRepaidMicros`), and a mark,
+the paid credits and paid funding just before it (`paidCreditsBeforeMicros`,
+`paidFundingBeforeMicros`, and `paidRestoredMicros` for a usage refund).
+Paid credit is then
+
+    min(paid funding + min(0, lowest mark), credits + fee debt)
+
+where paid funding is the receipts' paid credit less fees paid from it and
+fee debt repaid, and a mark is paid credits before it (plus what it restores)
+less paid funding before it. Between receipts plain spending only lowers
+credits, so the lowest point is either now or a mark. The ordinary balance
+read computes it in the same single pass over the ledger (a few sums, plus the
+paid inflows and any unrecorded unpaid inflows, which scale with top-ups and
+grants rather than usage), so fee admission and settlement cost the same as
+a plain balance read, and settling a fee reads the balance once.
+
+A video refund returns as paid credit what its debit drew from paid credit
+(`paidDrawnMicros` on the debit); other usage refunds return unpaid credit,
+which can understate paid credit but never overstate it. Rows without a
+receipt (written before this release, or by the previous release during a
+rolling deploy) are bounded conservatively: an unrecorded unpaid inflow after
+the latest mark is taken to arrive when paid credit was zero, and with no mark
+at all paid credit is also at most credits less every unrecorded unpaid
+inflow, whichever bound is larger. An unrecorded top-up after the latest mark
+repays fee debt first, and the next receipt records it.
 
 Workspace and member allowances count fee debits like any other debit, so an
 allowance that also counts unbilled usage at list price sees an own-key call
@@ -295,6 +341,13 @@ write handled by an old pod leaves the source unmarked, and an old pod's
 intake doesn't mark the automations a delivery fires. Such a source stays app
 until its next API secret or format write on a new pod.
 
-The platform fee needs no migration. Its default (500) turns it on wherever
-Stripe billing is active once deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0`
-to deploy it switched off.
+Migration 1102 is rolling: same-signature replacements of
+`opengeni_private.plan_period_usage` (an own-key fee counts only its
+`planPaidMicros`) and `opengeni_private.plan_app_general_balance` (the debt
+cap includes own-key fees charged to credits). The previous release never
+writes `byok_platform_fee` rows, so its results are unchanged. Paid-credit
+receipts are plain row metadata; rows the previous release writes during the
+rollout are read conservatively (see Paid credit).
+
+The fee's default (500) turns it on wherever Stripe billing is active once
+deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0` to deploy it switched off.

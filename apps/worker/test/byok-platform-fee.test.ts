@@ -315,15 +315,19 @@ describe("own-key admission", () => {
   });
 });
 
+const NO_FEE_DEBIT = {
+  debitedMicros: 0,
+  planPaidMicros: 0,
+  creditPaidMicros: 0,
+  unfundedMicros: 0,
+};
+
 describe("own-key settlement", () => {
   let recorded: ReturnType<typeof spyOn<typeof opengeniDb, "recordUsageEvent">>;
-  let debit: ReturnType<typeof spyOn<typeof opengeniDb, "applyCreditDebitAfterUse">>;
+  let debit: ReturnType<typeof spyOn<typeof opengeniDb, "applyByokPlatformFeeDebit">>;
   beforeEach(() => {
     recorded = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    debit = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
-      balance: {} as never,
-      debitedMicros: 0,
-    });
+    debit = spyOn(opengeniDb, "applyByokPlatformFeeDebit").mockResolvedValue(NO_FEE_DEBIT);
   });
   afterEach(() => {
     recorded.mockRestore();
@@ -353,9 +357,7 @@ describe("own-key settlement", () => {
     const list = charge.metadata!.listEquivalentMicros as number;
     expect(list).toBeGreaterThan(0);
     expect(charge).toMatchObject({
-      type: "byok_platform_fee",
       amountMicros: Math.ceil((list * 500) / 10_000),
-      byokPlatformFee: true,
       sourceType: "model_response",
       sourceId: "turn-own-key:response-own-key",
       idempotencyKey: "credit:byok_platform_fee:turn-own-key:response-own-key",
@@ -385,14 +387,11 @@ describe("own-key settlement", () => {
 describe("own-key fee on the turn's real response paths", () => {
   let recorded: ReturnType<typeof spyOn<typeof opengeniDb, "recordUsageEvent">>;
   let fact: ReturnType<typeof spyOn<typeof opengeniDb, "recordModelCallFact">>;
-  let debit: ReturnType<typeof spyOn<typeof opengeniDb, "applyCreditDebitAfterUse">>;
+  let debit: ReturnType<typeof spyOn<typeof opengeniDb, "applyByokPlatformFeeDebit">>;
   beforeEach(() => {
     recorded = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     fact = spyOn(opengeniDb, "recordModelCallFact").mockResolvedValue(undefined as never);
-    debit = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockResolvedValue({
-      balance: {} as never,
-      debitedMicros: 0,
-    });
+    debit = spyOn(opengeniDb, "applyByokPlatformFeeDebit").mockResolvedValue(NO_FEE_DEBIT);
   });
   afterEach(() => {
     recorded.mockRestore();
@@ -453,9 +452,9 @@ describe("own-key fee on the turn's real response paths", () => {
       state: createCompactionModelUsageEventState(new Set()),
       emittedSourceKeys: new Set(),
     });
-    expect(debit.mock.calls.map((call) => call[1].type)).toEqual([
-      "byok_platform_fee",
-      "byok_platform_fee",
+    expect(debit.mock.calls.map((call) => call[1].sourceId)).toEqual([
+      "turn-subscription:resp-own",
+      "turn-subscription:resp-compaction",
     ]);
   });
 

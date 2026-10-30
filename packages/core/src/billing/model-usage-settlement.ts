@@ -20,7 +20,7 @@ import type { BillingOrigin, LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import {
-  applyCreditDebitAfterUse,
+  applyByokPlatformFeeDebit,
   applyCreditDebitUpToBalance,
   isStoredVerbatimAsLosslessJsonString,
   recordUsageEvent,
@@ -204,15 +204,13 @@ async function chargeByokPlatformFee(
   const list = byokListEquivalent(priced);
   const feeMicros = byokPlatformFeeMicros(list.listMicros, settings.byokPlatformFeeBps);
   if (feeMicros <= 0) return 0;
-  await applyCreditDebitAfterUse(db, {
+  await applyByokPlatformFeeDebit(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
-    type: BYOK_PLATFORM_FEE_TYPE,
     amountMicros: feeMicros,
     sourceType: "model_response",
     sourceId: input.sourceId,
     idempotencyKey: `credit:${BYOK_PLATFORM_FEE_TYPE}:${input.sourceId}`,
-    byokPlatformFee: true,
     ...(input.billingOrigin ? { usageOrigin: input.billingOrigin } : {}),
     metadata: {
       ...input.debitMetadata,
