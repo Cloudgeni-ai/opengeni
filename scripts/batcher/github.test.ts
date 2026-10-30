@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { gitFileMode, GitHubError, isTransientGitHubFailure, RestGitHub } from "./github";
+import {
+  gitFileMode,
+  GitHubError,
+  GitHubNetworkError,
+  isTransientGitHubFailure,
+  RestGitHub,
+} from "./github";
 
 const SHA = "a".repeat(40);
 
@@ -111,14 +117,27 @@ describe("RestGitHub file and branch writes", () => {
     );
   });
 
-  test("only outages and the network count as transient", () => {
+  test("only outages and requests with no answer count as transient", async () => {
     expect(isTransientGitHubFailure(new GitHubError(503, "p", ""))).toBe(true);
     expect(isTransientGitHubFailure(new GitHubError(429, "p", ""))).toBe(true);
     expect(isTransientGitHubFailure(new GitHubError(403, "p", "API rate limit exceeded"))).toBe(
       true,
     );
-    expect(isTransientGitHubFailure(new TypeError("fetch failed"))).toBe(true);
-    expect(isTransientGitHubFailure(new DOMException("timed out", "TimeoutError"))).toBe(true);
+    // A rejected fetch (network failure or timeout) becomes a GitHubNetworkError.
+    for (const failure of [
+      new TypeError("fetch failed"),
+      new DOMException("timed out", "TimeoutError"),
+    ]) {
+      const gh = new RestGitHub("owner/repo", "token", (async () => {
+        throw failure;
+      }) as unknown as typeof fetch);
+      const error = await gh.branchHead("main").catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GitHubNetworkError);
+      expect(isTransientGitHubFailure(error)).toBe(true);
+    }
+    // The same error types from our own code are bugs, not outages.
+    expect(isTransientGitHubFailure(new TypeError("Cannot read properties of null"))).toBe(false);
+    expect(isTransientGitHubFailure(new DOMException("timed out", "TimeoutError"))).toBe(false);
     expect(isTransientGitHubFailure(new GitHubError(403, "p", "Resource not accessible"))).toBe(
       false,
     );

@@ -13,6 +13,16 @@ export class GitHubError extends Error {
   }
 }
 
+/** A request that never got an answer: the network failed or it timed out. */
+export class GitHubNetworkError extends Error {
+  constructor(
+    readonly path: string,
+    readonly failure: unknown,
+  ) {
+    super(`No answer from GitHub for ${path}: ${String(failure).slice(0, 300)}`);
+  }
+}
+
 export interface PullSummary {
   id: string;
   number: number;
@@ -112,7 +122,8 @@ export function gitFileMode(mode: number): string {
 
 /**
  * A failure that says nothing about the request itself: GitHub down or
- * throttling, or the network. Anything else would fail the same way again.
+ * throttling, or no answer at all. Anything else, including a bug in our own
+ * code, would fail the same way again.
  */
 export function isTransientGitHubFailure(error: unknown): boolean {
   if (error instanceof GitHubError)
@@ -121,10 +132,7 @@ export function isTransientGitHubFailure(error: unknown): boolean {
       error.status === 429 ||
       (error.status === 403 && /rate limit/i.test(error.body))
     );
-  if (!(error instanceof Error)) return false;
-  // fetch rejects with a TypeError when the network fails, and the request
-  // signal's timeout rejects with a TimeoutError.
-  return error instanceof TypeError || error.name === "TimeoutError" || error.name === "AbortError";
+  return error instanceof GitHubNetworkError;
 }
 
 /** A branch name as URL path segments, so no part of it can change the request path. */
@@ -144,17 +152,24 @@ export class RestGitHub implements GitHub {
   private async request(method: string, path: string, body?: unknown, okStatuses: number[] = []) {
     const url = path.startsWith("https://") ? path : `${this.api}/${path}`;
     for (let attempt = 1; ; attempt++) {
-      const response = await this.fetchImpl(url, {
-        method,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28",
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(60_000),
-      });
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          method,
+          headers: {
+            authorization: `Bearer ${this.token}`,
+            accept: "application/vnd.github+json",
+            "x-github-api-version": "2022-11-28",
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(60_000),
+        });
+      } catch (error) {
+        // fetch rejects only when no response arrived (network failure or the
+        // signal's timeout); a write's outcome is then unknown and re-observed.
+        throw new GitHubNetworkError(path, error);
+      }
       if (response.ok || okStatuses.includes(response.status)) {
         const text = await response.text();
         return { status: response.status, data: text ? (JSON.parse(text) as unknown) : null };

@@ -8,7 +8,7 @@ import type {
   PullSummary,
   RunSummary,
 } from "./github";
-import { GitHubError } from "./github";
+import { GitHubError, GitHubNetworkError } from "./github";
 import { CI_WORKFLOW, DEFAULT_SETTINGS, QUEUE_LABEL, parseManifest } from "./model";
 import { LandingMismatch, PR_WORKFLOW, run } from "./pass";
 import type { RepoFile, TreeEntry } from "./renumber";
@@ -554,8 +554,9 @@ describe("a batcher pass", () => {
       [new GitHubError(502, "graphql", "bad gateway"), false],
       [new GitHubError(429, "graphql", "slow down"), false],
       [new GitHubError(403, "graphql", "API rate limit exceeded for installation"), false],
-      [new TypeError("fetch failed"), false],
-      [new DOMException("The operation timed out.", "TimeoutError"), false],
+      [new GitHubNetworkError("graphql", new TypeError("fetch failed")), false],
+      // A bug in our own code is not an outage: it would fail every pass.
+      [new TypeError("Cannot read properties of null (reading 'map')"), true],
       [new GitHubError(403, "graphql", "Resource not accessible by integration"), true],
       [new Error("GraphQL: Could not resolve to a Repository"), true],
       [new Error("10000 does not fit a four-digit migration number"), true],
