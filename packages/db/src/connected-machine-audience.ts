@@ -15,9 +15,10 @@ export type MachineAudience = "workspace" | "only_me";
 /**
  * What the change does to one thing on the machine. move_off: the chat leaves
  * the machine (its files stay). keep: the owner's chat stays and keeps its
- * audience. make_only_me / pause: a schedule that runs on the machine.
- * remove_first: the same computer is connected a second time; that copy has to
- * be removed before the switch.
+ * audience. pause: another person's schedule that runs on the machine; the new
+ * owner's own schedules keep running with no change and are not listed.
+ * make_only_me is no longer produced. remove_first: the same computer is
+ * connected a second time; that copy has to be removed before the switch.
  */
 export type MachineAudienceAction = "move_off" | "keep" | "make_only_me" | "pause" | "remove_first";
 
@@ -45,6 +46,7 @@ export type MachineAudienceSummary = {
   /** The owner's shared chats that stay on the machine and stay shared. */
   keptSharedChats: number;
   movedOffChats: number;
+  /** No longer produced: always 0. */
   schedulesMadeOnlyMe: number;
   schedulesPaused: number;
   stoppedTurns: number;
@@ -110,11 +112,6 @@ type AudienceRequest = {
   target: MachineAudience;
   /** Who will own the machine when the target is Only me. */
   ownerSubjectId: string | null;
-  /**
-   * Whether the new owner may have Only me schedules. When not, their
-   * Workspace schedules on the machine pause instead of becoming Only me.
-   */
-  schedulesMayBeOnlyMe: boolean;
 };
 
 function targetScope(target: MachineAudience): "user" | "workspace" {
@@ -149,7 +146,8 @@ export async function previewMachineAudienceChange(
         sql`select preview_connected_machine_audience_change(
           ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.enrollmentId}::uuid,
           ${targetScope(input.target)}, ${input.ownerSubjectId},
-          ${input.schedulesMayBeOnlyMe}::boolean
+          -- Unused since migration 1143; kept for the signature.
+          false
         ) as value`,
       );
       return previewRecord(row?.value ?? { refusal: "machine_not_found" });
@@ -178,7 +176,8 @@ export async function changeMachineAudience(
         sql`select change_connected_machine_audience(
           ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.enrollmentId}::uuid,
           ${input.expectedGeneration}::bigint, ${targetScope(input.target)},
-          ${input.ownerSubjectId}, ${input.schedulesMayBeOnlyMe}::boolean
+          -- Unused since migration 1143; kept for the signature.
+          ${input.ownerSubjectId}, false
         ) as value`,
       );
       const value = row?.value ?? { outcome: "refused", refusal: "machine_not_found" };

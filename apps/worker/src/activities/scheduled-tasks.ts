@@ -96,6 +96,7 @@ import {
   getEnrollment,
   getSandbox,
   getSessionAuthorityEpoch,
+  getSessionVisibility,
   issueSelfUserResourceGrant,
   listSelfUserResourceAuthorities,
   getRig,
@@ -926,10 +927,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
           );
         }
-        // A personal machine runs only its owner's Only me schedule. The scoped
-        // lookup returns a personal machine to its owner alone, and every attempt
-        // re-proves the owner's membership, workspace access and grant in the
-        // database before the machine is used.
+        // A personal machine runs only its owner's schedules, Only me or shared:
+        // a schedule runs as its owner. The scoped lookup returns a personal
+        // machine to its owner alone, and every attempt re-proves the owner's
+        // membership, workspace access and grant in the database before the
+        // machine is used.
         if (
           !machine ||
           machine.kind !== "selfhosted" ||
@@ -2590,17 +2592,13 @@ async function recordScheduledTaskFiredUsage(
 }
 
 function personalMachineScheduleOwner(task: ScheduledTask, subjectId: string | null): boolean {
-  return (
-    task.visibility === "private" &&
-    task.ownerSubjectId !== null &&
-    task.ownerSubjectId === subjectId
-  );
+  return task.ownerSubjectId !== null && task.ownerSubjectId === subjectId;
 }
 
 /**
- * The owner and machine authority when an Only me schedule runs on its owner's
- * personal machine; null for a shared machine. Throws when a personal machine is
- * no longer usable by the owner, so the run fails closed.
+ * The owner and machine authority when a schedule runs on its owner's personal
+ * machine; null for a shared machine. Throws when a personal machine is no
+ * longer usable by the owner, so the run fails closed.
  */
 async function scheduledPersonalMachineOwner(
   db: Database,
@@ -2608,7 +2606,7 @@ async function scheduledPersonalMachineOwner(
   target: NonNullable<ScheduledTask["agentConfig"]["machineTarget"]>,
 ): Promise<{ subjectId: string; authorityId: string } | null> {
   const subjectId = task.ownerSubjectId;
-  if (task.visibility !== "private" || !subjectId) return null;
+  if (!subjectId) return null;
   const access = { accountId: task.accountId, workspaceId: task.workspaceId, subjectId };
   const machine = await getSandbox(db, access, target.targetSandboxId);
   if (machine?.scope !== "user") return null;
@@ -2716,14 +2714,21 @@ async function seedScheduledGeneratedSessionRoute(input: {
   );
   if (seeded.swapped) {
     if (personalOwner) {
-      // Saving an Only me schedule on your own machine is the consent. Each run
-      // gets a grant for exactly its own chat, so other chats keep asking.
+      // Picking your own machine on your schedule is the consent. Each run gets
+      // a grant for exactly its own chat, Only me or shared like the schedule.
+      // Other people's messages in a shared run chat still wait for the owner.
       const authorityEpoch = await getSessionAuthorityEpoch(input.db, {
         accountId: input.task.accountId,
         workspaceId: input.task.workspaceId,
         sessionId: input.session.id,
       });
       if (authorityEpoch === null) throw new Error("scheduled run chat has no authority epoch");
+      const visibility = await getSessionVisibility(
+        input.db,
+        input.task.workspaceId,
+        input.session.id,
+      );
+      if (visibility === null) throw new Error("scheduled run chat has no visibility");
       await issueSelfUserResourceGrant(input.db, {
         accountId: input.task.accountId,
         workspaceId: input.task.workspaceId,
@@ -2731,10 +2736,10 @@ async function seedScheduledGeneratedSessionRoute(input: {
         authorityId: personalOwner.authorityId,
         resourceKind: "connected_machine",
         mode: "session",
-        context: "user_private",
+        context: visibility,
         sessionId: input.session.id,
         expectedAuthorityEpoch: authorityEpoch,
-        workspaceSharedAcknowledged: false,
+        workspaceSharedAcknowledged: visibility === "workspace_shared",
       });
     }
     return await requireSession(input.db, input.task.workspaceId, input.session.id);

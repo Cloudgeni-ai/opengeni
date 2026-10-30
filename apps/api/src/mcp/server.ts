@@ -2413,7 +2413,6 @@ export function buildOpenGeniMcpServer(
             runMode: task.runMode,
             reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
-            audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
           });
           const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
