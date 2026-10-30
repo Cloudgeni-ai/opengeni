@@ -13362,16 +13362,20 @@ export function repositoryIdentityCommandLines(
   }
   const calls: string[] = [];
   let defaultIdentity: GitRepositoryIdentity | undefined;
-  const identityArguments = (identity: GitRepositoryIdentity) =>
-    [
-      identity.name,
-      identity.email,
-      ...(identity.committer?.name && identity.committer.email
-        ? [identity.committer.name, identity.committer.email]
-        : []),
-    ]
+  // A repository always gets an explicit committer (the author unless one is
+  // configured); the global default only a differing one. See
+  // apply_managed_identity.
+  const identityArguments = (identity: GitRepositoryIdentity, scope: "repository" | "default") => {
+    const committer =
+      identity.committer?.name && identity.committer.email
+        ? identity.committer
+        : scope === "repository"
+          ? identity
+          : null;
+    return [identity.name, identity.email, ...(committer ? [committer.name, committer.email] : [])]
       .map(shellQuote)
       .join(" ");
+  };
   let defaultIsPersonal = true;
   for (const resource of resources) {
     if (resource.subpath) continue;
@@ -13383,7 +13387,9 @@ export function repositoryIdentityCommandLines(
         : undefined;
     const target = shellQuote(posixPath.join("/workspace", resourceMountPath(resource)));
     if (identity) {
-      calls.push(`configure_repository_identity ${target} ${identityArguments(identity)} || true`);
+      calls.push(
+        `configure_repository_identity ${target} ${identityArguments(identity, "repository")} || true`,
+      );
       // Repositories the agent creates itself default to the App identity
       // when one is attached (the established behavior), else the person's.
       const personal = resource.connectionType === "github_personal";
@@ -13425,14 +13431,21 @@ export function repositoryIdentityCommandLines(
     '    [ "$(identity_value "$1" committer.name)" = "$(identity_value "$1" opengeni.managedcommittername)" ] &&',
     '    [ "$(identity_value "$1" committer.email)" = "$(identity_value "$1" opengeni.managedcommitteremail)" ]',
     "}",
-    "forget_managed_identity() {",
-    // A committer Opengeni wrote goes with the marker, so user.* the person
-    // set covers the committer again.
-    '  if [ "$(identity_value "$1" committer.name)" = "$(identity_value "$1" opengeni.managedcommittername)" ] &&',
+    // Removes a committer Opengeni wrote (still unchanged), so user.* covers
+    // the committer again.
+    "release_managed_committer() {",
+    '  if [ -n "$(identity_value "$1" opengeni.managedcommitteremail)" ] &&',
+    '    [ "$(identity_value "$1" committer.name)" = "$(identity_value "$1" opengeni.managedcommittername)" ] &&',
     '    [ "$(identity_value "$1" committer.email)" = "$(identity_value "$1" opengeni.managedcommitteremail)" ]; then',
     '    identity_config "$1" --unset-all committer.name >/dev/null 2>&1 || true',
     '    identity_config "$1" --unset-all committer.email >/dev/null 2>&1 || true',
     "  fi",
+    "  for managed_key in opengeni.managedcommittername opengeni.managedcommitteremail; do",
+    '    identity_config "$1" --unset-all "$managed_key" >/dev/null 2>&1 || true',
+    "  done",
+    "}",
+    "forget_managed_identity() {",
+    '  release_managed_committer "$1"',
     "  for managed_key in opengeni.managedidentity opengeni.managedname opengeni.managedemail opengeni.managedcommittername opengeni.managedcommitteremail; do",
     '    identity_config "$1" --unset-all "$managed_key" >/dev/null 2>&1 || true',
     "  done",
@@ -13452,12 +13465,18 @@ export function repositoryIdentityCommandLines(
     '  identity_config "$1" user.email "$3"',
     '  identity_config "$1" opengeni.managedName "$2"',
     '  identity_config "$1" opengeni.managedEmail "$3"',
-    // The committer is always explicit, so a box-wide committer (the global
-    // default) never leaks into a repository with a different author.
-    '  identity_config "$1" committer.name "${4:-$2}"',
-    '  identity_config "$1" committer.email "${5:-$3}"',
-    '  identity_config "$1" opengeni.managedCommitterName "${4:-$2}"',
-    '  identity_config "$1" opengeni.managedCommitterEmail "${5:-$3}"',
+    // committer.* wins over user.* at every config level, so it is written
+    // only when asked: always for a repository (a global default committer
+    // must never leak into it), and for the global default only when the
+    // committer differs from the author.
+    '  if [ -n "${4:-}" ] && [ -n "${5:-}" ]; then',
+    '    identity_config "$1" committer.name "$4"',
+    '    identity_config "$1" committer.email "$5"',
+    '    identity_config "$1" opengeni.managedCommitterName "$4"',
+    '    identity_config "$1" opengeni.managedCommitterEmail "$5"',
+    "  else",
+    '    release_managed_committer "$1"',
+    "  fi",
     '  identity_config "$1" opengeni.managedIdentity true',
     "}",
     "remove_managed_identity() {",
@@ -13479,7 +13498,7 @@ export function repositoryIdentityCommandLines(
     "}",
     ...calls,
     defaultIdentity
-      ? `apply_managed_identity '' ${identityArguments(defaultIdentity)} || true`
+      ? `apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
       : "remove_managed_identity '' || true",
   ];
 }

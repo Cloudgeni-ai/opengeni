@@ -2186,6 +2186,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         expect(await commitAs("repos/octocat/personal-repo")).toBe(
           `${personalIdentity.name} <mine@corp.example>|${personalIdentity.name} <mine@corp.example>`,
         );
+        // No global committer overrides an identity set in the repository.
+        expect(
+          (await session.exec({ cmd: "git config --global --get committer.email" })).exitCode,
+        ).toBe(1);
         expect(await run("git config --global --get user.name")).toBe("Someone Else");
         // The repository is no longer managed, so a dropped binding identity
         // does not clear it either.
