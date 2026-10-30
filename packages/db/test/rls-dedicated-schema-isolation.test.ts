@@ -45,6 +45,7 @@ import {
 } from "../src/index";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
 
 // The decisive migration-replay and RLS-isolation proof that the existing
 // suites do NOT cover: a NON-OWNER role (`opengeni_app`) under FORCE RLS, in a
@@ -641,15 +642,30 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           routine.name === "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)",
       )?.configuration,
     ).toContain("search_path=pg_catalog");
-    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
-      FORCE_RLS_TABLES.length,
-    );
-    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(FORCE_RLS_TABLES.length);
+    const retired = new Set<string>(Object.values(RETIRING_FEATURE_TABLES).flat());
+    const present = new Set(posture.tables.map((table) => table.name));
+    // Only explicitly retiring objects may be absent. Compare exact names,
+    // not counts: one missing mandatory table cannot hide behind an extra one.
+    const expectedPresent = (names: readonly string[]) =>
+      names.filter((name) => !retired.has(name) || present.has(name)).sort();
     expect(
-      posture.tables.filter(
-        (table) => table.select && table.insert && table.update && table.delete,
-      ),
-    ).toHaveLength(RUNTIME_FULL_DML_TABLES.length);
+      posture.tables
+        .filter((table) => table.rlsEnabled)
+        .map((table) => table.name)
+        .sort(),
+    ).toEqual(expectedPresent(FORCE_RLS_TABLES));
+    expect(
+      posture.tables
+        .filter((table) => table.rlsActive)
+        .map((table) => table.name)
+        .sort(),
+    ).toEqual(expectedPresent(FORCE_RLS_TABLES));
+    expect(
+      posture.tables
+        .filter((table) => table.select && table.insert && table.update && table.delete)
+        .map((table) => table.name)
+        .sort(),
+    ).toEqual(expectedPresent(RUNTIME_FULL_DML_TABLES));
     expect(
       posture.tables.find((table) => table.name === "nested_agent_depth_configuration"),
     ).toMatchObject({
