@@ -3,6 +3,8 @@
 
 export const QUEUE_LABEL = "queue-ready";
 export const PRIORITY_LABEL = "queue-priority";
+/** Marks the members of the running batch; the batcher keeps it in sync every pass. */
+export const IN_BATCH_LABEL = "in-batch";
 export const VERSION_BRANCH = "changeset-release/main";
 export const BATCH_PREFIX = "batch/";
 export const BUILD_PREFIX = "batch-build/";
@@ -140,7 +142,13 @@ export interface Observation {
 }
 
 export type Action =
-  | { kind: "abandon"; batch: Batch; reason: string }
+  | {
+      kind: "abandon";
+      batch: Batch;
+      reason: string;
+      /** The member whose new head or departure from the queue ended the batch. */
+      changed?: number;
+    }
   | { kind: "retry"; batch: Batch; runs: BatchRun[] }
   | { kind: "land"; batch: Batch }
   | { kind: "eject"; number: number; reason: string }
@@ -256,6 +264,27 @@ function split<T>(items: T[]): [T[], T[]] {
   return [items.slice(0, half), items.slice(half)];
 }
 
+/** The running batch: the newest one, as `decide` treats any others as extra. */
+export function runningBatch<T extends { createdAt: number }>(batches: T[]): T | undefined {
+  return [...batches].sort((a, b) => b.createdAt - a.createdAt)[0];
+}
+
+/**
+ * Label changes that make the `in-batch` label name exactly the running
+ * batch's members, given the PRs that carry it now.
+ */
+export function inBatchChanges(
+  members: number[],
+  labelled: number[],
+): { add: number[]; remove: number[] } {
+  const want = new Set(members);
+  const have = new Set(labelled);
+  return {
+    add: members.filter((n) => !have.has(n)),
+    remove: labelled.filter((n) => !want.has(n)),
+  };
+}
+
 /** Decide everything one pass should do, in order. */
 export function decide(observation: Observation, settings: Settings = DEFAULT_SETTINGS): Action[] {
   const { now, mainSha } = observation;
@@ -268,10 +297,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     if (pull.conflict !== null)
       actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
 
-  const batches = [...observation.batches].sort((a, b) => b.createdAt - a.createdAt);
-  for (const extra of batches.slice(1))
+  const batch = runningBatch(observation.batches);
+  for (const extra of observation.batches.filter((b) => b !== batch))
     actions.push({ kind: "abandon", batch: extra, reason: "only one batch runs at a time" });
-  const batch = batches[0];
 
   if (batch) {
     const { manifest } = batch;
@@ -281,12 +309,21 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     const left = manifest.members.find((m) => byNumber.get(m.number)?.headSha !== m.head);
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
+    let changed: number | undefined;
     if (manifest.base !== mainSha) reason = "main moved since the batch was built";
-    else if (left)
+    else if (left) {
+      changed = left.number;
       reason = byNumber.has(left.number)
         ? `#${left.number} has a new head`
         : `#${left.number} left the queue`;
-    if (reason) actions.push({ kind: "abandon", batch, reason });
+    }
+    if (reason)
+      actions.push({
+        kind: "abandon",
+        batch,
+        reason,
+        ...(changed === undefined ? {} : { changed }),
+      });
     else {
       const result = verdict(batch, now, settings);
       if (result.kind === "running") return actions;

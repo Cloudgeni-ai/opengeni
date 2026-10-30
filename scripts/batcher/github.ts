@@ -86,6 +86,11 @@ export interface GitHub {
   rerunFailedJobs(id: number): Promise<void>;
   comment(number: number, body: string): Promise<void>;
   removeLabel(number: number, label: string): Promise<void>;
+  addLabel(number: number, label: string): Promise<void>;
+  /** Creates the label unless it already exists. */
+  ensureLabel(label: string, color: string, description: string): Promise<void>;
+  /** Numbers of issues and PRs, open or closed, that carry the label. */
+  labelled(label: string): Promise<number[]>;
   disableAutoMerge(pullId: string): Promise<void>;
 }
 
@@ -412,6 +417,28 @@ export class RestGitHub implements GitHub {
       undefined,
       [404],
     );
+  }
+
+  async addLabel(number: number, label: string) {
+    await this.request("POST", `issues/${number}/labels`, { labels: [label] });
+  }
+
+  async ensureLabel(label: string, color: string, description: string) {
+    // 422 means it already exists.
+    await this.request("POST", "labels", { name: label, color, description }, [422]);
+  }
+
+  async labelled(label: string) {
+    const numbers: number[] = [];
+    // The batcher clears the label as members leave, so few issues carry it.
+    for (let page = 1; page <= 10; page++) {
+      const batch = await this.get<{ number: number }[]>(
+        `issues?labels=${encodeURIComponent(label)}&state=all&per_page=100&page=${page}`,
+      );
+      numbers.push(...batch.map((issue) => issue.number));
+      if (batch.length < 100) break;
+    }
+    return numbers;
   }
 
   async disableAutoMerge(pullId: string) {

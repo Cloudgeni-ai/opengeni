@@ -3,15 +3,18 @@ import {
   BATCH_PREFIX,
   BUILD_PREFIX,
   DEFAULT_SETTINGS,
+  IN_BATCH_LABEL,
   PRIORITY_LABEL,
   QUEUE_LABEL,
   VERSION_BRANCH,
   decide,
+  inBatchChanges,
   isControlPlane,
   numberTaken,
   numberedFiles,
   parseManifest,
   renderManifest,
+  runningBatch,
   squashTitle,
   type Action,
   type Batch,
@@ -34,6 +37,10 @@ const ADDED = new Set(["added", "renamed", "copied"]);
 
 export const VERSION_OVERLAP =
   "main changed files this Version PR also changes after it was generated, so it cannot land as reviewed. Run the Open Version PR workflow to regenerate it from current main; do not merge main into it.";
+
+export const IN_BATCH_COLOR = "fbca04";
+export const IN_BATCH_DESCRIPTION =
+  "In the running merge batch. Don't push or remove queue-ready until it lands or leaves.";
 
 export class LandingMismatch extends Error {}
 
@@ -145,10 +152,67 @@ async function eject(ctx: Context, number: number, reason: string) {
   if (autoMerge) await ctx.gh.disableAutoMerge(autoMerge);
 }
 
-async function abandon(ctx: Context, batch: Batch, reason: string) {
+async function abandon(ctx: Context, batch: Batch, reason: string, changed?: number) {
   ctx.log(`Abandoning ${batch.branch}: ${reason}`);
   for (const ci of batch.runs) if (ci.status !== "completed") await ctx.gh.cancelRun(ci.id);
   await ctx.gh.deleteBranch(batch.branch);
+  if (changed !== undefined) await tellChanged(ctx, batch.manifest, reason, changed);
+}
+
+/** Show whoever changed a member what that cost. Best effort: never fails the pass. */
+async function tellChanged(ctx: Context, manifest: Manifest, reason: string, changed: number) {
+  const others = manifest.members.filter((m) => m.number !== changed).map((m) => `#${m.number}`);
+  const restarted = others.length
+    ? ` It restarted CI for ${others.join(", ")}, which are tested again without this PR.`
+    : "";
+  try {
+    await ctx.gh.comment(
+      changed,
+      `Merge batch \`${manifest.id}\` was cancelled because ${reason} while CI was testing it.${restarted}\n\nWhile a PR has the \`${IN_BATCH_LABEL}\` label, don't push to it or remove \`${QUEUE_LABEL}\`. Wait until it lands or the label goes away.`,
+    );
+  } catch (error) {
+    ctx.log(`Could not comment on #${changed}: ${String(error)}`);
+  }
+}
+
+/**
+ * Make the `in-batch` label name exactly the members of the running batch, so
+ * people and agents can see which PRs must not change. Runs at the end of
+ * every pass; a failure is logged and the next pass tries again.
+ */
+async function markMembers(ctx: Context) {
+  const { gh } = ctx;
+  const attempt = async (what: string, call: () => Promise<void>) => {
+    try {
+      await call();
+    } catch (error) {
+      ctx.log(`Could not ${what}: ${String(error)}`);
+    }
+  };
+  await attempt(`update the ${IN_BATCH_LABEL} label`, async () => {
+    const batches: { createdAt: number; manifest: Manifest }[] = [];
+    for (const branch of await gh.branches(BATCH_PREFIX)) {
+      const commit = await gh.commit(branch.sha);
+      const manifest = parseManifest(commit.message);
+      if (manifest && branch.name === `${BATCH_PREFIX}${manifest.id}`)
+        batches.push({ createdAt: commit.date, manifest });
+    }
+    const running = runningBatch(batches);
+    const members = running?.manifest.members.map((m) => m.number) ?? [];
+    const { add, remove } = inBatchChanges(members, await gh.labelled(IN_BATCH_LABEL));
+    if (add.length)
+      await attempt(`create the ${IN_BATCH_LABEL} label`, () =>
+        gh.ensureLabel(IN_BATCH_LABEL, IN_BATCH_COLOR, IN_BATCH_DESCRIPTION),
+      );
+    for (const number of add) {
+      ctx.log(`Marking #${number} ${IN_BATCH_LABEL} (batch ${running!.manifest.id})`);
+      await attempt(`mark #${number}`, () => gh.addLabel(number, IN_BATCH_LABEL));
+    }
+    for (const number of remove) {
+      ctx.log(`Unmarking #${number} ${IN_BATCH_LABEL}`);
+      await attempt(`unmark #${number}`, () => gh.removeLabel(number, IN_BATCH_LABEL));
+    }
+  });
 }
 
 /**
@@ -249,7 +313,7 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
 async function act(ctx: Context, action: Action) {
   switch (action.kind) {
     case "abandon":
-      return abandon(ctx, action.batch, action.reason);
+      return abandon(ctx, action.batch, action.reason, action.changed);
     case "retry":
       for (const ci of action.runs) {
         ctx.log(`Retrying the failed jobs of ${ci.url}`);
@@ -301,28 +365,34 @@ export async function run(
   const done: Action[] = [];
   for (const branch of await gh.branches(BUILD_PREFIX))
     if (!options.dryRun) await gh.deleteBranch(branch.name);
-  for (let round = 0; round < 20; round++) {
-    const actions = decide(await observe(ctx), ctx.settings);
-    if (!actions.length) {
-      ctx.log("Nothing to do");
-      break;
+  try {
+    for (let round = 0; round < 20; round++) {
+      const actions = decide(await observe(ctx), ctx.settings);
+      if (!actions.length) {
+        ctx.log("Nothing to do");
+        break;
+      }
+      for (const action of actions) ctx.log(`Plan: ${describe(action)}`);
+      if (options.dryRun) return actions;
+      let waitUntil: number | null = null;
+      for (const action of actions) {
+        if (action.kind === "wait") waitUntil = action.until;
+        else await act(ctx, action);
+        done.push(action);
+      }
+      if (waitUntil !== null) {
+        if (waitUntil > options.deadline) break;
+        // Clear the label of an abandoned batch before waiting for a new one.
+        await markMembers(ctx);
+        await sleep(Math.max(0, waitUntil - ctx.now()) + 1_000);
+        continue;
+      }
+      // Only a landing, an ejection or an abandoned batch can make more work now.
+      if (!actions.some((a) => a.kind === "land" || a.kind === "eject" || a.kind === "abandon"))
+        break;
     }
-    for (const action of actions) ctx.log(`Plan: ${describe(action)}`);
-    if (options.dryRun) return actions;
-    let waitUntil: number | null = null;
-    for (const action of actions) {
-      if (action.kind === "wait") waitUntil = action.until;
-      else await act(ctx, action);
-      done.push(action);
-    }
-    if (waitUntil !== null) {
-      if (waitUntil > options.deadline) break;
-      await sleep(Math.max(0, waitUntil - ctx.now()) + 1_000);
-      continue;
-    }
-    // Only a landing, an ejection or an abandoned batch can make more work now.
-    if (!actions.some((a) => a.kind === "land" || a.kind === "eject" || a.kind === "abandon"))
-      break;
+  } finally {
+    if (!options.dryRun) await markMembers(ctx);
   }
   return done;
 }
