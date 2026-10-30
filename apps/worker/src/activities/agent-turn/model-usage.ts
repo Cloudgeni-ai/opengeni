@@ -58,6 +58,7 @@ import {
   sanitizedModelUsageInput,
   sessionUsageMeterAmountMicros,
   settleModelUsage,
+  settleHostedWebSearchUsage,
   type ModelUsageBillingRecord,
 } from "@opengeni/core";
 
@@ -332,8 +333,6 @@ export async function processModelResponseTerminalEvent(input: {
       sourceKey: string;
       authoritative: boolean;
       usageReported: boolean;
-      /** Hosted searches of a response without usage, for the aggregate fallback. */
-      webSearchRequestsWithoutUsage: number;
     }
 > {
   const terminal = modelTerminalResponseFromSdkEvent(input.event);
@@ -380,7 +379,17 @@ export async function processModelResponseTerminalEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      if (!responseUsage) return;
+      if (!responseUsage) {
+        // No usage means no token debit here, but the provider still ran
+        // these searches. Each response settles its own under its own source
+        // key, so a stream that mixes responses with and without usage
+        // charges every search once, whatever the aggregate fallback does.
+        await settleHostedWebSearchUsageWithoutTokens(input, {
+          sourceKey,
+          requests: terminal.webSearchRequests ?? 0,
+        });
+        return;
+      }
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -486,8 +495,43 @@ export async function processModelResponseTerminalEvent(input: {
     sourceKey,
     authoritative,
     usageReported: responseUsage !== null,
-    webSearchRequestsWithoutUsage: responseUsage === null ? (terminal.webSearchRequests ?? 0) : 0,
   };
+}
+
+/**
+ * Hosted searches of a model response that reported no usage. The same gates
+ * as the token path: only a credit-billed turn on a billed deployment pays
+ * (settleHostedWebSearchUsage checks billing, the operator switch and legacy
+ * accounts). There is no Gateway-reported cost without usage, so nothing
+ * already includes these searches.
+ */
+async function settleHostedWebSearchUsageWithoutTokens(
+  input: {
+    settings: Settings;
+    db: ActivityServices["db"];
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    model: string;
+    externallyBilled: boolean;
+    chargesOpenGeniCredits?: boolean | undefined;
+  },
+  response: { sourceKey: string; requests: number },
+): Promise<void> {
+  const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
+  if (response.requests <= 0 || !chargesOpenGeniCredits) return;
+  await settleHostedWebSearchUsage(input.db, input.settings, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+    sourceId: `${input.turnId}:${response.sourceKey}`,
+    model: input.model,
+    requests: response.requests,
+  });
 }
 
 /**

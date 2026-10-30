@@ -953,9 +953,6 @@ export async function runTurnStreamAttempt(
     >();
     let currentToolBatchCompletedCallIds = new Set<string>();
     let streamSawPerResponseUsage = false;
-    // Hosted searches of responses that reported no usage: the aggregate
-    // usage fallback below settles them with the stream's aggregate usage.
-    let aggregateWebSearchRequests = 0;
     // Deltas learn the phase a provider declares when it announces a message;
     // undeclared messages the SDK runs past (same response asks for tools)
     // are commentary. Every SDK event of this stream is normalized once.
@@ -1506,7 +1503,6 @@ export async function runTurnStreamAttempt(
             );
           }
           streamSawPerResponseUsage ||= responseResult.usageReported;
-          aggregateWebSearchRequests += responseResult.webSearchRequestsWithoutUsage;
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
           await historySink.reconcileConversationTruth();
@@ -2115,9 +2111,6 @@ export async function runTurnStreamAttempt(
               countsTowardTokenCap: billingState.countsTowardTokenCap,
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
-              ...(aggregateWebSearchRequests > 0
-                ? { webSearchRequests: aggregateWebSearchRequests }
-                : {}),
               sourceKey: aggregateSourceKey,
               latencyMode: turnExecutionPolicy.latencyMode,
               observability,

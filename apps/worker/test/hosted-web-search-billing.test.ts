@@ -8,7 +8,6 @@ import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/sessio
 import {
   createModelResponseEventState,
   processModelResponseTerminalEvent,
-  recordModelUsageAndDebitCredits,
 } from "../src/activities/agent-turn/model-usage";
 useNoSessionUsageLimitForFakeDatabases();
 
@@ -76,12 +75,20 @@ const settings = testSettings({
   }),
 });
 
-async function settleResponse(externallyBilled: boolean, withUsage = true) {
+async function settleResponse(
+  externallyBilled: boolean,
+  withUsage = true,
+  options: {
+    responseId?: string;
+    state?: ReturnType<typeof createModelResponseEventState>;
+    accountId?: string;
+  } = {},
+) {
   return await processModelResponseTerminalEvent({
     event: new RunRawModelStreamEvent({
       type: "response_done",
       response: {
-        id: "resp_hosted_search",
+        id: options.responseId ?? "resp_hosted_search",
         ...(withUsage
           ? { usage: { inputTokens: 1_000, outputTokens: 10, totalTokens: 1_010 } }
           : {}),
@@ -92,13 +99,13 @@ async function settleResponse(externallyBilled: boolean, withUsage = true) {
         ],
       },
     } as any) as any,
-    state: createModelResponseEventState(new Set()),
+    state: options.state ?? createModelResponseEventState(new Set()),
     dispatchId: "dispatch-1",
     settings,
     db: {} as any,
     observability: createObservability(testSettings(), { component: "worker" }) as any,
     publish,
-    accountId: "acct-1",
+    accountId: options.accountId ?? "acct-1",
     workspaceId: "ws-1",
     sessionId: "sess-1",
     turnId: TURN,
@@ -136,38 +143,49 @@ describe("hosted web search on a credit-billed turn", () => {
     });
   });
 
-  test("searches of a response without usage are settled by the aggregate usage fallback", async () => {
+  test("searches of a response without usage are charged for that response alone", async () => {
     const debits = spyWrites();
     const result = await settleResponse(false, false);
-    // Nothing to settle per response; the stream hands the count on.
     expect(result).toMatchObject({ status: "processed", usageReported: false });
-    expect(result.status === "processed" && result.webSearchRequestsWithoutUsage).toBe(2);
-    expect(debits).toEqual([]);
-    await recordModelUsageAndDebitCredits(settings, {} as any, {
-      accountId: "acct-1",
-      workspaceId: "ws-1",
-      sessionId: "sess-1",
-      turnId: TURN,
-      turnAttemptId: "attempt-1",
-      model: "gpt-hosted",
-      externallyBilled: false,
-      chargesOpenGeniCredits: true,
-      countsTowardTokenCap: true,
-      usage: { inputTokens: 1_000, outputTokens: 10, totalTokens: 1_010 } as any,
-      webSearchRequests: 2,
-      sourceKey: "aggregate",
-    });
     expect(debits).toHaveLength(1);
     expect(debits[0]).toMatchObject({
       type: "web_search_debit",
       amountMicros: 21_000,
-      idempotencyKey: `credit:web_search_debit:hosted:${TURN}:aggregate`,
+      usage: { kind: "tool", modelId: "gpt-hosted" },
+      idempotencyKey: `credit:web_search_debit:hosted:${TURN}:resp_hosted_search`,
+      metadata: { requests: 2 },
     });
+  });
+
+  test("a stream mixing responses with and without usage charges every response's searches once", async () => {
+    const debits = spyWrites();
+    // Once one response reports usage the stream skips the aggregate
+    // fallback, so the response without usage must settle its own searches.
+    const state = createModelResponseEventState(new Set());
+    await settleResponse(false, true, { responseId: "resp_with_usage", state });
+    await settleResponse(false, false, { responseId: "resp_without_usage", state });
+    // A replayed terminal event of the same response is not charged again.
+    expect(
+      await settleResponse(false, false, { responseId: "resp_without_usage", state }),
+    ).toMatchObject({ status: "duplicate" });
+    expect(debits.map((debit) => [debit.idempotencyKey, debit.amountMicros])).toEqual([
+      [`credit:web_search_debit:hosted:${TURN}:resp_with_usage`, 21_000],
+      [`credit:web_search_debit:hosted:${TURN}:resp_without_usage`, 21_000],
+    ]);
   });
 
   test("an externally billed turn is never charged for hosted search", async () => {
     const debits = spyWrites();
     await settleResponse(true);
+    await settleResponse(true, false, { responseId: "resp_external_without_usage" });
+    expect(debits).toEqual([]);
+  });
+
+  test("CloudGeni's legacy billing account is never charged for hosted search", async () => {
+    const debits = spyWrites();
+    const accountId = "25eacc5d-f383-4f79-910a-b3d11dbf1310";
+    await settleResponse(false, true, { responseId: "resp_legacy_with_usage", accountId });
+    await settleResponse(false, false, { responseId: "resp_legacy_without_usage", accountId });
     expect(debits).toEqual([]);
   });
 });

@@ -325,8 +325,9 @@ export type ModelTerminalResponse = {
   responseId?: string;
   usage: ModelResponseUsage | null;
   /**
-   * Hosted searches the response ran, also when it reported no usage: the
-   * aggregate usage fallback charges them (with usage, `usage` carries them).
+   * Hosted searches the response ran, also when it reported no usage; the
+   * worker then settles them for this response alone (with usage, `usage`
+   * carries them).
    */
   webSearchRequests?: number;
 };

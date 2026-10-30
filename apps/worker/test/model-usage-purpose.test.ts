@@ -195,7 +195,6 @@ test("main, compaction and session-title usage each record their purpose on the 
       sourceKey: "msg_main",
       authoritative: true,
       usageReported: true,
-      webSearchRequestsWithoutUsage: 0,
     },
     { status: "processed", sourceKey: "dispatch-A:compaction-1", authoritative: true },
     { status: "processed", sourceKey: "dispatch-A:session-title-1", authoritative: true },
