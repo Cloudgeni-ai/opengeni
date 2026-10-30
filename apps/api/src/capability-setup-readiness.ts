@@ -14,7 +14,11 @@ import type { CapabilityCatalogItem, Session } from "@opengeni/contracts";
  */
 export type CapabilitySetupReadiness = "ready" | "assumed_ready" | "not_ready" | "not_applicable";
 
-const SELF_REPORTING_CAPABILITY_IDS = new Set(["api:connected-machine", "api:github-app"]);
+const SELF_REPORTING_CAPABILITY_IDS = new Set([
+  "api:connected-machine",
+  "api:github-app",
+  "api:github-personal",
+]);
 
 /** Built-in servers are not tool-policy ids; their tools are chosen by name. */
 const BUILT_IN_SERVER_IDS = new Set(["opengeni", "files", "docs"]);

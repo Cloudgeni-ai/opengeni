@@ -30,6 +30,29 @@ Chat setup uses the provider-neutral capability discovery and human authorizatio
 card flow described in [MCP surfaces](mcp-surfaces.md). `github_connect_link`
 remains a status/manager-link tool; reading status never posts a setup card.
 
+`github_connect_link` also reports the caller's personal identity ("Your GitHub",
+see [Personal GitHub connections](personal-github.md)) in a `personal` field:
+
+```json
+{
+  "enabled": true,
+  "connected": true,
+  "status": "connected",
+  "login": "octocat",
+  "repositoryCount": 3,
+  "connectUrl": null,
+  "manageUrl": "https://app.example/workspaces/<id>/plugins?open=integration%3Agithub&github=personal"
+}
+```
+
+`status` is `disabled`, `not_connected` (a revoked connection counts as not
+connected), `connected`, `needs_reconnect` or `unknown` (no initiating person,
+no `connections:read`, or a failed read; `connected` is then `null`). For an
+agent attempt the person is the attempt's initiating human, with their current
+workspace permissions. `connectUrl` and `manageUrl` need `connections:write`;
+the App `installUrl`/`linkUrl` still need `github:manage`. The field carries no
+token, and a failed personal read never hides the App status.
+
 ## Owner-authority flow
 
 Creating the App and binding an installation are distinct operations. A caller

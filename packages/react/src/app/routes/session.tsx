@@ -1107,6 +1107,7 @@ export function SessionRoute({
     reconnectCardConnection.current = null;
     setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
   }, [page, reconnectTransport, workspaceId]);
+  const connectPersonalGitHub = context.connectPersonalGitHub;
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1165,6 +1166,10 @@ export function SessionRoute({
           }
           await markIntegrationConnectRedirect("github", "app_install");
           page.assign(status.linkUrl);
+          return;
+        }
+        if (item.capability.id === "api:github-personal") {
+          await connectPersonalGitHub(workspaceId);
           return;
         }
         if (item.capability.id === "mcp:codex_apps") {
@@ -1240,6 +1245,7 @@ export function SessionRoute({
       page,
       context.accessContext,
       context.client,
+      connectPersonalGitHub,
       context.workspaceCapabilityCatalog,
       workspaceId,
       reconnectTransport,

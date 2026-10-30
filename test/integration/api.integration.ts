@@ -8201,6 +8201,61 @@ describe("API component integration", () => {
     });
     expect(link.installUrl).toContain(`/v1/workspaces/${grant.workspaceId}/github/connect?state=`);
     expect(link.linkUrl).toBe(link.installUrl);
+    // Both identities in one answer: personal sign-in is off on this deployment.
+    expect((link as unknown as { personal: Record<string, unknown> }).personal).toMatchObject({
+      enabled: false,
+      connected: false,
+      status: "disabled",
+      connectUrl: null,
+    });
+
+    const personalDeps = {
+      ...mcpDeps,
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        integrationsEnabled: true,
+        githubPersonalOauthEnabled: true,
+        githubPersonalOauthClientId: "personal-client-id",
+        githubPersonalOauthClientSecret: "personal-client-secret",
+        ...configuredGitHub,
+      }),
+    };
+    const withPersonal = await callMcpTool<{
+      status: string;
+      personal: {
+        enabled: boolean;
+        connected: boolean | null;
+        status: string;
+        login: string | null;
+        repositoryCount: number | null;
+        connectUrl: string | null;
+        manageUrl: string | null;
+      };
+    }>(buildOpenGeniMcpServer(personalDeps, grant), "github_connect_link", {});
+    expect(withPersonal.status).toBe("unbound");
+    expect(withPersonal.personal).toMatchObject({
+      enabled: true,
+      connected: false,
+      status: "not_connected",
+      login: null,
+      repositoryCount: null,
+      manageUrl: null,
+      connectUrl: `https://api.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub&github=personal`,
+    });
+    const memberPersonal = await callMcpTool<{
+      installUrl: string | null;
+      personal: { status: string; connectUrl: string | null };
+    }>(
+      buildOpenGeniMcpServer(personalDeps, {
+        ...grant,
+        permissions: ["github:use", "connections:read"],
+      }),
+      "github_connect_link",
+      {},
+    );
+    expect(memberPersonal.installUrl).toBeNull();
+    expect(memberPersonal.personal).toMatchObject({ status: "not_connected", connectUrl: null });
 
     const useOnlyLink = await callMcpTool<{
       status: string;

@@ -138,6 +138,7 @@ export const SECTION_KEYS = [
   "page-knowledge",
   "page-org-people",
   "page-eu-only",
+  "page-github-integration",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -1019,6 +1020,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "The organization setting and what an EU-only workspace switches off, in production components.",
     usedOn: "Organization settings > Security & data, model pickers, feature settings",
     load: () => import("./page-eu-only"),
+  },
+  {
+    key: "page-github-integration",
+    group: "Pages",
+    title: "GitHub integration",
+    purpose:
+      "GitHub's two identities, Your GitHub and the Opengeni app, each with one action, in production components.",
+    usedOn: "Capabilities > GitHub",
+    load: () => import("./page-github-integration"),
   },
 ];
 

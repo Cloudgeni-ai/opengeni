@@ -1,5 +1,24 @@
 # Modular prompt changelog
 
+The agent knows both GitHub identities. When `github_connect_link` is
+available, the admin module adds one sentence (about 195 bytes) mapping "connect
+my GitHub" or "do it as me" to the person's own account (Your GitHub) and
+"install the GitHub app" to the Opengeni app. The repositories module gains a
+"GitHub identity per mounted repository:" block only when a mounted GitHub
+repository has a known identity: one bullet per repository (as the person, with
+their login when known, or as the Opengeni app), plus a sentence saying to use
+plain git and the github_personal__* tools on personal repositories because gh
+and raw GitHub API calls do not act as the person, and, with both identities, a
+sentence pointing to the github_app__* tools. With a personal repository, the gh
+sentence is limited to repositories not mounted as the person. Sessions without
+GitHub repository identities render the repositories module byte-for-byte as
+before. The `github_connect_link` description and response add the `personal`
+identity (see docs/github-app.md).
+
+```diff
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
+```
+
 The Skill index lists every installed Skill. Its last header sentence changes
 from "Use the id when names are ambiguous." to "Read a Skill by its name; an
 entry shows an id only when several Skills share that name, and then you read
