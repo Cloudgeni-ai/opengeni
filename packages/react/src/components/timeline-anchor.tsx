@@ -9,13 +9,23 @@ type Anchor = {
 };
 export type TimelineAnchor = Anchor[];
 
-/** Read ownership synchronously: selectionchange may follow the next React commit. */
-export function timelineHasReader(scroller: HTMLElement | null): boolean {
+/**
+ * Read ownership synchronously: selectionchange may follow the next React commit.
+ * Focus left on a card the person just answered is not reading: that answer
+ * handed the view back to the conversation's tip.
+ */
+export function timelineHasReader(
+  scroller: HTMLElement | null,
+  answeredCard: HTMLElement | null = null,
+): boolean {
   if (!scroller) return false;
   const focused = scroller.ownerDocument.activeElement;
   const selection = scroller.ownerDocument.getSelection();
   return Boolean(
-    (focused && focused !== scroller && scroller.contains(focused)) ||
+    (focused &&
+      focused !== scroller &&
+      scroller.contains(focused) &&
+      !answeredCard?.contains(focused)) ||
     (selection &&
       !selection.isCollapsed &&
       (scroller.contains(selection.anchorNode) || scroller.contains(selection.focusNode))),

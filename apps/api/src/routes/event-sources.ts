@@ -264,8 +264,9 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  // The public intake. The URL names the source; the signature authenticates
-  // the sender. Unknown URLs and a deployment without event triggers are 404.
+  // The public intake. The URL names the source; the signature (or, for an
+  // app that can't sign, the secret in the URL's query) authenticates the
+  // sender. Unknown URLs and a deployment without event triggers are 404.
   app.post("/v1/webhooks/events/:routeId", async (c) => {
     const routeId = c.req.param("routeId");
     if (!z.string().uuid().safeParse(routeId).success) {
@@ -282,6 +283,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       routeId,
       headers: c.req.raw.headers,
       body,
+      query: new URL(c.req.url).searchParams,
     });
     switch (result.outcome) {
       case "not_found":

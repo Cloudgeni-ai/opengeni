@@ -37,6 +37,7 @@ import {
   type CuaDesktopRuntime,
   type ListedWindow,
   type RunStepsOutcome,
+  WINDOWS_SET_VALUE_REFUSED,
 } from "./wire";
 import {
   dateFieldFormat,
@@ -236,6 +237,8 @@ export class CuaComputerBackend implements ComputerBackend {
       // stale token (see dispatchBatch); elsewhere each action is its own.
       actionBatches,
       parallelApps: false,
+      // Only macOS brings a window to the front (see dispatchFocus).
+      targetFocus: platform === "macos" && permissions.accessibility,
     };
   }
 
@@ -344,6 +347,7 @@ export class CuaComputerBackend implements ComputerBackend {
         keyboardInput: permissions.accessibility,
         backgroundActions: permissions.accessibility,
         backgroundInput: macos && permissions.accessibility,
+        targetFocus: macos && permissions.accessibility,
         windowCapture: permissions.screen_recording,
         pointerInput: permissions.accessibility && permissions.screen_recording,
       };
@@ -439,7 +443,8 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "batch") return await this.dispatchBatch(command, false, standIn);
+      if (command.action.type === "batch")
+        return await this.dispatchBatch(command, false, standIn, unconfirmed);
       if (command.action.type === "focus") return await this.dispatchFocus(command);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
@@ -472,6 +477,7 @@ export class CuaComputerBackend implements ComputerBackend {
           { ...command, action: { type: "batch", actions: [command.action] } },
           true,
           standIn,
+          unconfirmed,
         );
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
@@ -507,6 +513,18 @@ export class CuaComputerBackend implements ComputerBackend {
                 false,
                 true,
               );
+            if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
+              // CUA resolved the token and refused before writing. It does
+              // not expose that element's native control identity. Matching
+              // a descendant by its rectangle is not a safe fallback: an
+              // omitted child or sibling can occupy the same rectangle.
+              throw new ComputerBackendError(
+                "unsupported",
+                "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+                false,
+                false,
+              );
+            }
             // CUA's own wording names its raw tools; say what the caller does.
             if (
               error instanceof ComputerBackendError &&
@@ -768,6 +786,7 @@ export class CuaComputerBackend implements ComputerBackend {
     command: ComputerBackendActionCommand,
     single = false,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null> {
     const { steps, actionOf } = await this.batchSteps(command);
     const standIns: ComputerBackendRoleStandIn[] = [];
@@ -780,6 +799,9 @@ export class CuaComputerBackend implements ComputerBackend {
     let report = "";
     let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
       null;
+    // Raw input (a key press, or a press CUA could only send) with nothing
+    // confirming the app took it, as for one action (see dispatch).
+    let unconfirmedInput = false;
     try {
       for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
         const chunk = steps.slice(start, start + MAX_RUN_STEPS);
@@ -820,8 +842,19 @@ export class CuaComputerBackend implements ComputerBackend {
             name: used.name,
           });
         }
-        if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
-        else stopped = { step: start + outcome.completed, outcome };
+        if (outcome.kind === "completed") {
+          report += openedWindowsReport(outcome.windowChanges);
+          for (const index of outcome.unconfirmed) {
+            const action = actions[actionOf[start + index]!];
+            if (
+              action?.type === "keyboard" ||
+              (action?.type === "semantic" &&
+                action.action === "invoke" &&
+                steps[start + index]?.name === "click")
+            )
+              unconfirmedInput = true;
+          }
+        } else stopped = { step: start + outcome.completed, outcome };
       }
     } finally {
       await fronted.giveBack();
@@ -836,6 +869,7 @@ export class CuaComputerBackend implements ComputerBackend {
           standIn(used);
         }
     if (!stopped) {
+      if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const { after: confirmed, failures } = await this.confirmInput(after, steps);

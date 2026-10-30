@@ -6,6 +6,7 @@ import {
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
+import { gzipSync } from "node:zlib";
 import { objectStorageForSandboxDownloads } from "./file-resources";
 
 // A box can sit behind a slow provider queue; the URL only has to outlive the
@@ -17,17 +18,17 @@ const PUBLISHED_RECHECK_MS = 60 * 60 * 1000;
 const published = new Map<string, { at: number; done: Promise<void> }>();
 
 export function managedCodemodeClientObjectKey(digest: string): string {
-  return `sandbox-assets/codemode-client/${digest}.json`;
+  return `sandbox-assets/codemode-client/${digest}.json.gz`;
 }
 
 async function publishOnce(objectStorage: ObjectStorage, key: string, bytes: Uint8Array) {
   const head = objectStorage.headObject ? await objectStorage.headObject(key) : null;
   if (head) return;
-  await objectStorage.putObject({ key, contentType: "application/json", body: bytes });
+  await objectStorage.putObject({ key, contentType: "application/gzip", body: gzipSync(bytes) });
 }
 
 /**
- * Publishes this release's managed Codemode client under its digest and signs
+ * Publishes a compressed transfer of this release's managed Codemode client under its digest and signs
  * a short-lived download URL for a managed box. Returns undefined on any
  * failure: the runtime then stages the bytes through the provider file API.
  */

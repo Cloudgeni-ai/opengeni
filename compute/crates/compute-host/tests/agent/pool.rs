@@ -549,6 +549,7 @@ async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
             high_watermark: available - room,
             compressed_percent: 30,
             balloon_grace: Duration::from_secs(2),
+            outgrowth: None,
         }),
         ..HostPolicy::default()
     };

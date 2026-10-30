@@ -75,6 +75,17 @@ billing ledger. Both retain 30 days with bounded maintenance deletes; reads use
 14 days to support same-hours comparisons. The public read returns no call rows,
 session identities, monetary amounts or absolute units.
 
+The forecast samples usage from a five-minute slot's first reading to the first
+reading two or more slots later, and restarts the sample at any change. So the
+history read returns only each window's first and last reading, every reading
+that differs from the one before it, and each five-minute slot's first reading.
+It returns calls as totals per stretch between two returned readings and UTC
+hour, with their count. Its size follows how often usage changes, not how many
+model calls ran: at most about one reading per window and one total per account
+for every five minutes of activity, plus the changes. The forecast from it
+equals the forecast from every row, except that a total's calls are capped at
+their average size when the forecast damps call-size outliers.
+
 `model_call_facts.connection_id` is the canonical account ID used by Codex and
 Claude Models lists, in both scopes. Facts have no age-based prune job, but writes
 are best-effort; old unattributed facts, deleted workspaces and deleted accounts
@@ -1471,7 +1482,10 @@ Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
 Registry models may set `hostedWebSearchContextSize` to `low`, `medium`, or
-`high` for Responses routes that support `search_context_size`. The worker
+`high` for Responses routes that support `search_context_size` and have hosted
+web search enabled. Configuration rejects the setting for other APIs or a
+disabled hosted-search capability, rather than changing a route's execution
+digest for an option that its adapter cannot use. The worker
 passes this static route setting to the hosted search tool. Omission preserves
 the SDK's current `medium` default byte-for-byte; it does not add a new field
 to the executable definition. The option neither enables search nor changes
@@ -1505,7 +1519,9 @@ hosted client `tool_search`, `tool_list`, native search output definitions and
 direct function calls. `generic_dispatch` retains ordinary search/list/invoke
 controls. Ranked discovery loads the strongest match per explicit query clause;
 generic receipts also return compact alternatives. Native search outputs cannot
-carry compact suggestions, so use `tool_list` to browse alternatives. Exact ties,
+carry compact suggestions, so a search that neither names a tool nor matches one
+clearly is followed by a developer note listing its unloaded close candidates
+and any unresolved exact names. Exact ties,
 operation-only queries and no matches disclose no schemas. Exact
 `names` loads complete schemas. An optional decision model handles ambiguous
 searches from a wider candidate set; strong lexical matches skip inference.

@@ -184,6 +184,9 @@ const RunStepsReport = z.object({
         hint: z.unknown().optional(),
         /** The window-change report lines of the step's action. */
         window_changes: z.array(z.string().max(65_536)).max(16).optional(),
+        /** What the step's tool could confirm about its effect: "unverifiable"
+         * is input it sent with nothing confirming the app took it. */
+        effect: z.string().max(64).optional(),
         /** The element the step's lookup found. `stand_in` is set when no
          * element had the role named and the one element of a role pressed
          * alike with that exact name was used: its own role and label. */
@@ -206,7 +209,14 @@ export type RunStepsStandIn = { step: number; role: string; name: string };
 
 /** How a CUA run_steps batch ended. */
 export type RunStepsOutcome =
-  | { kind: "completed"; windowChanges: string; standIns: RunStepsStandIn[] }
+  | {
+      kind: "completed";
+      windowChanges: string;
+      standIns: RunStepsStandIn[];
+      /** The steps, by index in the call, whose input CUA sent with nothing
+       * confirming the app took it. */
+      unconfirmed: number[];
+    }
   | {
       kind: "stopped";
       /** The actions that completed before the one the batch stopped at. */
@@ -272,6 +282,9 @@ export async function runSteps(
       kind: "completed",
       windowChanges: (report.steps.at(-1)?.window_changes ?? []).join("\n"),
       standIns: standIns(total),
+      unconfirmed: report.steps.flatMap((step, index) =>
+        step.effect === "unverifiable" ? [index] : [],
+      ),
     };
   }
   const index = report.failed_step;
@@ -346,6 +359,16 @@ export function deliveredUnconfirmed(call: {
   return (call.data.effect ?? call.result.action?.effect) === "unverifiable";
 }
 
+/** The code given to Windows CUA's refusal of set_value, which it reports
+ * only as text: it neither set the element's value through UI Automation nor
+ * wrote anything else. CUA says so both for an element with no value pattern
+ * and for one whose value write failed (a read-only field, or one in a window
+ * CUA disabled for the write). */
+export const WINDOWS_SET_VALUE_REFUSED = "windows_set_value_refused";
+
+const WINDOWS_SET_VALUE_REFUSAL =
+  /^set_value: element \[\d+\] does not implement ValuePattern or RangeValuePattern\b/u;
+
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
   name: string,
@@ -383,6 +406,18 @@ export async function callDesktop(
         true,
       );
     }
+    if (
+      mutation &&
+      name === "set_value" &&
+      result?.isError &&
+      WINDOWS_SET_VALUE_REFUSAL.test(result.text)
+    )
+      throw new CuaFailure(
+        "unsupported",
+        "Windows would not set this element's value, so nothing was changed",
+        false,
+        WINDOWS_SET_VALUE_REFUSED,
+      );
     // A failure CUA reports only as text (Windows launch_app does) still says
     // why; keep it, as written, like any other CUA reason.
     const reason = result?.isError && result.text.trim() ? `: ${result.text}` : "";

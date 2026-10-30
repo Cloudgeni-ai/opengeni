@@ -1994,6 +1994,14 @@ const SettingsSchema = z.object({
   documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
+  // How OpenAI-compatible document embeddings sign in. `deployment_identity`
+  // is for an Azure OpenAI v1 resource (OPENGENI_DOCUMENT_EMBEDDING_BASE_URL
+  // set to its /openai/v1 URL, the deployment name as the model): a Microsoft
+  // Entra token for the deployment's own identity, the standard
+  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
+  // AZURE_CLIENT_SECRET, instead of a static key.
+  // OPENGENI_DOCUMENT_EMBEDDING_AUTH
+  documentEmbeddingAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
   // Site SQL: optional per-Site Cloudflare storage (one SQLite Durable Object
   // per Site, docs/site-data.md). Off unless enabled here, the gateway's
@@ -3692,6 +3700,19 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    provider.models.forEach((model, index) => {
+      if (model.hostedWebSearchContextSize === undefined) return;
+      const hostedSearchEnabled =
+        model.capabilities?.hostedTools.webSearch.runnable ?? model.hostedWebSearch ?? false;
+      if (provider.api !== "responses" || !hostedSearchEnabled) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["models", index, "hostedWebSearchContextSize"],
+          message:
+            "hostedWebSearchContextSize requires a Responses route with hosted web search enabled",
+        });
+      }
+    });
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({
@@ -6135,6 +6156,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingDimensions: optional("OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS"),
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
+    documentEmbeddingAuth: optional("OPENGENI_DOCUMENT_EMBEDDING_AUTH"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
@@ -6457,10 +6479,13 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export_status",
 ];
 
-/** Tools that read event sources and events; they exist only where event triggers run. */
+/** Tools for event sources and events; they exist only where event triggers run. */
 const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
 ];
 
 /**

@@ -743,12 +743,7 @@ describe("BrowserControlClient", () => {
           operationId: randomUUID(),
           action: {
             type: "batch" as const,
-            actions: [
-              {
-                type: "click" as const,
-                locator: { kind: "text" as const, text: "Save", exact: true },
-              },
-            ],
+            actions: [{ type: "viewport_reset" as const }],
           },
         }),
       ).rejects.toMatchObject({
@@ -758,8 +753,9 @@ describe("BrowserControlClient", () => {
           retryable: false,
           message:
             "This browser's controller image is older than this server and does not accept " +
-            '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
-            "the element by its ref. Updating the controller image adds support.",
+            'type "viewport_reset" on an action. Nothing ran. Retry without type "viewport_reset", ' +
+            "or set type viewport with the window's own width and height. Updating the " +
+            "controller image adds support.",
         },
       });
       rejected = { status: 404, code: "resource_not_found", message: "route not found" };
@@ -2734,7 +2730,7 @@ test("an older agent's controller refusal names the newer option without replayi
       expectedDocumentGeneration: "document-1",
       expectedFrameId: "frame-1",
       actor: { kind: "system", subjectId: "test" },
-      action: { type: "click", locator: { kind: "text", text: "Save", exact: true } },
+      action: { type: "viewport_reset" },
     }),
   ).rejects.toMatchObject({
     status: 409,
@@ -2743,8 +2739,9 @@ test("an older agent's controller refusal names the newer option without replayi
       retryable: false,
       message:
         "This browser's controller runs in an older Opengeni agent that does not accept " +
-        '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
-        "the element by its ref. Updating the agent adds support.",
+        'type "viewport_reset" on an action. Nothing ran. Retry without type "viewport_reset", ' +
+        "or set type viewport with the window's own width and height. Updating the agent " +
+        "adds support.",
     },
   });
   rejected = { status: 404, code: "resource_not_found", message: "route not found" };
@@ -2829,8 +2826,36 @@ test("keeps a create's tab inventory only when it validates for the same binding
     for (const value of [undefined, [{ id: "x" }], [target, foreign], "not-a-list"]) {
       targets = value;
       const created = await client.createSession(input);
-      expect(created.observation.target.id).toBe(target.id);
+      expect(created.observation?.target.id).toBe(target.id);
       expect(created).not.toHaveProperty("targets");
+    }
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("accepts a continued session that has no tab, and still rejects a malformed observation", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-resume" };
+  let observation: unknown = null;
+  const searches: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      searches.push(new URL(request.url).searchParams.get("acceptsNoObservation") ?? "absent");
+      return success({ ...reference, observation });
+    },
+  });
+  const placement = await localPlacement();
+  const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+  const input = { ...reference, tokenGeneration: 1, controlToken, viewToken, headed: true };
+  try {
+    expect((await client.createSession(input)).observation).toBeNull();
+    // It tells the controller it can take that, so a controller can tell it
+    // apart from a caller that predates such sessions.
+    expect(searches).toEqual(["1"]);
+    for (const value of [undefined, { target: { id: "x" } }]) {
+      observation = value;
+      await expect(client.createSession(input)).rejects.toThrow();
     }
   } finally {
     await server.stop(true);

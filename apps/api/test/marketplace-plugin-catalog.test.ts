@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
 import { capabilitySetupReadiness } from "../src/capability-setup-readiness";
 import {
+  mcpConnectionEndpointKey,
   pluginCapabilityId,
   pluginCapabilityItems,
   pluginCapabilitySetup,
+  pluginMcpEndpointKeys,
 } from "../src/integrations/marketplace-plugin-catalog";
 
 const FIGMA = "plugin:marketplace/openai/figma";
@@ -46,6 +48,38 @@ describe("marketplace plugins in the integration catalogue", () => {
     const chat = { tools: [], firstPartyMcpTools: [], effectiveToolPolicy: null } as never;
     expect(capabilitySetupReadiness(FIGMA, offered, chat)).toBe("not_ready");
     expect(capabilitySetupReadiness(FIGMA, installed, chat)).toBe("ready");
+  });
+
+  test("a description ends with a full stop before what the plugin adds", () => {
+    const gmail = pluginCapabilityItems(new Set()).find(
+      (item) => item.id === "plugin:marketplace/openai/gmail",
+    )!;
+    expect(gmail.description).toBe("Read and manage Gmail. Plugin with 1 MCP server.");
+    expect(pluginMcpEndpointKeys(gmail)).toEqual(["https://gmailmcp.googleapis.com/mcp/v1"]);
+  });
+
+  test("an uninstalled plugin names a connection to the same server for the person's own account", () => {
+    const gmail = pluginCapabilityItems(new Set()).find(
+      (item) => item.id === "plugin:marketplace/openai/gmail",
+    )!;
+    expect(pluginCapabilitySetup(gmail).detail).toBe(
+      "Not installed. The person can review what the Gmail plugin adds and install it for the workspace from its card.",
+    );
+    expect(pluginCapabilitySetup(gmail, [{ capabilityId: "mcp:gmail", name: "Gmail" }])).toEqual({
+      status: "authorization_required",
+      action: "enable",
+      detail:
+        "Not installed. The person can review what the Gmail plugin adds and install it for the workspace from its card. For the person's own account, offer the Gmail connection (mcp:gmail) instead: call capability_authorization_request with its capabilityId. Installing the plugin is for everyone in the workspace.",
+    });
+    const installed = pluginCapabilityItems(new Set(["marketplace/openai/gmail"])).find(
+      (item) => item.id === "plugin:marketplace/openai/gmail",
+    )!;
+    expect(
+      pluginCapabilitySetup(installed, [{ capabilityId: "mcp:gmail", name: "Gmail" }]).detail,
+    ).not.toContain("connection");
+    expect(mcpConnectionEndpointKey("https://gmailmcp.googleapis.com/mcp/v1/")).toBe(
+      "https://gmailmcp.googleapis.com/mcp/v1",
+    );
   });
 
   test("installing from the chat needs the same permission as the Plugins page", () => {

@@ -17,6 +17,12 @@ fn view() -> SandboxView {
         broken: false,
         paused_for_memory: None,
         balloon: 0,
+        compressed: 0,
+        swapped: 0,
+        stall: 0,
+        memory_high: None,
+        request: 0,
+        borrowed: 0,
     }
 }
 

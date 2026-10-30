@@ -289,6 +289,9 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
+  // Open approval waits by the approval ids they ask about, so the person's
+  // answer is on the wait the moment it is recorded, before work resumes.
+  const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
   // Live model-capacity waits. Later lifecycle evidence that the turn is no
   // longer blocked (resume, a non-waiting status, its settlement) resolves
   // them, so a recovered wait never lingers as a warning.
@@ -638,7 +641,7 @@ export function buildTimeline(
           });
           break;
         }
-        const voiceMessage = realtimeVoiceMessage(payload);
+        const voiceMessage = realtimeVoiceMessage(t, payload);
         const sender = messageSender(payload.initiator);
         const humanInputDelegation = parseHumanInputDelegation(payload.modelContext);
         const userMessage: UserMessageItem = {
@@ -1398,17 +1401,49 @@ export function buildTimeline(
             call.awaitingApproval = true;
           }
         }
-        rememberPresentationWait(
-          {
-            kind: "notice",
-            id: event.id,
-            tone: "waiting",
-            text: t("timeline.projection.approvalNeededTheTurnIs"),
-            approval: true,
-            occurredAt: event.occurredAt,
-          },
-          turnId,
-        );
+        const approvalActions = approvalActionsOf(payload);
+        const notice: NoticeItem = {
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text: t("timeline.projection.approvalNeededTheTurnIs"),
+          approval: true,
+          ...(approvalActions.length > 0 ? { approvalActions } : {}),
+          occurredAt: event.occurredAt,
+        };
+        for (const action of approvalActions) approvalWaitsById.set(action.id, { notice, turnId });
+        rememberPresentationWait(notice, turnId);
+        break;
+      }
+
+      case "user.approvalDecision": {
+        // The person answered: the wait reads as answered at once, saying how,
+        // rather than waiting for the run to resume.
+        if (event.duplicateOfEventId) break;
+        const approvalId = stringValue(payload.approvalId);
+        if (!approvalId || (payload.decision !== "approve" && payload.decision !== "reject")) break;
+        // Opengeni itself rejects a call it refused or whose approval expired;
+        // that is not the person's answer and never reads as theirs.
+        const automatic =
+          payload.decision === "reject" &&
+          (payload.refusal !== undefined || event.clientEventId?.startsWith("system:") === true);
+        const decision = automatic ? "automatic_reject" : payload.decision;
+        // The call it names stops waiting too: an approved call runs now, a
+        // rejected one never will.
+        const call = callsById.get(approvalId);
+        if (call?.kind === "tool-call" && call.awaitingApproval) {
+          delete call.awaitingApproval;
+          if (decision === "approve") call.status = "running";
+          else call.approvalRejected = automatic ? "automatic" : "person";
+        }
+        const open = approvalWaitsById.get(approvalId);
+        if (!open) break;
+        approvalWaitsById.delete(approvalId);
+        const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
+        if (action) action.decision = decision;
+        if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
+          resolvePresentationWait(event, turnId ?? open.turnId);
+        }
         break;
       }
 
@@ -2036,7 +2071,15 @@ export function buildTimeline(
   return items;
 }
 
-function realtimeVoiceMessage(payload: Record<string, unknown>): {
+/**
+ * A voice request shows its transcript. A voice handoff's stored text is a
+ * fixed English notice, not something the person said, so it shows in the
+ * reader's language.
+ */
+function realtimeVoiceMessage(
+  t: OpenGeniText,
+  payload: Record<string, unknown>,
+): {
   text: string;
   presentation: {
     kind: "realtime_voice" | "realtime_voice_handoff";
@@ -2047,9 +2090,14 @@ function realtimeVoiceMessage(payload: Record<string, unknown>): {
   const visibleText = stringValue(payload.text);
   if (presentation.kind === "realtime_voice" || presentation.kind === "realtime_voice_handoff") {
     const context = stringValue(presentation.context);
-    return visibleText && context
-      ? { text: visibleText, presentation: { kind: presentation.kind, context } }
-      : null;
+    if (!visibleText || !context) return null;
+    return {
+      text:
+        presentation.kind === "realtime_voice_handoff"
+          ? t("timeline.projection.voiceSessionEnded")
+          : visibleText,
+      presentation: { kind: presentation.kind, context },
+    };
   }
   return null;
 }
@@ -2298,10 +2346,27 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * the URL annotation table that would make them resolvable. Keep the canonical
  * model-history item untouched, but never expose those unusable handles in the
  * human timeline. Ordinary markdown links and structured URL citations remain.
+ *
+ * A handle is U+E200, `cite` or `filecite`, U+E202-separated references such
+ * as `turn0search3`, then U+E201. It also reaches the timeline without its
+ * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
+ * text), cut short, or still streaming at the end of the text.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text.replace(/\s*cite(?:[^]+)+/gu, "");
+  return text
+    .replace(PROVIDER_CITATION_HANDLE, "")
+    .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+    .replace(PROVIDER_CITATION_DELIMITER, "")
+    .replace(BARE_PROVIDER_CITATION_HANDLE, "");
 }
+
+const PROVIDER_CITATION_HANDLE =
+  /\s*\u{E200}(?:file)?cite(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
+/** A handle whose end has not streamed in yet, or never will. */
+const UNFINISHED_PROVIDER_CITATION_HANDLE = /\s*\u{E200}[^\u{E201}\s]*$/u;
+const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
+/** `cite` or `filecite` glued to one or more references, which no prose writes. */
+const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+/gu;
 
 /**
  * The turn summary's short outcome for a usage ceiling. The adjacent notice row
@@ -3523,6 +3588,26 @@ function approvalCallIds(payload: Record<string, unknown>): string[] {
     if (id) ids.push(id);
   }
   return ids;
+}
+
+/** The actions an approval request asks about, with their display titles when given. */
+function approvalActionsOf(
+  payload: Record<string, unknown>,
+): NonNullable<NoticeItem["approvalActions"]> {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const actions: NonNullable<NoticeItem["approvalActions"]> = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    // The same id `user.approvalDecision` answers (see `approvalCallIds`).
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (!id) continue;
+    const title = stringValue(asRecord(record.display).title).trim();
+    actions.push({ id, title: title || null });
+  }
+  return actions;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

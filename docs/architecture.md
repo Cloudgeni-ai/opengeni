@@ -1358,9 +1358,11 @@ flowchart LR
 ```
 
 Send and Steer create durable turn intent. A normal human Send is promoted to
-Steer-equivalent replacement only when the active, unpaused branch is waiting in
-`requires_action`; checked-out queue edits, paused sessions, and other active
-lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
+Steer-equivalent replacement only when the active, unpaused, admissible branch
+is waiting with no live attempt: in `requires_action`, or in
+`waiting_capacity` on a parked subscription turn (`sendTakesOverActiveWait`);
+checked-out queue edits, paused sessions, and other active lifecycle states
+keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
@@ -2509,6 +2511,29 @@ All text/chord components in a physical batch are resolved before its first
 input request, so known unsupported mappings remain definite zero-input failures.
 Once any request may have escaped, failures retain an unknown outcome.
 
+X11 text the layout cannot type is bound to spare keycodes (keycodes with no
+keysym) for the rest of the session, never only for one batch. The server
+cannot confirm that a receiving client has refreshed its keymap, so a binding
+restored after the action returns could reach a busy application late and lose
+or repeat characters. Each binding is recorded in a root-window property with an
+owner window that lives exactly as long as the session's own X connection. A
+claimed spare is never rebound to another glyph; sessions that bind the same
+glyph share it. When the last session using a spare closes, its keycode is
+restored after a short grace period, and a session start restores the bindings
+of owners that have gone away (a crashed process). Named function keys the layout
+lacks (F13 to F24) use the same bindings.
+
+When a batch needs more distinct glyphs than spare keycodes remain, it is refused
+before its first key. The computer driver then pastes ordinary single-line text
+through a CLIPBOARD owner of the helper's own: once a client of the focused
+window has read the text (clipboard-manager reads do not count), the previous
+clipboard text is put back, or the clipboard is emptied again if it was empty.
+It cannot be put back when it held something other than text, was too large to
+read whole, or the target did not read the paste within three seconds; the pasted
+text then stays. A copy the person makes meanwhile is kept. Text with secret
+references is never pasted: it is refused with a message that names neither the
+character nor the clipboard.
+
 Window pointer preflight follows the mapped point through the X11 tree and
 requires the original client window and the same XRes resource owner, including
 embedded children. Covered or unprovable points are refused before XTEST input.
@@ -3286,9 +3311,12 @@ do not remove it. See `docs/local-development.md`.
 
 Teams admission uses an internal durable inbox proof at native session/message commit
 (`packages/core/src/application/teams-private-session.ts` and `packages/db/src/teams-private-session.ts`). It binds the exact installation generation, actor, linked human, route, message,
-and current lease. Personal Teams conversations may create private sessions in an authorized
-shared workspace under the existing organization privacy policy; this does not mint managed-browser authority or permit Personal workspace binding, visibility changes, forks, or
-approvals.
+and current lease. Personal Teams conversations create private sessions in the sender's own
+Personal workspace when they have one and Personal workspaces are on (the route's
+`session_workspace_id`, migration 1097), otherwise in the authorized shared workspace under the
+existing organization privacy policy. The route, inbox, outbox and link stay in the installation's
+workspace; the proof verifies them there. This does not mint managed-browser authority or permit
+installation in a Personal workspace, visibility changes, forks, or approvals.
 
 Teams reply discovery uses a content-free sequence wake on relevant durable session events.
 An invoker-rights trigger updates the reserved route in the event transaction; delivery still
