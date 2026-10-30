@@ -433,7 +433,8 @@ async fn bindings_last_until_the_last_session_using_them_ends() {
     assert_eq!(received(&client).0, "é");
     drop(second);
     assert_eq!(keymap(&display), before, "restored with the last session");
-    assert!(claims_property(&display).is_empty());
+    let claims = claims_property(&display);
+    assert!(claims.is_empty(), "{claims:?}");
 }
 
 #[tokio::test]
