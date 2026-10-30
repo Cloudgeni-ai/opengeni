@@ -37,8 +37,8 @@ returns one text block for the turn's chat model:
   that admin-only rule, because everyone in a shared chat can see its output;
 - where the deployment hosts app data (database, files, backups), from the
   optional `OPENGENI_DATA_HOSTING_LOCATION` operator declaration (unset is
-  unknown), and where cloud sandboxes run, from `OPENGENI_SANDBOX_BACKEND` and
-  `OPENGENI_MODAL_REGIONS`;
+  unknown), and where this chat's sandbox runs, from the chat's sandbox backend
+  and `OPENGENI_MODAL_REGIONS` (a Connected Machine's location is not known);
 - the deployment's `OPENGENI_LEGAL_PRIVACY_POLICY_URL`,
   `OPENGENI_LEGAL_TERMS_OF_SERVICE_URL`, the optional
   `OPENGENI_LEGAL_SUBPROCESSORS_URL`, and `OPENGENI_SUPPORT_EMAIL` (the contact

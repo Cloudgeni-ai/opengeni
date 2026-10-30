@@ -423,7 +423,7 @@ describe("renderPrivacyFacts", () => {
     expect(text).toContain(
       "Where app data (database, files, backups) is hosted: not declared in this deployment's configuration (unknown).",
     );
-    expect(text).toContain("run on daytona; its region is not declared (unknown).");
+    expect(text).toContain("runs on daytona; its region is not declared (unknown).");
     expect(text).toContain("Subprocessor list: not published on this deployment");
     expect(text).not.toContain("open the privacy policy");
   });
@@ -442,7 +442,7 @@ describe("renderPrivacyFacts", () => {
     expect(declared).toContain(
       "- App data (database, files, backups) is hosted in: Microsoft Azure, North Europe (Ireland) (the operator's declaration).",
     );
-    expect(declared).toContain("run on Modal, placed in region eu.");
+    expect(declared).toContain("runs on Modal; new sandboxes are placed in region eu.");
     expect(declared).toContain("Subprocessor list: https://opengeni.ai/privacy#sharing");
     expect(declared).toContain("open the privacy policy (or subprocessor list) page now");
 
@@ -453,15 +453,26 @@ describe("renderPrivacyFacts", () => {
       deployment: DEPLOYMENT,
     });
     expect(undeclared).toContain("is hosted: not declared in this deployment's configuration");
-    expect(undeclared).toContain("run on Modal, not pinned to a region (unknown).");
+    expect(undeclared).toContain("runs on Modal, not pinned to a region (unknown).");
     expect(undeclared).toContain(
       "Subprocessor list: no separate list configured; check the privacy policy above",
     );
     expect(undeclared).toContain("open the privacy policy (or subprocessor list) page now");
 
     for (const [backend, expected] of [
-      ["docker", "run on this deployment's own servers (docker)."],
-      ["none", "this deployment runs no cloud sandboxes."],
+      ["docker", "runs on servers this deployment's operator runs (docker)"],
+      [
+        "none",
+        "- This chat has no sandbox for running commands. Other chats in the workspace may use a different sandbox.",
+      ],
+      [
+        "selfhosted",
+        "is a Connected Machine: a machine its owner connected to the workspace (its location is not known here).",
+      ],
+      [
+        "compute",
+        "runs on this deployment's own microVM sandboxes (compute); their region is not declared (unknown).",
+      ],
     ] as const) {
       const text = renderPrivacyFacts({
         route: route({}),

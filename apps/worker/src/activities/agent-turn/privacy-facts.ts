@@ -49,7 +49,7 @@ export type PrivacyFactsDeployment = {
   subprocessorsUrl: string | null;
   /** Operator-declared app data hosting, in plain words (`OPENGENI_DATA_HOSTING_LOCATION`). */
   dataHostingLocation: string | null;
-  /** The deployment's cloud sandbox backend, and its Modal placement regions. */
+  /** This chat's sandbox backend (not necessarily the deployment default), and Modal placement regions. */
   sandboxes: { backend: string; regions: readonly string[] | null };
   /** Idle chats move to read-only long-term storage after this many days. */
   sessionArchiveIdleDays: number | null;
@@ -57,18 +57,29 @@ export type PrivacyFactsDeployment = {
 
 const SELF_HOSTED_SANDBOX_BACKENDS: ReadonlySet<string> = new Set(["docker", "local"]);
 
-function sandboxText(sandboxes: PrivacyFactsDeployment["sandboxes"]): string {
+/** One sentence on where this chat's sandbox runs. */
+function sandboxSentence(sandboxes: PrivacyFactsDeployment["sandboxes"]): string {
   const { backend, regions } = sandboxes;
-  if (backend === "none") return "this deployment runs no cloud sandboxes.";
+  if (backend === "none") return "This chat has no sandbox for running commands.";
+  return `This chat's sandbox, where the agent runs commands, ${sandboxPlacement(backend, regions)}`;
+}
+
+function sandboxPlacement(backend: string, regions: readonly string[] | null): string {
+  if (backend === "selfhosted") {
+    return "is a Connected Machine: a machine its owner connected to the workspace (its location is not known here).";
+  }
   if (SELF_HOSTED_SANDBOX_BACKENDS.has(backend)) {
-    return `on this deployment's own servers (${backend}).`;
+    return `runs on servers this deployment's operator runs (${backend}); their location is not declared (unknown).`;
+  }
+  if (backend === "compute") {
+    return "runs on this deployment's own microVM sandboxes (compute); their region is not declared (unknown).";
   }
   if (backend === "modal") {
     return regions && regions.length > 0
-      ? `on Modal, placed in region ${regions.map(oneLine).join(", ")}. Where saved sandbox snapshots are stored is not stated here.`
-      : "on Modal, not pinned to a region (unknown).";
+      ? `runs on Modal; new sandboxes are placed in region ${regions.map(oneLine).join(", ")}. Where saved sandbox snapshots are stored is not stated here.`
+      : "runs on Modal, not pinned to a region (unknown).";
   }
-  return `on ${oneLine(backend)}; its region is not declared (unknown).`;
+  return `runs on ${oneLine(backend)}; its region is not declared (unknown).`;
 }
 
 const AZURE_HOST_SUFFIXES = [
@@ -300,7 +311,7 @@ export function renderPrivacyFacts(input: {
     deployment.dataHostingLocation
       ? `- App data (database, files, backups) is hosted in: ${oneLine(deployment.dataHostingLocation)} (the operator's declaration).`
       : "- Where app data (database, files, backups) is hosted: not declared in this deployment's configuration (unknown).",
-    `- Cloud sandboxes, where agents run commands, run ${sandboxText(deployment.sandboxes)} Connected Machines run on the user's own computer.`,
+    `- ${sandboxSentence(deployment.sandboxes)} Other chats in the workspace may use a different sandbox.`,
     "- Chats, files and Knowledge stay in the workspace until someone deletes them; Opengeni does not delete them by age.",
     `- Exception: images kept from tool results in chats (screenshots and images the agent viewed) are deleted ${RETAINED_IMAGE_DAYS} days after they are stored, and the oldest go sooner when the workspace's storage limit for them is reached.`,
     deployment.sessionArchiveIdleDays !== null
@@ -320,7 +331,7 @@ export function renderPrivacyFacts(input: {
       : "- Data processing agreement: no contact configured on this deployment.",
     ...(deployment.privacyPolicyUrl || deployment.subprocessorsUrl
       ? [
-          "- Not covered here: the subprocessor list, a DPA, and hosting details beyond the lines above. For those, open the privacy policy (or subprocessor list) page now with web search or a page fetch, answer from what it says, and say it is the policy's statement. Only if the page can't be opened, give the link.",
+          "- Not covered here: the subprocessor list, a DPA, and hosting details beyond the lines above. For those, open the privacy policy (or subprocessor list) page now with web search or a page fetch and report what the page states, as the policy's statement. Only if the page can't be opened, give the link.",
         ]
       : []),
     "",
