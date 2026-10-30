@@ -201,6 +201,7 @@ for (const scenario of [
             finalizations.push(callIds);
           },
           compactionModeOptions: {},
+          searchRecords: { form: "assistant" },
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
       } catch (error) {
         caught = error;
