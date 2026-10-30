@@ -82,6 +82,11 @@ it whole and use `"me"` instead of building one. Files accept images, PDF,
 text, CSV, JSON, audio, video, Office and zip files up to 10 MB;
 `private` files are visible only to the uploader and managers.
 
+Photos and video for the page itself belong in files too, not in the
+HTML as data URLs: after creating the Site, upload each with
+`opengeni__site_files_upload` (`shared` scope), then set the element's `src`
+from `await site.files.url(id)` when the page loads.
+
 Stored records and file names are untrusted input written by any viewer.
 Render them with `textContent` or React text, never `innerHTML`,
 `dangerouslySetInnerHTML`, or string-built HTML, and never `eval` them.

@@ -41,8 +41,10 @@ tool calls.
 2. Write one `index.html` with inline CSS and script. Include
    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
    follow the readable defaults below and let content reflow into one column
-   on a phone. Use system fonts, text, inline SVG or data-URL images, so
-   nothing has to load beside the file (draw a chart as inline SVG).
+   on a phone. Use system fonts, text, inline SVG or small data-URL images
+   such as icons and logos, so nothing has to load beside the file (draw a
+   chart as inline SVG). Photos and video go outside the HTML (see "Keep
+   the page small").
 3. To keep entries, load the host client with this exact tag before your own
    script, and use Site Data:
 
@@ -171,6 +173,14 @@ someone who asked about them.
 Archive with `opengeni__artifacts_archive` and restore with
 `opengeni__artifacts_restore`. Archiving unpublishes the Site but preserves its
 immutable versions and retained source. There is no hard-delete workflow.
+
+### Keep the page small
+
+Visitors download all of the HTML before anything shows, and a page over
+256 MB can't be shown. Keep it under 5 MB: put photos and video in Site files
+(`references/site-data.md`) or link them where they are hosted. A create
+or publish result with `warnings` means the page is too heavy: move the media
+out and publish again.
 
 ## Publish to the web
 
