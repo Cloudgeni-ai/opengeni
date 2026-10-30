@@ -54,7 +54,7 @@ import {
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { type SessionEvent } from "@opengeni/contracts";
-import { sessionIsUnattended } from "./unattended";
+import { sessionStartedUnattended } from "./unattended";
 
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
@@ -211,7 +211,8 @@ export function standaloneCompactionInstructions(input: {
   workspaceMemory: string | null | undefined;
   rig: { name: string; version: number } | undefined;
 }): string {
-  const unattended = sessionIsUnattended({ metadata: input.session.metadata ?? {} });
+  // The instructions the chat started with, as the turn composes them.
+  const unattended = sessionStartedUnattended({ metadata: input.session.metadata ?? {} });
   if (input.session.agent) {
     return inspectPersistentAgentInstructions(input.settings, {
       agentConfig: input.session.agent,

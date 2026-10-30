@@ -79,7 +79,7 @@ async function workspaceAuth(): Promise<{ workspaceId: string; auth: string }> {
     workspaceId: workspace!.id,
     subjectId: "unattended-service",
     subjectLabel: "unattended-service",
-    permissions: ["workspace:read", "sessions:create", "sessions:read"],
+    permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
     principalKind: "service",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   });
@@ -116,5 +116,27 @@ describe("unattended session create (real PostgreSQL)", () => {
     const spoofedMetadata = await read(spoofed);
     expect(spoofedMetadata?.["team"]).toBe("ops");
     expect(sessionMetadataUnattended(spoofedMetadata)).toBe(false);
+  }, 60_000);
+
+  test("the chat's switch turns unattended mode on and off through one call", async () => {
+    if (!shared) return;
+    const target = await workspaceAuth();
+    const id = await create(target, {});
+    const put = async (body: unknown) =>
+      await app.request(`/v1/workspaces/${target.workspaceId}/sessions/${id}/unattended`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", authorization: target.auth },
+        body: JSON.stringify(body),
+      });
+    const read = async () => (await getSession(client.db, target.workspaceId, id))?.unattended;
+    expect(await read()).toBe(false);
+    const on = await put({ unattended: true });
+    expect(on.status, await on.clone().text()).toBe(200);
+    expect(((await on.json()) as { unattended?: boolean }).unattended).toBe(true);
+    expect(await read()).toBe(true);
+    const off = await put({ unattended: false });
+    expect(((await off.json()) as { unattended?: boolean }).unattended).toBe(false);
+    expect(await read()).toBe(false);
+    expect((await put({ unattended: "yes" })).status).toBe(400);
   }, 60_000);
 });

@@ -155,8 +155,10 @@ import {
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
+  resolveSessionUnattended,
   sessionMetadataUnattended,
   withSessionUnattendedMetadata,
+  type SessionUnattendedSetting,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -30423,6 +30425,11 @@ export type SessionCreateInput = {
    * under the reserved metadata key, which a caller-supplied value never sets.
    */
   unattended?: boolean;
+  /**
+   * Changeable unattended setting (migration 1111), set only by first-party
+   * creators such as the scheduler; omitted leaves it to the create option.
+   */
+  unattendedSetting?: SessionUnattendedSetting;
   /** Vault narrowing for this session (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
@@ -31459,6 +31466,13 @@ async function createSessionInTransaction(
             : "portable"),
         codeSearchEnabled,
         agentConfig: input.agentConfig ?? null,
+        ...(input.unattendedSetting ? { unattendedSetting: input.unattendedSetting } : {}),
+        // Frozen: the chat starts unattended through its setting. The
+        // instructions and tools follow this, never the setting's later value.
+        ...(input.unattendedSetting === "unattended" ||
+        input.unattendedSetting === "unattended_by_default"
+          ? { startedUnattended: true }
+          : {}),
         // Creation reserves identity, not runnable work. The atomic start
         // transaction installs queued status together with its turn/wake.
         status: "idle",
@@ -35661,6 +35675,8 @@ async function readSessionListForSubject(
               initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
               agentConfig: sql<SessionRow["agentConfig"]>`null::jsonb`,
               mcpApprovalPolicies: sql<SessionRow["mcpApprovalPolicies"]>`null::jsonb`,
+              // Only list-entry fields are reliable here: `unattended` is not
+              // (the create option's key is left out) and SessionListEntry omits it.
               metadata: sql<SessionRow["metadata"]>`jsonb_build_object(
             'scheduledTaskId', ${schema.sessions.metadata}->'scheduledTaskId',
             '_opengeniSiteOrigin', ${schema.sessions.metadata}->'_opengeniSiteOrigin')`,
@@ -92415,6 +92431,11 @@ function mapSession(
         }
       : {}),
     retention: sessionRetentionFromRow(row),
+    unattended: resolveSessionUnattended({
+      setting: row.unattendedSetting ?? null,
+      createdUnattended: sessionMetadataUnattended(row.metadata),
+      forked: row.forkedFromSessionId !== null,
+    }),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: cleanStoredSessionTitle(row.title, row.titleSource),
@@ -92435,9 +92456,14 @@ function mapSession(
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     // A person makes a fork to continue the work, so a fork reads as attended
     // even though the fork routine copies the source row's metadata.
+    // Otherwise a chat that started unattended through its setting carries the
+    // same frozen marker as the create option, so everything that follows how
+    // the chat started reads one place.
     metadata: row.forkedFromSessionId
       ? withSessionUnattendedMetadata(row.metadata, false)
-      : row.metadata,
+      : row.startedUnattended === true
+        ? withSessionUnattendedMetadata(row.metadata, true)
+        : row.metadata,
     ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -93597,6 +93623,7 @@ export * from "./session-content-blobs";
 export * from "./session-content-compaction";
 export * from "./session-secret-redaction";
 export * from "./session-archive";
+export * from "./session-unattended";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";

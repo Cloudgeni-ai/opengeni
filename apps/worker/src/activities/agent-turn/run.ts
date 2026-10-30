@@ -81,6 +81,7 @@ import {
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
+import { attendanceChangeNote } from "./unattended";
 import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -2204,6 +2205,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               unavailableSandboxFilesNote,
               runCredentialsNote,
               mcpAvailabilityNote,
+              attendanceNote: attendanceChangeNote(session),
               knowledgeSourcePreparationNote,
               fileAuthoritySubjectId,
               activeSandboxBackend,
