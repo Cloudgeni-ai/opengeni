@@ -69,6 +69,11 @@ saying why the agent called, and the conversation lands in that chat.
 - `agent_calls`: id, workspace, session, callee and caller, caller label,
   reason, state, phones rung, deadline, answering phone, voice call id,
   timestamps. Workspace row-level security, owner-run functions for push.
+- Rollout: migration 1107 withholds the runtime's EXECUTE on its owner-run
+  functions for one release (runtime posture `DEFERRED_RUNTIME_PRIVATE_ROUTINES`),
+  because the previous release rejects a grant on a definer it does not know.
+  Until a later migration grants them, native push keeps its v1 functions,
+  call rules are dropped when a phone registers, and agents get `no_phone`.
 
 ## Products embedding Opengeni
 
