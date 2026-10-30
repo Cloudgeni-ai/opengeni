@@ -31,6 +31,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "session-header-owner" };
 const screenshotPhase =
   process.env.SESSION_HEADER_SCREENSHOT_PHASE === "before" ? "before" : "after";
+const screenshotDir = process.env.SESSION_HEADER_SCREENSHOT_DIR ?? "/tmp";
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
@@ -286,6 +287,87 @@ describe("responsive production session header", () => {
       await page.locator(".og-genie-loading").waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
       expect(await header.innerText()).not.toContain("Idle");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("the Waiting pill has the same type, height, padding, border and dot as Running", async () => {
+    const session = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Compare status pills",
+      title: "Status pill parity",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, fixture.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("pill parity turn not claimed");
+    const context = await configuredContext(browser, {
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
+      const header = page.locator("header");
+      const running = header.locator('[data-status="running"]:visible');
+      await running.waitFor();
+      const runningMetrics = await statusPillMetrics(running);
+      await captureStatusPill(page, "running");
+
+      await waitForSessionInputWithEvent(dbClient.db, fixture.workspaceId, session.id, {
+        reason: "Waiting for review",
+        timeoutSeconds: 600,
+        command: {
+          accountId: fixture.accountId,
+          actor: {
+            type: "agent_attempt",
+            sessionId: session.id,
+            turnId: claimed.turn.id,
+            attemptId,
+            executionGeneration: claimed.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      });
+      await applySessionTurnSettlement(dbClient.db, fixture.workspaceId, {
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { reason: "wait_for_input" } }],
+      });
+      await page.reload();
+      const waiting = header.locator("[data-session-wait-badge]:visible");
+      await waiting.waitFor();
+      expect(await waiting.innerText()).toBe("Waiting");
+      await captureStatusPill(page, "waiting");
+      // Only the colour may differ: the pill's geometry and type match exactly.
+      expect(await statusPillMetrics(waiting)).toEqual(runningMetrics);
     } finally {
       await context.close();
     }
@@ -793,6 +875,40 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
   }, theme);
+}
+
+/** Everything about a status pill except its colour. */
+async function statusPillMetrics(pill: ReturnType<Page["locator"]>) {
+  return await pill.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const dot = element.firstElementChild?.getBoundingClientRect();
+    return {
+      fontSize: style.fontSize,
+      lineHeight: style.lineHeight,
+      fontWeight: style.fontWeight,
+      height: element.getBoundingClientRect().height,
+      padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+      borderWidth: style.borderTopWidth,
+      borderRadius: style.borderTopLeftRadius,
+      gap: style.columnGap,
+      dot: dot ? [dot.width, dot.height] : null,
+    };
+  });
+}
+
+/** Light and dark crops of the header's right side, for before/after review. */
+async function captureStatusPill(page: Page, state: string): Promise<void> {
+  const box = await page.locator("header").boundingBox();
+  if (!box) throw new Error("missing header box");
+  const width = Math.min(560, box.width);
+  for (const theme of ["dark", "light"] as const) {
+    await setTheme(page, theme);
+    await page.screenshot({
+      path: `${screenshotDir}/session-header-${screenshotPhase}-pill-${state}-${theme}.png`,
+      clip: { x: box.x + box.width - width, y: box.y, width, height: box.height },
+    });
+  }
+  await setTheme(page, "dark");
 }
 
 type SessionHeaderMetrics = {
