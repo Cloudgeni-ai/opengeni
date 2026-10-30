@@ -10,6 +10,7 @@ import type { Settings } from "@opengeni/config";
 import {
   createApiKey,
   createDb,
+  createSession,
   createWorkspace,
   countWorkspacesForAccount,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -34,6 +35,10 @@ import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 import { registerWorkspaceInstructionPolicyRoutes } from "../src/routes/workspace-instruction-policies";
 import { registerModelAccountSettingsRoutes } from "../src/routes/model-account-settings";
 import { registerSocialRoutes } from "../src/routes/social";
+import { registerCredentialProfileRoutes } from "../src/routes/credential-profiles";
+import { registerSecretRedactionRoutes } from "../src/routes/secret-redactions";
+import { registerMemorySlackPublicationRoutes } from "../src/routes/memory-slack-publications";
+import { registerSlackTaskPolicyRoutes } from "../src/routes/slack-task-policy";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -165,6 +170,10 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerWorkspaceInstructionPolicyRoutes(registered, deps);
   registerModelAccountSettingsRoutes(registered, deps);
   registerSocialRoutes(registered, deps);
+  registerCredentialProfileRoutes(registered, deps);
+  registerSecretRedactionRoutes(registered, deps);
+  registerMemorySlackPublicationRoutes(registered, deps);
+  registerSlackTaskPolicyRoutes(registered, deps);
   return registered;
 }
 
@@ -615,6 +624,139 @@ describe("managed personal workspace access", () => {
           optIn,
         ),
       ).rejects.toThrow("Connection owner authority changed");
+    } finally {
+      await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    }
+  });
+
+  test("Personal owners change the remaining workspace settings; lookalikes do not", async () => {
+    if (!shared || !client) return;
+    // Secret redaction also requires a same-origin browser request.
+    const origin = "http://owner-settings.example.test";
+    const ownerApp = createTestApp({ publicBaseUrl: origin });
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const headers = {
+      cookie: "session=present",
+      "content-type": "application/json",
+      origin,
+      "sec-fetch-site": "same-origin",
+    };
+    const subjectId = `user:${userId}`;
+    const refusal = "Only a workspace admin, or the owner of a Personal workspace, can do this.";
+    const ownChat = await createSession(client.db, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      initialMessage: "A chat in my Personal workspace",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+    } as Parameters<typeof createSession>[1]);
+    const requests = [
+      ["PUT", "/credential-profile", { entries: [], gitHelper: false }],
+      [
+        "PUT",
+        "/memory-slack-publications/configuration",
+        {
+          expectedRevision: 0,
+          enabled: false,
+          connectionId: null,
+          slackChannelId: null,
+          slackChannelName: null,
+          autoImportances: [],
+          reviewImportances: [],
+        },
+      ],
+      [
+        "PUT",
+        "/slack-task-policy",
+        {
+          operationId: crypto.randomUUID(),
+          policy: {
+            allowedTeamIds: ["T_HOME"],
+            allowedConversationIds: [],
+            allowGuestInitiators: false,
+            allowExternalInitiators: false,
+            allowMpim: false,
+            sharedConversationMode: "private_handoff",
+            resultPublicationMode: "approval_required",
+          },
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+          reason: "Owner sets their Personal workspace's Slack task policy",
+        },
+      ],
+      [
+        "POST",
+        "/secret-redactions",
+        {
+          sessionIds: [ownChat.id],
+          match: { patterns: [{ kind: "github_token" }] },
+          dryRun: true,
+        },
+      ],
+    ] as const;
+
+    // The owner gets past the settings check on every route.
+    const ownerStatuses: Record<string, number> = {};
+    for (const [method, path, body] of requests) {
+      const response = await ownerApp.request(`${base}${path}`, {
+        method,
+        headers,
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      expect(text, path).not.toContain(refusal);
+      ownerStatuses[path] = response.status;
+    }
+    expect(ownerStatuses).toEqual({
+      "/credential-profile": 200,
+      "/memory-slack-publications/configuration": 200,
+      "/slack-task-policy": 200,
+      "/secret-redactions": 200,
+    });
+    const saved = await ownerApp.request(`${base}/credential-profile`, { headers });
+    expect(saved.status).toBe(200);
+
+    // A delegated owner lookalike without workspace:admin in its ceiling stays refused.
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId,
+      principalKind: "human_session",
+      permissions: managedPersonalWorkspacePermissions,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    for (const [method, path, body] of requests) {
+      const response = await ownerApp.request(`${base}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toContain(refusal);
+    }
+
+    // A read-only member of a shared workspace is not its admin.
+    const access = await ownerApp.request("http://x/v1/access/me", {
+      headers: { cookie: "session=present" },
+    });
+    const sharedWorkspaceId = ((await access.json()) as AccessContext).defaultWorkspaceId!;
+    expect(sharedWorkspaceId).not.toBe(personalWorkspaceId);
+    const [before] = await shared.admin<Array<{ permissions: string[] }>>`
+      select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    try {
+      await shared.admin`update workspace_memberships set permissions = '["workspace:read","secrets:write","secrets:list","sessions:read","sessions:control"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+      for (const [method, path, body] of requests) {
+        const response = await ownerApp.request(
+          `http://x/v1/workspaces/${sharedWorkspaceId}${path}`,
+          { method, headers, body: JSON.stringify(body) },
+        );
+        expect(response.status, path).toBe(403);
+      }
     } finally {
       await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
     }
