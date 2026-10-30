@@ -2199,4 +2199,86 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
       ).status,
     ).toBe(404);
   }, 180_000);
+
+  test("My things lists your own logins with where each works, and nobody else's", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const other = await provisionManagedHuman();
+    const app = buildApp(undefined, true);
+    const addLogin = async (person: typeof human, domain: string) =>
+      await shared!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${person.accountId}, true),
+          set_config('opengeni.workspace_id', ${person.legacyWorkspaceId}, true),
+          set_config('opengeni.subject_id', ${person.subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string }>>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${person.accountId}, ${person.legacyWorkspaceId}, ${person.subjectId}, ${domain}, 'oauth2', 'ciphertext')
+          returning id`;
+        return row!.id;
+      });
+    const linear = await addLogin(human, "linear.app");
+    const notion = await addLogin(human, "notion.so");
+    await addLogin(other, "github.com");
+
+    const listed = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      resources: Array<{
+        resourceKind: string;
+        resourceId: string;
+        name: string;
+        provider: string | null;
+        workspaces: Array<{ workspaceId: string; current: boolean; on: boolean }>;
+      }>;
+    };
+    expect(
+      body.resources.map(({ resourceKind, resourceId, name, provider }) => ({
+        resourceKind,
+        resourceId,
+        name,
+        provider,
+      })),
+    ).toEqual([
+      {
+        resourceKind: "connection",
+        resourceId: linear,
+        name: "linear.app",
+        provider: "linear.app",
+      },
+      { resourceKind: "connection", resourceId: notion, name: "notion.so", provider: "notion.so" },
+    ]);
+    expect(
+      body.resources[0]!.workspaces.map(({ workspaceId, current, on }) => ({
+        workspaceId,
+        current,
+        on,
+      })),
+    ).toEqual([
+      { workspaceId: human.personalWorkspaceId, current: false, on: true },
+      { workspaceId: human.legacyWorkspaceId, current: true, on: true },
+    ]);
+
+    // Someone else's list never shows yours.
+    const theirs = await app.request(
+      `http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources`,
+      { headers: { cookie: other.cookie } },
+    );
+    expect(theirs.status).toBe(200);
+    const theirIds = (
+      (await theirs.json()) as { resources: Array<{ resourceId: string }> }
+    ).resources.map((resource) => resource.resourceId);
+    expect(theirIds).not.toContain(linear);
+    expect(theirIds).toHaveLength(1);
+    // And you can't ask from a workspace that isn't yours.
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources`, {
+          headers: { cookie: human.cookie },
+        })
+      ).status,
+    ).toBeGreaterThanOrEqual(403);
+  }, 180_000);
 });

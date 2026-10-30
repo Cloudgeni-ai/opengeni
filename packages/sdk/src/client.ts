@@ -585,6 +585,7 @@ import type {
   RevokeUserResourceGrantResponse,
   OwnResourceReachKind,
   OwnResourceReachResponse,
+  OwnResourcesResponse,
   SetOwnResourceReachRequest,
   SetOwnResourceReachResponse,
   ListOrganizationInvitationsPageResponse,
@@ -6655,6 +6656,17 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${workspaceId}/own-resources/reach`,
       request,
+    );
+  }
+
+  /**
+   * "My things": every one of your own logins, model plans and machines in
+   * this workspace's organization, each with where it works.
+   */
+  async listOwnResources(workspaceId: string): Promise<OwnResourcesResponse> {
+    return await this.requestJson<OwnResourcesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources`,
     );
   }
 

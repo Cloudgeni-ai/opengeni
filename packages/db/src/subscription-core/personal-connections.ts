@@ -32,6 +32,10 @@ import {
 } from "./administered-connections";
 import { subscriptionCoreQuotaBlocksNow } from "./operations";
 import { memoByProvider, subscriptionCoreProviderId } from "./provider";
+import {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "../subscription-core-providers";
 import { subscriptionCoreTurns, type SubscriptionCoreTurnIdentity } from "./turns";
 
 export type SubscriptionCorePersonalConnection = {
@@ -178,3 +182,45 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
     refreshExhaustedSubscriptionCoreTurnPersonalQuota,
   };
 });
+
+/** One of the viewing person's own subscription accounts, of any provider. */
+export type OwnSubscriptionCoreConnection = {
+  connectionId: string;
+  /** The registered provider id. */
+  provider: string;
+  label: string | null;
+  accountEmail: string | null;
+  planType: string | null;
+};
+
+/**
+ * The viewing person's own subscription accounts of every registered
+ * provider, through the owner-only reader in the workspace they view (no
+ * credential material). Empty for anyone else and for a workspace the person
+ * may not use.
+ */
+export async function listOwnSubscriptionCoreConnections(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<OwnSubscriptionCoreConnection[]> {
+  if (!input.subjectId.startsWith("user:")) return [];
+  const connections: OwnSubscriptionCoreConnection[] = [];
+  for (const providerId of subscriptionCoreProviderIds()) {
+    const provider = subscriptionCoreProvider(providerId);
+    const rows = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      (tx) => listSubscriptionCorePersonalConnectionRowsInTransaction(tx, provider, input),
+    );
+    for (const row of rows) {
+      connections.push({
+        connectionId: row.id,
+        provider: providerId,
+        label: row.label,
+        accountEmail: row.account_email,
+        planType: row.plan_type,
+      });
+    }
+  }
+  return connections;
+}

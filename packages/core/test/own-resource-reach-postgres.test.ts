@@ -1,5 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
+import {
+  connectSubscriptionCoreCodexConnection,
+  createDb,
+  encryptEnvironmentValue,
+  ensureManagedAccessForUser,
+  withSessionRlsActorContext,
+  type DbClient,
+} from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
   grantDeferredRuntimeAccess,
@@ -9,8 +16,11 @@ import postgres from "postgres";
 import type { AccessGrantAuthorization } from "../src/access";
 import {
   getOwnResourceHere,
+  listOwnResourcesHere,
+  nameOwnResources,
   OwnResourceAlwaysOnError,
   OwnResourceNotFoundError,
+  ownResourceKey,
   setOwnResourceHere,
 } from "../src/application/user-resource-grants";
 
@@ -106,6 +116,40 @@ async function addLogin(f: Fixture, workspaceId: string) {
       returning id`;
   });
   return row!.id;
+}
+
+async function connectPlan(f: Fixture) {
+  await shared.admin`delete from subscription_settings
+    where account_id = ${f.accountId}::uuid and workspace_id is null`;
+  await shared.admin`insert into subscription_settings (
+      account_id, rotation, providers, cross_provider_failover, fallback_order,
+      personal_connections_allowed, personal_fallback_allowed)
+    values (${f.accountId}::uuid, ${shared.admin.json({ codex: { mode: "spread" } })}::jsonb,
+      '{}'::jsonb, false, '{}'::jsonb, true, true)`;
+  await shared.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
+    values (${f.accountId}::uuid, 'codex', true)
+    on conflict (account_id, provider) do update set enabled = true`;
+  const connected = await withSessionRlsActorContext({ subjectId: f.owner }, () =>
+    connectSubscriptionCoreCodexConnection(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.personal,
+      subjectId: f.owner,
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.alloc(32, 41),
+        JSON.stringify({ access_token: "a", refresh_token: "r", id_token: "i" }),
+      ),
+      providerAccountId: `reach-${crypto.randomUUID()}`,
+      providerSubjectId: `reach-${crypto.randomUUID()}`,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 86_400_000),
+      lastRefreshAt: new Date(),
+      accountEmail: "owner@example.test",
+      label: "Own account",
+    }),
+  );
+  if (connected.kind !== "connected") throw new Error(`connect refused: ${connected.reason}`);
+  return connected.id;
 }
 
 /** What turn admission decides (1142), read as the migration owner. */
@@ -228,5 +272,59 @@ describe("where your own things work (real PostgreSQL)", () => {
     await expect(
       setOwnResourceHere(deps(), f.authorization(f.origin), f.origin, { ...resource, on: true }),
     ).rejects.toBeInstanceOf(OwnResourceNotFoundError);
+  }, 180_000);
+
+  test("My things lists each of your own things with where it works and its name", async () => {
+    const f = await fixture();
+    const login = await addLogin(f, f.origin);
+    const machine = await connectMachine(f);
+    const plan = await connectPlan(f);
+    const g = await fixture();
+    await addLogin(g, g.origin);
+
+    const state = async (workspaceId: string) =>
+      Object.fromEntries(
+        (await listOwnResourcesHere(deps(), f.authorization(workspaceId), workspaceId)).map(
+          (entry) => [entry.resourceId, { on: entry.on, alwaysOn: entry.alwaysOn }],
+        ),
+      );
+    expect(await state(f.personal)).toEqual({
+      [login]: { on: true, alwaysOn: true },
+      [plan]: { on: true, alwaysOn: true },
+      [machine]: { on: true, alwaysOn: false },
+    });
+    expect(await state(f.origin)).toMatchObject({
+      [login]: { on: true, alwaysOn: false },
+      [machine]: { on: true, alwaysOn: false },
+    });
+    expect(await state(f.other)).toMatchObject({
+      [login]: { on: false },
+      [machine]: { on: false },
+    });
+
+    // A kind you may not list here is left out.
+    const withoutMachines = await listOwnResourcesHere(
+      deps(),
+      f.authorization(f.other, ["workspace:read", "connections:read"]),
+      f.other,
+    );
+    expect(new Set(withoutMachines.map((entry) => entry.resourceKind))).toEqual(
+      new Set(["connection", "subscription_connection"]),
+    );
+
+    const everything = await listOwnResourcesHere(deps(), f.authorization(f.personal), f.personal);
+    const names = await nameOwnResources(deps(), f.authorization(f.other), f.other, everything);
+    expect(names.get(ownResourceKey({ resourceKind: "connection", resourceId: login }))).toEqual({
+      name: "linear.app",
+      provider: "linear.app",
+      plan: null,
+    });
+    expect(
+      names.get(ownResourceKey({ resourceKind: "subscription_connection", resourceId: plan })),
+    ).toEqual({ name: "owner@example.test", provider: "codex", plan: "pro" });
+    expect(
+      names.get(ownResourceKey({ resourceKind: "connected_machine", resourceId: machine })),
+    ).toEqual({ name: "Laptop", provider: null, plan: null });
+    expect(names.size).toBe(3);
   }, 180_000);
 });

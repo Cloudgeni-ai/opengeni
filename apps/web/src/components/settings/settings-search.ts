@@ -49,6 +49,15 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
   "workspace:usage": ["budget", "spend", "limit", "monthly", "cost"],
   "workspace:api-keys": ["token", "bearer", "sdk", "key"],
   "workspace:developer": ["webhooks", "credential provider", "events", "sdk", "integration"],
+  "account:mine": [
+    "my things",
+    "my logins",
+    "only me",
+    "personal",
+    "where it works",
+    "my machines",
+    "my subscriptions",
+  ],
   "workspace:/workspaces/$workspaceId/insights": ["usage", "spend", "tokens", "cost", "analytics"],
   "workspace:/workspaces/$workspaceId/secrets": [
     "passwords",
