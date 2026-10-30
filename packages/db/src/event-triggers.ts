@@ -102,8 +102,9 @@ export type EventSourceRecord = {
   statusReasonDetail: string | null;
   secretEncrypted: string | null;
   /**
-   * 'api' once an API caller set or received the webhook signing secret:
-   * every delivery verified with it is API use. Never turned back.
+   * 'api' once an API caller set or received the webhook signing secret, or
+   * named the URL a workspace MCP source listens to: every delivery verified
+   * with it, or arriving on its subscriptions, is API use. Never turned back.
    */
   secretBillingOrigin: "api" | null;
   externalKey: string | null;

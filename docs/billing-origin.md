@@ -80,6 +80,14 @@ inherit the origin of the chat they run in, never the credential's.
   each copy of the secret in the kept body with `[secret]` (an app echoing
   the address it posts to), and never uses an id holding the secret as the
   delivery's dedupe key. The kept size and digest describe the kept body.
+- The same mark covers a workspace MCP source that listens to a server by
+  URL (`kind: "mcp"` with `url`): whoever names the URL chooses the server
+  that sends its events, so an API caller creating one marks it. Its
+  subscriptions read the mark in each delivery's transaction, polled or
+  delivered to their callback (`recordMcpEventDelivery`), and the automations
+  those events fire are API use, CloudGeni's legacy account excepted.
+  Creating a source that already exists returns it unchanged and marks
+  nothing.
   The match is on the raw secret, byte for byte, and only for secrets of at
   least 24 characters (every `url_token` secret), so a short HMAC or token
   secret that happens to occur in ordinary values doesn't redact them; an
@@ -147,9 +155,11 @@ credits.
   (`eligible_model_ids` null), and 100%-off coupon credit written as a plain
   `grant` when no promotion policy is configured. Both are bounded, already
   issued amounts; new promotional credit is scoped and never pays for API use.
-- Only a webhook source's own signing secret marks its deliveries. Sources
-  whose deliveries are authenticated by the deployment (GitHub, Slack, Gmail)
-  or by an MCP server's subscription are not held by the caller. A person's
+- Only a webhook source's own signing secret, or a workspace MCP source's
+  URL, marks its deliveries. Sources whose deliveries are authenticated by
+  the deployment (GitHub, Slack, Gmail), and a person's MCP source, which
+  listens with that person's own sign-in to a server the workspace already
+  connected, are not held by the caller. A person's
   "This workspace" source turns their own workspace activity (recording
   events) into events; activity an API caller causes there, such as a
   product uploading a recording with a person's delegated token, fires the
@@ -191,13 +201,16 @@ way. Processes install it at boot (`configureBillingLegacyAccounts`).
 
 ## Rollout
 
-Migration 1107 is rolling: four nullable columns with `NOT VALID` checks,
+Migration 1119 is rolling: four nullable columns with `NOT VALID` checks,
 two triggers with their private functions, new private helpers,
-same-signature replacements of existing function bodies (plan balances and
-expiry, and the scheduled-task execution digest and personal-resource fence,
-which now ignore `billing_origin`) and two widened `NOT VALID` billing-record
-checks. The previous release
-never writes the columns; null keeps today's behaviour.
+same-signature replacements of the plan balance and expiry functions, and two
+widened `NOT VALID` billing-record checks. The scheduled-task execution
+digest, execution state and personal-resource fence learn to ignore
+`billing_origin` through an in-place patch of their exclusion lists, like
+1115's `creator_locked`, so whatever earlier migrations put there is kept; the
+patch refuses to run if a list it expects is missing and is a no-op when
+rerun. The previous release never writes the columns; null keeps today's
+behaviour.
 
 During the rolling deploy an old pod neither sets nor reads
 `event_sources.secret_billing_origin`: an API caller's secret or format

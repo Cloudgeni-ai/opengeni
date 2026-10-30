@@ -194,7 +194,10 @@ export async function createEventSourceForViewer(
     viewer: EventSourceViewer;
     request: ParsedCreateEventSourceRequest;
     baseUrl: string;
-    /** Who creates it: an API caller holding the secret makes its deliveries API use. */
+    /**
+     * Who creates it: an API caller holding a webhook's secret, or naming a
+     * workspace MCP source's URL, makes its deliveries API use.
+     */
     billingOrigin?: BillingOrigin;
   } & McpEventSourceNetwork &
     GitHubEventSourceAccess,
@@ -209,6 +212,7 @@ export async function createEventSourceForViewer(
       connectionId: request.connectionId,
       url: request.url,
       name: request.name,
+      billingOrigin: input.billingOrigin,
     });
     return { source: eventSourceForClient(source, input.baseUrl) };
   }
@@ -400,6 +404,11 @@ export async function addMcpEventSource(
     connectionId?: string | undefined;
     url?: string | undefined;
     name?: string | undefined;
+    /**
+     * Who adds it: an API caller that names the server a workspace source
+     * listens to by URL makes the automations its events fire API use.
+     */
+    billingOrigin?: BillingOrigin | undefined;
   } & McpEventSourceNetwork,
 ): Promise<EventSourceRecord> {
   const url = input.url ?? null;
@@ -456,6 +465,9 @@ export async function addMcpEventSource(
     mcpServerId: input.serverId,
     mcpServerUrl: url,
     connectionId: connection.connectionId,
+    // Like a webhook's secret: whoever chose the URL controls what it sends.
+    // Adding one that already exists changes nothing, so it marks nothing.
+    ...(url !== null ? secretHolder(input.billingOrigin) : {}),
   });
   if (!created && url !== null && source.mcpServerUrl !== url) {
     throw new HTTPException(409, {

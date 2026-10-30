@@ -1,10 +1,18 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHmac, randomBytes } from "node:crypto";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { configureBillingLegacyAccounts, signStandardWebhook } from "@opengeni/core";
+import {
+  configureBillingLegacyAccounts,
+  pumpDueMcpEventSubscriptions,
+  signStandardWebhook,
+} from "@opengeni/core";
 import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
+import {
+  startFakeMcpEventsServer,
+  type FakeMcpEventType,
+} from "@opengeni/testing/mcp-events-server";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
@@ -173,7 +181,9 @@ test("a person's edits and manual runs keep an app schedule app; a delegated tok
 // Whoever holds a webhook source's signing secret can sign deliveries to its
 // public URL. When an API caller set or received it, deliveries fire the
 // automations listening on it as API use, whoever set them up and whenever.
-async function eventSourceHarness(options: { legacy?: boolean } = {}) {
+async function eventSourceHarness(
+  options: { legacy?: boolean; eventSourceFetch?: typeof fetch } = {},
+) {
   const noop = async () => undefined;
   const local = await bootstrapWorkspace(client!.db, {
     accountExternalSource: "opengeni:local",
@@ -186,19 +196,22 @@ async function eventSourceHarness(options: { legacy?: boolean } = {}) {
     subjectLabel: "Local dev",
   });
   const grant = local.workspaceGrants[0]!;
+  const settings = testSettings({
+    productAccessMode: "local",
+    delegationSecret: SECRET,
+    sandboxBackend: "none",
+    eventTriggersEnabled: true,
+    environmentsEncryptionKey: randomBytes(32).toString("base64"),
+    publicBaseUrl: "https://opengeni.example",
+    // CloudGeni's legacy account: every caller is funded as app.
+    ...(options.legacy ? { billingLegacyAccountIds: [grant.accountId] } : {}),
+  });
+  const bus = new MemoryEventBus();
   const app = createApp({
-    settings: testSettings({
-      productAccessMode: "local",
-      delegationSecret: SECRET,
-      sandboxBackend: "none",
-      eventTriggersEnabled: true,
-      environmentsEncryptionKey: randomBytes(32).toString("base64"),
-      publicBaseUrl: "https://opengeni.example",
-      // CloudGeni's legacy account: every caller is funded as app.
-      ...(options.legacy ? { billingLegacyAccountIds: [grant.accountId] } : {}),
-    }),
+    settings,
     db: client!.db,
-    bus: new MemoryEventBus(),
+    bus,
+    ...(options.eventSourceFetch ? { eventSourceFetch: options.eventSourceFetch } : {}),
     workflowClient: {
       wakeSessionWorkflow: noop,
       requestSessionWorkflowWakeDispatch: noop,
@@ -353,6 +366,9 @@ async function eventSourceHarness(options: { legacy?: boolean } = {}) {
     ).status;
   return {
     app,
+    settings,
+    bus,
+    grant,
     api,
     send,
     tokenFormat,
@@ -633,4 +649,154 @@ test("a url_token secret never reaches stored deliveries or events, even when th
   // Agents and API callers read deliveries and events through the API.
   const listed = await h.send("GET", `/event-sources/${source.id}/deliveries`);
   expect(JSON.stringify(listed)).not.toContain(secret);
+}, 180_000);
+
+// A workspace MCP source that listens to a server by URL: whoever names the
+// URL chooses the server that sends its events, like holding a webhook's
+// secret. Polled and webhook-delivered events from a source an API caller
+// added fire the automations listening on it as API use.
+const TICKET_CREATED: FakeMcpEventType = {
+  name: "ticket.created",
+  delivery: ["poll"],
+  inputSchema: { type: "object", properties: { queue: { type: "string" } } },
+  payloadSchema: { type: "object", properties: { queue: { type: "string" } } },
+};
+const TICKET_CLOSED: FakeMcpEventType = {
+  ...TICKET_CREATED,
+  name: "ticket.closed",
+  delivery: ["webhook"],
+};
+
+async function mcpUrlHarness(options: { legacy?: boolean } = {}) {
+  let app: { request: (path: string, init: RequestInit) => Promise<Response> } | null = null;
+  const server = startFakeMcpEventsServer({
+    eventTypes: [TICKET_CREATED, TICKET_CLOSED],
+    nextPollMs: 20_000,
+    maxTtlMs: 3_600_000,
+    webhookFetch: async (url, init) => await app!.request(new URL(url).pathname, init),
+  });
+  // The workspace credential provider signs every URL source in.
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const body = (await request.json()) as { eventSubscription: { serverUrl: string } };
+      return Response.json({
+        status: "ok",
+        mcp: [
+          { url: body.eventSubscription.serverUrl, headers: { Authorization: "Bearer listen" } },
+        ],
+      });
+    },
+  });
+  // Every source's https URL reaches the local fake server.
+  const network = (async (url: string | URL | Request, init?: RequestInit) =>
+    await fetch(
+      String(url instanceof Request ? url.url : url).replace(/^https:\/\/[^/]+\/mcp/, server.url),
+      init,
+    )) as typeof fetch;
+  const h = await eventSourceHarness({ ...options, eventSourceFetch: network });
+  app = h.app;
+  // Each harness has its own encryption key, so the provider gets a new secret.
+  await shared!.admin`delete from workspace_credential_providers
+    where workspace_id = ${h.grant.workspaceId}::uuid`;
+  await h.send("PUT", "/credential-provider", { url: "https://provider.example/credentials" });
+  await shared!.admin`update workspace_credential_providers
+    set url = ${`http://127.0.0.1:${provider.port}/credentials`}
+    where workspace_id = ${h.grant.workspaceId}::uuid`;
+  const sources: string[] = [];
+  const addSource = async (authorization?: string) => {
+    const serverId = `tickets-${crypto.randomUUID()}`;
+    const created = await h.send(
+      "POST",
+      "/event-sources",
+      { kind: "mcp", serverId, url: `https://${serverId}.example/mcp` },
+      authorization,
+    );
+    sources.push(created.source.id as string);
+    return created.source.id as string;
+  };
+  // The person sets the automation up in the app.
+  const automation = async (sourceId: string, eventType: string) => {
+    const task = await h.send("POST", "/scheduled-tasks", {
+      name: "Triage",
+      schedule: { type: "manual" },
+      agentConfig: {
+        prompt: "Look at the ticket",
+        resources: [],
+        tools: [],
+        metadata: {},
+        sandboxBackend: "none",
+      },
+      events: {
+        triggers: [{ sourceId, eventTypes: [eventType], arguments: { queue: "billing" } }],
+      },
+    });
+    return task.id as string;
+  };
+  const pump = async () => {
+    await shared!.admin`update mcp_event_subscriptions
+      set next_action_at = now() - interval '1 second', lease_until = null
+      where workspace_id = ${h.grant.workspaceId}::uuid and source_id = any(${sources}::uuid[])`;
+    await pumpDueMcpEventSubscriptions({
+      db: client!.db,
+      settings: h.settings,
+      bus: h.bus,
+      fetch: network,
+    });
+  };
+  // Both delivery paths: the polled stream and the webhook callback.
+  const deliver = async (pollTask: string, webhookTask: string) => {
+    await pump();
+    await server.emit("ticket.created", { queue: "billing" });
+    await server.emit("ticket.closed", { queue: "billing" });
+    await pump();
+    return [await h.origin(pollTask), await h.origin(webhookTask)];
+  };
+  const stop = async () => {
+    await server.stop();
+    await provider.stop(true);
+  };
+  return { ...h, addSource, automation, deliver, stop };
+}
+
+test("events from a URL MCP source an API caller added fire a person's automations as API use", async () => {
+  if (!client || !shared) return;
+  const h = await mcpUrlHarness();
+  try {
+    const sourceId = await h.addSource(h.api);
+    expect(await h.sourceHolder(sourceId)).toBe("api");
+    const polled = await h.automation(sourceId, "ticket.created");
+    const delivered = await h.automation(sourceId, "ticket.closed");
+    expect([await h.origin(polled), await h.origin(delivered)]).toEqual(["app", "app"]);
+    expect(await h.deliver(polled, delivered)).toEqual(["api", "api"]);
+
+    // Control: a person's URL source keeps their automations app use.
+    const own = await h.addSource();
+    expect(await h.sourceHolder(own)).toBeNull();
+    const ownPolled = await h.automation(own, "ticket.created");
+    const ownDelivered = await h.automation(own, "ticket.closed");
+    expect(await h.deliver(ownPolled, ownDelivered)).toEqual(["app", "app"]);
+  } finally {
+    await h.stop();
+  }
+}, 180_000);
+
+test("CloudGeni's legacy account stays app use whoever added a URL MCP source", async () => {
+  if (!client || !shared) return;
+  const h = await mcpUrlHarness({ legacy: true });
+  try {
+    const sourceId = await h.addSource(h.api);
+    expect(await h.sourceHolder(sourceId)).toBeNull();
+    const polled = await h.automation(sourceId, "ticket.created");
+    const delivered = await h.automation(sourceId, "ticket.closed");
+    expect(await h.deliver(polled, delivered)).toEqual(["app", "app"]);
+    // A source an API caller added before the account went legacy stays app too.
+    await shared.admin`update event_sources set secret_billing_origin = 'api'
+      where id = ${sourceId}::uuid`;
+    expect(await h.deliver(polled, delivered)).toEqual(["app", "app"]);
+  } finally {
+    await h.stop();
+    configureBillingLegacyAccounts(testSettings().billingLegacyAccountIds ?? []);
+  }
 }, 180_000);

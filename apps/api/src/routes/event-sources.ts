@@ -119,8 +119,9 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       baseUrl: baseUrl(c),
       githubApp: request.kind === "github" ? githubAppWebhookPort(deps) : null,
       ...(deps.eventSourceFetch ? { fetch: deps.eventSourceFetch } : {}),
-      // An API caller that sets or receives a webhook's secret makes its deliveries API use.
-      ...(request.kind === "webhook"
+      // An API caller that sets or receives a webhook's secret, or names the
+      // URL a workspace MCP source listens to, makes its deliveries API use.
+      ...(request.kind === "webhook" || (request.kind === "mcp" && request.url !== undefined)
         ? { billingOrigin: await resolveTurnBillingOrigin(db, { grant }) }
         : {}),
     });
