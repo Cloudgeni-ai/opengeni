@@ -213,12 +213,6 @@ export function useFollowUpRepositories(
     () => ({ ...mountedRepositorySelection.selectedRepoRefs, ...pendingRepoRefs }),
     [mountedRepositorySelection.selectedRepoRefs, pendingRepoRefs],
   );
-  const selectedInstallationId = useMemo(
-    () =>
-      context.githubRepos.find((repository) => selectedRepoIds.has(repository.id))
-        ?.installationId ?? null,
-    [context.githubRepos, selectedRepoIds],
-  );
   const pendingBuild = useMemo(() => {
     try {
       return {
@@ -278,20 +272,10 @@ export function useFollowUpRepositories(
       const mountedPersonalConflict = context.personalGitHubRepositories.some(
         (personalRepo) =>
           mountedPersonalRepoIds.has(personalRepo.repositoryId) &&
-          personalRepo.fullName === repo.fullName,
+          personalRepo.fullName.toLowerCase() === repo.fullName.toLowerCase(),
       );
       if (mountedPersonalConflict) {
         toast.info("This repository is already mounted as you");
-        return;
-      }
-      if (
-        selectedInstallationId !== null &&
-        selectedInstallationId !== repo.installationId &&
-        !pendingRepoIds.has(repo.id)
-      ) {
-        toast.info("This session uses one GitHub token", {
-          description: "Clear pending repositories to choose repositories from another account.",
-        });
         return;
       }
       setPendingRepoIds((current) => {
@@ -306,7 +290,9 @@ export function useFollowUpRepositories(
       }));
       const personalConflictIds = new Set(
         context.personalGitHubRepositories
-          .filter((personalRepo) => personalRepo.fullName === repo.fullName)
+          .filter(
+            (personalRepo) => personalRepo.fullName.toLowerCase() === repo.fullName.toLowerCase(),
+          )
           .map((personalRepo) => personalRepo.repositoryId),
       );
       setPendingPersonalRepoIds(
@@ -317,8 +303,6 @@ export function useFollowUpRepositories(
       context.personalGitHubRepositories,
       mountedPersonalRepoIds,
       mountedRepositorySelection.selectedRepoIds,
-      pendingRepoIds,
-      selectedInstallationId,
     ],
   );
 
@@ -357,7 +341,7 @@ export function useFollowUpRepositories(
       const mountedWorkspaceConflict = context.githubRepos.some(
         (workspaceRepo) =>
           mountedRepositorySelection.selectedRepoIds.has(workspaceRepo.id) &&
-          workspaceRepo.fullName === repo.fullName,
+          workspaceRepo.fullName.toLowerCase() === repo.fullName.toLowerCase(),
       );
       if (mountedWorkspaceConflict) {
         toast.info("This repository is already mounted with the workspace GitHub App");
@@ -366,7 +350,9 @@ export function useFollowUpRepositories(
       if (!(await context.ensurePersonalGitHubAuthority(session.workspaceId))) return;
       const workspaceConflictIds = new Set(
         context.githubRepos
-          .filter((workspaceRepo) => workspaceRepo.fullName === repo.fullName)
+          .filter(
+            (workspaceRepo) => workspaceRepo.fullName.toLowerCase() === repo.fullName.toLowerCase(),
+          )
           .map((workspaceRepo) => workspaceRepo.id),
       );
       setPendingRepoIds(
@@ -403,10 +389,10 @@ export function useFollowUpRepositories(
       selectedPersonalGitHubRepoIds: selectedPersonalRepoIds,
       selectedPersonalGitHubRepoRefs: selectedPersonalRepoRefs,
       personalGitHubBusy: context.personalGitHubBusy,
+      personalGitHubManageUrl: `/workspaces/${encodeURIComponent(session.workspaceId)}/plugins?open=integration:github`,
       groups: context.repositoryGroups,
       selectedRepoIds,
       selectedRepoRefs,
-      selectedInstallationId,
       manualRepos: [...mountedManualRepos, ...pendingManualRepos],
       manualOpen: manualReposOpen,
       githubAppOpen: context.githubAppOpen,
@@ -522,25 +508,7 @@ export function useFollowUpRepositories(
             if (mountedPersonalConflict) {
               throw new Error("This repository is already mounted as your GitHub identity.");
             }
-            const mountedInstallationId = context.githubRepos.find((candidate) =>
-              mountedRepositorySelection.selectedRepoIds.has(candidate.id),
-            )?.installationId;
-            if (
-              mountedInstallationId !== undefined &&
-              mountedInstallationId !== matched.installationId
-            ) {
-              throw new Error(
-                "This session already has repositories mounted from another App account.",
-              );
-            }
-            setPendingRepoIds((current) => {
-              const next =
-                selectedInstallationId !== null && selectedInstallationId !== matched.installationId
-                  ? new Set<number>()
-                  : new Set(current);
-              next.add(matched.id);
-              return next;
-            });
+            setPendingRepoIds((current) => new Set(current).add(matched.id));
             setPendingRepoRefs((current) => ({ ...current, [matched.id]: ref }));
             setPendingPersonalRepoIds(
               (current) =>
@@ -635,7 +603,6 @@ export function useFollowUpRepositories(
       mountedRepositorySelection.selectedRepoIds,
       pendingBuild.error,
       pendingManualRepos,
-      selectedInstallationId,
       selectedPersonalRepoIds,
       selectedPersonalRepoRefs,
       selectedRepoIds,

@@ -659,8 +659,6 @@ function selectedPersonalCounterpartRef(
  * - A row open in the editor is left alone until the edit ends.
  * - A retained identity that a ready catalog no longer contains is dropped,
  *   exactly like draft hydration drops it when the catalog is already loaded.
- * - A bare row for another GitHub installation than the current selection is
- *   left alone, matching the picker's one-installation rule.
  * - An unknown catalog changes nothing.
  */
 export function reconcileManualRepositoriesWithCatalog(
@@ -673,8 +671,6 @@ export function reconcileManualRepositoriesWithCatalog(
   let changed = false;
   const selectedRepoIds = new Set(state.selectedRepoIds);
   const selectedRepoRefs = { ...state.selectedRepoRefs };
-  const selectedInstallationId = () =>
-    repositories.find((candidate) => selectedRepoIds.has(candidate.id))?.installationId ?? null;
   const manualRepos: RepoDraft[] = [];
   // Retained identities first: they are the authoritative restored selection,
   // and a bare duplicate of the same repository then reconciles against it.
@@ -708,11 +704,6 @@ export function reconcileManualRepositoriesWithCatalog(
       continue;
     }
     if (!selectedRepoIds.has(match.id)) {
-      const installationId = selectedInstallationId();
-      if (!repo.github && installationId !== null && installationId !== match.installationId) {
-        kept.add(repo);
-        continue;
-      }
       selectedRepoIds.add(match.id);
       selectedRepoRefs[match.id] = ref;
       changed = true;

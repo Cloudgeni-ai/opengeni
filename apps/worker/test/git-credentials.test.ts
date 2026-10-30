@@ -188,7 +188,11 @@ describe("sandbox git credentials", () => {
     ).toEqual(personalIdentity);
     // The deployment identity is box-wide (manifest env); no per-repo value.
     expect(
-      repositoryCommitIdentity(deploymentSettings, { provider: "github", personalGitHub: false }, null),
+      repositoryCommitIdentity(
+        deploymentSettings,
+        { provider: "github", personalGitHub: false },
+        null,
+      ),
     ).toBeNull();
     const appSettings = testSettings({
       sandboxBackend: "docker",
