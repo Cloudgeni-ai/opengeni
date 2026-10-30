@@ -49,8 +49,19 @@ export const VERSION_OVERLAP =
 export const VERSION_CI_FAILED =
   "its PR CI failed on its current head, and while a Version PR is queued no other PR builds. Rerun or fix its PR CI, or run the Open Version PR workflow again.";
 
+/** How long a queued Version PR holds main without a PR CI run on its head. */
+export const VERSION_CI_DEADLINE_MS = 60 * 60_000;
+
+export const VERSION_CI_MISSING =
+  "no PR CI run has passed or is running on its current head within an hour of queueing it, and while a Version PR is queued no other PR builds. Rerun PR CI on its head (or run the Open Version PR workflow again), then queue it again.";
+
+export const VERSION_UNCHECKABLE =
+  "it changes too many files to compare with main, so the merge queue cannot tell whether it is current. Land it by hand with the merge batcher off.";
+
 /** Marks the one notice per Version PR head that main has overtaken it. */
 const versionBehindMarker = (headSha: string) => `<!-- merge-batcher:version-behind ${headSha} -->`;
+/** Marks the one notice per Version PR head that it holds main while its PR CI runs. */
+const versionHoldMarker = (headSha: string) => `<!-- merge-batcher:version-hold ${headSha} -->`;
 
 export class LandingMismatch extends Error {}
 
@@ -113,20 +124,36 @@ async function observe(ctx: Context): Promise<Observation> {
     if (pull.draft || !pull.sameRepository) continue;
     if (pull.autoMergeAt !== null) ctx.autoMerge.set(pull.number, pull.id);
     const check = await gh.check(pull.headSha, PR_CHECK);
-    const current =
-      check?.status === "completed" &&
-      check.workflow === PR_WORKFLOW &&
-      check.runHeadSha === pull.headSha;
-    const green = current && check.conclusion === "success";
+    const ownRun = check?.workflow === PR_WORKFLOW && check.runHeadSha === pull.headSha;
+    const current = ownRun && check?.status === "completed";
+    const green = current && check?.conclusion === "success";
     const version = pull.headRef === VERSION_BRANCH;
     const changed = green ? await gh.pullFiles(pull.number) : [];
     const files = changed?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ?? null;
     const added = numberedFiles(
       (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
     );
-    let conflict = pull.mergeable === "CONFLICTING" ? CONFLICTING : null;
-    // A Version PR holds the queue, so one whose PR CI failed leaves it.
-    if (version && current && !green) conflict = VERSION_CI_FAILED;
+    const queuedAt = Math.min(
+      ...[pull.labeledAt, pull.autoMergeAt].filter((t): t is number => t !== null),
+    );
+    // A Version PR is regenerated, never merged with main, so a Git conflict
+    // holds it like any other overlap (below) instead of ejecting it.
+    let conflict = pull.mergeable === "CONFLICTING" && !version ? CONFLICTING : null;
+    let headAt: number | undefined;
+    if (version) {
+      headAt = (await gh.commit(pull.headSha)).date;
+      // It holds the queue, so it leaves when its PR CI failed, or when no run
+      // passed or is running an hour after it was queued (or pushed). A
+      // cancelled or skipped run is not a failure: a rerun can still pass.
+      if (current && (check?.conclusion === "failure" || check?.conclusion === "timed_out"))
+        conflict = VERSION_CI_FAILED;
+      else if (
+        !green &&
+        !(ownRun && !current) &&
+        now - Math.max(queuedAt, headAt) > VERSION_CI_DEADLINE_MS
+      )
+        conflict = VERSION_CI_MISSING;
+    }
     const renumber: string[] = [];
     for (const directory of new Set(
       added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
@@ -151,22 +178,27 @@ async function observe(ctx: Context): Promise<Observation> {
         headRef: pull.headRef,
         files: changed,
       });
+    // Only a held Version PR is compared: main moves under it only when the
+    // batch in flight when it was queued lands.
+    let behind = false;
+    if (version && conflict === null) {
+      const overlaps = await versionOverlaps(gh, mainSha, pull.headSha, pull.number);
+      if (overlaps === null) conflict = VERSION_UNCHECKABLE;
+      else behind = overlaps || pull.mergeable === "CONFLICTING";
+    }
     pulls.push({
       number: pull.number,
       title: pull.title,
       headSha: pull.headSha,
-      queuedAt: Math.min(
-        ...[pull.labeledAt, pull.autoMergeAt].filter((t): t is number => t !== null),
-      ),
-      greenAt: green ? (check.completedAt ?? now) : null,
+      queuedAt,
+      greenAt: green ? (check?.completedAt ?? now) : null,
       conflict,
       renumber: conflict === null ? renumber : [],
       slots: added.map((f) => f.slot),
       priority: pull.labels.includes(PRIORITY_LABEL),
       version,
-      // Only a held Version PR is compared: main moves under it only when the
-      // batch in flight when it was queued lands.
-      behind: version && conflict === null && (await versionOverlaps(gh, mainSha, pull.headSha)),
+      behind,
+      ...(headAt === undefined ? {} : { headAt }),
       // Too many files to list is treated like a CI change: it runs alone.
       controlPlane: files === null || isControlPlane(files),
     });
@@ -428,13 +460,29 @@ async function land(ctx: Context, batch: Batch) {
   await gh.deleteBranch(batch.branch);
 }
 
-async function versionOverlaps(gh: GitHub, base: string, head: string): Promise<boolean> {
+/**
+ * Whether main changed files a Version PR also changes since it was generated;
+ * null when the PR changes too many files to tell. Main changing too many to
+ * list counts as an overlap, which a regenerate settles.
+ */
+async function versionOverlaps(
+  gh: GitHub,
+  base: string,
+  head: string,
+  number: number,
+): Promise<boolean | null> {
   const own = await gh.compareFiles(base, head);
-  if (!own) return true;
+  // A release consumes many changesets: past the compare API's 300 files the
+  // PR's own paginated file list stands in.
+  const ownFiles =
+    own.files ??
+    (await gh.pullFiles(number))?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ??
+    null;
+  if (ownFiles === null) return null;
   const main = await gh.compareFiles(own.mergeBase, base);
-  if (!main) return true;
+  if (main.files === null) return true;
   const changed = new Set(main.files);
-  return own.files.some((file) => changed.has(file));
+  return ownFiles.some((file) => changed.has(file));
 }
 
 /**
@@ -452,7 +500,7 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
   try {
     for (const pull of members) {
       // Main moved since this pass observed it; the next pass holds for it.
-      if (pull.version && (await versionOverlaps(gh, base, pull.headSha))) {
+      if (pull.version && (await versionOverlaps(gh, base, pull.headSha, pull.number)) !== false) {
         ctx.log(`Not building Version PR #${pull.number}: main changed files it also changes`);
         continue;
       }
@@ -462,7 +510,10 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
         `Batch ${id}: merge #${pull.number}`,
       );
       if (result.kind === "conflict") {
-        if (head === base)
+        // A Version PR is regenerated, not merged with main: the next pass holds it.
+        if (pull.version)
+          ctx.log(`Not building Version PR #${pull.number}: it conflicts with main`);
+        else if (head === base)
           await eject(
             ctx,
             pull.number,
@@ -511,21 +562,32 @@ async function act(ctx: Context, action: Action) {
     case "build":
       return build(ctx, action.members, action.pending);
     case "hold":
-      if (action.behind) await noteVersionBehind(ctx, action.number, action.headSha);
+      await noteVersionHold(ctx, action);
       return;
     case "wait":
       return;
   }
 }
 
-/** Tell a held Version PR once per head that it must be regenerated. */
-async function noteVersionBehind(ctx: Context, number: number, headSha: string) {
-  const marker = versionBehindMarker(headSha);
-  if ((await ctx.gh.commentBodies(number)).some((body) => body.includes(marker))) return;
-  ctx.log(`Asking for Version PR #${number} to be regenerated`);
+/**
+ * Tell a held Version PR once per head why it holds: that it waits for its
+ * PR CI, or that it must be regenerated. A notice for a head can only be
+ * newer than that head, so only those comments are read.
+ */
+async function noteVersionHold(ctx: Context, action: Extract<Action, { kind: "hold" }>) {
+  const { number, headSha, headAt, behind } = action;
+  const marker = behind ? versionBehindMarker(headSha) : versionHoldMarker(headSha);
+  if ((await ctx.gh.commentBodies(number, headAt)).some((body) => body.includes(marker))) return;
+  ctx.log(
+    behind
+      ? `Asking for Version PR #${number} to be regenerated`
+      : `Telling Version PR #${number} that it holds main`,
+  );
   await ctx.gh.comment(
     number,
-    `${marker}\nThe merge queue is holding main for this Version PR, but ${VERSION_OVERLAP} It keeps its place in the queue and lands next.`,
+    behind
+      ? `${marker}\nThe merge queue is holding main for this Version PR, but ${VERSION_OVERLAP} It keeps its place in the queue and lands next.`
+      : `${marker}\nThe merge queue is holding main for this Version PR: the batch already running finishes, then nothing else builds until this lands. It builds as soon as PR CI passes on ${headSha.slice(0, 10)}. If no PR CI run passes or is running on it within an hour, it leaves the queue. To land a fix first, remove the queue-ready label from this PR.`,
   );
 }
 
@@ -546,7 +608,7 @@ export function describe(action: Action): string {
     case "hold":
       return action.behind
         ? `hold the queue for Version PR #${action.number}: main changed files it also changes, so it waits to be regenerated`
-        : `hold the queue for Version PR #${action.number} until its PR CI passes`;
+        : `hold the queue for Version PR #${action.number} until PR CI passes on ${action.headSha.slice(0, 10)}`;
     case "wait":
       return `wait until ${new Date(action.until).toISOString()} to collect more PRs`;
   }

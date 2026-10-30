@@ -25,6 +25,10 @@ interface FakePull {
   green: boolean;
   /** Its PR CI finished on this head without passing. */
   ciFailed?: boolean;
+  /** Its PR CI on this head: still running, or finished another way than passing. */
+  ci?: "running" | "cancelled" | "timed_out";
+  /** When its head was committed, if not ten minutes ago. */
+  headAt?: number;
   mergeable?: "MERGEABLE" | "CONFLICTING";
   merged?: string;
   headRef?: string;
@@ -61,6 +65,10 @@ class FakeGitHub implements GitHub {
   commentFailure: Error | null = null;
   /** Exact branch names looked up with branchHead. */
   headLookups: string[] = [];
+  /** Heads whose compare lists too many files to show. */
+  tooManyFiles = new Set<string>();
+  /** The `since` of every comment lookup. */
+  commentLookups: number[] = [];
 
   constructor() {
     this.root = this.store([], [], "root");
@@ -135,6 +143,14 @@ class FakeGitHub implements GitHub {
 
   async check(headSha: string): Promise<CheckSummary | null> {
     const pull = [...this.pulls.values()].find((p) => p.head === headSha);
+    if (pull?.ci)
+      return {
+        status: pull.ci === "running" ? "in_progress" : "completed",
+        conclusion: pull.ci === "running" ? null : pull.ci,
+        completedAt: pull.ci === "running" ? null : NOW - 3_600_000,
+        workflow: PR_WORKFLOW,
+        runHeadSha: headSha,
+      };
     if (pull?.ciFailed)
       return {
         status: "completed",
@@ -190,7 +206,7 @@ class FakeGitHub implements GitHub {
     const files = [...this.pulls.values()]
       .filter((p) => changed.includes(this.content(p.head)))
       .flatMap((p) => p.files);
-    return { files, mergeBase };
+    return { files: this.tooManyFiles.has(head) ? null : files, mergeBase };
   }
 
   async branches(prefix: string) {
@@ -208,8 +224,18 @@ class FakeGitHub implements GitHub {
 
   async commit(sha: string) {
     const commit = this.commits.get(sha);
-    if (!commit) throw new Error(`no commit ${sha}`);
-    return commit;
+    if (commit) return commit;
+    // A PR head the test did not make a real commit: the root plus that PR.
+    const pull = [...this.pulls.values()].find((p) => p.head === sha);
+    if (!pull) throw new Error(`no commit ${sha}`);
+    return {
+      sha,
+      tree: hash(`tree:${sha}`),
+      message: `head ${pull.number}`,
+      date: pull.headAt ?? NOW - 600_000,
+      applied: [sha],
+      parents: [this.root],
+    };
   }
 
   async runs(_branch: string, sha: string) {
@@ -306,7 +332,8 @@ class FakeGitHub implements GitHub {
     this.comments.push({ number, body });
   }
 
-  async commentBodies(number: number) {
+  async commentBodies(number: number, since: number) {
+    this.commentLookups.push(since);
     return this.comments.filter((c) => c.number === number).map((c) => c.body);
   }
 
@@ -417,7 +444,12 @@ describe("a batcher pass", () => {
     expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
     await run(gh, options());
     expect(await gh.mainSha()).toBe(frozen);
-    expect(gh.comments).toEqual([]);
+    // Announced once for this head, looked up from the head's own time.
+    expect(gh.comments).toEqual([
+      { number: 5, body: expect.stringContaining("holding main for this Version PR") },
+    ]);
+    expect(gh.comments[0]!.body).toContain("remove the queue-ready label");
+    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000]));
 
     gh.pulls.get(5)!.green = true;
     await run(gh, options());
@@ -480,6 +512,108 @@ describe("a batcher pass", () => {
     expect(version.manifest.members).toEqual([
       expect.objectContaining({ number: 5, head: regenerated }),
     ]);
+  });
+
+  test("a Version PR that conflicts with main is held for a regenerate, never ejected", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    await run(gh, options());
+    const inFlight = gh.batch();
+    gh.addPull(5, { title: "Version" });
+    // GitHub has not yet seen the conflict #1 brings: the build's own merge finds it.
+    gh.conflicts.push([gh.pulls.get(5)!.head, gh.pulls.get(1)!.head]);
+    gh.addPull(2);
+    gh.finishCi(inFlight.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+    const frozen = await gh.mainSha();
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+    expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
+
+    // Then GitHub marks it conflicting: still held, and asked once to regenerate.
+    gh.pulls.get(5)!.mergeable = "CONFLICTING";
+    await run(gh, options());
+    await run(gh, options());
+    expect(await gh.mainSha()).toBe(frozen);
+    expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments).toEqual([
+      { number: 5, body: expect.stringContaining("Run the Open Version PR workflow") },
+    ]);
+    expect(gh.comments[0]!.body).not.toContain("Merge main into the branch");
+  });
+
+  test("a cancelled PR CI run holds a Version PR until the hour is up, then it leaves", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(5, { title: "Version", green: false, ci: "cancelled" });
+    gh.addPull(1);
+    await run(gh, options());
+    expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+
+    // An hour after it was queued and pushed, with no run passing or running.
+    await run(gh, { ...options(), now: () => NOW + 3_600_000 });
+    expect(gh.pulls.get(5)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments.at(-1)).toEqual({
+      number: 5,
+      body: expect.stringContaining("no PR CI run has passed or is running on its current head"),
+    });
+    // Normal batching resumes.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+  });
+
+  test("a running PR CI keeps holding past the hour; a timed-out one leaves at once", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(5, { title: "Version", green: false, ci: "running" });
+    gh.addPull(1);
+    await run(gh, { ...options(), now: () => NOW + 7_200_000 });
+    expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+
+    gh.pulls.get(5)!.ci = "timed_out";
+    await run(gh, options());
+    expect(gh.pulls.get(5)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments.at(-1)!.body).toContain("its PR CI failed on its current head");
+  });
+
+  test("a Version PR with more files than compare lists is checked by its own file list", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: ["packages/sdk/package.json"] });
+    await run(gh, options());
+    const inFlight = gh.batch();
+    gh.addPull(5, { title: "Version", files: [".changeset/a.md", "packages/cli/package.json"] });
+    gh.tooManyFiles.add(gh.pulls.get(5)!.head);
+    gh.finishCi(inFlight.sha, "success");
+    await run(gh, options());
+    // Main changed none of its files, so it builds instead of waiting for a regenerate.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([5]);
+    expect(gh.comments).toEqual([]);
+  });
+
+  test("a bisection waits behind a Version PR and resumes after it lands", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const first = gh.batch();
+    gh.finishCi(first.sha, "failure");
+    await run(gh, options());
+    gh.finishCi(first.sha, "failure", 2);
+    await run(gh, options());
+    const half = gh.batch();
+    expect(half.manifest.pending).toEqual([[2]]);
+
+    gh.addPull(5, { title: "Version" });
+    gh.finishCi(half.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+    // The Version PR builds alone and carries the remaining half.
+    const version = gh.batch();
+    expect(version.manifest.members.map((m) => m.number)).toEqual([5]);
+    expect(version.manifest.pending).toEqual([[2]]);
+    gh.finishCi(version.sha, "success");
+    await run(gh, options());
+    expect(gh.log).toContain("merge #5 merge");
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
   });
 
   test("retries flaky jobs, then bisects and ejects the culprit", async () => {

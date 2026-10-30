@@ -149,16 +149,39 @@ describe("RestGitHub file and branch writes", () => {
 });
 
 describe("RestGitHub comments", () => {
-  test("commentBodies reads the latest page of a PR's comments", async () => {
+  test("commentBodies reads every comment since a time, page by page", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ body: `c${i}` }));
     const { gh, requests } = client(({ url }) =>
-      url.endsWith("/issues/7")
-        ? { comments: 150 }
-        : [{ body: "first" }, { body: null }, { body: "<!-- marker -->" }],
+      url.endsWith("page=1") ? full : [{ body: null }, { body: "<!-- marker -->" }],
     );
-    expect(await gh.commentBodies(7)).toEqual(["first", "", "<!-- marker -->"]);
+    const bodies = await gh.commentBodies(7, Date.UTC(2026, 9, 30, 12, 0, 0));
+    expect(bodies).toHaveLength(102);
+    expect(bodies.slice(-2)).toEqual(["", "<!-- marker -->"]);
     expect(requests.map((r) => r.url.replace(/^.*\/repos\/owner\/repo\//, ""))).toEqual([
-      "issues/7",
-      "issues/7/comments?per_page=100&page=2",
+      "issues/7/comments?since=2026-10-30T12%3A00%3A00.000Z&per_page=100&page=1",
+      "issues/7/comments?since=2026-10-30T12%3A00%3A00.000Z&per_page=100&page=2",
     ]);
+  });
+});
+
+describe("RestGitHub compare", () => {
+  test("compareFiles keeps the merge base when there are too many files to list", async () => {
+    const many = Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}` }));
+    const { gh } = client(() => ({ merge_base_commit: { sha: "b".repeat(40) }, files: many }));
+    expect(await gh.compareFiles("a".repeat(40), "c".repeat(40))).toEqual({
+      files: null,
+      mergeBase: "b".repeat(40),
+    });
+  });
+
+  test("compareFiles lists renamed files under both names", async () => {
+    const { gh } = client(() => ({
+      merge_base_commit: { sha: "b".repeat(40) },
+      files: [{ filename: "new.ts", previous_filename: "old.ts" }, { filename: "x.ts" }],
+    }));
+    expect(await gh.compareFiles("a".repeat(40), "c".repeat(40))).toEqual({
+      files: ["new.ts", "old.ts", "x.ts"],
+      mergeBase: "b".repeat(40),
+    });
   });
 });

@@ -24,20 +24,29 @@ PR workflow opens) holds the queue so it lands on a stable `main`:
 1. Run the **Open Version PR** workflow, then add `queue-ready` to the PR.
 2. The batch already running, if any, still finishes and may land. After
    that, nothing else builds, including priority and CI-change PRs, so `main`
-   moves at most once after you queue it.
+   moves at most once after you queue it. The Version PR gets one comment per
+   head saying it holds `main`.
 3. Once the Version PR's PR CI passes on its head, it is built alone on that
    `main` and lands as a true merge. Normal batching then resumes, priority
    PRs first.
 
-If the batch that was running lands a file the Version PR also changes, the
-Version PR cannot land as reviewed. It keeps holding the queue and gets one
-comment asking for it to be regenerated: run the Open Version PR workflow
-again. That updates the same PR from the now-stable `main`, it keeps its
-label, and it lands next. If its PR CI fails on its current head, it leaves the
-queue with a comment instead, so a broken Version PR never blocks other work.
-To give up on a release, remove its `queue-ready` label. A bisection that was
-in progress may be dropped during a hold; its PRs are simply batched again
-afterwards.
+If the batch that was running lands a file the Version PR also changes, or
+its merge conflicts with `main`, the Version PR cannot land as reviewed. It is
+never ejected for that: it keeps holding the queue and gets one comment per
+head asking for it to be regenerated. Run the Open Version PR workflow again;
+do not merge `main` into it. That updates the same PR from the now-stable
+`main`, it keeps its label, and it lands next.
+
+A Version PR leaves the queue with a comment, so a broken release never blocks
+other work, when its PR CI fails or times out on its current head, or when no
+PR CI run has passed or is running on that head an hour after it was queued
+or pushed (a cancelled run counts as none: rerun it). A bisection in progress
+waits behind the hold and continues after the Version PR lands.
+
+While a Version PR holds the queue, nothing else lands, including a lone
+control-plane fix. To land a fix first, remove `queue-ready` from the Version
+PR, let the fix land, then queue the Version PR again; to give up on a
+release, just remove the label.
 
 The release-plan guard recognizes singleton Version batches by their manifest
 and exact parent topology, independently recomputes their complete merge tree,

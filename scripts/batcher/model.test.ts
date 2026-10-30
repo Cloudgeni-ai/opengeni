@@ -156,11 +156,12 @@ describe("nextBatch", () => {
 
   test("a queued Version PR holds everything else until it is green and current", () => {
     const others = [pull(1), pull(2, { priority: true }), pull(3, { controlPlane: true })];
-    const waiting = pull(5, { version: true, greenAt: null });
+    const waiting = pull(5, { version: true, greenAt: null, headAt: NOW - 60_000 });
     expect(nextBatch([...others, waiting], [[1], [2]], NOW, DEFAULT_SETTINGS)).toEqual({
       kind: "hold",
       number: 5,
       headSha: waiting.headSha,
+      headAt: NOW - 60_000,
       behind: false,
     });
     const behind = pull(5, { version: true, behind: true });
@@ -185,7 +186,7 @@ describe("nextBatch", () => {
     const passed = batch([1, 2], { runs: [run()] });
     expect(decide(observe([pull(1), pull(2), pull(3), waiting], [passed]))).toEqual([
       { kind: "land", batch: passed },
-      { kind: "hold", number: 5, headSha: waiting.headSha, behind: false },
+      { kind: "hold", number: 5, headSha: waiting.headSha, headAt: 0, behind: false },
     ]);
   });
 

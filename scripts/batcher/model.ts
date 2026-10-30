@@ -134,6 +134,8 @@ export interface QueuedPull {
    * land as reviewed until it is regenerated; it keeps holding the queue.
    */
   behind: boolean;
+  /** A Version PR's head commit time (epoch ms): its notices are looked up from then. */
+  headAt?: number;
   controlPlane: boolean;
 }
 
@@ -192,7 +194,7 @@ export type Action =
   | { kind: "renumber"; number: number; paths: string[] }
   | { kind: "build"; members: QueuedPull[]; pending: number[][] }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
-  | { kind: "hold"; number: number; headSha: string; behind: boolean }
+  | { kind: "hold"; number: number; headSha: string; headAt: number; behind: boolean }
   | { kind: "wait"; until: number };
 
 export type Verdict =
@@ -246,10 +248,17 @@ export function nextBatch(
   settings: Settings,
 ): Action | null {
   const version = pulls.filter((p) => p.version && p.conflict === null).sort(fifo)[0];
+  // The batcher never renumbers a Version PR, so green and current is enough.
   if (version)
-    return version.greenAt !== null && !version.behind && !version.renumber.length
+    return version.greenAt !== null && !version.behind
       ? { kind: "build", members: [version], pending }
-      : { kind: "hold", number: version.number, headSha: version.headSha, behind: version.behind };
+      : {
+          kind: "hold",
+          number: version.number,
+          headSha: version.headSha,
+          headAt: version.headAt ?? 0,
+          behind: version.behind,
+        };
 
   const ready = pulls
     .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length)

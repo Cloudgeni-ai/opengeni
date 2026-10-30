@@ -86,7 +86,8 @@ export interface GitHub {
   listDirectory(path: string, ref: string): Promise<string[]>;
   /** These files at a commit, keyed by path; a path that is not a file there is absent. */
   readFiles(ref: string, paths: string[]): Promise<Map<string, RepoFile>>;
-  compareFiles(base: string, head: string): Promise<{ files: string[]; mergeBase: string } | null>;
+  /** Files `head` changes since its merge base with `base`; null files when too many to list. */
+  compareFiles(base: string, head: string): Promise<{ files: string[] | null; mergeBase: string }>;
   branches(prefix: string): Promise<{ name: string; sha: string }[]>;
   /** The head of exactly this branch, or null when it no longer exists. */
   branchHead(name: string): Promise<string | null>;
@@ -106,8 +107,8 @@ export interface GitHub {
   cancelRun(id: number): Promise<void>;
   rerunFailedJobs(id: number): Promise<void>;
   comment(number: number, body: string): Promise<void>;
-  /** The bodies of a PR's latest page of comments (at most 100). */
-  commentBodies(number: number): Promise<string[]>;
+  /** The bodies of a PR's comments created or edited at or after `since` (epoch ms). */
+  commentBodies(number: number, since: number): Promise<string[]>;
   removeLabel(number: number, label: string): Promise<void>;
   disableAutoMerge(pullId: string): Promise<void>;
 }
@@ -344,8 +345,8 @@ export class RestGitHub implements GitHub {
       f.previous_filename ? [f.filename, f.previous_filename] : [f.filename],
     );
     // The compare API lists at most 300 files; more is reported as unknown.
-    if ((data.files ?? []).length >= 300) return null;
-    return { files, mergeBase: data.merge_base_commit.sha };
+    const listed = (data.files ?? []).length < 300;
+    return { files: listed ? files : null, mergeBase: data.merge_base_commit.sha };
   }
 
   async readFiles(ref: string, paths: string[]) {
@@ -539,13 +540,17 @@ export class RestGitHub implements GitHub {
     await this.request("POST", `issues/${number}/comments`, { body });
   }
 
-  async commentBodies(number: number) {
-    const issue = await this.get<{ comments: number }>(`issues/${number}`);
-    const page = Math.max(1, Math.ceil(issue.comments / 100));
-    const data = await this.get<{ body?: string | null }[]>(
-      `issues/${number}/comments?per_page=100&page=${page}`,
-    );
-    return data.map((comment) => comment.body ?? "");
+  async commentBodies(number: number, since: number) {
+    const bodies: string[] = [];
+    const after = encodeURIComponent(new Date(since).toISOString());
+    for (let page = 1; page <= 30; page++) {
+      const data = await this.get<{ body?: string | null }[]>(
+        `issues/${number}/comments?since=${after}&per_page=100&page=${page}`,
+      );
+      bodies.push(...data.map((comment) => comment.body ?? ""));
+      if (data.length < 100) break;
+    }
+    return bodies;
   }
 
   async removeLabel(number: number, label: string) {
