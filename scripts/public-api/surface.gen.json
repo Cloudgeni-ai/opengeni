@@ -18656,7 +18656,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.range": "enum?=[\"\\\"30d\\\"\",\"\\\"90d\\\"\",\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]"
+        "$.range": "enum?=[\"\\\"1h\\\"\",\"\\\"24h\\\"\",\"\\\"30d\\\"\",\"\\\"3h\\\"\",\"\\\"90d\\\"\",\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]"
       }
     },
     "InsightsSiteUsageResponse": {
@@ -18665,7 +18665,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.range": "enum!=[\"\\\"30d\\\"\",\"\\\"90d\\\"\",\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]",
+        "$.range": "enum!=[\"\\\"1h\\\"\",\"\\\"24h\\\"\",\"\\\"30d\\\"\",\"\\\"3h\\\"\",\"\\\"90d\\\"\",\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]",
         "$.rows": "array!",
         "$.rows[]": "ref(InsightsSiteUsageRow)",
         "$.windowEnd": "string!",
@@ -18709,6 +18709,14 @@
         "$.pctOfCreditUsd": "integer!",
         "$.pctOfTokens": "integer!",
         "$.tokens": "number!"
+      }
+    },
+    "InsightsUsageBucket": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"day\\\"\",\"\\\"five_minutes\\\"\",\"\\\"hour\\\"\"]"
       }
     },
     "InsightsUsageClassMicros": {
@@ -18832,7 +18840,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"30d\\\"\",\"\\\"90d\\\"\",\"\\\"custom\\\"\",\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]"
+        "$": "enum=[\"\\\"1h\\\"\",\"\\\"24h\\\"\",\"\\\"30d\\\"\",\"\\\"3h\\\"\",\"\\\"90d\\\"\",\"\\\"custom\\\"\",\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]"
       }
     },
     "InsightsUsageResponse": {
@@ -18841,7 +18849,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.bucket": "enum!=[\"\\\"day\\\"\",\"\\\"hour\\\"\"]",
+        "$.availableRanges": "array?",
+        "$.availableRanges[]": "ref(InsightsUsageRange)",
+        "$.bucket": "ref(InsightsUsageBucket)!",
         "$.dataThrough": "string! null",
         "$.facets": "ref(InsightsUsageFacets)!",
         "$.generatedAt": "string!",
@@ -26642,6 +26652,7 @@
         "$.cursor": "string?",
         "$.groupBy": "const?=[\"\\\"session\\\"\"]",
         "$.limit": "integer?",
+        "$.order": "enum?=[\"\\\"newest\\\"\",\"\\\"oldest\\\"\"]",
         "$.query": "string!",
         "$.sessionId": "string?"
       }

@@ -579,6 +579,31 @@ fn store_urls_pick_the_verifying_uploader() {
     assert_eq!(s3.settle, SETTLE);
 }
 
+#[test]
+fn a_store_opens_by_its_own_settings() {
+    let file = "# the store copied to\n\nexport AWS_ENDPOINT=\"http://127.0.0.1:3900\"\n\
+                AWS_ACCESS_KEY_ID='GKexample'\nAWS_SECRET_ACCESS_KEY=a=b\nAWS_ALLOW_HTTP=true\n\
+                GOOGLE_SERVICE_ACCOUNT=/elsewhere.json\n";
+    let given = settings(file).unwrap();
+    assert_eq!(
+        given[..3],
+        [
+            ("AWS_ENDPOINT".into(), "http://127.0.0.1:3900".into()),
+            ("AWS_ACCESS_KEY_ID".into(), "GKexample".into()),
+            ("AWS_SECRET_ACCESS_KEY".into(), "a=b".into()),
+        ]
+    );
+    assert!(settings("AWS_ENDPOINT").is_err());
+    assert!(settings("=value").is_err());
+    // Another provider's settings are left out, so the S3 store opens.
+    let s3 = ChunkStore::from_url_with("s3://bucket/a", &given)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(s3.uploader, Uploader::StoreVerified));
+    let unknown = [("AWS_NO_SUCH_SETTING".to_owned(), "1".to_owned())];
+    assert!(ChunkStore::from_url_with("s3://bucket/a", &unknown).is_err());
+}
+
 #[tokio::test]
 async fn manifest_round_trip_rejects_corruption_and_invalid_digest() {
     use crate::manifest::{Extent, ExtentSource};

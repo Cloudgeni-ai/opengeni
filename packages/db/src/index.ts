@@ -93835,7 +93835,7 @@ export async function loadDirectModelProviderConnection(
   const metadata = (
     connectionMetadata ?? (await listConnectionsMetadata(db, workspaceId, null))
   ).find((candidate) => directModelConnectionSpec(candidate)?.modelId === modelId);
-  if (!metadata) throw new Error("OpenAI or Azure OpenAI connection is no longer available");
+  if (!metadata) throw new Error("This model connection is no longer available");
   const connection = await loadConnectionCredentialForBroker(db, settings, {
     workspaceId,
     connectionId: metadata.id,
@@ -93849,7 +93849,7 @@ export async function loadDirectModelProviderConnection(
     typeof connection.credential.apiKey !== "string" ||
     !connection.credential.apiKey.trim()
   ) {
-    throw new Error("OpenAI or Azure OpenAI connection changed; reconnect and select its model");
+    throw new Error("This model connection changed; reconnect and select its model");
   }
   await assertModelConnectionAllowsTurn(db, {
     workspaceId,
