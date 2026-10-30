@@ -197,7 +197,13 @@ export async function findFinalSha(
 }
 
 /** Waits between attempts of a read that hit a transient failure. */
-export const RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+export const RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 10_000];
+
+export interface RetryOptions {
+  /** Waits before each retry; empty means a single attempt. */
+  delaysMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+}
 
 /**
  * One read, retried after a network error, a timeout, a 5xx or a 429 so a
@@ -210,10 +216,10 @@ export async function retryingFetch(
   url: string,
   init: RequestInit,
   timeoutMs: number,
-  sleep: (ms: number) => Promise<void>,
+  { delaysMs = RETRY_DELAYS_MS, sleep = (ms) => Bun.sleep(ms) }: RetryOptions = {},
 ): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
-    const last = attempt >= RETRY_DELAYS_MS.length;
+    const last = attempt >= delaysMs.length;
     try {
       const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
       if (last || (response.status < 500 && response.status !== 429)) return response;
@@ -221,21 +227,24 @@ export async function retryingFetch(
     } catch (error) {
       if (last) throw error;
     }
-    await sleep(RETRY_DELAYS_MS[attempt]!);
+    await sleep(delaysMs[attempt]!);
   }
 }
 
-/** GitHub reads with complete pagination; any gap throws. */
+/**
+ * GitHub reads with complete pagination; any gap throws. Each read retries
+ * transient failures unless `retry.delaysMs` is empty.
+ */
 export function githubReads(
   repository: string,
   token: string,
   fetcher: typeof fetch = fetch,
-  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+  retry: RetryOptions = {},
 ): Reads {
   const api = `https://api.github.com/repos/${repository}`;
   const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
   const read = (url: string, init: RequestInit, timeoutMs: number) =>
-    retryingFetch(fetcher, url, init, timeoutMs, sleep);
+    retryingFetch(fetcher, url, init, timeoutMs, retry);
   const get = async (path: string): Promise<Row> => {
     const response = await read(`${api}/${path}`, { headers }, 30_000);
     if (!response.ok) throw new Error(`GitHub ${response.status} for ${path}`);
@@ -362,7 +371,9 @@ if (import.meta.main) {
       ? local.sha
       : receipt.kind === "intermediate"
         ? await findFinalSha(
-            githubReads(local.repository, process.env.GITHUB_TOKEN ?? ""),
+            // findFinalSha already polls, so its reads don't retry on their own:
+            // that keeps a GitHub outage within the job's time limit.
+            githubReads(local.repository, process.env.GITHUB_TOKEN ?? "", fetch, { delaysMs: [] }),
             receipt.batch.tree,
           )
         : null;

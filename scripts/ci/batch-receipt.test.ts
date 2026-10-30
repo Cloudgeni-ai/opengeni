@@ -317,30 +317,46 @@ describe("githubReads", () => {
       calls++;
       return response({ message: "nope" }, 502);
     }) as unknown as typeof fetch;
-    const reads = githubReads(REPO, "t", fetcher, async (ms) => void slept.push(ms));
-    await expect(reads.runs(`batch/${ID}`)).rejects.toThrow("GitHub 502");
+    const github = githubReads(REPO, "t", fetcher, { sleep: async (ms) => void slept.push(ms) });
+    await expect(github.runs(`batch/${ID}`)).rejects.toThrow("GitHub 502");
     expect(calls).toBe(RETRY_DELAYS_MS.length + 1);
-    expect(slept).toEqual(RETRY_DELAYS_MS);
+    expect(slept).toEqual([...RETRY_DELAYS_MS]);
   });
 
-  test("transient 5xx, 429 and network errors are retried with a fresh timeout each time", async () => {
+  test("transient 5xx, 429, network errors and timeouts are retried with a fresh timeout each time", async () => {
     const signals: (AbortSignal | null | undefined)[] = [];
+    let cancelled = 0;
+    const failing = (status: number) =>
+      new Response(
+        new ReadableStream({
+          cancel: () => void cancelled++,
+        }),
+        { status },
+      );
     const failures: (() => Response)[] = [
-      () => response({ message: "bad gateway" }, 502),
+      () => failing(502),
       () => {
         throw new TypeError("socket closed");
       },
-      () => response({ message: "slow down" }, 429),
+      () => failing(429),
+      () => {
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
     ];
     const fetcher = (async (_url: string, init?: RequestInit) => {
       signals.push(init?.signal);
       const fail = failures.shift();
       return fail ? fail() : response([{ sha: sha(0xc2), commit: { tree: { sha: TREES[2] } } }]);
     }) as unknown as typeof fetch;
-    const reads = githubReads(REPO, "t", fetcher, async () => {});
-    expect(await reads.mainCommitWithTree(TREES[2]!)).toBe(sha(0xc2));
-    expect(signals).toHaveLength(4);
-    expect(new Set(signals).size).toBe(4);
+    const github = githubReads(REPO, "t", fetcher, {
+      delaysMs: [1, 1, 1, 1],
+      sleep: async () => {},
+    });
+    expect(await github.mainCommitWithTree(TREES[2]!)).toBe(sha(0xc2));
+    expect(signals).toHaveLength(5);
+    expect(new Set(signals).size).toBe(5);
+    // A failed response's body is released before the next attempt.
+    expect(cancelled).toBe(2);
   });
 
   test("a client error is not retried", async () => {
@@ -349,9 +365,20 @@ describe("githubReads", () => {
       calls++;
       return response({ message: "not found" }, 404);
     }) as unknown as typeof fetch;
-    const reads = githubReads(REPO, "t", fetcher, async () => {});
-    await expect(reads.commit(sha(0x1))).rejects.toThrow("GitHub 404");
+    const github = githubReads(REPO, "t", fetcher, { sleep: async () => {} });
+    await expect(github.commit(sha(0x1))).rejects.toThrow("GitHub 404");
     expect(calls).toBe(1);
+  });
+
+  test("reads with no retry delays make a single attempt, as findFinalSha's polling uses", async () => {
+    let calls = 0;
+    const fetcher = (async () => {
+      calls++;
+      return response({ message: "bad gateway" }, 502);
+    }) as unknown as typeof fetch;
+    const github = githubReads(REPO, "t", fetcher, { delaysMs: [] });
+    expect(await findFinalSha(github, TREES[2]!, 3, async () => {})).toBeNull();
+    expect(calls).toBe(3);
   });
 
   test("a missing, duplicated, foreign or expired impact plan reads as no plan", async () => {
@@ -403,18 +430,22 @@ describe("githubReads", () => {
         });
       return new Response(null, { status: 500 });
     }) as unknown as typeof fetch;
-    expect(await githubReads(REPO, "t", fetcher, async () => {}).planMode(900, TIP)).toBeNull();
-    expect(calls.find((call) => call.url === "https://storage.example/zip")?.auth).toBeNull();
-    expect(calls.find((call) => call.url === "https://api.github.com/archive")?.auth).toBe(
-      "Bearer t",
-    );
+    expect(
+      await githubReads(REPO, "t", fetcher, { sleep: async () => {} }).planMode(900, TIP),
+    ).toBeNull();
+    // Every retry of the failing storage download goes without the token.
+    const storage = calls.filter((call) => call.url === "https://storage.example/zip");
+    expect(storage).toHaveLength(RETRY_DELAYS_MS.length + 1);
+    expect(storage.every((call) => call.auth === null)).toBe(true);
+    const archive = calls.filter((call) => call.url === "https://api.github.com/archive");
+    expect(archive).toEqual([{ url: "https://api.github.com/archive", auth: "Bearer t" }]);
   });
 
   test("an unreachable listing throws, which the entry point turns into a full run", async () => {
     const fetcher = (async () => response({ message: "nope" }, 503)) as unknown as typeof fetch;
-    await expect(githubReads(REPO, "t", fetcher, async () => {}).jobs(900)).rejects.toThrow(
-      "GitHub 503",
-    );
+    await expect(
+      githubReads(REPO, "t", fetcher, { sleep: async () => {} }).jobs(900),
+    ).rejects.toThrow("GitHub 503");
   });
 });
 
