@@ -1,3 +1,4 @@
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 /**
  * Markdown to Slack mrkdwn for model-authored text Opengeni posts to Slack.
  *
@@ -88,12 +89,13 @@ export function stripProviderCitationMarkers(text: string): string {
  *   The opening fence loses its language tag, which Slack would otherwise print
  *   as the first code line, and an unclosed block is closed so Slack still
  *   renders it as code.
- * - Provider citation handles are removed.
+ * - Provider citation handles are removed, and Claude citation tags outside code
+ *   become their quoted text (`rewriteClaudeCiteTags`).
  *
  * Text that uses none of this syntax comes back unchanged.
  */
 export function slackMrkdwnFromMarkdown(markdown: string): string {
-  const lines = stripProviderCitationMarkers(markdown).split("\n");
+  const lines = stripProviderCitationMarkers(rewriteClaudeCiteTags(markdown)).split("\n");
   const output: string[] = [];
   let fence: { character: string; length: number } | null = null;
   for (const line of lines) {

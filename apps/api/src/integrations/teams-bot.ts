@@ -5,6 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { AccessGrant } from "@opengeni/contracts";
 import { turnCompletedReply } from "@opengeni/contracts";
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -598,6 +599,11 @@ async function catalogDeps(deps: ApiRouteDeps, grant: AccessGrant): Promise<ApiR
     ).settings,
   };
 }
+/** An agent's reply as Teams message parts. Teams shows plain text, so Claude
+ * citation tags become their quoted text instead of raw markup. */
+export function teamsReplyParts(text: string): string[] {
+  return teamsTextParts(rewriteClaudeCiteTags(text));
+}
 export function teamsTextParts(text: string): string[] {
   const parts: string[] = [];
   let part = "";
@@ -822,7 +828,7 @@ async function drainRoute(
           text = `Your task needs your input or approval. Open the secure Opengeni chat: ${sessionUrl(deps, r)}`;
         else if (event.type === "turn.failed")
           text = `The task could not finish. Open Opengeni for details: ${sessionUrl(deps, r)}`;
-        await enqueueTeamsOutput(deps.db, i, r, event.sequence, text ? teamsTextParts(text) : []);
+        await enqueueTeamsOutput(deps.db, i, r, event.sequence, text ? teamsReplyParts(text) : []);
       }
     }
     output = await claimTeamsOutput(deps.db, i, r);
