@@ -7789,7 +7789,7 @@ export const sessionTurns = pgTable(
     // Immutable funding origin (`BillingOrigin`: app or api), frozen when the
     // turn is accepted and inherited by agent and machine work. Unlike
     // `surface` it decides which credit pays; it never grants access. Null is
-    // legacy and billed as app (migration 1119).
+    // legacy and billed as app (migration 1128).
     billingOrigin: text("billing_origin"),
     // Immutable user-facing admission intent. Physical execution still uses
     // status=queued until a worker claims the row; this field keeps that

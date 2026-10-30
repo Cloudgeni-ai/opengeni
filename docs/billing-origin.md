@@ -201,7 +201,7 @@ way. Processes install it at boot (`configureBillingLegacyAccounts`).
 
 ## Rollout
 
-Migration 1119 is rolling: four nullable columns with `NOT VALID` checks,
+Migration 1128 is rolling: four nullable columns with `NOT VALID` checks,
 two triggers with their private functions, new private helpers,
 same-signature replacements of the plan balance and expiry functions, and two
 widened `NOT VALID` billing-record checks. The scheduled-task execution

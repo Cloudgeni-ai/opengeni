@@ -468,7 +468,7 @@ BEGIN
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> expected
       OR (length(definition) - length(replace(definition, target, ''))) / length(target) <> expected
     THEN
-      RAISE EXCEPTION '1119 scheduled task execution exclusion drift in %', routine
+      RAISE EXCEPTION '1128 scheduled task execution exclusion drift in %', routine
         USING ERRCODE = '55000';
     END IF;
     EXECUTE replace(definition, target, target || $a$, 'billing_origin'$a$);

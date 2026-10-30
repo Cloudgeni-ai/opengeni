@@ -43,14 +43,14 @@ async function definitions(): Promise<Map<string, string>> {
 }
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-1119-billing-origin");
+  owned = await acquireOwnerMigratedTestDatabase("migration-1128-billing-origin");
   if (!owned) {
     if (requireRealDatabase) throw new Error("PostgreSQL fixture is unavailable");
     return;
   }
   // A database that already ran every other shipped migration, main's 1115
   // included, then upgrades to the release that adds ours.
-  directory = await mkdtemp(join(tmpdir(), "og-migration-1119-"));
+  directory = await mkdtemp(join(tmpdir(), "og-migration-1128-"));
   const files = (await readdir(SHIPPED)).filter((file) => file.endsWith(".sql")).sort();
   ours = files.find((file) => file.endsWith("_billing_usage_origin.sql")) ?? "";
   if (!ours) throw new Error("the billing-origin migration is missing");
@@ -105,12 +105,12 @@ test("neither the creator lock nor the funding origin changes a task's execution
   const suffix = crypto.randomUUID();
   const subjectId = `subject-${suffix}`;
   const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "migration-1119",
+    accountExternalSource: "migration-1128",
     accountExternalId: suffix,
-    accountName: "Migration 1119",
-    workspaceExternalSource: "migration-1119",
+    accountName: "Migration 1128",
+    workspaceExternalSource: "migration-1128",
     workspaceExternalId: suffix,
-    workspaceName: "Migration 1119",
+    workspaceName: "Migration 1128",
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
