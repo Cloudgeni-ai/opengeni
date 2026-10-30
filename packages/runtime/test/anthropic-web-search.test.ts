@@ -7,6 +7,7 @@ import {
   type ModelRequest,
 } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
+import { maskSecretValues } from "@opengeni/contracts";
 import {
   ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
   AnthropicMessagesModel,
@@ -863,6 +864,34 @@ describe("Claude searches across Claude accounts", () => {
     );
   });
 
+  test("a record never ends a reply that the request continues", () => {
+    // The request continues Claude's own reply (as after a paused search), so
+    // the readable record of its earlier search waits for the next user
+    // message instead of ending the reply, and the reply can grow in place.
+    const reply = searchedOn(accountA).slice(0, -1);
+    const first = buildAnthropicRequest(request(inRuntimeForm(reply)), "claude", accountB, false);
+    expect(first.messages.map((entry: any) => entry.role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(first.messages)).not.toContain("opengeni release notes");
+    const later = buildAnthropicRequest(
+      request(
+        inRuntimeForm([
+          ...reply,
+          ...anthropicResponse(message("msg_2", [{ type: "text", text: "More." }])).output,
+          { role: "user", content: "Thanks" },
+        ]),
+      ),
+      "claude",
+      accountB,
+      false,
+    );
+    expect(later.messages.map((entry: any) => entry.role)).toEqual(["user", "assistant", "user"]);
+    const [user, answer] = unmarked(first.messages) as any[];
+    const [laterUser, laterAnswer, next] = unmarked(later.messages) as any[];
+    expect(laterUser).toEqual(user);
+    expect(laterAnswer.content.slice(0, answer.content.length)).toEqual(answer.content);
+    expect(JSON.stringify(next.content)).toContain("opengeni release notes");
+  });
+
   test("a conversation that moves accounts between turns keeps working", async () => {
     const sent: any[] = [];
     const fetcher = (async (_url, init) => {
@@ -948,6 +977,21 @@ describe("Claude searches outside the Claude transport", () => {
     });
     expect(JSON.stringify(kept)).toBe(JSON.stringify([item, cited]));
     expect(projectHostedSearchEvidence(kept[0]!)).toMatchObject({ role: "user" });
+  });
+
+  test("a search keeps its session's form when secret masking copies it", () => {
+    const kept = projectHistoryForProvider([item, cited], "anthropic-messages", {
+      searchRecordForm: "runtime",
+    });
+    // Masking happens between the filters and the transport, and rebuilds
+    // any item holding a known secret value.
+    const masked = maskSecretValues(kept, [{ value: "opengeni release notes", label: "[secret]" }]);
+    expect(masked[0]).not.toBe(kept[0]);
+    for (const api of ["responses", "chat"] as const) {
+      const projected = projectHistoryForProvider(masked, api);
+      expect(projected[0]).toMatchObject({ type: "message", role: "user" });
+      expect(JSON.stringify(projected)).not.toContain("opengeni release notes");
+    }
   });
 
   test("the compaction transcript names the query and sources without encrypted pages", () => {

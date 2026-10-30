@@ -242,6 +242,60 @@ describe("projectHistoryForProvider", () => {
     ]);
   });
 
+  test("every request's projection is a prefix of the next one's, in both forms, on every API", () => {
+    const call = (callId: string) => ({
+      type: "function_call",
+      callId,
+      name: "lookup",
+      arguments: "{}",
+    });
+    const result = (callId: string) => ({ type: "function_call_result", callId, output: "ok" });
+    const user = (content: string) => ({ type: "message", role: "user", content });
+    const assistant = (content: string) => ({ type: "message", role: "assistant", content });
+    // Each step is what one later request adds; a request goes out once its
+    // calls have results, unless stored history lost one. Claude can write
+    // text and search after its own tool call, before the results.
+    const steps: Item[][] = [
+      [user("u1"), call("lost")],
+      [user("u2"), hostedSearchFixture(), assistant("a1")],
+      [
+        user("u3"),
+        call("a"),
+        hostedSearchFixture(),
+        assistant("after the call"),
+        call("b"),
+        result("a"),
+        result("b"),
+      ],
+      [hostedSearchFixture(), assistant("a2")],
+      [call("c"), hostedSearchFixture()],
+      [user("u4")],
+    ];
+    for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+      for (const searchRecordForm of ["assistant", "runtime"] as const) {
+        let history: Item[] = [];
+        let previous: string[] = [];
+        for (const step of steps) {
+          history = [...history, ...step];
+          const sent = projectHistoryForProvider(history, api, { searchRecordForm }).map((item) =>
+            JSON.stringify(item),
+          );
+          expect(sent.slice(0, previous.length)).toEqual(previous);
+          previous = sent;
+        }
+        // The open calls' results still follow their calls directly.
+        const final = projectHistoryForProvider(history, api, { searchRecordForm });
+        const at = (item: Item) => final.indexOf(item);
+        expect(
+          at(history.find((item) => item.callId === "b" && item.type === "function_call")!),
+        ).toBe(
+          at(history.find((item) => item.callId === "a" && item.type === "function_call_result")!) -
+            1,
+        );
+      }
+    }
+  });
+
   test("legacy Chat raw reasoning becomes inert assistant context without truncation or mutation", () => {
     const text = "Synthetic reasoning. ".repeat(2000);
     const items = [

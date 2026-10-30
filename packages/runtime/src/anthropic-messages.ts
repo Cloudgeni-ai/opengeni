@@ -446,7 +446,11 @@ export function anthropicMessages(
         ]);
     }
   }
-  append("user", []);
+  // A request that ends in Claude's own reply continues it (a paused search).
+  // A record placed after that reply would end it, and would move once the
+  // reply grows, so records still waiting then reach Claude with the next
+  // user message, in a later request.
+  if (messages.at(-1)?.role !== "assistant") append("user", []);
   withoutUncontinuableSearches(messages);
   // Validate adjacency and pairing before network I/O. Reorder only results within their user message.
   let pending = new Set<string>();

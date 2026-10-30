@@ -3,7 +3,12 @@ import {
   sessionSearchRecordsAsInput,
   type Database,
 } from "@opengeni/db";
-import { searchRecordFormMatters, type SearchRecordForm } from "@opengeni/runtime";
+import {
+  projectHistoryForProvider,
+  searchRecordFormMatters,
+  type HistoryProviderApi,
+  type SearchRecordForm,
+} from "@opengeni/runtime";
 
 /**
  * How this turn's hosted web searches reach the model (docs/web-search.md).
@@ -39,4 +44,18 @@ export async function settleTurnSearchRecords(
   await adoptSessionSearchRecordsAsInput(db, workspaceId, sessionId);
   records.form = "runtime";
   return records.form;
+}
+
+/**
+ * The turn's provider projection of history, in the form the turn holds when
+ * it is called. Turn input and compaction both use it, so compaction's
+ * request shares the turn's cached prefix and its summarizer sees what the
+ * model saw.
+ */
+export function projectTurnHistoryForProvider(
+  items: Array<Record<string, unknown>>,
+  providerApi: HistoryProviderApi,
+  records: TurnSearchRecords,
+): Array<Record<string, unknown>> {
+  return projectHistoryForProvider(items, providerApi, { searchRecordForm: records.form });
 }

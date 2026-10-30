@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { tool as functionTool } from "@openai/agents";
+import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   HOSTED_SEARCH_EVIDENCE_MAX_BYTES,
   HostedSearchEvidenceEchoGuard,
@@ -9,6 +12,7 @@ import {
   withSearchRecordForm,
   withSearchRecordsAfterOpenCalls,
 } from "../src/hosted-search-evidence";
+import { buildOpenGeniAgent, runAgentStream } from "../src/index";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 const runtime = { form: "runtime" } as const;
@@ -403,5 +407,61 @@ describe("streamed copies of a search record stay out of the transcript", () => 
       delta(quoted, "msg_r"),
       completed(quoted, "msg_r"),
     ]);
+  });
+});
+
+describe("a run's own model calls", () => {
+  // Real SDK provided-session preparation on an in-memory session, no I/O.
+  const ownedSandboxFor = (agent: ReturnType<typeof buildOpenGeniAgent>) => ({
+    client: { backendId: "unix_local", serializeSessionState: async () => ({}) },
+    session: {
+      state: { manifest: (agent as unknown as { defaultManifest: unknown }).defaultManifest },
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      execCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      createEditor: () => ({}),
+      listDir: async () => [],
+      readFile: async () => "",
+      pathExists: async () => false,
+      materializeEntry: async () => undefined,
+    },
+  });
+
+  test("send the run's searches in the session's form", async () => {
+    for (const [form, role, owned] of [
+      ["runtime", "user", false],
+      ["assistant", "assistant", false],
+      ["runtime", "user", true],
+    ] as const) {
+      const settings = testSettings({
+        sandboxBackend: owned ? "local" : "none",
+        webSearchEnabled: false,
+      });
+      const model = new ScriptedModel([
+        { output: [hostedSearchFixture() as never, functionCall("lookup", {}, "call-1")] },
+        { outputText: "Seven colors." },
+      ]);
+      const agent = buildOpenGeniAgent(settings, [], { model });
+      agent.tools.push(
+        functionTool({
+          name: "lookup",
+          strict: false,
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => "found",
+        }),
+      );
+      const stream = await runAgentStream(agent, "How many colors?", settings, {
+        searchRecordForm: form,
+        ...(owned ? { ownedSandbox: ownedSandboxFor(agent) as never } : {}),
+      });
+      for await (const _event of stream) {
+        /* drain */
+      }
+      await stream.completed;
+      const sent = model.requests[1]!.input as Array<Record<string, unknown>>;
+      const records = sent.filter((item) => JSON.stringify(item).includes("exactly seven colors"));
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ type: "message", role });
+      expect(isHostedSearchEvidenceRecord(records[0])).toBe(form === "runtime");
+    }
   });
 });

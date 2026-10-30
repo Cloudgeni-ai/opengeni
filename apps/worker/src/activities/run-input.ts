@@ -38,7 +38,11 @@ import {
 } from "@opengeni/runtime";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
-import { settleTurnSearchRecords, type TurnSearchRecords } from "./search-record-form";
+import {
+  projectTurnHistoryForProvider,
+  settleTurnSearchRecords,
+  type TurnSearchRecords,
+} from "./search-record-form";
 
 /** D-37 request-copy projection. C1 is deliberately not wired into turnInput;
  * C2 must supply scoped turn metadata and the D-43 deployment gate. The API
@@ -947,24 +951,22 @@ async function messageInput(
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );
-  const searchRecordForm = preparationOptions.searchRecords
-    ? await settleTurnSearchRecords(
-        db,
-        trigger.workspaceId,
-        trigger.sessionId,
-        preparationOptions.searchRecords,
-        canonicalView,
-      )
-    : undefined;
+  const searchRecords = preparationOptions.searchRecords;
+  if (searchRecords)
+    await settleTurnSearchRecords(
+      db,
+      trigger.workspaceId,
+      trigger.sessionId,
+      searchRecords,
+      canonicalView,
+    );
   const providerView = await measureHistoryPreparationPhase(
     preparationOptions,
     "provider_projection",
     () =>
-      projectHistoryForProvider(
-        canonicalView,
-        providerApi,
-        searchRecordForm ? { searchRecordForm } : {},
-      ),
+      searchRecords
+        ? projectTurnHistoryForProvider(canonicalView, providerApi, searchRecords)
+        : projectHistoryForProvider(canonicalView, providerApi),
   );
   const referencedHistory = await measureHistoryPreparationPhase(
     preparationOptions,

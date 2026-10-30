@@ -15,7 +15,6 @@ import {
   freezeAgentLearningPolicy,
 } from "@opengeni/db";
 import {
-  projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   projectModelInputForCapabilities,
   hasActiveWorkspaceInstructionPolicy,
@@ -32,7 +31,11 @@ import { projectReasoningConfigurations, supportsReasoningConfiguration } from "
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
-import { loadTurnSearchRecords, type TurnSearchRecords } from "../search-record-form";
+import {
+  loadTurnSearchRecords,
+  projectTurnHistoryForProvider,
+  type TurnSearchRecords,
+} from "../search-record-form";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -440,10 +443,10 @@ export async function prepareGovernanceAndModel(
   const searchRecords = await loadTurnSearchRecords(db, input.workspaceId, input.sessionId);
   const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
     await modelHistoryProjector(
-      projectHistoryForProvider(
+      projectTurnHistoryForProvider(
         await generatedImageHistoryProjector(restoreGenericDispatchHistoryItems(items)),
         providerApi,
-        { searchRecordForm: searchRecords.form },
+        searchRecords,
       ),
     );
   // Bind the provider/model catalog's context policy to every model-facing
