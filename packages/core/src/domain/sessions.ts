@@ -4,6 +4,7 @@ import type { TeamsConversationProof } from "@opengeni/db";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
+  messageSentByPerson,
   ModelUnavailableError,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts";
@@ -206,6 +207,9 @@ import {
   updateSessionProfileWithEvent,
   setSessionKeepLive,
   type SetSessionKeepLiveResult,
+  setSessionUnattendedSetting,
+  endSessionUnattendedDefault,
+  type SetSessionUnattendedResult,
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
@@ -750,7 +754,8 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
-function validateSessionMcpServersForCreate(
+/** Session-create MCP server validation, shared by automations that start chats. */
+export function validateSessionMcpServersForCreate(
   settings: Settings,
   grant: AccessGrant,
   servers: SessionMcpServerInput[],
@@ -1041,6 +1046,8 @@ export async function createAndStartSessionWithOutcome(input: {
   reasoningEffort: Settings["openaiReasoningEffort"];
   /** Session default Fast/standard; mirrored into metadata when set. */
   latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
+  /** No person answers during the task; frozen in the session metadata. */
+  unattended?: boolean;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1337,6 +1344,7 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
+          ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -1449,6 +1457,7 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
+        ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -4179,6 +4188,8 @@ async function createSessionForRequestInFileScope(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      // No person answers during the task. Never inherited by a child.
+      ...(payload.unattended === true ? { unattended: true } : {}),
       // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
       // policies apply again whenever this session resolves a reference.
       vaultPolicy: intersectVaultPolicies(
@@ -4726,6 +4737,12 @@ async function acceptSessionUserMessageInFileScope(
         input.authorization !== undefined &&
         (await workspaceSettingsAuthorized(deps, input.authorization, workspaceId)),
     });
+    // A person writing in a chat an automation started is there to answer:
+    // its unattended default ends before this turn can be claimed. An
+    // explicit choice (the chat's switch or the API) stays.
+    if (existingSession.unattended === true && messageSentByPerson({ source, surface })) {
+      await endSessionUnattendedDefault(db, { workspaceId, sessionId: existingSession.id });
+    }
     const {
       accepted,
       turn,
@@ -5034,6 +5051,36 @@ export async function setSessionRetention(
     workspaceId: grant.workspaceId,
     sessionId,
     keepLive,
+  });
+  return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
+}
+
+/**
+ * Turn a chat's unattended mode on or off ("work without me") from its next
+ * turn. An explicit choice: a person's later message does not change it.
+ */
+export async function setSessionUnattended(
+  deps: {
+    db: Database;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  unattended: boolean,
+): Promise<{
+  result: SetSessionUnattendedResult;
+  relatedSessionAccess: "target" | "root";
+}> {
+  requirePermission(grant, "sessions:control");
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.tool_policy.write",
+    surface: "core",
+  });
+  const result = await setSessionUnattendedSetting(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    unattended,
   });
   return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
 }

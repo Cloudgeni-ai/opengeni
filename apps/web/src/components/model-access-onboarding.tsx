@@ -98,6 +98,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   credits: "Opengeni credits",
   openai: "OpenAI",
   azure_openai: "Azure OpenAI",
+  openai_compatible: "Your endpoint",
 };
 
 /** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */

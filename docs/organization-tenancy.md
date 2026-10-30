@@ -1245,9 +1245,12 @@ Site they can see (Site Data, Site SQL, publication settings, takedown and
 restore), authors, installs and reviews workspace Skills
 (`documents:manage`), creates and runs schedules, automations and event
 sources (`scheduled_tasks:*`), changes or deletes any bot template shared with
-the workspace, and records posts on their own social accounts. Settings-class
-powers stay Admin-only:
-`workspace:admin` (workspace settings, instructions, Insights),
+the workspace, and records posts on their own social accounts. A signed-in
+Member also edits the workspace instructions
+and reviews the agent's proposed changes to them (`sessions:create`, see
+[workspace instruction policies](workspace-instruction-policies.md)).
+Settings-class powers stay Admin-only:
+`workspace:admin` (workspace settings, learning settings, Insights),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
 App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
 workspace and organization machines; a signed-in Member connects and changes

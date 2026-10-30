@@ -8,7 +8,7 @@
 // checked before each new model request: requests already running can take
 // recorded usage above it. See docs/session-usage-limits.md.
 import type { OpenGeniClient, OpenGeniRequestOptions } from "./client";
-import { sessionUsageLimitNotConfirmed } from "./errors";
+import { sessionUsageLimitConfirmed, sessionUsageLimitNotConfirmed } from "./errors";
 import type {
   SessionUsageLimit,
   SetSessionUsageLimitRequest,
@@ -19,6 +19,8 @@ export type {
   SessionUsageLimitHistory,
   SessionUsageLimitReachedRefusal,
   SessionUsageLimitStatus,
+  SessionUsageLimitWindow,
+  SessionUsageLimitWindowInput,
   SetSessionUsageLimitRequest,
 } from "@opengeni/contracts/session-usage-limits";
 export {
@@ -64,7 +66,7 @@ export async function setSessionUsageLimit(
     usageLimitPath(workspaceId, sessionId),
     request,
   );
-  if (committed.limitMicros !== request.limitMicros) {
+  if (!sessionUsageLimitConfirmed(request, committed)) {
     throw sessionUsageLimitNotConfirmed(sessionId);
   }
   return committed;

@@ -6,34 +6,15 @@ import {
   type UseMachinesOptions,
 } from "../../machines";
 import { useAppContext } from "../app-context";
-import type { AccessContext } from "../types";
-import { hasWorkspacePermission } from "./permissions";
+import { hasWorkspacePermission, isSignedInPerson } from "./permissions";
+
+export { isSignedInPerson };
 
 const EMPTY_MACHINES: MachineView[] = [];
 const ignoreRefresh = async () => {};
 const denyMutation = async () => null;
 const denyAttach = async () => false;
 const emptySeries = async (): Promise<MetricSample[]> => [];
-
-/**
- * The signed-in person themself, not a key, a delegated credential or an
- * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
- * Mirrors the API's rule for Only me machines; the API still decides.
- */
-export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
-  if (!context || context.credential) return false;
-  const person =
-    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
-  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
-  return Boolean(
-    person &&
-    grant &&
-    grant.subjectId === context.subjectId &&
-    grant.principalKind === "human_session" &&
-    grant.metadata?.delegated !== true &&
-    !grant.serviceInitiator,
-  );
-}
 
 // Stock-console reads follow the current workspace grant. The public React
 // hook remains usable by embedding hosts with their own authorization model.

@@ -11,6 +11,7 @@ import {
   type GmailRestMcpServerOptions,
   gmailRestResultOutcome,
 } from "../src/gmail-rest-mcp";
+import { gmailToolRequiredScope } from "../src/gmail-rest-tools";
 
 const operationId = "12345678-1234-4123-8123-123456789abc";
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -570,11 +571,17 @@ describe("Gmail complete mailbox operations", () => {
         .map((tool) => tool.name)
         .sort(),
     );
-    expect(gmail.scopesHint).toEqual([
-      "https://www.googleapis.com/auth/gmail.readonly",
+    // A first connection asks only to read; the rest is asked for in the chat
+    // when a tool needs it, and every such scope has plain-language copy.
+    expect(gmail.scopesHint).toEqual(["https://www.googleapis.com/auth/gmail.readonly"]);
+    const labelled = Object.keys(gmail.presentation.scopeLabels).sort();
+    expect(labelled).toEqual([
       "https://www.googleapis.com/auth/gmail.compose",
       "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.readonly",
     ]);
+    for (const tool of GMAIL_REST_MCP_TOOLS)
+      expect(labelled).toContain(gmailToolRequiredScope(tool.name));
   });
 
   test("original message bytes exceed the old JSON limit without entering model output", async () => {

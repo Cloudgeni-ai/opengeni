@@ -91,9 +91,30 @@ impl std::fmt::Display for Format {
 /// How a runtime label names the snapshot format.
 const FORMAT_LABEL: &str = "Firecracker snapshot format ";
 
+/// How a runtime label names the host kernel, after the processor.
+const KERNEL_LABEL: &str = " under Linux ";
+
+/// Splits a runtime label into what names the VMM and the processor, and
+/// the host kernel, which labels made before they named it lack.
+fn split_kernel(runtime: &str) -> (&str, Option<&str>) {
+    match runtime.rsplit_once(KERNEL_LABEL) {
+        Some((made_by, kernel)) => (made_by, Some(kernel)),
+        None => (runtime, None),
+    }
+}
+
+/// The processor model a runtime label names, if it names one.
+fn processor_of(runtime: &str) -> Option<&str> {
+    split_kernel(runtime)
+        .0
+        .split_once(" on ")
+        .map(|(_, processor)| processor)
+}
+
 /// Of `binaries`, the one to restore an image made under `made_under`
 /// with: the one that made it if it is there, else the first that reads
-/// its snapshot format. With none, the current binary tries it.
+/// its snapshot format. With none, the current binary tries it. The host
+/// kernel a label names says nothing about which binary made the image.
 pub(super) fn chosen<'a>(binaries: &[&'a Binary], made_under: &str) -> Option<&'a Binary> {
     let image = Format::of_runtime(made_under);
     let reads = |binary: &&&Binary| {
@@ -102,19 +123,22 @@ pub(super) fn chosen<'a>(binaries: &[&'a Binary], made_under: &str) -> Option<&'
             .zip(image)
             .is_some_and(|(writes, image)| writes.reads(image))
     };
+    let made_by = split_kernel(made_under).0;
     binaries
         .iter()
-        .find(|binary| binary.runtime == made_under)
+        .find(|binary| split_kernel(&binary.runtime).0 == made_by)
         .or_else(|| binaries.iter().find(reads))
         .copied()
 }
 
 /// Whether any of `binaries` loads an image made under `made_under`; see
 /// [`crate::Engine::reads`]. Only a known snapshot format that every binary
-/// names, and none reads, is a no.
+/// names, and none reads, is a no. One a binary reads but that was made on
+/// another processor model or under another host kernel, as both labels
+/// name them, was made elsewhere.
 pub(super) fn readable(binaries: &[&Binary], made_under: &str) -> Readable {
-    if chosen(binaries, made_under).is_some() {
-        return Readable::Yes;
+    if let Some(binary) = chosen(binaries, made_under) {
+        return elsewhere(&binary.runtime, made_under).map_or(Readable::Yes, Readable::Elsewhere);
     }
     let Some(image) = Format::of_runtime(made_under) else {
         return Readable::Unknown;
@@ -133,28 +157,64 @@ pub(super) fn readable(binaries: &[&Binary], made_under: &str) -> Readable {
     ))
 }
 
+/// How the host an image was made on, as `made_under` names it, differs
+/// from this one, which `here` names, if the labels say. A label made
+/// before labels named the kernel leaves it open, so it may differ.
+fn elsewhere(here: &str, made_under: &str) -> Option<String> {
+    match (processor_of(made_under), processor_of(here)) {
+        (Some(made_on), Some(this)) if made_on != this => {
+            return Some(format!("it was made on {made_on}, and this host is {this}"));
+        }
+        _ => {}
+    }
+    match (split_kernel(made_under).1, split_kernel(here).1) {
+        (Some(made_under), Some(this)) if made_under != this => Some(format!(
+            "it was made under Linux {made_under}, and this host runs Linux {this}"
+        )),
+        (None, Some(this)) => Some(format!(
+            "its label does not name the host kernel it was made under, and this host runs \
+             Linux {this}"
+        )),
+        _ => None,
+    }
+}
+
 /// What a memory image made here depends on, and the snapshot format
-/// `binary` writes if it names one: the format and the processor model.
-/// Firecracker refuses snapshots in formats it does not read, and a
-/// guest's saved processor state belongs to its model. Releases that write
-/// the same format make interchangeable images, so an upgrade that keeps
-/// the format keeps every image. A binary too old to name its format is
-/// known by its release.
+/// `binary` writes if it names one: the format, the processor model and
+/// the host kernel. Firecracker refuses snapshots in formats it does not
+/// read, a guest's saved processor state belongs to its model, and the
+/// processor state KVM saves depends on the kernel: an image made under a
+/// newer kernel can hold registers an older one refuses, and Firecracker
+/// promises no restore across kernels. Releases that write the same format
+/// make interchangeable images, so an upgrade that keeps the format keeps
+/// every image. A binary too old to name its format is known by its
+/// release.
 pub(super) fn runtime_of(binary: &Path) -> io::Result<(String, Option<Format>)> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let processor = cpu_model(&cpuinfo);
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let host = host_label(cpu_model(&cpuinfo), kernel.trim());
     if let Some(format) = first_line(binary, "--snapshot-version")? {
         return Ok((
-            format!("{FORMAT_LABEL}{format} on {processor}"),
+            format!("{FORMAT_LABEL}{format}{host}"),
             Format::parse(&format),
         ));
     }
     match first_line(binary, "--version")? {
-        Some(release) => Ok((format!("{release} on {processor}"), None)),
+        Some(release) => Ok((format!("{release}{host}"), None)),
         None => Err(io::Error::other(format!(
             "{} --version reported no version",
             binary.display()
         ))),
+    }
+}
+
+/// The end of a runtime label, naming the host: its processor model and,
+/// when known, its kernel release.
+pub(super) fn host_label(processor: &str, kernel: &str) -> String {
+    if kernel.is_empty() {
+        format!(" on {processor}")
+    } else {
+        format!(" on {processor}{KERNEL_LABEL}{kernel}")
     }
 }
 

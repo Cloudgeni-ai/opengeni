@@ -27,6 +27,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   notify_user: { sessionRequired: true, allOf: ["sessions:control"] },
   notification_withdraw: { sessionRequired: true, allOf: ["sessions:control"] },
   inbox_tidy: { sessionRequired: true, allOf: ["sessions:control"] },
+  call_user: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },

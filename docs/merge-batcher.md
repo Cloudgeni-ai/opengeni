@@ -16,6 +16,12 @@ head. Add `queue-priority` as well for an urgent fix: priority PRs are tested
 next, as soon as the batch that is already running finishes. A running batch is
 never cancelled for one.
 
+The release-plan guard recognizes singleton Version batches by their manifest
+and exact parent topology, independently recomputes their complete merge tree,
+then reproduces the original Version head from its own base. Consumed changesets
+are therefore validated without losing disjoint main changes or skipping the
+deterministic Version check.
+
 A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
 Pushing a new head while queued simply restarts its batch.

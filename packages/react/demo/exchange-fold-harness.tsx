@@ -203,7 +203,8 @@ function tailScenario(): Draft[] {
   tool(
     "after-final",
     "exec_command",
-    { cmd: "record-analysis-metadata" },
+    // A script, so its plain-words title keeps the name the tail preview shows.
+    { cmd: "./record-analysis-metadata.sh" },
     "Analysis metadata saved.",
     "turn-tail",
   );

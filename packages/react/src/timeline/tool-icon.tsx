@@ -35,6 +35,7 @@ import {
   PanelsTopLeftIcon,
   PaperclipIcon,
   PencilIcon,
+  PhoneIcon,
   PlugIcon,
   ReceiptIcon,
   SearchIcon,
@@ -135,6 +136,8 @@ export function toolIcon(kind: ToolIconKind): LucideIcon {
       return SettingsIcon;
     case "bell":
       return BellIcon;
+    case "phone":
+      return PhoneIcon;
     case "inbox":
       return InboxIcon;
     case "help":

@@ -943,6 +943,20 @@ describe("turnInput attachment projection", () => {
       expect(String((modelInputs[4] as Array<Record<string, unknown>>).at(-1)!.content)).toContain(
         workspaceRecoveryNote,
       );
+
+      // A chat whose attendance changed since it started carries the note in
+      // the turn's input, after the stored history it leaves unchanged.
+      const attendanceNote = "[Opengeni attendance]\nA person is now present in this chat.";
+      await turnInput({} as Database, runtime, {}, trigger, {
+        turnId: laterTurnId,
+        fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
+        providerApi: "responses",
+        attendanceNote,
+      });
+      const attendance = modelInputs[5] as Array<Record<string, unknown>>;
+      expect(attendance[0]).toEqual(summary);
+      expect(attendance.at(-1)).toMatchObject({ type: "message", role: "system" });
+      expect(String(attendance.at(-1)!.content)).toContain(attendanceNote);
     } finally {
       listUpdates.mockRestore();
       getHistory.mockRestore();

@@ -82,6 +82,8 @@ export type ConnectAttempt = {
   installationTarget?: ConnectInstallationTarget;
   mcpSetup?: PreparedMcpSetup;
   mcpCapabilityId?: string;
+  /** Additional provider access this reconnect asks for. */
+  requestedScopes?: string[];
   source?:
     | { kind: "definition"; definitionId: string }
     | { kind: "openapi" | "auto"; url: string; baseUrl?: string }
@@ -111,6 +113,8 @@ export interface ConnectTransport {
       finishInPopup?: true;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: ConnectInstallationTarget;
       mcpSetup?: PreparedMcpSetup;
     },

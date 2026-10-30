@@ -828,7 +828,8 @@ function credentialReadinessFor(input: {
     );
     const connectionActive =
       input.provider?.kind === "direct-openai-workspace" ||
-      input.provider?.kind === "direct-azure-workspace"
+      input.provider?.kind === "direct-azure-workspace" ||
+      input.provider?.kind === "direct-compatible-workspace"
         ? true
         : claudeKind
           ? input.workspaceClaudeConnections?.[claudeKind]?.active === true

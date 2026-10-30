@@ -1202,8 +1202,14 @@
 :where(.og-root).-mx-2,:where(.og-root) .-mx-2 {
     margin-inline: calc(var(--spacing) * -2);
   }
+:where(.og-root).-mx-2\.5,:where(.og-root) .-mx-2\.5 {
+    margin-inline: calc(var(--spacing) * -2.5);
+  }
 :where(.og-root).-mx-3,:where(.og-root) .-mx-3 {
     margin-inline: calc(var(--spacing) * -3);
+  }
+:where(.og-root).mx-0,:where(.og-root) .mx-0 {
+    margin-inline: calc(var(--spacing) * 0);
   }
 :where(.og-root).mx-1,:where(.og-root) .mx-1 {
     margin-inline: calc(var(--spacing) * 1);
@@ -7590,6 +7596,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-og-surface-1\/80,:where(.og-root) .hover\:bg-og-surface-1\/80 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-surface-1);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-surface-1) 80%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-og-surface-2,:where(.og-root) .hover\:bg-og-surface-2 {
     &:hover {
       @media (hover: hover) {
@@ -9010,6 +9026,11 @@
 :where(.og-root).aria-pressed\:opacity-100,:where(.og-root) .aria-pressed\:opacity-100 {
     &[aria-pressed="true"] {
       opacity: 100%;
+    }
+  }
+:where(.og-root).aria-\[invalid\=true\]\:border-og-status-failed,:where(.og-root) .aria-\[invalid\=true\]\:border-og-status-failed {
+    &[aria-invalid="true"] {
+      border-color: var(--og-color-status-failed);
     }
   }
 :where(.og-root).aria-\[invalid\=true\]\:border-og-status-failed\/60,:where(.og-root) .aria-\[invalid\=true\]\:border-og-status-failed\/60 {
@@ -12683,6 +12704,11 @@
 :where(.og-root).\[\@media\(pointer\:coarse\)\]\:min-w-11,:where(.og-root) .\[\@media\(pointer\:coarse\)\]\:min-w-11 {
     @media (pointer:coarse) {
       min-width: calc(var(--spacing) * 11);
+    }
+  }
+:where(.og-root).\[\@media\(pointer\:coarse\)\]\:py-2\.5,:where(.og-root) .\[\@media\(pointer\:coarse\)\]\:py-2\.5 {
+    @media (pointer:coarse) {
+      padding-block: calc(var(--spacing) * 2.5);
     }
   }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */

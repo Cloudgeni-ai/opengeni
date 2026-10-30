@@ -33,6 +33,7 @@ import { Field, TextArea } from "../../../ui/field";
 import { Notice } from "../../../ui/notice";
 import { RelativeTime } from "../../../ui/relative-time";
 import { KeepActiveSetting, sessionReadOnlyArchive } from "./session-retention";
+import { UnattendedSetting } from "./session-unattended-setting";
 import { SessionUsageLimitSection } from "./session-usage-limit-section";
 import { useAppContext } from "../../app-context";
 import {
@@ -366,6 +367,12 @@ export function AgentConfigurationPanel(props: {
                   learningModes={learning.modes}
                 />
               </PanelSection>
+              {/* Absent on servers without unattended chats. */}
+              {session.unattended !== undefined && !sessionReadOnlyArchive(session) ? (
+                <PanelSection id={`${sectionId}-autonomy`} title="Autonomy">
+                  <UnattendedSetting session={session} onSaved={props.onReloadSession} />
+                </PanelSection>
+              ) : null}
               {context.clientConfig.sessionArchive && !sessionReadOnlyArchive(session) ? (
                 <PanelSection id={`${sectionId}-storage`} title="Storage">
                   <KeepActiveSetting

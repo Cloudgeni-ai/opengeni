@@ -201,7 +201,7 @@ const fn by(metric: Metric, labels: &'static [Label]) -> Metric {
 
 /// Every metric a host exports: its own, and its process's as
 /// OpenTelemetry's semantic conventions name them.
-pub const METRICS: [Metric; 42] = [
+pub const METRICS: [Metric; 43] = [
     by(
         sum(
             "compute.step.count",
@@ -489,6 +489,13 @@ pub const METRICS: [Metric; 42] = [
         "{sandbox}",
         "Running sandboxes holding more than their bound while the host is below its low \
          watermark: memory the kernel cannot compress.",
+    ),
+    gauge(
+        "compute.memory.bringing_down",
+        "{sandbox}",
+        "Running sandboxes holding more than their bound while the host is below its low \
+         watermark that the kernel is still bringing down: slow to start compressing, \
+         aging their pages first, and not yet counted over their bound.",
     ),
     by(
         sum(

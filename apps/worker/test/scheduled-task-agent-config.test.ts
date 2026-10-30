@@ -266,6 +266,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     expect([...session.firstPartyMcpTools].sort()).toEqual(
       [
+        "call_user",
         "command_read",
         "command_wait",
         "goal_complete",
@@ -447,5 +448,110 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       select execution_digest from scheduled_tasks where id = ${task.id}`;
     expect(before?.execution_digest).toBeTruthy();
     expect(after?.execution_digest).not.toBe(before?.execution_digest);
+  }, 60_000);
+
+  test("a generated chat gets the task's servers, skills, memory and agent access, through the fence", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const skills = [
+      {
+        name: "triage",
+        description: "Triage findings",
+        files: [
+          {
+            path: "SKILL.md",
+            content: "---\nname: triage\ndescription: Triage findings\n---\nRead the findings.",
+          },
+        ],
+      },
+    ];
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Generated chat settings",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-chat-settings-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Review the new findings",
+        resources: [],
+        tools: [],
+        metadata: {},
+        mcpServers: [{ id: "product", url: "https://product.example/mcp" }],
+        skills,
+        memoryScope: "off",
+        agentAccess: "session",
+      } as never,
+      metadata: {},
+      creatorPolicy: null,
+    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
+    const [row] = await shared!.admin<
+      Array<{ memory_scope: string; agent_access: string; skills: unknown }>
+    >`select memory_scope, agent_access, skills from sessions where id = ${session.id}`;
+    expect(row).toMatchObject({ memory_scope: "off", agent_access: "session", skills });
+    const servers = await shared!.admin<Array<{ server_id: string; url: string }>>`
+      select server_id, url from session_mcp_servers where session_id = ${session.id}`;
+    expect([...servers]).toEqual([{ server_id: "product", url: "https://product.example/mcp" }]);
+
+    // Queued recovery and its replay accept the chat they made with these settings.
+    const { producerKey } = await queuedAgentRun(grant, accepted!);
+    const { activities: scheduled } = activities();
+    const input = {
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey,
+    };
+    const recovered = await scheduled.dispatchScheduledTaskRun(input);
+    expect(recovered.action).toBe("start");
+    if (recovered.action !== "start") throw new Error("queued recovery did not start");
+    expect(await scheduled.dispatchScheduledTaskRun(input)).toMatchObject({
+      action: "start",
+      sessionId: recovered.sessionId,
+    });
+  }, 60_000);
+
+  test("skip on a new chat per run skips while the previous run's chat still works", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Skip while working",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-skip-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Check", resources: [], tools: [], metadata: {} } as never,
+      metadata: {},
+      creatorPolicy: null,
+    });
+    const { session } = await dispatchGeneratedSession(grant, task.id);
+    const { activities: scheduled } = activities();
+    // The first run's chat has not finished: the next occurrence is skipped.
+    const skipped = await scheduled.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `scheduled-skip-${crypto.randomUUID()}`,
+    });
+    expect(skipped.action).toBe("blocked");
+    const [latest] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    expect(latest).toMatchObject({ status: "skipped", error: "scheduled_session_not_idle" });
+
+    // Once it is idle the next occurrence starts a new chat.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set status = 'idle', active_turn_id = null
+        where id = ${session.id}`;
+    });
+    const next = await dispatchGeneratedSession(grant, task.id);
+    expect(next.session.id).not.toBe(session.id);
   }, 60_000);
 });

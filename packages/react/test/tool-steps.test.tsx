@@ -148,7 +148,8 @@ describe("plain tool details", () => {
     const Full = defaultToolRegistry.resolve(exec);
     const full = await renderComponent(<Full item={exec} />);
     await flush();
-    expect(full.container.textContent).toContain("$ cat secrets.json");
+    // Full details title the step in plain words; the command is in the body.
+    expect(full.container.textContent).toContain("Reading secrets.json");
     expect(full.container.querySelector("[aria-expanded]")).not.toBeNull();
     await full.unmount();
     for (const item of [

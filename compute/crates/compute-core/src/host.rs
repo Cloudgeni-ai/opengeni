@@ -21,6 +21,7 @@ pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
 pub use outgrowth::MemoryLevels;
+pub use spare::Claims;
 pub(crate) use squeeze::{Balloon, Squeeze};
 
 /// Something that happened, fed to [`Host::handle`].
@@ -329,6 +330,12 @@ pub enum Input {
         /// kernel could not bring the VM down to it; `None` for none or
         /// unknown.
         high: Option<u64>,
+        /// Whether the engine is still bringing the VM down toward that
+        /// bound: the kernel is at work on it and has not shown that it
+        /// can take no more. Before it compresses a VM that has just
+        /// written gigabytes, the kernel may age its pages for many
+        /// seconds of a busy host's time.
+        bringing_down: bool,
     },
     /// The guest of the sandbox answered the [`Action::Shrink`] of
     /// `request`: it freed `freed` bytes, and `spent` says whether it has
@@ -608,6 +615,9 @@ pub struct SandboxView {
     /// Bytes its running VM holds uncompressed above its request: what it
     /// borrowed. None for a sandbox whose request is its whole size.
     pub borrowed: u64,
+    /// How many times in a row its steps failed for now (see
+    /// [`Failure::Transient`]) since one last succeeded.
+    pub failures: u32,
 }
 
 impl SandboxView {
@@ -838,6 +848,7 @@ impl Host {
             } else {
                 0
             },
+            failures: sandbox.retry.map_or(0, |retry| retry.failures),
         })
     }
 

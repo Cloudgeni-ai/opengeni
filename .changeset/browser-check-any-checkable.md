@@ -1,5 +1,0 @@
----
-"@opengeni/browserd": patch
----
-
-`check` now works on whatever observe shows as a checkbox, switch or radio button. A located element stands for the control it is or sits in, up to the nearest label, and a label (or text in it) stands for the control its `for` names, or else for the one checkable control it wraps, such as a box drawn with an ARIA role or a hidden input beside the label's box; a label wrapping more than one control stands for none. A native input that is not rendered, hidden or clipped away is checked through its label, never through a link in it. ARIA roles and `aria-checked` are read in any case, a checkable role after one the browser does not know counts, and a custom element that sets its role and state through `ElementInternals` is read from the accessibility tree. A disabled or `aria-disabled` control is refused at once. A box in the mixed state counts as neither checked nor unchecked, and `check` completes only when the box shows exactly the state asked for. A target that is none of these is refused with a reason that says to click it instead.

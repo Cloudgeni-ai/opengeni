@@ -1,5 +1,0 @@
----
-"@opengeni/browserd": patch
----
-
-Browser Back now leaves a page that a sign-in or other redirect flow reached, instead of reporting success while the tab stays put. Back used to step exactly one history entry and count any commit as success, so two common shapes trapped it: an intermediate page that sends the tab on again as soon as Back shows it, and entries a page adds for the URL it already shows as it opens. Back now passes over an entry whose page goes on to another page by itself right after Back opened it (up to three such entries), and over entries for the current URL that the page added without any input, as Chrome's own Back button does. Entries made after input, such as a dialog that closes on Back, and entries with their own URLs stay single steps, and a page restored from the back/forward cache or one that reloads itself stays where Back left it. When every page Back could reach sends the tab on by itself, Back fails and names the page before them to navigate to instead. Forward is unchanged.
