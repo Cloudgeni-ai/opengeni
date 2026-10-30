@@ -1,13 +1,28 @@
-import type { UsageMeasures, UsagePayerId, UsageRange, UsageTokens } from "./usage-contract";
+import type {
+  UsageBucket,
+  UsageMeasures,
+  UsagePayerId,
+  UsageRange,
+  UsageTokens,
+} from "./usage-contract";
 
-export const RANGES: ReadonlyArray<{ id: UsageRange; label: string; short: string }> = [
-  { id: "today", label: "Today", short: "Today" },
+/** Menu order: rolling windows first, then calendar periods, then a custom range. */
+export const RANGES: ReadonlyArray<{
+  id: UsageRange;
+  label: string;
+  short: string;
+  group?: string;
+}> = [
+  { id: "1h", label: "Last hour", short: "1H" },
+  { id: "3h", label: "Last 3 hours", short: "3H" },
+  { id: "24h", label: "Last 24 hours", short: "24H" },
   { id: "week", label: "Last 7 days", short: "7D" },
   { id: "30d", label: "Last 30 days", short: "30D" },
-  { id: "month", label: "This month", short: "MTD" },
   { id: "90d", label: "Last 90 days", short: "90D" },
-  { id: "ytd", label: "Year to date", short: "YTD" },
-  { id: "custom", label: "Custom range", short: "Custom" },
+  { id: "today", label: "Today", short: "Today", group: "Calendar" },
+  { id: "month", label: "This month", short: "MTD", group: "Calendar" },
+  { id: "ytd", label: "Year to date", short: "YTD", group: "Calendar" },
+  { id: "custom", label: "Custom range", short: "Custom", group: "Custom" },
 ];
 
 export function rangeLabel(range: UsageRange): string {
@@ -16,6 +31,12 @@ export function rangeLabel(range: UsageRange): string {
 
 export function priorLabel(range: UsageRange): string {
   switch (range) {
+    case "1h":
+      return "the hour before";
+    case "3h":
+      return "the 3 hours before";
+    case "24h":
+      return "the 24 hours before";
     case "today":
       return "yesterday";
     case "week":
@@ -216,10 +237,18 @@ export function formatChange(change: number): string {
   return `${rounded > 0 ? "+" : "−"}${Math.abs(rounded)}%`;
 }
 
-export function formatBucket(start: string, bucket: "hour" | "day", long = false): string {
+/**
+ * A chart bucket's start. Days are UTC days; hours and 5-minute buckets read in
+ * the viewer's own time. `long` adds the day for tooltips.
+ */
+export function formatBucket(start: string, bucket: UsageBucket, long = false): string {
   const date = new Date(start);
-  if (bucket === "hour") {
-    return date.toLocaleTimeString("en-US", { hour: "numeric", timeZone: "UTC" });
+  if (bucket !== "day") {
+    const time: Intl.DateTimeFormatOptions =
+      bucket === "hour" && !long ? { hour: "numeric" } : { hour: "numeric", minute: "2-digit" };
+    return long
+      ? date.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", ...time })
+      : date.toLocaleTimeString("en-US", time);
   }
   return date.toLocaleDateString("en-US", {
     month: "short",
@@ -227,6 +256,12 @@ export function formatBucket(start: string, bucket: "hour" | "day", long = false
     ...(long ? { weekday: "short" } : {}),
     timeZone: "UTC",
   });
+}
+
+/** The viewer's day ("Oct 30") of a bucket shorter than a day; day buckets have none. */
+export function bucketDay(start: string, bucket: UsageBucket): string | undefined {
+  if (bucket === "day") return undefined;
+  return new Date(start).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 export function formatUtc(value: string): string {
@@ -238,4 +273,17 @@ export function formatUtc(value: string): string {
     hour12: false,
     timeZone: "UTC",
   })} UTC`;
+}
+
+/** A window edge: UTC for day buckets (the days are UTC days), the viewer's time otherwise. */
+export function formatWindowEdge(value: string, bucket: UsageBucket): string {
+  if (bucket === "day") return formatUtc(value);
+  return new Date(value).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  });
 }
