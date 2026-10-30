@@ -126,12 +126,6 @@ describe("storeless Responses requests", () => {
   test.each([
     ["a workspace OpenAI key", provider({ kind: "direct-openai-workspace" }), false],
     ["an organization OpenAI key", provider({ kind: "direct-openai-organization" }), false],
-    ["the built-in OpenAI provider", provider({ builtin: true, baseUrl: undefined }), false],
-    [
-      "the built-in provider on an OpenAI-compatible server",
-      provider({ builtin: true, baseUrl: "http://vllm.internal:8000/v1" }),
-      undefined,
-    ],
     ["an operator's compatible Responses server", provider({}), undefined],
     [
       "a workspace's own compatible server",
@@ -171,35 +165,56 @@ describe("storeless Responses requests", () => {
     expect(storelessResponsesBody("/responses/resp_1", {})).toBeNull();
   });
 
-  test("the built-in Azure and OpenAI clients are storeless on Responses", async () => {
-    for (const settings of [
-      testSettings({
+  test.each([
+    [
+      "Azure OpenAI",
+      {
         openaiProvider: "azure",
         azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
         azureOpenaiApiKey: "fixture",
-      }),
-      testSettings({ openaiProvider: "openai", openaiApiKey: "fixture" }),
-    ]) {
-      const bodies: Record<string, any>[] = [];
-      const original = globalThis.fetch;
-      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-        bodies.push(JSON.parse(await requestBodyText(init?.body)));
-        return Response.json({
-          id: "resp_1",
-          object: "response",
-          status: "completed",
-          output: [],
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-        });
-      }) as typeof fetch;
-      try {
-        const client = buildOpenAIClientFromSettings(settings);
-        await client.responses.create({ model: "m", input: "Hi" });
-      } finally {
-        globalThis.fetch = original;
-      }
-      expect(bodies).toHaveLength(1);
-      expect(bodies[0]!.store).toBe(false);
+      },
+      false,
+    ],
+    ["the OpenAI platform", { openaiProvider: "openai", openaiApiKey: "fixture" }, false],
+    [
+      "the OpenAI platform's explicit endpoint",
+      {
+        openaiProvider: "openai",
+        openaiApiKey: "fixture",
+        openaiBaseUrl: "https://api.openai.com/v1",
+      },
+      false,
+    ],
+    [
+      "an OpenAI-compatible server",
+      {
+        openaiProvider: "openai",
+        openaiApiKey: "fixture",
+        openaiBaseUrl: "http://vllm.internal:8000/v1",
+      },
+      undefined,
+    ],
+  ] as const)("the built-in client on %s", async (_name, overrides, store) => {
+    const settings = testSettings(overrides);
+    const bodies: Record<string, any>[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(await requestBodyText(init?.body)));
+      return Response.json({
+        id: "resp_1",
+        object: "response",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      });
+    }) as typeof fetch;
+    try {
+      const client = buildOpenAIClientFromSettings(settings);
+      await client.responses.create({ model: "m", input: "Hi" });
+    } finally {
+      globalThis.fetch = original;
     }
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.store).toBe(store);
   });
 });

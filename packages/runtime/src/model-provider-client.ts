@@ -9,6 +9,7 @@ import {
   configuredModels,
   azureOpenAIDeploymentIdentityAvailable,
   deploymentAzureEntraCredential,
+  isDirectOpenAiApiBaseUrl,
   opperMaxOutputTokens,
   type ResolvedModelProvider,
   type Settings,
@@ -60,7 +61,6 @@ import {
 import {
   azureModelRequestPolicy,
   chatModelRequestPolicy,
-  isOpenAIPlatformBaseUrl,
   modelRequestPolicyForProvider,
   withStorelessResponses,
 } from "./model-provider-request-policy";
@@ -201,7 +201,7 @@ export function buildOpenAIClientFromSettings(
     },
     {
       // Only the OpenAI platform; a compatible server keeps its own contract.
-      modelRequestPolicy: isOpenAIPlatformBaseUrl(settings.openaiBaseUrl)
+      modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
         ? withStorelessResponses(chatModelRequestPolicy)
         : chatModelRequestPolicy,
     },
