@@ -592,6 +592,17 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
+      // 1103: created without runtime EXECUTE until its follow-up release.
+      {
+        name: "grant_subscription_account_administrator(jsonb)",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -832,12 +843,26 @@ describe("runtime database posture evaluator", () => {
         ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
         ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        // The fixture includes 1103's grant, so its administration context is required.
+        ...runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
         ...names,
       ].map(ownerRoutine);
       return posture;
     };
     // Before 0717 none is required; after it all four are, safely.
     expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
+    // 1103's administration context is required once its grant exists.
+    const withoutAdministration = withOwnerRoutines([]);
+    withoutAdministration.subscriptionOwnerRoutines =
+      withoutAdministration.subscriptionOwnerRoutines!.filter(
+        (routine) =>
+          !(
+            runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES as readonly string[]
+          ).includes(routine.name),
+      );
+    expect(evaluateRuntimeDatabasePosture(withoutAdministration, options)).toEqual([
+      "subscription owner implementation subscription_core_administration_context(text, uuid, uuid, text) is missing or unsafe",
+    ]);
     expect(
       evaluateRuntimeDatabasePosture(
         withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES),
@@ -4040,7 +4065,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       /event_ingress_routes|runtime definer/.test(violation),
     );
 
-  test("every runtime definer is known, and runtime EXECUTE is required", () => {
+  test("every runtime definer is known, and runtime EXECUTE is required unless deferred", () => {
     const pinnedPaths = [
       'search_path="opengeni_tenant", opengeni_private, public',
       "search_path=pg_catalog, public, pg_temp",
@@ -4066,6 +4091,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "grant_subscription_account_administrator(jsonb)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4073,6 +4099,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "grant_subscription_account_administrator(jsonb)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(

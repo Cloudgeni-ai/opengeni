@@ -21,6 +21,7 @@ import { sql } from "drizzle-orm";
 import { auditEvents } from "../schema";
 import { withLosslessContentWriteVersion } from "../lossless-json";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
+import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import {
   readSubscriptionEffectiveSettings,
   resolveSubscriptionConnectionId,
@@ -415,7 +416,10 @@ export async function readSubscriptionCoreOrganizationPool(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, {
+        accountId: input.organizationId,
+        subjectId: input.subjectId,
+      });
       const [admin] = await rawRows<{ admin: boolean }>(
         tx,
         sql`select opengeni_private.subscription_organization_admin(${input.organizationId}::uuid) as admin`,
@@ -675,7 +679,7 @@ async function withAdministration<T>(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        await setSubjectRlsContext(tx, input.subjectId);
+        await setSubscriptionAdministrationSubject(tx, input);
         // A workspace route that writes the workspace's settings row takes the
         // settings lock before any row lock (see lockSubscriptionSettings);
         // routes that never write settings do not queue behind a lock change.

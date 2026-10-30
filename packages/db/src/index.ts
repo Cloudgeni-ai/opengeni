@@ -509,6 +509,14 @@ export {
   type SubscriptionCoreDisconnectAudit,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
+// Account administration a request proved without an organization membership
+// (configured access key, account-scoped key, signed delegation).
+export {
+  withSubscriptionAccountAdministrators,
+  type SubscriptionAccountAdministratorResolver,
+  type SubscriptionAccountAdministratorStamp,
+} from "./subscription-core/account-administrator";
+import { setSubscriptionAdministrationSubject } from "./subscription-core/account-administrator";
 export * from "./subscription-core-xai-compat";
 export * from "./subscription-core-claude-adapter";
 export * from "./subscription-core-claude";
@@ -24870,13 +24878,21 @@ async function withOrganizationCodexAdministrator<T>(
       // overview and before any Codex workspace inventory so a new workspace
       // cannot commit after the source snapshot was captured.
       await lockOrganizationMembershipLifecycle(scopedDb, input.organizationId);
-      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
-      await scopedDb.execute(sql`
-        select get_organization_administration_overview(
-          ${input.organizationId}::uuid,
-          ${input.actorSubjectId}
-        )
-      `);
+      // An account administrator the request proved (for example the
+      // deployment's configured key) has no organization membership for the
+      // overview to find; its recorded authority is the check instead.
+      const accountAdministrator = await setSubscriptionAdministrationSubject(scopedDb, {
+        accountId: input.organizationId,
+        subjectId: input.actorSubjectId,
+      });
+      if (!accountAdministrator) {
+        await scopedDb.execute(sql`
+          select get_organization_administration_overview(
+            ${input.organizationId}::uuid,
+            ${input.actorSubjectId}
+          )
+        `);
+      }
       return await use(scopedDb);
     },
   );
