@@ -1148,14 +1148,14 @@ export function toolReviewDetails(
       ) {
         Object.entries(entry).forEach(([name, item], position) =>
           all.push({
-            label: bound(toolReviewFieldLabel(name), 256),
+            label: bound(sentLabel(name), 256),
             ...preview(item, name, `${parentPath}${fieldPointer(name, position, parentPath)}`),
           }),
         );
         return;
       }
       all.push({
-        label: bound(toolReviewFieldLabel(key), 256),
+        label: bound(sentLabel(key), 256),
         ...preview(entry, key, parentPath),
       });
     });

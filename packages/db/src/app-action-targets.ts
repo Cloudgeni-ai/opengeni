@@ -1320,7 +1320,10 @@ const subscriptionAccountLookup: Lookup = async (where) => {
       .limit(1);
     return core;
   });
-  if (!row) return missing("account");
+  // The routes also reach accounts by an older alias id, and the person's
+  // own personal ones, through routines plain row security can't see: a
+  // miss here may be one of those, so it is never called not found.
+  if (!row) unresolved();
   const product = SUBSCRIPTION_NAMES[row.provider] ?? row.provider;
   return {
     kind: "account",

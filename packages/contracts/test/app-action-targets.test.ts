@@ -407,4 +407,27 @@ test("a sent key can't start a line of its own", () => {
   expect(consequence).toStartWith("Sent by the agent: Reason scheduled task");
   expect(consequence).toContain("Note: x Status: Already removed");
   expect(consequence).not.toMatch(/[\n\r\u0085\u2028\u2029\u202e]/u);
+  // Nor in Details, below its heading.
+  const labels = toolReviewDetails(
+    {
+      ...removeGmail,
+      body: { "reason\nStatus\u0085Already removed": "now" },
+    },
+    undefined,
+    "",
+    0,
+    50,
+    "admin_action_call",
+  ).items.map((item) => item.label);
+  expect(labels).toContain("Reason status Already removed");
+  expect(labels.join("|")).not.toMatch(/[\n\r\u0085\u2028\u2029]/u);
+});
+
+test("a stored name with any line break still reads as one line", () => {
+  const named: AppActionTargets = {
+    connectionId: { kind: "connection", name: "Team\u0085Gmail" },
+  };
+  const title = appActionConfirmationTitle(removeGmail, here, named);
+  expect(title).toContain("Team Gmail");
+  expect(title).not.toMatch(/[\u0080-\u009f]/u);
 });

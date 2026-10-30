@@ -537,6 +537,9 @@ test("every confirmed action's lookup runs against the real schema and says not 
       if (!appActionTargetLookupKey(entry.path, name) || name === "workspaceId") continue;
       // Integrations can be defined in code, so one missing from the catalog stays unresolved.
       if (name === "capabilityId") continue;
+      // Subscription routes also reach aliases and personal accounts row security hides.
+      if (name === "accountId" && /\/(codex|claude|supergrok)\/accounts\//.test(entry.path))
+        continue;
       checked += 1;
       // Found (the workspace and organization themselves) or plainly not found; never an error.
       if (!targets[name]) failures.push(`${entry.id} ${name}: unresolved`);
@@ -805,9 +808,26 @@ test("each route's own permission, and no membership counts only in a Personal w
   expect(
     (await resolveAppActionTargets(client.db, scope(reader), subscription)).accountId,
   ).toBeUndefined();
-  expect((await resolveAppActionTargets(client.db, scope(owner), subscription)).accountId).toEqual({
-    kind: "account",
-  });
+  // A miss may be an alias or someone's personal account the routes reach
+  // through their own routines: never "not found".
+  expect(
+    (await resolveAppActionTargets(client.db, scope(owner), subscription)).accountId,
+  ).toBeUndefined();
+  const [pool] = await shared!.admin<{ id: string }[]>`
+    insert into subscription_connections (account_id, provider, kind, credential_encrypted,
+      ownership, scope_kind, allow_personal_workspaces, provider_account_id, provider_subject_id,
+      label, account_email, status)
+    values (${org.accountId}, 'codex', 'subscription', 'sealed', 'shared', 'organization', true,
+      'ops-pool', 'ops-pool', 'Ops pool', 'ops@cloudgeni.ai', 'active')
+    returning id::text as id`;
+  expect(
+    (
+      await resolveAppActionTargets(client.db, scope(owner), {
+        ...subscription,
+        pathParameters: { organizationId: org.accountId, accountId: pool!.id },
+      })
+    ).accountId,
+  ).toMatchObject({ kind: "account", name: "Ops pool", account: "ops@cloudgeni.ai" });
   // Without a membership row, only the person's own Personal workspace counts.
   const [{ personal_workspace_id: personal } = { personal_workspace_id: "" }] = await shared!.admin<
     { personal_workspace_id: string }[]

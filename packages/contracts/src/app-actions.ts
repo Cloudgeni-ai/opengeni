@@ -305,7 +305,7 @@ export function appActionCallPathIds(
 /** A stored name made safe to quote in a question: one line, bounded. */
 function plainName(text: string | undefined): string | undefined {
   const line = text
-    ?.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ")
+    ?.replace(/[\p{Cc}\u2028\u2029]/gu, " ")
     // Format characters (bidi overrides, zero-width) could reorder the
     // question; joiners stay, as Persian, Indic scripts and emoji need them.
     .replace(/(?![\u200c\u200d])\p{Cf}/gu, "")
