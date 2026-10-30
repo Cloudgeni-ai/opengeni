@@ -209,6 +209,7 @@ test.each([
       providerId = "gmail",
       reconnectAccountId?: string,
       extraHeaders: Record<string, string> = {},
+      requestedScopes?: string[],
     ) => {
       const response = await app.request(base, {
         method: "POST",
@@ -218,6 +219,7 @@ test.each([
           ownership,
           returnUrl,
           ...(reconnectAccountId ? { reconnectAccountId } : {}),
+          ...(requestedScopes ? { requestedScopes } : {}),
           idempotencyKey: randomUUID(),
         }),
       });
@@ -237,6 +239,11 @@ test.each([
       expect(ready.state).toBe("requires_user_action");
       return { attempt: ready, state: new URL(ready.nextAction.url).searchParams.get("state")! };
     };
+    const askedScopes = (attempt: { nextAction: { url: string } }) =>
+      new URL(attempt.nextAction.url).searchParams.get("scope")!.split(" ").sort();
+    const [readonlyScope, composeScope, modifyScope] = OFFICIAL_GMAIL_MCP_SCOPES;
+    // A reconnect that may add access keeps the base read grant mandatory, so
+    // only a missing read grant (or none reported) fails it.
     const grantFailures = [
       "malformed",
       "rejected",
@@ -246,8 +253,6 @@ test.each([
       "malformed_scopes",
       "wrong_scopes",
       "missing_readonly",
-      "missing_compose",
-      "missing_modify",
       "token_rejected",
     ] as const;
     const setGrantFailure = (failure?: (typeof grantFailures)[number]) => {
@@ -266,15 +271,7 @@ test.each([
               ? "https://www.googleapis.com/auth/drive.readonly"
               : OFFICIAL_GMAIL_MCP_SCOPES.filter(
                   (scope) =>
-                    !scope.endsWith(
-                      failure === "missing_readonly"
-                        ? ".readonly"
-                        : failure === "missing_compose"
-                          ? ".compose"
-                          : failure === "missing_modify"
-                            ? ".modify"
-                            : ".absent",
-                    ),
+                    !scope.endsWith(failure === "missing_readonly" ? ".readonly" : ".absent"),
                 ).join(" ");
       return failure === "missing_refresh"
         ? "offline_access_unavailable"
@@ -308,6 +305,8 @@ test.each([
       setGrantFailure();
       const initialExchanges = exchanges;
       const { attempt, state } = await begin();
+      // A first connection asks Google only to read mail.
+      expect(askedScopes(attempt)).toEqual([readonlyScope]);
       // The provider only sees a short signed reference; the full signed
       // context waits encrypted at rest and is what the fixtures alter below.
       const reference = readSignedState(state, secret) as Record<string, unknown>;
@@ -506,6 +505,61 @@ test.each([
         account: { id: completed.account.id, version: saved!.version + 1, ownership },
       });
       expect(profileChecks).toBeGreaterThan(1);
+
+      // Incremental consent. A plain reconnect keeps exactly what the account
+      // holds; here Google grants only read access this time.
+      expect(askedScopes(verifiedReconnect.attempt)).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES].sort());
+      const grants = async () =>
+        (
+          await getConnectionMetadata(
+            client.db,
+            identity.personalWorkspaceId,
+            completed.account.id,
+            identity.subjectId,
+          )
+        )?.grantedScopes;
+      reportedScopes = readonlyScope;
+      const readOnly = await begin("gmail", completed.account.id);
+      await callback(readOnly.state);
+      expect(await read(readOnly.attempt.id)).toMatchObject({ state: "complete" });
+      expect(await grants()).toEqual([readonlyScope]);
+      // A read-only account reconnects read-only: nothing widens by itself.
+      const plain = await begin("gmail", completed.account.id);
+      expect(askedScopes(plain.attempt)).toEqual([readonlyScope]);
+      // A tool that needs to send asks for exactly that, bounded by the reviewed
+      // list: broader Gmail access is never requested even if a client asks.
+      const upgrade = await begin("gmail", completed.account.id, {}, [
+        composeScope,
+        "https://mail.google.com/",
+      ]);
+      expect(upgrade.attempt.requestedScopes).toEqual([composeScope, "https://mail.google.com/"]);
+      expect(askedScopes(upgrade.attempt)).toEqual([readonlyScope, composeScope].sort());
+      reportedScopes = `${readonlyScope} ${composeScope}`;
+      await callback(upgrade.state);
+      expect(await read(upgrade.attempt.id)).toMatchObject({ state: "complete" });
+      expect(await grants()).toEqual([readonlyScope, composeScope]);
+      // Later reconnects keep the added access and add only what is asked for.
+      const later = await begin("gmail", completed.account.id, {}, [modifyScope]);
+      expect(askedScopes(later.attempt)).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES].sort());
+      // The person may decline the extra access on Google's screen; the account
+      // then keeps working with what it already had.
+      await callback(later.state);
+      expect(await read(later.attempt.id)).toMatchObject({ state: "complete" });
+      expect(await grants()).toEqual([readonlyScope, composeScope]);
+      // Additional access is only asked for when reconnecting an account.
+      const unbound = await app.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "gmail",
+          ownership,
+          returnUrl,
+          requestedScopes: [composeScope],
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(unbound.status).toBe(400);
+      reportedScopes = OFFICIAL_GMAIL_MCP_SCOPES.join(" ");
       const acceptedExchanges = exchanges;
 
       const cancelled = await begin();

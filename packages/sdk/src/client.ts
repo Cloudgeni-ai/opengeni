@@ -484,6 +484,7 @@ import type {
   UpdateInboxItemInput,
   NativePushDevice,
   RegisterNativePushDeviceInput,
+  AgentCall,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -643,6 +644,7 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -1922,6 +1924,7 @@ export class OpenGeniClient {
         query: request.query,
         ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
         ...(request.groupBy !== undefined ? { groupBy: request.groupBy } : {}),
+        ...(request.order !== undefined ? { order: request.order } : {}),
         ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
         ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
         ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
@@ -2354,6 +2357,23 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/retention`,
+      request,
+    );
+  }
+
+  /**
+   * Turn a chat's unattended mode on or off ("work without me"). Applies from
+   * the next turn and is an explicit choice: a person's later message does not
+   * change it. Fails with 409 SESSION_ARCHIVED_READ_ONLY once archived.
+   */
+  async updateSessionUnattended(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionUnattendedRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/unattended`,
       request,
     );
   }
@@ -6904,6 +6924,8 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
@@ -6919,6 +6941,7 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
       mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },
@@ -11051,6 +11074,43 @@ export class OpenGeniClient {
   /** Stop pushes to this device for this app credential. */
   async unregisterNativePushDevice(): Promise<void> {
     await this.requestJson<unknown>("DELETE", "/v1/native-app/push-device");
+  }
+
+  /** An agent's call to the signed-in person, while it rings and after. */
+  async getAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}`,
+    );
+    return call;
+  }
+
+  /**
+   * Take an agent's call. The first phone to answer wins; the call comes back
+   * `answered` with `answeredHere: true`, then start the chat's voice call.
+   * A call already taken, declined or rung out comes back in that state.
+   */
+  async answerAgentCall(
+    workspaceId: string,
+    callId: string,
+    options: { device?: string } = {},
+  ): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/answer`,
+      options,
+    );
+    return call;
+  }
+
+  /** Decline an agent's call: it stops ringing everywhere and the agent is told. */
+  async declineAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/decline`,
+      {},
+    );
+    return call;
   }
 
   // --- Organization-wide sessions ----------------------------------------------------------------

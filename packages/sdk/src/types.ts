@@ -877,11 +877,14 @@ export type UpdateSessionToolPolicyRequest =
 /**
  * The person finished setup from a capability card the agent posted in this
  * chat. The server wakes the agent once per card so it continues the request
- * that needed the capability.
+ * that needed the capability. Name the capability from an agent's
+ * recommendation card, or the connected account from that account's own card
+ * (for example after allowing more access); the account continues only once
+ * it is active and holds the access the card asked for.
  */
-export type ContinueAfterCapabilitySetupRequest = {
-  capabilityId: string;
-};
+export type ContinueAfterCapabilitySetupRequest =
+  | { capabilityId: string }
+  | { connectionId: string };
 
 /** Why no continuation was sent. Each is a normal outcome, not an error. */
 export type CapabilitySetupContinuationSkipReason =
@@ -2052,6 +2055,11 @@ export type Session = {
    * independent of the personal `archived` flag. Absent on older servers.
    */
   retention?: SessionRetention | undefined;
+  /**
+   * Whether the next turns run unattended: no person will see or answer a
+   * question until the task ends. Absent on older servers (attended).
+   */
+  unattended?: boolean | undefined;
   /** Optimistic archive-state revision. */
   archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
@@ -2402,6 +2410,11 @@ export type UpdateSessionRetentionRequest = {
   keepLive: boolean;
 };
 
+/** Turn a chat's unattended mode on or off from its next turn. */
+export type UpdateSessionUnattendedRequest = {
+  unattended: boolean;
+};
+
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
   clientEventId?: string;
@@ -2700,6 +2713,8 @@ export const SESSION_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.notification.posted",
   "session.notification.withdrawn",
+  "session.agentCall.ringing",
+  "session.agentCall.settled",
   "session.context.compaction.requested",
   "session.context.compaction.started",
   "session.context.compacted",
@@ -3770,6 +3785,8 @@ export type ScheduledTaskAgentConfig = {
   maxNestedAgentDepth?: number | undefined;
   /** Seconds a run may wait on a person before the scheduler answers for it. */
   approvalTimeoutSeconds?: number | undefined;
+  /** Whether the chats this task starts run unattended; see the request type. */
+  unattended?: boolean | undefined;
 };
 
 export type ScopedKnowledgeScope =
@@ -3985,8 +4002,10 @@ export type CreateSessionRequest = {
    * No person will see or answer questions until the task ends (an API
    * automation or other headless run). The agent is told so and resolves open
    * choices itself instead of asking; tools that wait for a person are not
-   * offered. Frozen at create for every later turn; not inherited by child
-   * sessions, and a fork reads as attended. Servers that predate it ignore it.
+   * offered, and a call that needs someone's approval is refused instead of
+   * waiting. A person's later message does not change it; turn it off with
+   * `updateSessionUnattended`. Not inherited by child sessions, and a fork
+   * reads as attended. Servers that predate it ignore it.
    */
   unattended?: boolean | undefined;
   /**
@@ -4192,6 +4211,7 @@ export type FirstPartyMcpToolName =
   | "notify_user"
   | "notification_withdraw"
   | "inbox_tidy"
+  | "call_user"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
@@ -7041,7 +7061,15 @@ export type NativeAppToken = {
  * `needs_input` (a question or an approval), `reply_ready` (a turn finished),
  * `failed` (a turn failed) and `agent` (the agent chose to notify).
  */
-export type NativePushRule = "needs_input" | "reply_ready" | "failed" | "agent";
+export type NativePushRule =
+  | "needs_input"
+  | "reply_ready"
+  | "failed"
+  | "agent"
+  /** Agents working for this person may ring this phone (off unless the person turns it on). */
+  | "call"
+  /** Agents of other members of a shared workspace may ring it too; needs `call`. */
+  | "call_members";
 
 export type RegisterNativePushDeviceInput = {
   platform: NativeAppPlatform;
@@ -7052,6 +7080,8 @@ export type RegisterNativePushDeviceInput = {
   /** The APNs device token (hex) or FCM registration token. */
   token: string;
   rules: NativePushRule[];
+  /** iOS PushKit token that agent calls ring; iOS keeps no call rules without it. */
+  voipToken?: string | null;
 };
 
 /** This app credential's push registration. */
@@ -7061,7 +7091,31 @@ export type NativePushDevice = {
   environment: "development" | "production";
   token: string;
   rules: NativePushRule[];
+  voipToken?: string | null;
   updatedAt: string;
+};
+
+/** Where an agent's call to a person stands. */
+export type AgentCallState = "ringing" | "answered" | "declined" | "missed" | "cancelled";
+
+/**
+ * An agent ringing a person's phones (`call_user`). Only the person called can
+ * read, answer or decline it. Answering opens the chat's voice call.
+ */
+export type AgentCall = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  /** Who the ring screen shows as calling. */
+  callerLabel: string | null;
+  /** Why the agent calls, in a few words. */
+  reason: string;
+  state: AgentCallState;
+  ringUntil: string;
+  createdAt: string;
+  endedAt: string | null;
+  /** Whether this phone (app credential) took the call; null when unknown. */
+  answeredHere: boolean | null;
 };
 
 // --- Organization-wide session list (org API key or organization owner) -----------------------
@@ -7833,6 +7887,16 @@ export type ScheduledTaskAgentConfigInput = {
    * the question as a labelled system decision. Omitted: waits indefinitely.
    */
   approvalTimeoutSeconds?: number | undefined;
+  /**
+   * Whether each chat this task starts runs unattended: no person answers
+   * during the run, so the agent is told to settle open choices itself and
+   * report what is left for a person, and calls that need someone's approval
+   * are refused instead of waiting. `true` or `false` is a fixed choice.
+   * Omitted: unattended by default, unless `approvalTimeoutSeconds` is set;
+   * the default ends when a person writes in the chat. A task that posts into
+   * an existing chat follows that chat.
+   */
+  unattended?: boolean | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {

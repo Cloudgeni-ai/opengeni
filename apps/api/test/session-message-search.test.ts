@@ -133,6 +133,47 @@ test("HTTP occurrence pagination carries advancing cursors and exact terminal co
   expect(next.matchedMessageCount).toBe(1);
 }, 180_000);
 
+test("HTTP newest-first order starts at the latest message and binds its cursor", async () => {
+  const f = await fixture();
+  await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, 4, 'user.message', ${shared.admin.json({ text: "latest twice" })})`;
+  const app = appWith();
+  const query = { query: "twice", sessionId: f.session.id, order: "newest", limit: "1" };
+  const read = async (params: Record<string, string>) => {
+    const response = await app.request(`${f.path}?${new URLSearchParams(params)}`, {
+      headers: { authorization: f.authorization },
+    });
+    return {
+      status: response.status,
+      body: response.ok ? await response.json() : await response.text(),
+    };
+  };
+  const pages = [];
+  let cursor: string | null = null;
+  do {
+    const { status, body } = await read({ ...query, ...(cursor ? { cursor } : {}) });
+    expect(status).toBe(200);
+    const page = SessionMessageSearchResponse.parse(body);
+    pages.push(page);
+    cursor = page.nextCursor;
+  } while (cursor && pages.length < 10);
+  expect(
+    pages.flatMap((page) =>
+      page.matches.map((match) => [match.sequence, match.messageMatchOffset]),
+    ),
+  ).toEqual([
+    [4, 7],
+    [2, 14],
+    [2, 20],
+  ]);
+  expect(pages.at(-1)!.countIsExact).toBe(true);
+  // A newest-first cursor cannot continue an oldest-first traversal.
+  const first = SessionMessageSearchResponse.parse((await read(query)).body);
+  const { order: _order, ...oldest } = query;
+  expect((await read({ ...oldest, cursor: first.nextCursor! })).status).toBe(400);
+  expect((await read({ query: "twice", groupBy: "session", order: "newest" })).status).toBe(400);
+}, 180_000);
+
 test("HTTP cancelled searches return an empty client-closed response, not a server error", async () => {
   const f = await fixture();
   for (const customReason of [false, true]) {

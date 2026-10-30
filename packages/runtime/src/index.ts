@@ -200,6 +200,8 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
+  UNATTENDED_PERSON_REFUSAL_TEXT,
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
@@ -2309,6 +2311,14 @@ export type BuildAgentOptions = {
    */
   unattended?: boolean;
   /**
+   * No person answers during this attempt (the chat's current setting, which
+   * can change after it starts). Only call-time behaviour follows it: a call
+   * that needs approval, a question and a hand-off to a person are refused
+   * with a tool result instead of waiting. The instructions and tools follow
+   * `unattended`, so earlier requests' text never changes.
+   */
+  unattendedNow?: boolean;
+  /**
    * Secret facts for this attempt. `referencesEnabled` is true when the host
    * resolves `{{secret:…}}` references (the secrets prompt module renders
    * only then). `hasActingHuman` admits Only-me secret questions;
@@ -3399,6 +3409,13 @@ export function buildOpenGeniAgent(
           {
             name: "validate_human_input_request",
             run: async ({ toolCall }) => {
+              // Switched to work without a person after the chat started: the
+              // tool stays (its list never changes) but nobody would answer.
+              if (options.unattendedNow) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  UNATTENDED_PERSON_REFUSAL_TEXT,
+                );
+              }
               let input: unknown;
               try {
                 input = JSON.parse(toolCall.arguments);
@@ -3570,9 +3587,16 @@ export function buildOpenGeniAgent(
     installInteractionInterventionPolicy(
       agent as unknown as ApprovalCapableAgent,
       options.approvedToolCallId,
+      options.unattendedNow === true,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+    if (options.unattendedNow) {
+      installUnattendedApprovalRefusal(
+        agent as unknown as ApprovalCapableAgent,
+        options.approvedToolCallId,
+      );
+    }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     // Last, so it masks exactly what every other wrapper hands to the model.
     if (options.secretValueMemory) {
@@ -3712,9 +3736,16 @@ export function buildOpenGeniAgent(
   installInteractionInterventionPolicy(
     agent as unknown as ApprovalCapableAgent,
     options.approvedToolCallId,
+    options.unattendedNow === true,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+  if (options.unattendedNow) {
+    installUnattendedApprovalRefusal(
+      agent as unknown as ApprovalCapableAgent,
+      options.approvedToolCallId,
+    );
+  }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   // Last, so it masks exactly what every other wrapper hands to the model.
   if (options.secretValueMemory) {
@@ -4087,6 +4118,74 @@ export function toolPreflightFailureOutput(error: unknown): {
       },
     ],
   };
+}
+
+/** Model-facing result for a call refused because nobody can approve it. */
+export function unattendedApprovalRefusalOutput(): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  return { isError: true, content: [{ type: "text", text: UNATTENDED_APPROVAL_REFUSAL_TEXT }] };
+}
+
+/**
+ * In an unattended session nobody answers an approval, so a call that would
+ * wait for one is refused at once instead: the SDK is told no approval is
+ * needed and the matching `invoke` returns the refusal without running any
+ * inner wrapper, so nothing executes and nothing is approved. Policy is read
+ * exactly as configured; only the wait is replaced. An already approved call
+ * (`approvedToolCallId`) keeps its normal path.
+ *
+ * Installed before preflight containment, which wraps it like any other
+ * Opengeni approval hook (so a throwing policy check stays contained), and
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installUnattendedApprovalRefusal(
+  agent: ApprovalCapableAgent,
+  approvedToolCallId?: string,
+): void {
+  const refused = new Set<string>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof needsApproval>[0],
+            parsedInput: Parameters<typeof needsApproval>[1],
+            callId: Parameters<typeof needsApproval>[2],
+          ) => {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (!callId || callId === approvedToolCallId) return required;
+            if (!required) {
+              refused.delete(callId);
+              return false;
+            }
+            refused.add(callId);
+            return false;
+          },
+        ),
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && refused.delete(callId)) {
+            return unattendedApprovalRefusalOutput() as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installUnattendedApprovalRefusal(cloned, approvedToolCallId);
+      return cloned;
+    };
+  }
 }
 
 /**
@@ -4548,6 +4647,7 @@ export function interactionRequestArgumentsProblem(serialized: string): string |
 function installInteractionInterventionPolicy(
   agent: ApprovalCapableAgent,
   approvedToolCallId?: string,
+  unattendedNow = false,
 ): void {
   const approvalRequiredCallIds = new Set<string>();
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -4570,6 +4670,13 @@ function installInteractionInterventionPolicy(
           defineToolInputGuardrail({
             name: "validate_interaction_request_human",
             run: async ({ toolCall }) => {
+              // Switched to work without a person after the chat started:
+              // nobody would act, so the hand-off is refused, not awaited.
+              if (unattendedNow) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  UNATTENDED_PERSON_REFUSAL_TEXT,
+                );
+              }
               const problem = interactionRequestArgumentsProblem(toolCall.arguments);
               return problem
                 ? ToolGuardrailFunctionOutputFactory.rejectContent(problem)
@@ -4611,7 +4718,7 @@ function installInteractionInterventionPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installInteractionInterventionPolicy(cloned, approvedToolCallId);
+      installInteractionInterventionPolicy(cloned, approvedToolCallId, unattendedNow);
       return cloned;
     };
   }

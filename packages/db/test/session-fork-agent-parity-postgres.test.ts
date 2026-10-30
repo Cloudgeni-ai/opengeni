@@ -51,6 +51,9 @@ const COPIED = [
   "sandbox_os",
   "channel_id",
   "keep_live",
+  "unattended_setting",
+  // Kept as recorded; a fork reads as attended regardless (see the session read).
+  "started_unattended",
   "rig_id",
   "rig_version_id",
   "initial_xai_provider_account_authority_snapshot",

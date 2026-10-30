@@ -1,7 +1,12 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
+import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
-import { firstPartyToolsForAttendance, sessionIsUnattended } from "./unattended";
+import {
+  firstPartyToolsForAttendance,
+  sessionStartedUnattended,
+  sessionUnattendedNow,
+} from "./unattended";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -478,6 +483,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   const videoSkillSelected =
     bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
+  // The tools follow how the chat started, so its tool list never changes
+  // under earlier requests; refusing what would wait follows the current setting.
+  const startedUnattended = sessionStartedUnattended(session);
+  const unattended = sessionUnattendedNow(session);
   // These are independent metadata reads on separate pool scopes, after the
   // linked-identity guard. No selection, credential or authority is cached.
   // Join every scope before proceeding or failing; executable preparation and
@@ -502,7 +511,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   if (sharedSkillsResult.status === "rejected") throw sharedSkillsResult.reason;
   const skillConfiguration = skillConfigurationResult.value;
   const sharedSkillDescriptors = sharedSkillsResult.value;
-  // An unattended session has no tool that waits for a person to act.
+  // A session that started unattended has no tool that waits for a person to act.
   const selectedFirstPartyMcpTools = firstPartyToolsForAttendance(
     toolFamilies.firstPartyTools(
       scheduledTurnMcpServerIds(turn) !== null
@@ -512,7 +521,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           )
         : resolveSessionFirstPartyMcpTools(runSettings, session, workspaceResult.value!.settings),
     ),
-    sessionIsUnattended(session),
+    startedUnattended,
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -548,8 +557,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     {
       preview: async (call) =>
         await previewConnectorActionApproval(db, connectorActionIdentity, call),
-      prepare: async (call) =>
-        await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+      prepare: async (call) => {
+        // Nobody can answer an approval here, so an Ask opens no request for
+        // one: the call is refused (see the runtime) and nothing waits on it.
+        if (unattended) {
+          const preview = await previewConnectorActionApproval(db, connectorActionIdentity, call);
+          if (preview.managed && preview.decision === "ask" && !preview.requestId) return preview;
+        }
+        return await prepareConnectorActionApproval(db, connectorActionIdentity, call);
+      },
       begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
       complete: async ({ requestId, outcome }) =>
         await completeConnectorActionExecution(db, {
@@ -941,7 +957,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
     count: githubRestMcp.tools.length,
   });
-  await eventing.publish!([
+  await publishStartupProgress(eventing, [
     {
       type: "turn.startup.phase.started",
       payload: { phase: "tools" },
@@ -1210,7 +1226,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       durationSeconds: toolPreparationDurationMs / 1_000,
       count: githubRestMcp.tools.length,
     });
-    await eventing.publish!([
+    await publishStartupProgress(eventing, [
       {
         type:
           toolPreparationOutcome === "completed"
@@ -1253,6 +1269,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
       (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
       tools.inputWaitYield,
+      // Nobody answers an approval here: a call that needs one is refused.
+      unattended,
     );
     eventing.codemodeDispatcher.start();
   };
