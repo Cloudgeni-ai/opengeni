@@ -966,6 +966,12 @@ describe("BrowserAccountsProvider", () => {
     const transitionSettled = new Promise<void>((resolve) => {
       releaseTransition = resolve;
     });
+    // Resolved when this tab's own transition starts and is held open, so the
+    // assertions below run inside that window whatever the scheduler's speed.
+    let enterTransition!: () => void;
+    const transitionEntered = new Promise<void>((resolve) => {
+      enterTransition = resolve;
+    });
     let accounts: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     try {
       accounts = await renderAccounts(
@@ -978,6 +984,7 @@ describe("BrowserAccountsProvider", () => {
         }),
         async (transition) => {
           if (transition.to?.selectedSlotId === SLOT_B) {
+            enterTransition();
             await transitionSettled;
           }
         },
@@ -987,7 +994,7 @@ describe("BrowserAccountsProvider", () => {
       let selection!: Promise<boolean>;
       await act(async () => {
         selection = accounts!.current.selectSlot(SLOT_B);
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await transitionEntered;
       });
       expect(messages).toHaveLength(2);
       expect(messages[0]).toEqual({
