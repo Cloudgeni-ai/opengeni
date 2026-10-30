@@ -49,6 +49,18 @@ take `agentConfig` creation settings. After a reusable chat exists, change its
 execution settings in that chat. The schedule editor and MCP summary identify
 those settings as inherited rather than displaying stale creation defaults.
 
+Those creation settings also take the chat settings a session create takes:
+`mcpServers` (session MCP servers by id and URL, without headers),
+`skills`, `memoryScope` and `agentAccess`. A generated chat gets them, and
+the run's dispatch fence checks that its skills and servers match the
+accepted snapshot. `memoryScope` and `agentAccess` only narrow: the chat gets
+the narrower of the setting and the creator's own policy. An existing-chat
+schedule rejects them. The agent schedule tools do not offer these fields.
+
+With `overlapPolicy: "skip"`, a `new_session_per_run` occurrence is skipped
+(`scheduled_session_not_idle`) while the chat of the task's previous run is
+still working, so a slow run is never doubled up.
+
 ## Editing messages and destinations
 
 `scheduled_tasks_update`, HTTP PATCH and the SDK accept `prompt` for a lossless
@@ -123,6 +135,14 @@ are ownerless: the key stays the audited creator (`createdBy` with
 `kind: "service"`), runs use service authority with workspace accounts only,
 and anyone holding `scheduled_tasks:manage` (including the key) may change or
 run them.
+
+A creator may lock a schedule with `creatorLocked: true` when creating it.
+Only the same creator subject can then change, run or delete it;
+`scheduled_tasks:manage` alone is not enough, and agents always get 403. A
+workspace admin can still pause it. An agent cannot create a locked schedule
+(422). Products use it for schedules
+they manage on a workspace's behalf, so the workspace's own agents cannot edit
+them.
 
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in

@@ -16,7 +16,9 @@
 #   fmt clippy arch workspace python    no KVM needed
 #   lab-setup                           prepares LAB with lab/host-setup.sh
 #                                       when it lacks Firecracker, the guest
-#                                       kernel or the base image
+#                                       kernel or the base image; otherwise
+#                                       applies only what a boot loses
+#                                       (lab/host-boot.sh: swap and zswap)
 #   pager networking engine save_wake lab guest smoke conformance
 #                                       real VMs, as root
 #
@@ -113,8 +115,11 @@ if wants lab-setup; then
   step "lab-setup ($LAB)"
   if [ -x "$LAB/bin/firecracker" ] && [ -x "$LAB/bin/jailer" ] && [ -f "$LAB/vmlinux" ] && [ -f "$LAB/base.ext4" ]; then
     echo "lab ready: $("$LAB/bin/firecracker" --version | head -1)"
+    # The files may come from CI's cache onto a fresh machine, or the host
+    # may have rebooted since it was prepared.
+    check lab-setup '^\[host-boot' env LAB_DIR="$LAB" SWAP_SIZE="${SWAP_SIZE:-4G}" bash lab/host-boot.sh
   else
-    check lab-setup '^\[host-setup' env LAB_DIR="$LAB" SWAP_SIZE="${SWAP_SIZE:-4G}" bash lab/host-setup.sh
+    check lab-setup '^\[host-(setup|boot)' env LAB_DIR="$LAB" SWAP_SIZE="${SWAP_SIZE:-4G}" bash lab/host-setup.sh
   fi
 fi
 if wants pager; then

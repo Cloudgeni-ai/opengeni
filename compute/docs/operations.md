@@ -1299,14 +1299,17 @@ Four layers, each a superset of what the one before cannot reach:
 GitHub's hosted x64 Linux runners are VMs with nested virtualization that
 expose `/dev/kvm` (root, group `kvm`, mode 0660); the job grants the runner
 user access with an ACL, makes an XFS lab directory on a loop file,
-reserves a quarter of the runner's memory as huge pages for the nested
+reserves half of the runner's memory as huge pages for the nested
 profile, and caches the downloaded Firecracker, kernel and base image by
-the pins' hash. It runs four sandboxes where the lab gate runs twelve.
+the pins' hash. A runner that restores them from the cache still gets swap
+and zswap from `lab/host-boot.sh`, which the gate's lab-setup step runs
+either way. It runs four sandboxes where the lab gate runs twelve.
 
 Run the gate on a lab host:
 
 ```sh
 bash lab/host-setup.sh                       # once
+bash lab/host-boot.sh                        # after each reboot: swap and zswap (the gate's lab-setup step runs it)
 PROFILE=nested bash ci/gate.sh               # all steps
 STEPS="engine save_wake" STORE=gs://bucket/gate bash ci/gate.sh
 ```

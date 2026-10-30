@@ -176,6 +176,8 @@ export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
+export * from "./mcp-elicitation";
+import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,
@@ -12065,8 +12067,9 @@ export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 /**
  * What a run does when the automation's previous run is still working. Only an
  * automation that continues a chat (`existing_session`, `reusable_session`)
- * can overlap; a run in a new chat always runs on its own, whatever the
- * choice. `steer`, the default for new automations, hands this automation's
+ * can overlap; a run in a new chat runs on its own, except that `skip` drops
+ * it while the chat of the automation's previous run is still working.
+ * `steer`, the default for new automations, hands this automation's
  * own running turn over at its next model step, like a person's Steer, so the
  * agent sees the new run with the work so far; a turn anyone else started
  * still finishes first, and the run follows it. In a chat, `allow_concurrent`
@@ -12545,7 +12548,71 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // Agent configuration for every generated session; resolved at dispatch
     // (the whole-row execution digest covers it). Omitted keeps legacy.
     agent: AgentConfigRequest.optional(),
+    /**
+     * Remote MCP servers attached to each chat the task starts, as on session
+     * create. Static headers are not stored: credentials come from the
+     * workspace credential provider or `connectionRef`.
+     */
+    mcpServers: z.array(ScheduledTaskMcpServer).max(SESSION_MCP_SERVERS_MAX).optional(),
+    /** Memory, agent reach and inline Skills of each chat the task starts, as on session create. */
+    memoryScope: SessionMemoryScope.optional(),
+    agentAccess: SessionAgentAccess.optional(),
+    // Validated on save like session create Skills (SessionSkills) and stored
+    // normalized; only the shape is declared here so Skill YAML validation
+    // stays out of browser bundles, like UpdateSessionSkillsRequest.
+    skills: z.array(ScheduledTaskSkill).max(32).optional(),
   };
+}
+
+/** A session-create MCP server without static headers, for chats a task starts. */
+export const ScheduledTaskMcpServer = /* @__PURE__ */ defineSchema(() =>
+  SessionMcpServerInput.omit({ headers: true }).strict(),
+);
+export type ScheduledTaskMcpServer = z.infer<typeof ScheduledTaskMcpServer>;
+
+/**
+ * An inline Skill for each chat a task starts, in the session create Skill
+ * shape: files own the metadata (a top-level SKILL.md is required), and the
+ * full Skill validation runs when the task is saved.
+ */
+export const ScheduledTaskSkill = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1).max(64).optional(),
+    description: z.string().min(1).max(1024).optional(),
+    activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
+    files: z
+      .array(
+        z.object({
+          path: z.string().min(1).max(512),
+          content: primitives.string.max(SKILL_MAX_FILE_BYTES),
+        }),
+      )
+      .min(1)
+      .max(SKILL_MAX_FILES),
+  }),
+);
+export type ScheduledTaskSkill = z.infer<typeof ScheduledTaskSkill>;
+
+/** Chat settings that only a chat the task starts can carry. */
+const SCHEDULED_TASK_GENERATED_CHAT_FIELDS = [
+  "mcpServers",
+  "memoryScope",
+  "agentAccess",
+  "skills",
+] as const;
+
+function refineScheduledTaskGeneratedChatFields(
+  agentConfig: Partial<Record<(typeof SCHEDULED_TASK_GENERATED_CHAT_FIELDS)[number], unknown>>,
+  context: z.RefinementCtx,
+): void {
+  for (const field of SCHEDULED_TASK_GENERATED_CHAT_FIELDS) {
+    if (agentConfig[field] === undefined) continue;
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", field],
+      message: `${field} cannot be used with an existing-session target; that chat keeps its own`,
+    });
+  }
 }
 
 function refineScheduledTaskAgentConfig(
@@ -12846,6 +12913,12 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
     /** Vaults every run may resolve secret references from (the task vault is always included). */
     vaultPolicy: VaultPolicy.default({ mode: "all" }),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * Present and true when the task was created locked: only its creator (the
+     * same key or signed service identity) can change, run, resume or delete
+     * it, never an agent. A workspace admin can still pause it.
+     */
+    creatorLocked: z.literal(true).optional(),
     createdAt: primitives.string,
     updatedAt: primitives.string,
     /** Read-only response projection; never stored and never execution authority. */
@@ -13472,6 +13545,12 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ rejectingRemovedFields(
       metadata: ScheduledTaskMetadataInput.default({}),
       /** Event triggers and the event run policy. Use schedule `{ type: "manual" }` for an event-only automation. */
       events: ScheduledTaskEventsInput.optional(),
+      /**
+       * Lock the task to its creator: only the same key or signed service
+       * identity can later change, run, resume or delete it, and no agent can.
+       * A workspace admin can still pause it. Set once at creation.
+       */
+      creatorLocked: z.boolean().optional(),
     })
     .superRefine((value, context) => {
       if (value.runMode === "existing_session" && !value.targetSessionId) {
@@ -13505,6 +13584,9 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ rejectingRemovedFields(
           path: ["agentConfig", "goal"],
           message: "agentConfig.goal cannot be used with an existing-session target",
         });
+      }
+      if (value.runMode === "existing_session") {
+        refineScheduledTaskGeneratedChatFields(value.agentConfig, context);
       }
       if (value.runMode === "existing_session" && value.agentConfig.executionTarget) {
         context.addIssue({
@@ -13561,6 +13643,8 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       metadata: ScheduledTaskMetadataInput.default({}),
       /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
       events: ScheduledTaskEventsInput.optional(),
+      /** Lock the task to its creator; see the agent-task request. */
+      creatorLocked: z.boolean().optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -13725,6 +13809,12 @@ export const UpdateScheduledTaskRequest =
             path: ["agentConfig", "goal"],
             message: "agentConfig.goal cannot be used with an existing-session target",
           });
+        }
+        if (
+          value.agentConfig &&
+          (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+        ) {
+          refineScheduledTaskGeneratedChatFields(value.agentConfig, context);
         }
         if (
           value.agentConfig?.executionTarget &&
@@ -17086,6 +17176,23 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     eventSequence: z.number().int().positive().nullable().optional(),
     /** One-tap answers for a single short choice question; empty otherwise. */
     choices: z.array(z.object({ id: primitives.string, label: primitives.string })).max(4),
+    /**
+     * An approval whose tool's MCP server asks the person a question in the
+     * middle of the call: which server asks, how the person answers and which
+     * of the call's questions it is (`round`, sent back as
+     * `elicitationRound`). The item's title is then the server's question. A
+     * `confirm` is one question with nothing to fill in, shown whole by the
+     * title, so it can be allowed from the item; anything else is a `form`,
+     * answered in the session. Null otherwise.
+     */
+    serverQuestion: z
+      .object({
+        server: primitives.string,
+        kind: z.enum(["confirm", "form"]),
+        round: z.number().int().positive(),
+      })
+      .nullable()
+      .default(null),
     urgency: NotificationUrgency,
     status: InboxItemStatus,
     /** True while the person has not seen the item's current content. */
@@ -20165,6 +20272,12 @@ export type SessionApprovalRequestPublicFields = {
   id: string;
   name: string;
   arguments: unknown;
+  /**
+   * Present when an MCP server asked the person a question in the middle of
+   * this call (form elicitation). Approving answers it; see `content` on
+   * `user.approvalDecision`.
+   */
+  elicitation?: McpElicitationApprovalRequest;
 };
 
 export function withPublicApprovalFields<T>(
@@ -20244,6 +20357,19 @@ export const ClientSessionEvent = /* @__PURE__ */ defineSchema(() =>
         approvalId: primitives.nonEmptyString.max(SESSION_OPERATION_KEY_MAX_CHARS),
         decision: z.enum(["approve", "reject"]),
         message: z.string().optional(),
+        /**
+         * Answers to an approval's `elicitation` questions, keyed by request
+         * id. Checked against each form; omitted fields take the server's
+         * defaults, so a form without required fields needs no content.
+         */
+        content: McpElicitationContent.optional(),
+        /**
+         * The `elicitation.round` this decision answers. Required to approve
+         * an approval with `elicitation`, so an approval sent for an earlier
+         * question (or by a surface that never showed it) cannot answer the
+         * server's current one.
+         */
+        elicitationRound: z.number().int().positive().optional(),
         // Write-only header rotation committed with the response before resume.
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
       }),

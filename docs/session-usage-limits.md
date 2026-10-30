@@ -218,6 +218,20 @@ the same operation replayed returns its committed state. Other write errors use
 (503). Every successful change appends `session.usage_limit.updated` to the
 root and writes an audit receipt naming the person or host.
 
+### Daily window
+
+A limit may apply per calendar day instead of for the task's whole life:
+`"window": { "period": "day", "timeZone": "UTC" }` (any IANA zone) on the
+PUT. `usedMicros` then counts usage since the start of the current day in
+that zone, and the read adds `window: { period, timeZone, startedAt,
+resetsAt }`. At the next day the count starts from zero, so a long-lived chat
+can spend up to the limit each day. Setting a window counts the usage already
+recorded since the start of the current day. Omitting `window` keeps the
+current one, `null` clears it, and clearing the limit clears it too. Total
+usage is still recorded; only what is compared to the limit changes. A new
+day does not resume a paused goal or a stopped turn: the next message,
+schedule run or Resume does.
+
 ### Authority
 
 Only a signed-in person or the product's trusted server may set, change or

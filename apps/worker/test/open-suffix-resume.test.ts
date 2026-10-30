@@ -236,10 +236,16 @@ describe("open suffix approval results", () => {
     };
   }
 
+  function finished(result: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>) {
+    if ("asked" in result) throw new Error("expected a finished call");
+    return result;
+  }
+
   function expectPairedResult(
-    result: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>,
+    outcome: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>,
     output: string,
   ) {
+    const result = finished(outcome);
     expect(result.eventOutput).toBe(output);
     expect(result.resultItem).toMatchObject({
       type: "function_call_result",
@@ -250,9 +256,10 @@ describe("open suffix approval results", () => {
   }
 
   function expectInterruptedResult(
-    result: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>,
+    outcome: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>,
     reason: string,
   ) {
+    const result = finished(outcome);
     expect(result.eventOutput).toBe(reason);
     expect(result.resultItem).toEqual(
       interruptedToolCallResult({
