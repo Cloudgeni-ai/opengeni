@@ -195,6 +195,24 @@ describe("sandbox git credentials", () => {
         null,
       ),
     ).toEqual({ name: "Deploy Bot", email: "deploy@example.com" });
+    // A separately configured committer travels with the identity.
+    expect(
+      repositoryCommitIdentity(
+        testSettings({
+          sandboxBackend: "docker",
+          gitAuthorName: "Deploy Bot",
+          gitAuthorEmail: "deploy@example.com",
+          gitCommitterName: "Release Bot",
+          gitCommitterEmail: "release@example.com",
+        }),
+        { provider: "github", personalGitHub: false },
+        null,
+      ),
+    ).toEqual({
+      name: "Deploy Bot",
+      email: "deploy@example.com",
+      committer: { name: "Release Bot", email: "release@example.com" },
+    });
     // A partial deployment identity keeps its half and fills the other.
     expect(
       repositoryCommitIdentity(

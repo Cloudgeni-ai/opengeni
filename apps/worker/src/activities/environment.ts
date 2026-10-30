@@ -33,7 +33,12 @@ export type ConnectionScope = {
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 export type GitTokenExpiries = Partial<Record<GitCredentialProvider, string>>;
-export type GitCommitIdentity = { name: string; email: string };
+export type GitCommitIdentity = {
+  name: string;
+  email: string;
+  /** Set only when the committer differs from the author. */
+  committer?: { name: string; email: string } | undefined;
+};
 export type GitCredentialBindingSeed = {
   credentialBindingId: string;
   provider: GitCredentialProvider;
@@ -824,10 +829,18 @@ export function repositoryCommitIdentity(
     (selection.provider === "github" ? usable(githubAppBotIdentity(settings)) : null);
   const deployment = collectGitIdentityEnvironment(settings);
   if (deployment.GIT_AUTHOR_NAME || deployment.GIT_AUTHOR_EMAIL) {
-    return usable({
+    const author = usable({
       name: deployment.GIT_AUTHOR_NAME ?? fallback?.name ?? "",
       email: deployment.GIT_AUTHOR_EMAIL ?? fallback?.email ?? "",
     });
+    if (!author) return null;
+    const committer = usable({
+      name: deployment.GIT_COMMITTER_NAME ?? author.name,
+      email: deployment.GIT_COMMITTER_EMAIL ?? author.email,
+    });
+    return committer && (committer.name !== author.name || committer.email !== author.email)
+      ? { ...author, committer }
+      : author;
   }
   return fallback;
 }

@@ -2207,21 +2207,25 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       try {
         const home = join(root, "home");
         const deployment = { name: "Deploy Bot", email: "deploy@example.com" };
+        const releaseBot = { name: "Release Bot", email: "release@example.com" };
         const { session, commitAs } = identitySession(root, home, {
           GIT_AUTHOR_NAME: deployment.name,
           GIT_AUTHOR_EMAIL: deployment.email,
-          GIT_COMMITTER_NAME: deployment.name,
-          GIT_COMMITTER_EMAIL: deployment.email,
+          GIT_COMMITTER_NAME: releaseBot.name,
+          GIT_COMMITTER_EMAIL: releaseBot.email,
         });
         await runRepositoryCloneHook(session as never, resources, {
           environment: {},
           gitCredentialBindings: bindings.map((binding) =>
             binding.credentialBindingId === "github-installation:42"
-              ? { ...binding, identity: deployment }
+              ? { ...binding, identity: { ...deployment, committer: releaseBot } }
               : binding,
           ),
         });
-        expect(await commitAs("repos/acme/app-repo")).toBe(formatted(deployment));
+        // A separately configured committer survives on App repositories.
+        expect(await commitAs("repos/acme/app-repo")).toBe(
+          `${deployment.name} <${deployment.email}>|${releaseBot.name} <${releaseBot.email}>`,
+        );
         expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
       } finally {
         rmSync(root, { recursive: true, force: true });
