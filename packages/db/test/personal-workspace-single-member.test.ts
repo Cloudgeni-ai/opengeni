@@ -1,4 +1,4 @@
-// Migration 1107: a Personal workspace has exactly one member, its owner. The
+// Migration 1153: a Personal workspace has exactly one member, its owner. The
 // database refuses every other row, and the runtime's membership readers never
 // count a row in a Personal workspace as membership (only the verified owner
 // reaches it, through the organization membership's pointer).

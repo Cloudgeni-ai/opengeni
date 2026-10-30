@@ -269,9 +269,9 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
-### One member, enforced by the database (migration 1107)
+### One member, enforced by the database (migration 1153)
 
-Migration `1107_personal_workspace_single_member.sql` turns "a Personal
+Migration `1153_personal_workspace_single_member.sql` turns "a Personal
 workspace has exactly one member, its owner" from a runtime property into a
 database rule. It comes ahead of giving the owner a real membership row in a later
 release. A workspace is Personal when it carries the Personal identity:
