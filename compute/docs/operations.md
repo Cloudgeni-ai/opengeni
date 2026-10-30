@@ -993,7 +993,9 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     fleet the agent's process then stops itself for systemd to start it
     again (log line `the agent has not said what the host can take on
     for a minute`), keeping the VMs and the lease; repeated restarts mean
-    a host that needs a person.
+    a host that needs a person. A stop that hangs a minute more ends the
+    process at once (log line `the stuck agent's process has not stopped
+    in a minute`).
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or

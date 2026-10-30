@@ -24,9 +24,11 @@
 //! An agent that has not answered one for [`STUCK_AFTER`] is stuck, not
 //! busy: the process asks itself to stop, as systemd would, and the agent
 //! that systemd starts again takes back the VMs, which run on meanwhile.
-//! The lease is renewed all along, as in any restart. Renewing on for a
-//! stuck agent alone would keep every sandbox on the host out of reach
-//! without the service ever moving one.
+//! The lease is renewed all along, as in any restart. A stop that has not
+//! ended [`STUCK_AFTER`] later (a stop waits on writes a stuck disk may
+//! never finish) ends the process at once, as systemd's stop timeout
+//! would. Renewing on for a stuck agent alone would keep every sandbox on
+//! the host out of reach without the service ever moving one.
 //!
 //! It runs from the moment the agent process starts until it exits. A
 //! restarted agent takes back what the previous run left before it
@@ -464,6 +466,15 @@ impl Running {
         let now = boot_now();
         if let Some(since) = self.reading {
             let taken = now.since_origin().saturating_sub(since.since_origin());
+            // Asked to stop, the process has not: nothing else would end it,
+            // since systemd did not ask.
+            if self.restarting && taken > STUCK_AFTER * 2 {
+                tracing::error!(
+                    waited_ms = ms(taken),
+                    "the stuck agent's process has not stopped in a minute: it ends now, for systemd to start it again"
+                );
+                std::process::exit(1);
+            }
             if taken > STUCK_AFTER && !self.restarting && self.renewer.agent.handle().is_some() {
                 self.restarting = true;
                 tracing::error!(

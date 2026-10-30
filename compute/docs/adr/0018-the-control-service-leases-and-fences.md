@@ -211,7 +211,11 @@ can be built and tested.
   minute is stuck rather than busy: its process stops itself, renewing
   the lease as any stop does, and the agent systemd starts again takes
   back the VMs, which run on meanwhile, so a stuck agent neither keeps
-  its sandboxes out of reach for good nor costs their programs. A gap is
+  its sandboxes out of reach for good nor costs their programs. A stop
+  that has not ended a minute later (it waits on writes a stuck disk may
+  never finish) ends the process at once, as systemd's stop timeout
+  would; a host that cannot start its agent again lets its lease lapse,
+  and the service moves its sandboxes. A gap is
   visible before it costs anything:
   the host warns once two renewals in a row go unanswered, with how long
   its lease has left, the service records how long each host went
