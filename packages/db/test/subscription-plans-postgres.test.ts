@@ -1167,7 +1167,7 @@ for (const posture of ["production", "restricted"] as const) {
     const memberships = await shared.admin<Array<{ account_id: string; status: string }>>`
       select account_id::text, status from organization_memberships
       where subject_id = ${`user:${authUserId}`}`;
-    expect(memberships).toEqual([{ account_id: inviting.accountId, status: "active" }]);
+    expect([...memberships]).toEqual([{ account_id: inviting.accountId, status: "active" }]);
     const [left] = await shared.admin<
       Array<{ target_subject_id: string | null; status: string }>
     >`select target_subject_id, status from organization_membership_invitations
