@@ -12551,9 +12551,9 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     memoryScope: SessionMemoryScope.optional(),
     agentAccess: SessionAgentAccess.optional(),
     // Validated on save like session create Skills (SessionSkills) and stored
-    // normalized; kept opaque here so Skill YAML validation stays out of
-    // browser bundles, like UpdateSessionSkillsRequest.
-    skills: z.array(z.unknown()).max(32).optional(),
+    // normalized; only the shape is declared here so Skill YAML validation
+    // stays out of browser bundles, like UpdateSessionSkillsRequest.
+    skills: z.array(ScheduledTaskSkill).max(32).optional(),
   };
 }
 
@@ -12562,6 +12562,29 @@ export const ScheduledTaskMcpServer = /* @__PURE__ */ defineSchema(() =>
   SessionMcpServerInput.omit({ headers: true }).strict(),
 );
 export type ScheduledTaskMcpServer = z.infer<typeof ScheduledTaskMcpServer>;
+
+/**
+ * An inline Skill for each chat a task starts, in the session create Skill
+ * shape: files own the metadata (a top-level SKILL.md is required), and the
+ * full Skill validation runs when the task is saved.
+ */
+export const ScheduledTaskSkill = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1).max(64).optional(),
+    description: z.string().min(1).max(1024).optional(),
+    activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
+    files: z
+      .array(
+        z.object({
+          path: z.string().min(1).max(512),
+          content: primitives.string.max(SKILL_MAX_FILE_BYTES),
+        }),
+      )
+      .min(1)
+      .max(SKILL_MAX_FILES),
+  }),
+);
+export type ScheduledTaskSkill = z.infer<typeof ScheduledTaskSkill>;
 
 /** Chat settings that only a chat the task starts can carry. */
 const SCHEDULED_TASK_GENERATED_CHAT_FIELDS = [

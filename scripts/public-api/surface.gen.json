@@ -25242,7 +25242,7 @@
         "$.resources[]": "ref(ResourceRef)",
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.skills": "array?",
-        "$.skills[]": "unknown",
+        "$.skills[]": "ref(ScheduledTaskSkill)",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
         "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
@@ -25282,7 +25282,7 @@
         "$.resources[]": "ref(ResourceRef)",
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.skills": "array?",
-        "$.skills[]": "unknown",
+        "$.skills[]": "ref(SessionSkill)",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
         "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
@@ -25502,6 +25502,19 @@
         "$|type=calendar.minute": "integer!",
         "$|type=calendar.timeZone": "string?",
         "$|type=calendar.type": "const!=[\"\\\"calendar\\\"\"]"
+      }
+    },
+    "ScheduledTaskSkill": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.activationMode": "enum?=[\"\\\"session_selected\\\"\",\"\\\"workspace_managed\\\"\"]",
+        "$.description": "string?",
+        "$.files": "array!",
+        "$.files[]": "ref(SkillArtifactFile)",
+        "$.name": "string?"
       }
     },
     "ScheduledTaskStatus": {
@@ -27922,7 +27935,8 @@
     },
     "SkillArtifactFile": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "object",
