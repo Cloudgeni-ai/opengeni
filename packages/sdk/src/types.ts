@@ -34,10 +34,12 @@ import type {
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
+  ScheduledTaskSkill,
   SessionAutomationWaitSummary,
   SessionAvatar,
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type { ScheduledTaskSkill } from "@opengeni/contracts";
 export type {
   McpElicitationAnswer,
   McpElicitationApprovalRequest,
@@ -3787,7 +3789,16 @@ export type ScheduledTaskAgentConfig = {
   approvalTimeoutSeconds?: number | undefined;
   /** Whether the chats this task starts run unattended; see the request type. */
   unattended?: boolean | undefined;
+  /** Remote MCP servers attached to each chat the task starts. */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /** Memory, agent reach and inline Skills of each chat the task starts. */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
+
+/** A session-create MCP server without static headers, for chats a task starts. */
+export type ScheduledTaskMcpServer = Omit<SessionMcpServerInput, "headers">;
 
 export type ScopedKnowledgeScope =
   | { kind: "organization"; workspaceId: null; subjectId: null }
@@ -3857,6 +3868,12 @@ export type ScheduledTask = {
   /** Vaults every run may resolve secret references from (the task vault is always included). */
   vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
+  /**
+   * Present and true when the task was created locked: only its creator (the
+   * same key or signed service identity) can change, run, resume or delete
+   * it, never an agent. A workspace admin can still pause it.
+   */
+  creatorLocked?: true | undefined;
   createdAt: string;
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
@@ -7897,6 +7914,20 @@ export type ScheduledTaskAgentConfigInput = {
    * an existing chat follows that chat.
    */
   unattended?: boolean | undefined;
+  bundledSkillIds?: BundledSkillId[] | undefined;
+  /**
+   * Remote MCP servers attached to each chat the task starts, as on session
+   * create. Static headers are not stored: credentials come from the
+   * workspace credential provider or `connectionRef`.
+   */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /**
+   * Memory, agent reach and inline Skills of each chat the task starts, as on
+   * session create. Only a task that starts its own chats can carry them.
+   */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -7933,6 +7964,12 @@ export type CreateAgentScheduledTaskRequest = {
   /** Vault narrowing for every run; omission adds none. */
   vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Lock the task to its creator: only the same key or signed service
+   * identity can later change, run, resume or delete it, and no agent can.
+   * A workspace admin can still pause it. Set once at creation.
+   */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
@@ -7958,6 +7995,8 @@ export type CreateSessionScheduledTaskRequest = {
   /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
   events?: ScheduledTaskEventsInput | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** Lock the task to its creator; see the agent-task request. */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateScheduledTaskRequest =
