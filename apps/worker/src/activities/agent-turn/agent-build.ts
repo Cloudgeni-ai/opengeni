@@ -69,6 +69,7 @@ import {
   resolveAgentToolFamilies,
   type VideoGenerationPolicy,
 } from "@opengeni/contracts";
+import { sessionIsUnattended } from "./unattended";
 
 import {
   structuredToolTransportForTurn,
@@ -821,6 +822,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        // Frozen at create: no person answers during the task (see runtime).
+        ...(sessionIsUnattended(session) ? { unattended: true } : {}),
         secrets: {
           referencesEnabled: secretsCapabilityEnabled(session.agent),
           // Same rule as the vault context (0739) and session authorization:

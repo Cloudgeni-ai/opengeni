@@ -426,6 +426,7 @@ import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptExperiments,
   type AgentPromptResources,
@@ -444,6 +445,7 @@ export {
   identityFromLegacyTemplate,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
   type AgentPromptExperiments,
@@ -2301,6 +2303,12 @@ export type BuildAgentOptions = {
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
   /**
+   * The session is unattended (frozen at create): no person will see or answer
+   * a question until the task ends. Both compositions say so, and the
+   * human-input tool is not attached. Omitted or false keeps today's bytes.
+   */
+  unattended?: boolean;
+  /**
    * Secret facts for this attempt. `referencesEnabled` is true when the host
    * resolves `{{secret:…}}` references (the secrets prompt module renders
    * only then). `hasActingHuman` admits Only-me secret questions;
@@ -2631,6 +2639,12 @@ export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
 
+/** Session-level facts the legacy CORE renders. Omitted keeps today's bytes. */
+export type CoreInstructionsSession = {
+  /** No person will see or answer a question until the task ends. */
+  unattended?: boolean | undefined;
+};
+
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
  * line (which names the opengeni__goal_* tools and is what keeps a long-running
@@ -2646,6 +2660,7 @@ export function coreInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
   experiments?: AgentPromptExperiments,
+  session?: CoreInstructionsSession,
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
@@ -2655,6 +2670,9 @@ export function coreInstructions(
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
     ...(rig ? rigInstructions(rig) : []),
+    // Unattended sessions (frozen at create): inside the non-bypassable CORE
+    // for the same reason. Absent for interactive sessions.
+    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE] : []),
   ];
 }
 
@@ -2671,8 +2689,9 @@ export function composeAgentInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
   experiments?: AgentPromptExperiments,
+  session?: CoreInstructionsSession,
 ): string {
-  const core = coreInstructions(workspaceEnvironment, rig, experiments).join(" ");
+  const core = coreInstructions(workspaceEnvironment, rig, experiments, session).join(" ");
   if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
     return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
   }
@@ -2747,6 +2766,7 @@ export function agentPromptResourcesFor(
     | "workspaceEnvironment"
     | "rig"
     | "secrets"
+    | "unattended"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2766,6 +2786,7 @@ export function agentPromptResourcesFor(
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
+    ...(options.unattended ? { unattended: true } : {}),
   };
 }
 
@@ -2793,11 +2814,15 @@ function inspectModularAgentInstructions(
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
   });
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
-    capabilities: config.capabilities,
+    // An unattended session gets no human-input tool, so no clause offers it.
+    capabilities: resources.unattended
+      ? { ...config.capabilities, humanInput: false }
+      : config.capabilities,
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
-    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    resources,
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
       : {}),
@@ -2833,16 +2858,19 @@ export function inspectPersistentAgentInstructions(
       options.workspaceEnvironment,
       options.rig,
       agentPromptExperimentsFor(settings).experiments,
+      options.unattended ? { unattended: true } : undefined,
     ),
     settings,
   );
   if (settings.experimentSystemPromptCacheSplit) {
     // The deployment persona with no workspace environment or sandbox
-    // environment is shared by every session; a workspace persona is not.
+    // environment is shared by every interactive session; a workspace
+    // persona is not.
     recordStableSystemPromptPrefix(
       personaTemplate === settings.agentInstructionsTemplate &&
         !options.workspaceEnvironment &&
-        !options.rig
+        !options.rig &&
+        !options.unattended
         ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
         : OPENGENI_OPERATIONAL_INSTRUCTIONS,
     );
@@ -3265,7 +3293,8 @@ export function buildOpenGeniAgent(
     webSearch:
       (options.hostedWebSearch ?? settings.webSearchEnabled) &&
       sideFeatureRouteRunnable(settings, "web_search.hosted"),
-    humanInput: options.humanInputEnabled !== false,
+    // Nobody answers in an unattended session, so a question would only park it.
+    humanInput: options.humanInputEnabled !== false && options.unattended !== true,
   });
   const hostedWebSearch = toolFamilies.webSearch;
   const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
