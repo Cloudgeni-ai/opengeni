@@ -121,6 +121,27 @@ describe("literal high-trust permissions", () => {
     ).toBe(false);
   });
 
+  test("a deprecated permission name outside the policy is refused with its canonical name", () => {
+    const secrets: AccessGrant = {
+      ...grant(["workspace:read", "secrets:list", "secrets:use"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(secrets, ["secrets:use"])).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation(secrets, ["workspace:read", "variable-sets:use"]),
+    ).toThrow("variable-sets:use is a deprecated permission name; state secrets:use instead");
+    // A deprecated name whose canonical permission the policy lacks is simply outside it.
+    expect(() => requireExplicitPermissionDelegation(secrets, ["variable-sets:write"])).toThrow(
+      "cannot delegate a permission outside the organization key policy",
+    );
+    // A policy that stores the deprecated name itself still covers it.
+    const legacy: AccessGrant = {
+      ...grant(["workspace:read", "variable-sets:use"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(legacy, ["variable-sets:use"])).not.toThrow();
+  });
+
   test("variable-set capabilities do not imply one another", () => {
     const exact = [
       "variable-sets:list",
