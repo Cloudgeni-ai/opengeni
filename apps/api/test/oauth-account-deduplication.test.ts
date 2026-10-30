@@ -310,28 +310,31 @@ describe("OAuth account deduplication across connector profiles", () => {
       const results = await Promise.all([provider.callback(first), provider.callback(second)]);
       expect(results.map((result) => result.state).sort()).toEqual(["complete", "failed"]);
       const failure = results.find((result) => result.state === "failed");
-      expect(failure.error.message.toLowerCase()).toContain("reconnect");
+      expect(failure.error.message).toContain("you can connect one account");
       expect(await provider.connections()).toHaveLength(1);
     } finally {
       provider.restore();
     }
   }, 60_000);
 
-  test("opaque connections keep endpoint and owner boundaries separate", async () => {
+  test("opaque connections keep endpoints separate and give each person one account", async () => {
     const provider = await fixture("opaque");
     try {
       const first = await provider.callback(await provider.begin());
       const otherEndpoint = await provider.callback(
         await provider.begin({ mcpUrl: "https://connector.example.test/other" }),
       );
+      // The person already has their own; a shared one would show them two
+      // connections nobody can tell apart.
       const shared = await provider.callback(await provider.begin({ ownership: "workspace" }));
       expect([first.state, otherEndpoint.state, shared.state]).toEqual([
         "complete",
         "complete",
-        "complete",
+        "failed",
       ]);
-      expect(new Set([first.account.id, otherEndpoint.account.id, shared.account.id]).size).toBe(3);
-      expect(await provider.connections()).toHaveLength(3);
+      expect(shared.error.message).toContain("you can connect one account");
+      expect(first.account.id).not.toBe(otherEndpoint.account.id);
+      expect(await provider.connections()).toHaveLength(2);
     } finally {
       provider.restore();
     }

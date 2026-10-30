@@ -103,26 +103,89 @@ ID without rotating credentials, resetting approvals or rewriting accepted work.
 Changed permissions or an inactive account require explicit reconnect. A known
 identity cannot change during reconnect.
 
-OAuth and MCP do not require an account-identity endpoint. Without verified
-identity, the shared policy permits one live connection per owner and exact
-resource and refuses additional Connect attempts with reconnect guidance. It
-never treats opaque tokens, decoded JWTs or missing identity as proof that two
+OAuth and MCP do not require an account-identity endpoint. The policy never
+treats opaque tokens, unverified JWTs or missing identity as proof that two
 accounts are the same. A reviewed verification adapter can enable distinct
 accounts without changing the persistence policy.
 
-Reviewed adapters exist for Slack, Gmail and Google Calendar (in their OAuth
-profiles) and, by exact MCP URL in `accountIdentityVerifierFor`
-(`apps/api/src/integrations/oauth-profiles.ts`), for Google Drive (Drive About's
-`user.emailAddress`, identity `googleDriveEmail`) and Atlassian's hosted Rovo
-MCP (`/v1/mcp/authv2` and `/v1/mcp`; the read-only `atlassianUserInfo` tool, identity `atlassianAccountId`, with
-the email and name kept for the label). These run after the normal tool
-verification with the new token, within a short budget that keeps time for
-saving the connection. A failed identity read leaves the identity unknown and is
-logged with a reason, so the one-connection rule above still applies; a reconnect
-of a verified account whose identity cannot be read is refused as unconfirmed,
-not reported as a different account. Connections made before
-an adapter existed have no identity: reconnect that account once before adding
-another.
+### How accounts are identified
+
+Identity comes from the first of these that applies to the connection:
+
+- The OAuth profile's own adapter: Slack, Gmail and Google Calendar.
+- A reviewed adapter for the exact MCP URL in `accountIdentityVerifierFor`
+  (`apps/api/src/integrations/oauth-profiles.ts`):
+
+  | Service | Read | Identity | Label |
+  | --- | --- | --- | --- |
+  | Google Drive | Drive About | `googleDriveEmail` | email |
+  | Atlassian Rovo (`/v1/mcp/authv2`, `/v1/mcp`) | `atlassianUserInfo` tool | `atlassianAccountId` | email, name |
+  | Linear | `get_user` with `query: "me"`; optional `get_workspace` | `linearUserId` | email, name, workspace |
+  | Notion | token response `workspace_id` and `user_id`; else a person from `notion-get-self` | `notionWorkspaceId`, `notionUserId` | email, name, workspace |
+  | Asana (`/v2/mcp`) | `get_me` tool | `asanaUserId` | email, name |
+  | Stripe | `get_stripe_account_info` tool | `stripeAccountId` | email, account name |
+
+- Generic OpenID Connect, when nothing above applies, `openid` was granted and
+  the authorization server's metadata advertises a `jwks_uri` or
+  `userinfo_endpoint`. A token response `id_token` is used when its signature
+  (asymmetric algorithms only), issuer, audience (our client id) and expiry
+  verify; otherwise userinfo is called with the access token. The identity is
+  the issuer-scoped `sub` (`oidcSubject`); `email` and `name` are only labels.
+  The connection records `accountIdentityMethod: "oidc"`. Today this covers
+  services such as PostHog, Zapier, Vercel, Mobbin and PagerDuty.
+
+Identity reads run after the normal tool verification with the new token,
+within a short budget that keeps time for saving the connection. Every read is
+non-fatal: a failure leaves the identity unknown and is logged with a
+secret-free reason (`tool_missing`, `tool_error`, `timeout`, `budget_exhausted`,
+`invalid_identity`, `userinfo_http_<status>`, `id_token_<reason>`). A reconnect
+of a verified account whose identity cannot be read is refused as unconfirmed
+(`account_identity_unavailable`), not reported as a different account.
+
+Some MCP URLs reach the same accounts (`accountMcpUrlGroup`, for example
+`https://mcp.stripe.com/` and `https://mcp.stripe.com`). Connections through any
+of them count as the same resource for duplicates and share one lock.
+
+### One account per person when a service can't identify accounts
+
+Services with no identity source (HubSpot, Sentry and Apollo among the
+catalog's, and any custom MCP without OpenID Connect) follow a one-account
+rule, enforced in `decideOAuthAccountConnection`:
+
+- Each person sees at most one connection to the resource: a second one in
+  the same owner bucket is refused.
+- A personal connection is refused while a shared (workspace) one exists, and
+  a shared one is refused while the person adding it has their own.
+- Different people may each have their own personal connection, because each
+  only sees their own. If a shared connection is then added, both stay, and
+  they are labelled "Yours" and "Shared".
+- Reconnecting an existing connection is unaffected.
+
+The refusal reason is `account_limit_one`: "This service doesn't tell us which
+account you signed in with, so you can connect one account. Disconnect it to
+use a different one." A service that can identify accounts but whose read
+failed this time answers `account_identity_unavailable` instead. Callbacks lock
+the shared bucket and the requester's personal bucket, in that order, so
+concurrent personal and shared connects cannot both pass.
+
+Connections made before identity existed for a service have none. Adding
+another account alongside one is refused with `account_reconnect_required`
+("Reconnect your existing account once, then add another."); a reconnect
+records its identity.
+
+### What people and agents see
+
+Connection lists (`GET .../connections`) add `accountIdentity` to OAuth MCP
+connections: `verified` (the account is known), `reconnect` (the service
+identifies accounts but this connection must be signed in again once) or
+`single` (the one-account rule applies). The connector page uses it to hide
+Add account and show the matching sentence instead, and to offer Reconnect on
+an account that needs it.
+
+Account rows and pickers mark each account "Yours" (the viewer's own) or
+"Shared" (the workspace's), with "From <workspace>" when it was added
+elsewhere. Agents see each account route as `<connector> — <account> · Yours`
+or `· Shared`, so a personal and a shared connection never read the same.
 
 Existing duplicate records are not deleted or rebound by this flow. Their
 accepted session/schedule references and approval policies remain intact.
