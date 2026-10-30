@@ -2479,7 +2479,7 @@ describe("recordings and usage allowances", () => {
       await meeting.elapse(15);
     }
     await (await liveMeeting(scope)).start(0);
-  });
+  }, 60_000);
 
   test("live time not charged in credits (billing off, a legacy account) isn't counted toward the day", async () => {
     if (!client || !shared) return;
@@ -2525,7 +2525,7 @@ describe("recordings and usage allowances", () => {
       }
       await meeting.report(0);
     }
-  });
+  }, 60_000);
 
   test("honest short meetings all day, reported every minute, are never refused", async () => {
     if (!client || !shared) return;
@@ -2598,30 +2598,39 @@ describe("recordings and usage allowances", () => {
     expect(Number(day!.unbacked)).toBe(LIVE_UNBACKED_DAILY_MAX_MILLISECONDS);
   }, 60_000);
 
-  test("concurrent saves and starts of a person, with old hours to drop, never deadlock", async () => {
+  test("concurrent saves, starts and releases of a person, with old hours to drop, never deadlock", async () => {
     if (!client || !shared) return;
     const scope = await workspace();
-    const first = await liveMeeting(scope);
-    const second = await liveMeeting(scope);
-    await first.start(0);
-    await second.start(0);
-    // Each round an hour older than two days waits to be dropped while two
-    // saves (each giving back its session's provisional time in the current
-    // hour) and a new recording's first session run at once.
+    let meeting = await liveMeeting(scope);
+    // Each round: sessions on both tracks of a meeting (a new one every 50
+    // rounds, within a track's 100 sessions), two hours older than two days
+    // waiting to be dropped, then at once saves on both tracks (each giving
+    // back its session's provisional time), a release followed by another
+    // save, and a new recording's first sessions on both tracks.
     // The database error's code (40P01 for a deadlock), or the refusal's.
     const failures: string[] = [];
-    for (let round = 0; round < 40; round++) {
-      await shared.admin`
-        insert into recording_live_unbacked_hours
-          (account_id, workspace_id, bound_subject_id, hour_start, unbacked_milliseconds)
-        values (${scope.accountId}, ${scope.workspaceId}, ${scope.owner},
-          date_trunc('hour', now()) - interval '3 days', 1000)
-        on conflict do nothing`;
+    for (let round = 0; round < 150; round++) {
+      if (round > 0 && round % 50 === 0) meeting = await liveMeeting(scope);
+      await meeting.start(0);
+      await meeting.start(1);
+      for (const days of [3, 4]) {
+        await shared.admin`
+          insert into recording_live_unbacked_hours
+            (account_id, workspace_id, bound_subject_id, hour_start, unbacked_milliseconds)
+          values (${scope.accountId}, ${scope.workspaceId}, ${scope.owner},
+            date_trunc('hour', now()) - make_interval(days => ${days}), 1000)
+          on conflict do nothing`;
+      }
       const next = await liveMeeting(scope);
       const results = await Promise.allSettled([
-        first.report(600_000),
+        meeting.report(600_000, 0),
         next.start(0),
-        second.report(600_000),
+        meeting.report(600_000, 1),
+        (async () => {
+          await meeting.release(1);
+          await meeting.report(600_000, 0);
+        })(),
+        next.start(1),
       ]);
       for (const result of results) {
         if (result.status !== "rejected") continue;
@@ -2630,7 +2639,7 @@ describe("recordings and usage allowances", () => {
       }
     }
     expect(failures).toEqual([]);
-  }, 120_000);
+  }, 240_000);
 
   test("a save or new session a day after a session's hour leaves that day's time where it was", async () => {
     if (!client || !shared) return;

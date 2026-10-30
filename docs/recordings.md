@@ -464,7 +464,9 @@ recorder reports.
   live preview.
 - Only time of tracks charged in credits is stored per hour. A session's
   time stays in the hour it began in, so a report or request a day later
-  adds nothing to today for it. Hours older than two days are removed on the
+  adds nothing to today for it, and a session that runs into the next hour
+  leaves the 24-hour window up to an hour early (slightly looser than
+  counting each minute in its own hour). Hours older than two days are removed on the
   person's next write in that workspace (skipped while another request holds
   them), not otherwise; they no longer count after a day either way.
 
