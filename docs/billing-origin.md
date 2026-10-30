@@ -220,7 +220,8 @@ pays a platform fee instead, in the app and over the API alike:
 the call's list-price equivalent, rounded up to the micro-dollar. The fee is
 charged only with Stripe billing (`OPENGENI_BILLING_MODE=stripe`), where people
 can buy the credit it needs; `0` turns it off. An account on legacy billing
-terms (CloudGeni, above) is skipped. A host that binds its own entitlements
+terms (an internal account: CloudGeni or our own team, above) is skipped, so
+the team's heavy use of its own Claude and Codex subscriptions pays no fee. A host that binds its own entitlements
 is not special: its own-key calls are admitted, charged and refused by the
 same rule everywhere (session and run admission, model calls, limits and
 settlement).
