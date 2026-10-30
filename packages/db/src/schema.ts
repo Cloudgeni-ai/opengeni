@@ -12681,6 +12681,10 @@ export const scheduledTasks = pgTable(
       scopeSubjectId: string | null;
       memoryScope: string | null;
     }>(),
+    // Opt-in at creation (migration 1100): only the frozen creator principal
+    // may change, run, resume or delete the task; agent attempts never may.
+    // Mutation authority, not execution configuration: excluded from the digest.
+    creatorLocked: boolean("creator_locked").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
