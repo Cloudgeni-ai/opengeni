@@ -197,28 +197,18 @@ export function withStorelessResponses(policy: ModelJsonRequestPolicy): ModelJso
 }
 
 /**
- * The OpenAI platform itself: a workspace or organization OpenAI key, or the
- * built-in OpenAI provider on its default endpoint. OpenAI-compatible servers
- * and gateways keep their own request contracts and are left alone.
+ * A workspace or organization OpenAI key, which always calls the OpenAI
+ * platform. The built-in provider never reaches this policy: its client is
+ * built from settings (`buildOpenAIClientFromSettings`), which checks the
+ * endpoint itself. An operator's registry provider is left alone even when it
+ * points at api.openai.com, as are OpenAI-compatible servers and gateways.
  */
 export function isOpenAIPlatformResponsesProvider(provider: ResolvedModelProvider): boolean {
-  if (provider.api !== "responses" || provider.wireProfile !== "openai") return false;
-  if (
-    provider.kind === "direct-openai-workspace" ||
-    provider.kind === "direct-openai-organization"
-  ) {
-    return true;
-  }
-  return provider.builtin && isOpenAIPlatformBaseUrl(provider.baseUrl);
-}
-
-export function isOpenAIPlatformBaseUrl(baseUrl: string | null | undefined): boolean {
-  if (!baseUrl) return true;
-  try {
-    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com";
-  } catch {
-    return false;
-  }
+  return (
+    provider.api === "responses" &&
+    provider.wireProfile === "openai" &&
+    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-openai-organization")
+  );
 }
 
 function azureModelRequestProjection({
