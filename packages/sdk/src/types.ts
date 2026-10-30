@@ -1951,6 +1951,11 @@ export type Session = {
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
+  /**
+   * Repositories a person removed from this chat, newest per repository. The
+   * agent can't attach one again; a person attaching it again ends its record.
+   */
+  removedRepositories?: SessionRemovedRepository[] | undefined;
   skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
@@ -11284,6 +11289,15 @@ export type UpdateSessionSkillsRequest = {
  */
 export type RemoveSessionResourcesRequest = {
   resources: Array<{ kind: "repository"; uri: string }>;
+};
+
+/** One repository removed from a session (`Session.removedRepositories`). */
+export type SessionRemovedRepository = {
+  id: string;
+  resource: RepositoryResourceRef;
+  removedAt: string;
+  /** True until the next turn has removed the folder from the sandbox. */
+  sandboxCleanupPending: boolean;
 };
 
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */
