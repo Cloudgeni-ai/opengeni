@@ -759,6 +759,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             provider: turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
             publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
           },
           (measure) =>
             measure("client_publication", () =>

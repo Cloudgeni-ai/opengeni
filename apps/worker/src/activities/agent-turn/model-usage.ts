@@ -140,6 +140,29 @@ export type TurnEventPublisher = (
   canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
 }>;
 
+/** Issues progress receipts in order without waiting for them (turn-event-lane.ts). */
+export type TurnBackgroundEventPublisher = (
+  events: Parameters<TurnEventPublisher>[0],
+  options?: { measureDelivery?: <T>(work: () => Promise<T>) => Promise<T> },
+) => void;
+
+/** A startup progress receipt nothing reads back before the first model
+ * request. Uses the background lane when the attempt wired one; otherwise it
+ * is an ordinary awaited append. */
+export async function publishStartupProgress(
+  eventing: {
+    publish: TurnEventPublisher | null;
+    publishInBackground: TurnBackgroundEventPublisher | null;
+  },
+  events: Parameters<TurnEventPublisher>[0],
+): Promise<void> {
+  if (eventing.publishInBackground) {
+    eventing.publishInBackground(events);
+    return;
+  }
+  await eventing.publish!(events);
+}
+
 export type ModelResponseEventState = {
   responseCount: number;
   contextSignal: { revision: number; totalTokens: number } | null;
