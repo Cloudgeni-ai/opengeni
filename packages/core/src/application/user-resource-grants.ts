@@ -29,7 +29,8 @@ const LIST_PERMISSIONS = {
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;
 
 const ISSUE_PERMISSIONS = {
-  connection: ["connections:read"],
+  // Turning your own login on in a workspace (D-54), like adding one there.
+  connection: ["connections:personal"],
   document: ["documents:search"],
   variable_set: ["variable-sets:list", "variable-sets:attach", "variable-sets:use"],
   rig: ["rigs:use"],

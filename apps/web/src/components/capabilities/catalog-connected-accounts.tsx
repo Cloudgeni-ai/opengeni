@@ -9,6 +9,7 @@ import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 import {
@@ -58,7 +59,61 @@ export type CatalogConnectedAccountsProps = {
    * where they came from. */
   workspaceId?: string | undefined;
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
+  /** Turn your own login on or off for your messages in this workspace (D-54). */
+  onTurnOnHere?: ((account: ConnectionMetadata, on: boolean) => Promise<void>) | undefined;
 };
+
+/**
+ * Your own login in a shared workspace can be turned on or off for your
+ * messages here. Your Personal workspace always uses it, so it has no switch.
+ */
+export function ownLoginHasHereSwitch(
+  account: Pick<ConnectionMetadata, "subjectId" | "turnedOnHere" | "turnedOnHereGrantId">,
+  viewerSubjectId: string | null | undefined,
+): boolean {
+  if (account.subjectId === null || account.subjectId !== viewerSubjectId) return false;
+  if (account.turnedOnHere === false) return true;
+  return account.turnedOnHere === true && !!account.turnedOnHereGrantId;
+}
+
+function OwnLoginHereSwitch({
+  account,
+  label,
+  onTurnOnHere,
+}: {
+  account: ConnectionMetadata;
+  label: string;
+  onTurnOnHere: (account: ConnectionMetadata, on: boolean) => Promise<void>;
+}) {
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const on = pending ?? account.turnedOnHere === true;
+  return (
+    <div className="flex min-w-0 basis-full items-center justify-between gap-3">
+      <div className="min-w-0">
+        <p className="m-0 text-sm text-fg">Use for my messages here</p>
+        <p className="m-0 text-xs text-fg-muted">
+          {error ??
+            "Only you can use it. In shared chats here, people see what the agent does with it."}
+        </p>
+      </div>
+      <Switch
+        aria-label={`Use ${label} for my messages here`}
+        checked={on}
+        pending={pending !== null}
+        disabled={pending !== null}
+        onCheckedChange={(next) => {
+          // The switch moves at once; a failure puts it back and says why.
+          setPending(next);
+          setError(null);
+          void onTurnOnHere(account, next)
+            .catch(() => setError("Couldn't change this. Try again."))
+            .finally(() => setPending(null));
+        }}
+      />
+    </div>
+  );
+}
 
 /** Whether the viewer may disconnect this account: their own personal
  * account, wherever it was added, when they may remove their own accounts in
@@ -131,6 +186,7 @@ export function CatalogConnectedAccounts({
   management,
   workspaceId,
   workspaces,
+  onTurnOnHere,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
@@ -289,6 +345,9 @@ export function CatalogConnectedAccounts({
                       </Button>
                     ) : null}
                   </div>
+                ) : null}
+                {onTurnOnHere && ownLoginHasHereSwitch(account, management?.viewerSubjectId) ? (
+                  <OwnLoginHereSwitch account={account} label={label} onTurnOnHere={onTurnOnHere} />
                 ) : null}
               </li>
             );

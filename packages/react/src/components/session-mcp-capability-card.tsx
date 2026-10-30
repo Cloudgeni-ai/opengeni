@@ -1,6 +1,7 @@
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useState } from "react";
 import { browserConnectWindowHost } from "../connect-window-host";
+import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { useOpenGeniText } from "../messages/runtime";
 import { useMcpCapabilityConnect } from "./mcp-capability-connect-flow";
 import { showsMcpServerLabel } from "./mcp-server-label";
@@ -94,7 +95,17 @@ function ScopedCard({
     onClose,
     personalOnly: configuredPersonalOnly,
   });
-  const { item, personalOnly, busy, waiting, reconciling, connected, ownership } = flow;
+  const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
+  // Your own login, added in another workspace: one click turns it on here.
+  const useOwnLoginHere = offHere !== null && !connected && item !== null;
+  const ownLoginQuestion = useOwnLoginHere
+    ? `${t("sessionMcpCapabilityCard.useYourLoginHereToo", {
+        account: connectionAccountIdentityLabel(
+          offHere.metadata,
+          t("sessionMcpCapabilityCard.yourNameAccount", { name: item.name }),
+        ),
+      })} ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`
+    : null;
   const [logo, setLogo] = useState<string | null>(null);
 
   useEffect(() => {
@@ -137,18 +148,23 @@ function ScopedCard({
       expanded={flow.expanded}
       complete={flow.complete}
       actionLabel={
-        connected
-          ? sessionId
-            ? t("sessionMcpCapabilityCard.useInThisConversation")
-            : t("sessionMcpCapabilityCard.connected")
-          : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
+        useOwnLoginHere
+          ? t("sessionMcpCapabilityCard.useItHere")
+          : connected
+            ? sessionId
+              ? t("sessionMcpCapabilityCard.useInThisConversation")
+              : t("sessionMcpCapabilityCard.connected")
+            : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
       }
       note={
-        sessionId
+        ownLoginQuestion ??
+        (sessionId
           ? t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")
-          : t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn2")
+          : t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn2"))
       }
-      onOpen={flow.open}
+      onOpen={useOwnLoginHere ? flow.useHere : flow.open}
+      opensDialog={!useOwnLoginHere}
+      busy={useOwnLoginHere && busy}
       onClose={flow.close}
       dialogOnly={dialogOnly}
     >
@@ -193,6 +209,20 @@ function ScopedCard({
                   </button>
                 ) : null}
               </div>
+            ) : ownLoginQuestion ? (
+              <>
+                <p className="og-session-capability-scope">{ownLoginQuestion}</p>
+                <button
+                  className="og-session-capability-primary"
+                  disabled={busy || flow.view.busy}
+                  onClick={flow.useHere}
+                >
+                  {t("sessionMcpCapabilityCard.useItHere")}
+                </button>
+                <button type="button" disabled={busy} onClick={flow.signIn}>
+                  {t("sessionMcpCapabilityCard.connectADifferentAccount")}
+                </button>
+              </>
             ) : !connected ? (
               <>
                 {!item.connectionRef && !personalOnly ? (

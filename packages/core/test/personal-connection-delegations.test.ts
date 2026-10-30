@@ -19,8 +19,10 @@ import {
   ensureManagedAccessForUser,
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
+  issueSelfUserResourceGrant,
   persistProviderOAuthConnection,
   replacePersonalGitHubRepositorySelections,
+  revokeSelfUserResourceGrant,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
@@ -32,6 +34,7 @@ import {
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
   selectedPersonalConnectionServers,
+  turnOnOwnLoginHere,
   withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
 import { validatedScheduledTaskUpdate } from "../src/domain/scheduled-tasks";
@@ -246,6 +249,9 @@ describe("personal MCP connection delegation", () => {
       );
       expect(settingsInventory.find((row) => row.id === inactive.id)?.status).toBe("needs_reauth");
       expect(settingsInventory.every((row) => row.workspaceId === origin!.id)).toBe(true);
+      // Added in the owner's Personal workspace, so it is listed in the shared
+      // workspace for reuse but not turned on there yet (D-54).
+      expect(settingsInventory.find((row) => row.id === connection.id)?.turnedOnHere).toBe(false);
       expect(
         await listOwnConnectionAccountsForGrant(
           client.db,
@@ -253,12 +259,31 @@ describe("personal MCP connection delegation", () => {
           { includeInactive: true },
         ),
       ).toEqual([]);
-      const frozen = await freezePersonalConnectionDelegations({
+      const sharedFreeze = {
         db: client.db,
         workspaceId: target!.id,
         settings: { mcpServers: [personalServer] },
-        tools: [{ kind: "mcp", id: "linear" }],
-        source: { kind: "subject", subjectId, accountId: account!.id },
+        tools: [{ kind: "mcp" as const, id: "linear" }],
+        source: { kind: "subject" as const, subjectId, accountId: account!.id },
+      };
+      // Off here: an explicit pick fails closed and the default binds nothing.
+      await expect(
+        freezePersonalConnectionDelegations({ ...sharedFreeze, authoritySelections: [selection] }),
+      ).rejects.toMatchObject({ diagnostic: { reason: "selected_account_unavailable" } });
+      expect(await freezePersonalConnectionDelegations(sharedFreeze)).toEqual([]);
+      await turnOnOwnLoginHere(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+        authorityId: connection.authorityId,
+      });
+      const turnedOn = await listOwnConnectionAccountsForGrant(client.db, inventoryGrant);
+      expect(turnedOn.find((row) => row.id === connection.id)).toMatchObject({
+        turnedOnHere: true,
+        turnedOnHereGrantId: expect.any(String),
+      });
+      const frozen = await freezePersonalConnectionDelegations({
+        ...sharedFreeze,
         authoritySelections: [selection],
       });
       expect(frozen).toEqual([
@@ -271,6 +296,78 @@ describe("personal MCP connection delegation", () => {
           kind: "oauth2",
         },
       ]);
+      // Turning a login on is a standing choice for the workspace, never a
+      // per-chat approval.
+      await expect(
+        issueSelfUserResourceGrant(client.db, {
+          accountId: account!.id,
+          workspaceId: target!.id,
+          subjectId,
+          authorityId: connection.authorityId,
+          resourceKind: "connection",
+          mode: "session",
+          context: "workspace_shared",
+          workspaceSharedAcknowledged: true,
+        }),
+      ).rejects.toBeTruthy();
+      // A login added from a shared workspace starts on there.
+      const addedHere = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<{ id: string }[]>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${account!.id}, ${target!.id}, ${subjectId}, 'notion.example.test', 'oauth2', 'ciphertext')
+          returning id
+        `;
+        return row!;
+      });
+      const addedHereListed = (
+        await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)
+      ).find((row) => row.id === addedHere.id);
+      expect(addedHereListed?.turnedOnHere).toBe(true);
+      // Stopping it here revokes that standing grant; it is off here again.
+      await revokeSelfUserResourceGrant(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+        grantId: addedHereListed!.turnedOnHereGrantId!,
+      });
+      expect(
+        (await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)).find(
+          (row) => row.id === addedHere.id,
+        )?.turnedOnHere,
+      ).toBe(false);
+      // Every own login works in its owner's Personal workspace.
+      expect(
+        (
+          await listOwnConnectionAccountsForGrant(client.db, {
+            ...inventoryGrant,
+            workspaceId: origin!.id,
+          })
+        ).find((row) => row.id === addedHere.id)?.turnedOnHere,
+      ).toBe(true);
+      // It stays off in another shared workspace until its owner turns it on.
+      const [other] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'other shared')
+        returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${other!.id}, ${account!.id})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${account!.id}, ${other!.id}, ${subjectId})
+      `;
+      expect(
+        (
+          await listOwnConnectionAccountsForGrant(client.db, {
+            ...inventoryGrant,
+            workspaceId: other!.id,
+          })
+        ).find((row) => row.id === addedHere.id)?.turnedOnHere,
+      ).toBe(false);
 
       const personalFrozen = await freezePersonalConnectionDelegations({
         db: client.db,
