@@ -1338,6 +1338,7 @@ export {
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
 export * from "./native-push";
+export * from "./agent-calls";
 export * from "./inbox";
 export * from "./vaults";
 export * from "./persistence-errors";
