@@ -99,6 +99,27 @@ const time = (value: unknown) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+/**
+ * When a PR that carries the queue label was last given it, from its newest
+ * label events. If other labels (such as in-batch, added on every batch) have
+ * pushed that event out of the window, it was added before the oldest event
+ * read, so that time stands in: the PR stays queued instead of leaving.
+ */
+export function queuedTime(
+  events: ({ createdAt: string; label: { name: string } } | null)[],
+  queueLabel: string,
+): number {
+  const times = (name?: string) =>
+    events
+      .filter((e) => e !== null && (name === undefined || e.label?.name === name))
+      .map((e) => time(e!.createdAt))
+      .filter((t): t is number => t !== null);
+  const queued = times(queueLabel);
+  if (queued.length) return Math.max(...queued);
+  const all = times();
+  return all.length ? Math.min(...all) : 0;
+}
+
 export class RestGitHub implements GitHub {
   private readonly api: string;
   constructor(
@@ -191,7 +212,7 @@ export class RestGitHub implements GitHub {
                 id number title headRefOid headRefName isCrossRepository isDraft mergeable
                 autoMergeRequest { enabledAt }
                 labels(first: 30) { nodes { name } }
-                timelineItems(itemTypes: [LABELED_EVENT], last: 30) {
+                timelineItems(itemTypes: [LABELED_EVENT], last: 100) {
                   nodes { ... on LabeledEvent { createdAt label { name } } }
                 }
               }
@@ -203,13 +224,10 @@ export class RestGitHub implements GitHub {
       const { nodes, pageInfo } = data.repository.pullRequests;
       for (const node of nodes) {
         const labels = node.labels.nodes.map((l) => l.name);
-        const labeled = node.timelineItems.nodes
-          .filter((e) => e?.label?.name === queueLabel)
-          .map((e) => time(e!.createdAt))
-          .filter((t): t is number => t !== null);
         const autoMergeAt = node.autoMergeRequest ? time(node.autoMergeRequest.enabledAt) : null;
-        const labeledAt =
-          labels.includes(queueLabel) && labeled.length ? Math.max(...labeled) : null;
+        const labeledAt = labels.includes(queueLabel)
+          ? queuedTime(node.timelineItems.nodes, queueLabel)
+          : null;
         if (labeledAt === null && autoMergeAt === null) continue;
         pulls.push({
           id: node.id,
