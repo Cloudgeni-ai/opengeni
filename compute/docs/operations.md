@@ -963,6 +963,17 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - any increase of `compute.alarm.count`. Each occurrence also writes a
     `compute.alarm` event naming the sandbox (or the stored object's key),
     so group alerts on that.
+    A `programs_lost` alarm for a VM the host did not end on purpose
+    comes with a `compute.vm.lost` event for the same sandbox, written
+    before the VM is torn down, since its logs may go with it.
+    `compute.vm.end` says how it was lost: `vm_exited` (its process ended
+    on its own: the guest rebooted, which its kernel does on a panic, or
+    the VMM failed or was killed), `memory_lost` (its memory could no
+    longer be served), `guest_stopped` (it took no connection: halted,
+    powered off or hung) or `ended_for_memory`. `compute.vm.guest_said`,
+    `.vmm_said` and `.pager_said` hold the last lines of the guest's
+    console, the VMM's own messages and its pager's log, which usually
+    say why.
   - `compute.canary.count` with outcome `failed` or `timed_out`, and a
     `compute.canary.last_run` older than one rotation plus a period for
     any path, which also catches an agent that died or hangs. A rotation

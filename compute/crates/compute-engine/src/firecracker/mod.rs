@@ -56,7 +56,7 @@ use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
 use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
-use crate::{CancellationToken, Completion, Engine, Found};
+use crate::{CancellationToken, Completion, Engine, Found, LastWords};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
 /// wake arriving mid-compression waits only a few milliseconds.
@@ -481,6 +481,7 @@ impl Firecracker {
             compress_running: self.compress_running,
             runtime: recorded_runtime(jail),
             console: spec.logs.join(logs::CONSOLE_LOG),
+            logs: spec.logs.clone(),
         })
     }
 
@@ -659,6 +660,8 @@ pub struct FirecrackerVm {
     runtime: String,
     /// Its guest's serial console, written by this VM process alone.
     console: PathBuf,
+    /// Its logs: the console, the VMM's own log and its pager's.
+    logs: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -1226,6 +1229,10 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         logs::halted(vm.console.clone(), vm.name.clone())
+    }
+
+    fn last_words(&self, vm: &FirecrackerVm) -> impl Future<Output = LastWords> + Send + 'static {
+        logs::last_words(vm.logs.clone(), vm.name.clone())
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
