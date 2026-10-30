@@ -41,15 +41,26 @@ export function siteFrameDocument(html: string): string {
  */
 const FRAME_FORMAT = "frame-stream-1";
 
+/** Small documents whose frame form changes whenever the SDK's rewrite rules do. */
+const FRAME_PROBES = [
+  "<p>x</p>",
+  "<!doctype html><html><head><title>x</title></head><body></body></html>",
+  "<!-- c --><!DOCTYPE html><html lang=en><body>x</body></html>",
+  "<html><head><meta charset=utf-8></head></html>",
+  `<head><script src="${SITE_CLIENT_SCRIPT_PATH}"></script><script src='${SITE_CLIENT_SCRIPT_PATH}?v=1' defer></script></head>`,
+];
+
 let frameFingerprint: Promise<string> | null = null;
 
-/** Everything besides the version that shapes the frame document: format, bootstrap and client runtime. */
+/** Everything besides the version that shapes the frame document: format, bootstrap, client runtime and rewrite rules. */
 function siteFrameFingerprint(): Promise<string> {
   frameFingerprint ??= sha256Hex(
     [
       FRAME_FORMAT,
       SITE_BRIDGE_BOOTSTRAP_SCRIPT,
       resolveSiteClientScript(`<script src="${SITE_CLIENT_SCRIPT_PATH}"></script>`),
+      // The SDK's placement and resolve rules, read from their output.
+      ...FRAME_PROBES.map(siteFrameDocument),
     ].join("\n"),
   ).then((hex) => hex.slice(0, 16));
   return frameFingerprint;
@@ -146,8 +157,6 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
   headers.set("Vary", "Sec-Fetch-Dest");
   const revalidating = etagMatches(site.request.headers.get("if-none-match"), etag);
   const current = versionId === site.record.versionId;
-  // The current version's document is fixed by its ETag: the browser already has it.
-  if (current && revalidating) return new Response(null, { status: 304, headers });
 
   const cache = current ? edgeCache() : null;
   const key = edgeCacheKey(site.hostname, "site-html", [
@@ -159,6 +168,12 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
   const hit = cache ? await cache.match(key) : undefined;
   if (hit?.body) {
     headers.set("X-OpenGeni-Site-Cache", "HIT");
+    // A 304 needs the same proof as the page: a takedown purges this cache,
+    // and on a miss the API decides, so a stale host record never extends it.
+    if (revalidating) {
+      await hit.body.cancel();
+      return new Response(null, { status: 304, headers });
+    }
     headers.set("Content-Type", "text/html; charset=utf-8");
     if (method === "HEAD") {
       await hit.body.cancel();
@@ -223,7 +238,9 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
           },
         }),
       )
-      .catch(() => undefined),
+      .catch(() => undefined)
+      // However put settles, the viewer's branch no longer waits for it.
+      .finally(branches.releaseSecondary),
   );
   return new Response(branches.primary, { status: 200, headers });
 }

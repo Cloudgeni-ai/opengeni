@@ -322,19 +322,21 @@ export function lockstepTee(source: ReadableStream<Uint8Array>): {
   primary: ReadableStream<Uint8Array>;
   secondary: ReadableStream<Uint8Array>;
   done: Promise<void>;
+  /** Stop feeding the secondary (its consumer finished or gave up); the primary carries on. */
+  releaseSecondary: () => void;
 } {
   const primary = new TransformStream<Uint8Array, Uint8Array>();
   const secondary = new TransformStream<Uint8Array, Uint8Array>();
   const primaryWriter = primary.writable.getWriter();
   const secondaryWriter = secondary.writable.getWriter();
   const reader = source.getReader();
+  let secondaryOpen = true;
+  const dropSecondary = (reason?: unknown) => {
+    if (!secondaryOpen) return;
+    secondaryOpen = false;
+    secondaryWriter.abort(reason).catch(() => undefined);
+  };
   const done = (async () => {
-    let secondaryOpen = true;
-    const dropSecondary = (reason?: unknown) => {
-      if (!secondaryOpen) return;
-      secondaryOpen = false;
-      secondaryWriter.abort(reason).catch(() => undefined);
-    };
     try {
       for (;;) {
         await primaryWriter.ready;
@@ -352,5 +354,10 @@ export function lockstepTee(source: ReadableStream<Uint8Array>): {
       await reader.cancel(error).catch(() => undefined);
     }
   })();
-  return { primary: primary.readable, secondary: secondary.readable, done };
+  return {
+    primary: primary.readable,
+    secondary: secondary.readable,
+    done,
+    releaseSecondary: () => dropSecondary(new Error("secondary released")),
+  };
 }

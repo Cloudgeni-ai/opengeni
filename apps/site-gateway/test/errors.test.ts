@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { siteHostMapKey, type SiteHostMapRecord } from "@opengeni/contracts";
 import worker, { unexpectedErrorResponse, type GatewayEnv } from "../src/index";
+import { SITE_DB_INTERNAL_PREFIX } from "../src/site-db";
 import { TEST_SECRET } from "./helpers";
 
 const HOST = "pub.sites.test";
@@ -79,15 +80,14 @@ describe("unexpected gateway errors", () => {
     }
   });
 
-  test("Site API calls get a JSON error", async () => {
-    const response = unexpectedErrorResponse(
-      new Request(`https://${HOST}/_og/api/sessions`),
-      env(),
-    );
-    expect(response.status).toBe(500);
-    expect(response.headers.get("content-type")).toContain("application/json");
-    expect(await response.json()).toMatchObject({
-      error: { status: 500, code: "site_gateway_error", retryable: true },
-    });
+  test("Site API calls and the internal Site database route get a JSON error", async () => {
+    for (const path of ["/_og/api/sessions", `${SITE_DB_INTERNAL_PREFIX}/query`]) {
+      const response = unexpectedErrorResponse(new Request(`https://${HOST}${path}`), env());
+      expect(response.status).toBe(500);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toMatchObject({
+        error: { status: 500, code: "site_gateway_error", retryable: true },
+      });
+    }
   });
 });

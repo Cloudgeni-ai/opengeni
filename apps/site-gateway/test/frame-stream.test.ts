@@ -310,6 +310,16 @@ describe("lockstep tee", () => {
     expect(source.pulled()).toBe(1000);
   });
 
+  test("releasing the secondary lets the primary finish without it", async () => {
+    const source = counted(500);
+    const tee = lockstepTee(source.stream);
+    // The cache put settled without reading its body: nothing reads the secondary.
+    setTimeout(tee.releaseSecondary, 10);
+    expect((await new Response(tee.primary).arrayBuffer()).byteLength).toBe(500);
+    await tee.done;
+    tee.releaseSecondary();
+  });
+
   test("both branches see every chunk in order", async () => {
     const source = counted(300);
     const { primary, secondary, done } = lockstepTee(source.stream);

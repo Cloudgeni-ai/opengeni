@@ -62,14 +62,15 @@ function isApiPath(pathname: string): boolean {
 }
 
 /**
- * An error the gateway did not expect: a plain Opengeni page (or JSON error
- * on the Site API) instead of Cloudflare's raw "Worker threw exception" page.
+ * An error the gateway did not expect: a plain Opengeni page (or a JSON error
+ * on the Site API and the internal Site database route) instead of
+ * Cloudflare's raw "Worker threw exception" page.
  */
 export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Response {
   const url = new URL(request.url);
   const environment = env.ENVIRONMENT?.trim().toLowerCase();
   const hsts = environment !== "development" && environment !== "test";
-  if (isApiPath(url.pathname))
+  if (isApiPath(url.pathname) || isSiteDbInternalPath(url.pathname))
     return jsonError(
       500,
       {

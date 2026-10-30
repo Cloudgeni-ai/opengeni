@@ -96,6 +96,7 @@ const RECORDS = new Map<string, SiteHostMapRecord>(
     record("stream", { siteId: "77777777-0000-4000-8000-000000000001", versionId: STREAM_VERSION }),
     record("big", { siteId: "88888888-0000-4000-8000-000000000001", versionId: BIG_VERSION }),
     record("huge", { siteId: "99999999-0000-4000-8000-000000000001", versionId: HUGE_VERSION }),
+    record("recheck", { siteId: "aaaaaaaa-0000-4000-8000-000000000001" }),
   ].map((entry) => [entry.hostname, entry]),
 );
 
@@ -109,6 +110,8 @@ const viewer = {
 
 const received: Received[] = [];
 let htmlFetches = 0;
+/** Sites the API has taken down while the host map may not know yet. */
+const takenDown = new Set<string>();
 let pendingChallenge = "";
 /** The fake API's "View as visitor" state for SESSION (one session in these tests). */
 let previewAs: "invited" | "public" | null = null;
@@ -183,6 +186,8 @@ async function fakeApi(request: Request): Promise<Response> {
   }
   if (suffix.startsWith("/versions/")) {
     htmlFetches += 1;
+    if (takenDown.has(site.siteId))
+      return json({ error: { code: "site_unavailable" } }, { status: 410 });
     if (site.access !== "public" && session === NO_ACCESS_SESSION)
       return json({ error: { code: "forbidden" } }, { status: 403 });
     if (site.access !== "public" && session !== SESSION)
@@ -724,6 +729,37 @@ describe("site gateway in workerd", () => {
     expect(await gone.text()).not.toContain("Hello Site");
   });
 
+  test("a revalidation the edge cache can't answer asks the API, so a stale host record can't extend a takedown", async () => {
+    const kv = await hostMap();
+    const key = siteHostMapKey(`recheck.${DOMAIN}`);
+    const first = await get("recheck", `/_og/v/${VERSION}`, { headers: FRAME });
+    const etag = first.headers.get("etag")!;
+    await first.text();
+    // A new generation empties the edge cache; the record still says active.
+    await kv.put(
+      key,
+      JSON.stringify(
+        record("recheck", { siteId: "aaaaaaaa-0000-4000-8000-000000000001", generation: 2 }),
+      ),
+    );
+    const fetches = htmlFetches;
+    const revalidated = await get("recheck", `/_og/v/${VERSION}`, {
+      headers: { ...FRAME, "if-none-match": etag },
+    });
+    expect(revalidated.status).toBe(304);
+    expect(htmlFetches).toBe(fetches + 1);
+    takenDown.add("aaaaaaaa-0000-4000-8000-000000000001");
+    try {
+      const refused = await get("recheck", `/_og/v/${VERSION}`, {
+        headers: { ...FRAME, "if-none-match": etag },
+      });
+      expect(refused.status).toBe(404);
+      expect(await refused.text()).not.toContain("Hello Site");
+    } finally {
+      takenDown.clear();
+    }
+  });
+
   test("Site HTML streams through: the first bytes arrive before the page has", async () => {
     // Over plain HTTP: Bun's fetch (and so dispatchFetch) holds small chunked
     // bodies back, which would hide whether the gateway streams.
@@ -776,7 +812,7 @@ describe("site gateway in workerd", () => {
     );
   }, 30_000);
 
-  test("a large Site page is served whole and exact, and edge-cached", async () => {
+  test("a large multi-byte page comes out exactly as the whole-string rewrite, and is edge-cached", async () => {
     const expected = siteFrameDocument(BIG_HTML);
     const first = await get("big", `/_og/v/${BIG_VERSION}`, { headers: FRAME });
     expect(first.status).toBe(200);
