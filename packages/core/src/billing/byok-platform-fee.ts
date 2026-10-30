@@ -29,8 +29,8 @@ export const BYOK_FALLBACK_LIST_RATE = Object.freeze({
 /**
  * Is the fee charged for this account? Only with Stripe billing (people can
  * buy the credit it needs) and a positive rate, and never for an account on
- * legacy billing terms (CloudGeni). Hosts that bind their own entitlements
- * are charged like everyone else.
+ * legacy billing terms (internal accounts: CloudGeni and our own team). Hosts
+ * that bind their own entitlements are charged like everyone else.
  */
 export function byokPlatformFeeActive(
   settings: Pick<Settings, "billingMode" | "byokPlatformFeeBps" | "billingLegacyAccountIds">,
