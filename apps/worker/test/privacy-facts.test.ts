@@ -67,6 +67,9 @@ const DEPLOYMENT: PrivacyFactsDeployment = {
   privacyPolicyUrl: "https://opengeni.ai/privacy",
   termsOfServiceUrl: "https://opengeni.ai/terms",
   supportEmail: "support@opengeni.ai",
+  subprocessorsUrl: null,
+  dataHostingLocation: null,
+  sandboxes: { backend: "modal", regions: null },
   sessionArchiveIdleDays: 30,
 };
 const LIVE_OFF: PrivacyFactsLive = { euOnly: false };
@@ -404,6 +407,9 @@ describe("renderPrivacyFacts", () => {
         privacyPolicyUrl: null,
         termsOfServiceUrl: null,
         supportEmail: null,
+        subprocessorsUrl: null,
+        dataHostingLocation: null,
+        sandboxes: { backend: "daytona", regions: null },
         sessionArchiveIdleDays: null,
       },
     });
@@ -414,6 +420,56 @@ describe("renderPrivacyFacts", () => {
     expect(text).toContain("Privacy policy: not configured on this deployment");
     expect(text).toContain("no contact configured on this deployment");
     expect(text).toContain("Idle chats are not moved to long-term storage");
+    expect(text).toContain(
+      "Where app data (database, files, backups) is hosted: not declared in this deployment's configuration (unknown).",
+    );
+    expect(text).toContain("run on daytona; its region is not declared (unknown).");
+    expect(text).toContain("Subprocessor list: not published on this deployment");
+    expect(text).not.toContain("open the privacy policy");
+  });
+
+  test("states the operator's hosting, sandbox placement and subprocessor list", () => {
+    const declared = renderPrivacyFacts({
+      route: route({}),
+      live: LIVE_OFF,
+      deployment: {
+        ...DEPLOYMENT,
+        dataHostingLocation: "Microsoft Azure, North Europe (Ireland)",
+        subprocessorsUrl: "https://opengeni.ai/privacy#sharing",
+        sandboxes: { backend: "modal", regions: ["eu"] },
+      },
+    });
+    expect(declared).toContain(
+      "- App data (database, files, backups) is hosted in: Microsoft Azure, North Europe (Ireland) (the operator's declaration).",
+    );
+    expect(declared).toContain("run on Modal, placed in region eu.");
+    expect(declared).toContain("Subprocessor list: https://opengeni.ai/privacy#sharing");
+    expect(declared).toContain("open the privacy policy (or subprocessor list) page now");
+
+    // Unset declarations stay unknown, and the policy is where to look.
+    const undeclared = renderPrivacyFacts({
+      route: route({}),
+      live: LIVE_OFF,
+      deployment: DEPLOYMENT,
+    });
+    expect(undeclared).toContain("is hosted: not declared in this deployment's configuration");
+    expect(undeclared).toContain("run on Modal, not pinned to a region (unknown).");
+    expect(undeclared).toContain(
+      "Subprocessor list: no separate list configured; check the privacy policy above",
+    );
+    expect(undeclared).toContain("open the privacy policy (or subprocessor list) page now");
+
+    for (const [backend, expected] of [
+      ["docker", "run on this deployment's own servers (docker)."],
+      ["none", "this deployment runs no cloud sandboxes."],
+    ] as const) {
+      const text = renderPrivacyFacts({
+        route: route({}),
+        live: LIVE_OFF,
+        deployment: { ...DEPLOYMENT, sandboxes: { backend, regions: null } },
+      });
+      expect(text).toContain(expected);
+    }
   });
 
   test("subscription routes say the account's own terms apply", () => {

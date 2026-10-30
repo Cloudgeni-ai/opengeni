@@ -45,9 +45,31 @@ export type PrivacyFactsDeployment = {
   privacyPolicyUrl: string | null;
   termsOfServiceUrl: string | null;
   supportEmail: string | null;
+  /** Operator-declared subprocessor list (`OPENGENI_LEGAL_SUBPROCESSORS_URL`). */
+  subprocessorsUrl: string | null;
+  /** Operator-declared app data hosting, in plain words (`OPENGENI_DATA_HOSTING_LOCATION`). */
+  dataHostingLocation: string | null;
+  /** The deployment's cloud sandbox backend, and its Modal placement regions. */
+  sandboxes: { backend: string; regions: readonly string[] | null };
   /** Idle chats move to read-only long-term storage after this many days. */
   sessionArchiveIdleDays: number | null;
 };
+
+const SELF_HOSTED_SANDBOX_BACKENDS: ReadonlySet<string> = new Set(["docker", "local"]);
+
+function sandboxText(sandboxes: PrivacyFactsDeployment["sandboxes"]): string {
+  const { backend, regions } = sandboxes;
+  if (backend === "none") return "this deployment runs no cloud sandboxes.";
+  if (SELF_HOSTED_SANDBOX_BACKENDS.has(backend)) {
+    return `on this deployment's own servers (${backend}).`;
+  }
+  if (backend === "modal") {
+    return regions && regions.length > 0
+      ? `on Modal, placed in region ${regions.map(oneLine).join(", ")}. Where saved sandbox snapshots are stored is not stated here.`
+      : "on Modal, not pinned to a region (unknown).";
+  }
+  return `on ${oneLine(backend)}; its region is not declared (unknown).`;
+}
 
 const AZURE_HOST_SUFFIXES = [
   ".openai.azure.com",
@@ -273,8 +295,12 @@ export function renderPrivacyFacts(input: {
   }
   lines.push(
     "",
-    "Opengeni (this workspace):",
+    "Opengeni (this deployment and workspace):",
     "- The Opengeni software does not train models on chat content.",
+    deployment.dataHostingLocation
+      ? `- App data (database, files, backups) is hosted in: ${oneLine(deployment.dataHostingLocation)} (the operator's declaration).`
+      : "- Where app data (database, files, backups) is hosted: not declared in this deployment's configuration (unknown).",
+    `- Cloud sandboxes, where agents run commands, run ${sandboxText(deployment.sandboxes)} Connected Machines run on the user's own computer.`,
     "- Chats, files and Knowledge stay in the workspace until someone deletes them; Opengeni does not delete them by age.",
     `- Exception: images kept from tool results in chats (screenshots and images the agent viewed) are deleted ${RETAINED_IMAGE_DAYS} days after they are stored, and the oldest go sooner when the workspace's storage limit for them is reached.`,
     deployment.sessionArchiveIdleDays !== null
@@ -283,9 +309,20 @@ export function renderPrivacyFacts(input: {
     "- When a member leaves the organization, an organization admin's setting in organization settings decides whether their content is kept or deleted after a set number of days.",
     `- Privacy policy: ${deployment.privacyPolicyUrl ?? "not configured on this deployment"}`,
     `- Terms of service: ${deployment.termsOfServiceUrl ?? "not configured on this deployment"}`,
+    `- Subprocessor list: ${
+      deployment.subprocessorsUrl ??
+      (deployment.privacyPolicyUrl
+        ? "no separate list configured; check the privacy policy above"
+        : "not published on this deployment")
+    }`,
     deployment.supportEmail
-      ? `- Data processing agreement, subprocessors and other privacy questions: ${deployment.supportEmail}`
-      : "- Data processing agreement and subprocessors: no contact configured on this deployment.",
+      ? `- Data processing agreement and other privacy questions: ${deployment.supportEmail}`
+      : "- Data processing agreement: no contact configured on this deployment.",
+    ...(deployment.privacyPolicyUrl || deployment.subprocessorsUrl
+      ? [
+          "- Not covered here: the subprocessor list, a DPA, and hosting details beyond the lines above. For those, open the privacy policy (or subprocessor list) page now with web search or a page fetch, answer from what it says, and say it is the policy's statement. Only if the page can't be opened, give the link.",
+        ]
+      : []),
     "",
     "Scope: these facts cover the chat model above. Other features (chat titles, voice, image generation, web search, and connected apps or tools) can send data to other providers and are not described here.",
   );

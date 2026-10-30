@@ -35,9 +35,16 @@ returns one text block for the turn's chat model:
   stay live ([session storage lifecycle](session-storage-lifecycle.md)); and
   where the organization's departing-member rule is set. The tool does not read
   that admin-only rule, because everyone in a shared chat can see its output;
+- where the deployment hosts app data (database, files, backups), from the
+  optional `OPENGENI_DATA_HOSTING_LOCATION` operator declaration (unset is
+  unknown), and where cloud sandboxes run, from `OPENGENI_SANDBOX_BACKEND` and
+  `OPENGENI_MODAL_REGIONS`;
 - the deployment's `OPENGENI_LEGAL_PRIVACY_POLICY_URL`,
-  `OPENGENI_LEGAL_TERMS_OF_SERVICE_URL` and `OPENGENI_SUPPORT_EMAIL` (the
-  contact for a DPA or the subprocessor list).
+  `OPENGENI_LEGAL_TERMS_OF_SERVICE_URL`, the optional
+  `OPENGENI_LEGAL_SUBPROCESSORS_URL`, and `OPENGENI_SUPPORT_EMAIL` (the contact
+  for a DPA). When a policy or subprocessor link is set, the tool tells the
+  agent to open it for hosting and subprocessor questions and to quote it as
+  the policy's statement.
 
 A read that fails becomes "unknown" in the result rather than failing the tool.
 The scope line says other features (titles, voice, images, web search and

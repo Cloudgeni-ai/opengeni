@@ -923,6 +923,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         privacyPolicyUrl: runSettings.legalPrivacyPolicyUrl ?? null,
         termsOfServiceUrl: runSettings.legalTermsOfServiceUrl ?? null,
         supportEmail: runSettings.supportEmail ?? null,
+        subprocessorsUrl: runSettings.legalSubprocessorsUrl ?? null,
+        dataHostingLocation: runSettings.dataHostingLocation ?? null,
+        sandboxes: {
+          backend: runSettings.sandboxBackend,
+          regions: runSettings.modalRegions ?? null,
+        },
         // Archiving needs object storage; without it the worker never archives.
         sessionArchiveIdleDays:
           runSettings.sessionArchiveEnabled && deps.objectStorage
