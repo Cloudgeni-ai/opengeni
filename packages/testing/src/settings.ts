@@ -1,10 +1,11 @@
 import {
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
 } from "@opengeni/config/defaults";
-import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS, type Settings } from "@opengeni/config";
+import type { Settings } from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
