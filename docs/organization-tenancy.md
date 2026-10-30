@@ -830,10 +830,9 @@ other actor. Changes carry the current `version` (stale: `409`) and an
 `operationId`: an exact replay returns the stored result, and the same id with
 a different request is `409`. A request that changes nothing keeps the
 version, so repeating "on" never makes someone else's change stale. 1060
-withholds the runtime's EXECUTE on that
-function for one release (see
-[migrations-expand-contract.md](migrations-expand-contract.md)); until a later
-migration grants it, changes answer `503` and the setting stays off.
+withheld the runtime's EXECUTE on that function for one release and 1158
+granted it (see [migrations-expand-contract.md](migrations-expand-contract.md));
+readiness requires the grant.
 
 Only Opengeni sign-in (managed access) has people in browsers who could turn
 it off, so in local and configured access modes it can't be changed at all

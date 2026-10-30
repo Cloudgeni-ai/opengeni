@@ -356,7 +356,6 @@ const INFERENCE_RESIDENCY_REFUSAL_STATUS = {
   version_conflict: 409,
   operation_reused: 409,
   invalid: 422,
-  unavailable: 503,
 } as const;
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {

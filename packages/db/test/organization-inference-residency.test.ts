@@ -1,9 +1,5 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import {
@@ -34,9 +30,6 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("organization-inference-residency");
   if (!acquired) throw new Error("EU-only inference tests require PostgreSQL");
   shared = acquired;
-  // Run as the runtime will once the change function 1060 withholds is granted;
-  // one test checks the behaviour while it is still withheld.
-  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
   runtime = postgres(shared.appUrl, { max: 1, prepare: false, onnotice: () => undefined });
 }, 180_000);
@@ -395,22 +388,42 @@ test("the runtime reads the setting but never writes it or reads the history dir
   );
 });
 
-test("until the change function is granted, the setting cannot change and stays off", async () => {
+test("migrations grant the runtime the change function, never PUBLIC", async () => {
+  const [grant] = await shared.admin<{ runtime: boolean; public: boolean }[]>`
+    select has_function_privilege('opengeni_app', to_regprocedure(${CHANGE_ROUTINE}), 'EXECUTE')
+        as runtime,
+      exists (
+        select 1 from pg_proc, aclexplode(coalesce(proacl, acldefault('f', proowner))) acl
+        where pg_proc.oid = to_regprocedure(${CHANGE_ROUTINE}) and acl.grantee = 0
+      ) as public`;
+  expect(grant).toEqual({ runtime: true, public: false });
   const org = await organization();
-  await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${CHANGE_ROUTINE} FROM opengeni_app`);
-  try {
-    expect(
-      await refusal(
-        changer(org)({ actorKind: "browser_person", euOnly: true, expectedVersion: 0 }),
-      ),
-    ).toBe("unavailable");
-    expect(
-      await isWorkspaceEuOnly(client.db, {
-        accountId: org.organizationId,
-        workspaceId: org.sharedWorkspaceId,
-      }),
-    ).toBe(false);
-  } finally {
-    await grantDeferredRuntimeAccess(shared.admin);
-  }
+  const changed = await changer(org)({
+    actorKind: "browser_person",
+    euOnly: true,
+    expectedVersion: 0,
+  });
+  expect(changed).toMatchObject({ euOnly: true, version: 1, changed: true });
+});
+
+test("1158 grants every configured application role", async () => {
+  const migration = await Bun.file(
+    new URL("../drizzle/1158_organization_inference_residency_runtime_grant.sql", import.meta.url),
+  ).text();
+  const role = `eu_only_app_${crypto.randomUUID().replaceAll("-", "")}`;
+  class RolledBack extends Error {}
+  await shared.admin
+    .begin(async (tx) => {
+      await tx.unsafe(`CREATE ROLE ${role} NOLOGIN`);
+      await tx`select set_config('opengeni.migration_application_roles', ${JSON.stringify([role])}, true)`;
+      await tx.unsafe(migration);
+      const [row] = await tx<{ granted: boolean }[]>`
+        select has_function_privilege(${role}, to_regprocedure(${CHANGE_ROUTINE}), 'EXECUTE')
+          as granted`;
+      expect(row?.granted).toBe(true);
+      throw new RolledBack();
+    })
+    .catch((error: unknown) => {
+      if (!(error instanceof RolledBack)) throw error;
+    });
 });
