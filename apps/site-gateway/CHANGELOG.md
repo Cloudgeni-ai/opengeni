@@ -1,5 +1,62 @@
 # @opengeni/site-gateway
 
+## 0.1.24
+
+### Patch Changes
+
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [f2e1953]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [1271da5]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/sdk@6.0.0
+
 ## 0.1.23
 
 ### Patch Changes
