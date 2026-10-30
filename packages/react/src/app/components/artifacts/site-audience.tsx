@@ -87,6 +87,25 @@ export const FILE_AUDIENCE_COPY: AudienceCopy = {
   limitedToast: "Only you can open it now.",
 };
 
+/** The words for a document's, spreadsheet's or presentation's audience. */
+export function editableArtifactAudienceCopy(
+  noun: "document" | "spreadsheet" | "presentation",
+): AudienceCopy {
+  const Noun = `${noun.charAt(0).toUpperCase()}${noun.slice(1)}`;
+  return {
+    noun,
+    Noun,
+    onlyMeDescription: `Only you can open this ${noun}.`,
+    workspaceDescription: (workspaceName) => `Everyone in ${workspaceName} can open this ${noun}.`,
+    shareConfirm: (workspaceName) =>
+      `Everyone in ${workspaceName} will be able to open this ${noun}. The chat it was made in keeps its own audience.`,
+    limitConfirm: `Only you will be able to open this ${noun}. Other people in the workspace lose access to it, even if they have it open.`,
+    whoCan: `Who can open this ${noun}`,
+    changeLabel: "Change who can open it",
+    limitedToast: "Only you can open it now.",
+  };
+}
+
 export type AudienceControls = {
   chip: ReactNode;
   shareButton: ReactNode;

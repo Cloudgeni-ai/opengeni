@@ -9275,6 +9275,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "capabilities:manage"
   },
   {
+    "id": "updateEditableArtifactVisibility",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/visibility",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:publish"
+  },
+  {
     "id": "updateEventSource",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",

@@ -25,6 +25,7 @@ import type {
   EditableArtifactClientTransactionId,
   EditableArtifactCommittedTransactionRecord,
   EditableArtifactModality,
+  EditableArtifactAudience,
   EditableArtifactRequestHash,
   EditableArtifactSerialized,
   EditableArtifactSerializedCommittedTransactionRecord,
@@ -222,6 +223,8 @@ export type CreateEditableArtifactStoreRequest = Readonly<{
   modality: EditableArtifactModality;
   title: string;
   createdBySubjectId: string;
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
   genesisSnapshot: EditableArtifactSnapshotMetadata;
   originalImport?: Readonly<
     EditableArtifactOriginalImport & { blobRefId: EditableArtifactStableId }

@@ -19580,6 +19580,34 @@ export async function getVisibleSessionTenancyVisibility(
   });
 }
 
+/**
+ * A chat's audience and, for an Only me chat, its owner; null when the
+ * caller cannot see the chat.
+ */
+export async function getVisibleSessionAudience(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  visibility: "user_private" | "workspace_shared";
+  ownerSubjectId: string | null;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        visibility: schema.sessions.visibility,
+        ownerSubjectId: schema.sessions.ownerSubjectId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return row.visibility === "user_private"
+      ? { visibility: "user_private", ownerSubjectId: row.ownerSubjectId ?? null }
+      : { visibility: "workspace_shared", ownerSubjectId: null };
+  });
+}
+
 export async function updateScheduledTask(
   db: Database,
   workspaceId: string,
