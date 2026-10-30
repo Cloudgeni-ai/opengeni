@@ -415,7 +415,9 @@ describe("managed personal workspace access", () => {
         });
         expect(response.status).toBe(403);
         expect(await response.text()).toContain(
-          "Only a workspace admin, or the owner of a Personal workspace, can do this",
+          path.startsWith("/instruction-policies")
+            ? "Only people who can start chats here, acting as themselves, can change this"
+            : "Only a workspace admin, or the owner of a Personal workspace, can do this",
         );
       }
     }
