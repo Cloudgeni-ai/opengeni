@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`944b1b7f973f37be4237dd7054e0e54964da69f5`: upstream `cua-driver-rs-v0.37.0`
+`473b859de3e2b1c313d8764acc22e610605cb407`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -38,6 +38,28 @@ loaded nothing (`cu-browser-field-keys`). Each `run_steps` step reports the
 can be told from one the app was seen to take.
 Popup options are chosen without pressing their items (`cu-popup-options`,
 below).
+A background pixel click is checked against the element under the point in
+its own window (`cu-window-hit-test`): the app's accessibility hit test answers
+with the element of whichever of its windows is on top there, so a click on a
+web `<select>` in a browser window behind another of the browser's windows
+was not refused and opened the select's menu.
+On macOS keys addressed to a window that is not its app's main window make it
+main first (`cu-main-window-keys`): an app's shortcuts go to its main window
+whatever window has focus, so a background `cmd+L` focused another Chrome
+window's address bar, and the typed address was appended to the addressed
+window's current address instead of replacing it. The window stays main, as
+after a background press, and comes to the top of its app's own windows, which
+stay behind the person's app. When the app is the person's front app, or the
+window does not become main, the keys are refused with `window_not_main`
+before any is sent.
+On macOS keys to the iOS Simulator are physical keys (`cu-forwarder-keys`):
+the Simulator passes key presses on to the device by key code, as Screen
+Sharing does, and rebuilds modifiers from modifier key presses. Background
+text used to arrive as "aaaa" (each character was a Unicode payload on the A
+key) and `cmd+v` as nothing, since its Command was only a flag on the `v`.
+Each character is now its own US-keyboard key with real Shift presses, a
+chord presses its modifier keys, and text with a character that has no such
+key fails before any key is sent.
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -380,7 +402,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/944b1b7f973f37be4237dd7054e0e54964da69f5/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/473b859de3e2b1c313d8764acc22e610605cb407/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

@@ -640,6 +640,7 @@ jobs:
           plan="$RUNNER_TEMP/changeset-status.json"
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           version_base_ref=refs/remotes/origin/main
+          version_head_ref=HEAD
 
           # `changeset status` deliberately exits non-zero on the generated
           # Version PR: its package files changed and the consumed changeset is
@@ -654,6 +655,16 @@ jobs:
             git cat-file -e "$AUTOMATION_BASE_SHA^{commit}"
             version_base_ref="$AUTOMATION_BASE_SHA"
             is_version_pr=true
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [[ "$GITHUB_REF" == refs/heads/batch/* ]]; then
+            # A singleton Version batch has consumed its changesets too. Prove
+            # its complete merge tree, then reproduce the original Version head
+            # from its own base, retaining any disjoint main movement.
+            version_batch="$(bun scripts/release/version-batch.ts)"
+            if [ "$version_batch" != null ]; then
+              version_base_ref="$(jq -er '.base' <<< "$version_batch")"
+              version_head_ref="$(jq -er '.head' <<< "$version_batch")"
+              is_version_pr=true
+            fi
           fi
           git update-ref refs/heads/main "$version_base_ref"
           if [ "$is_version_pr" = "true" ]; then
@@ -674,7 +685,7 @@ jobs:
             )
 
             expected_tree="$(git -C "$expected" write-tree)"
-            actual_tree="$(git rev-parse 'HEAD^{tree}')"
+            actual_tree="$(git rev-parse "$version_head_ref^{tree}")"
             if [ "$actual_tree" != "$expected_tree" ]; then
               echo "::error::Version PR tree does not exactly reproduce 'changeset version' from its admitted base"
               git -C "$expected" diff --cached --stat

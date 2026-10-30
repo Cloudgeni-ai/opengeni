@@ -216,6 +216,26 @@ export function sessionUsageLimitNotConfirmed(
   );
 }
 
+/** Whether the committed state is the limit and recurring window that were requested. */
+export function sessionUsageLimitConfirmed(
+  request: {
+    limitMicros: number | null;
+    window?: { period: "day"; timeZone: string } | null | undefined;
+  },
+  committed: {
+    limitMicros: number | null;
+    window?: { period: "day"; timeZone: string } | undefined;
+  },
+): boolean {
+  if (committed.limitMicros !== request.limitMicros) return false;
+  if (request.window === undefined) return true;
+  if (request.window === null) return committed.window === undefined;
+  return (
+    committed.window?.period === request.window.period &&
+    committed.window.timeZone === request.window.timeZone
+  );
+}
+
 /** Parse a session usage limit refusal from an API error envelope body. */
 export function sessionUsageLimitReachedFields(
   body: string,

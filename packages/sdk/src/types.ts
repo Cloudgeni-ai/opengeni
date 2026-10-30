@@ -39,6 +39,15 @@ import type {
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
 export type {
+  McpElicitationAnswer,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationRequestedSchema,
+  McpElicitationValue,
+} from "@opengeni/contracts";
+import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
+export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -6851,6 +6860,14 @@ export type InboxItem = {
   eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
+  /**
+   * An approval whose tool's MCP server asks the person a question in the
+   * middle of the call: the title is then the server's question. A `confirm`
+   * is answered with Allow or Deny (send `elicitationRound: round` with the
+   * approval); a `form` is answered in the session, where the approval card
+   * shows its fields. Null or absent otherwise.
+   */
+  serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   /** True while the person has not seen the item's current content. */
@@ -6879,6 +6896,17 @@ export type InboxItemLink = { url: string; label: string };
 
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
+
+/**
+ * The MCP server asking about an approval in the inbox, how the person
+ * answers (`confirm` has nothing to fill in, `form` has fields) and which of
+ * the call's questions it is: send `round` back as `elicitationRound`.
+ */
+export type InboxItemServerQuestion = {
+  server: string;
+  kind: "confirm" | "form";
+  round: number;
+};
 
 export type ListInboxResponse = {
   items: InboxItem[];
@@ -7358,6 +7386,14 @@ export type ComposerDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the draft has no model choice of its own: `model`,
+   * `reasoningEffort` and `latencyMode` are then the chat's current settings
+   * and follow every later change to them (for example by the agent). Send a
+   * model with this draft only after the person picks one. Absent from
+   * servers that predate it, which means false.
+   */
+  policyFollowsSession?: boolean | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -7698,8 +7734,24 @@ export type DeleteSessionQueueItemRequest = {
 
 export type SaveComposerDraftRequest = Omit<
   ComposerDraft,
-  "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
-> & { expectedRevision: number };
+  | "revision"
+  | "sourceTurnId"
+  | "sourceTurnVersion"
+  | "updatedAt"
+  | "policyFollowsSession"
+  | "model"
+  | "reasoningEffort"
+  | "latencyMode"
+> & {
+  expectedRevision: number;
+  /**
+   * The person's pick in the composer. Omit all three to keep (or return)
+   * the draft to the chat's own settings, so it follows later changes.
+   */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
+};
 
 export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
   expectedDraftRevision: number;
@@ -10347,6 +10399,14 @@ export type SessionApprovalRequest = {
   name: string;
   /** Tool arguments as the model produced them (usually a JSON string). */
   arguments: unknown;
+  /**
+   * Present when the tool's MCP server stopped mid-call to ask the person
+   * (form elicitation). Approving sends `elicitationRound: elicitation.round`
+   * and the answers as `content`, keyed by `requests[].id` and then by field
+   * name; omitted fields take the form's defaults. Rejecting tells the server
+   * the person declined.
+   */
+  elicitation?: McpElicitationApprovalRequest | undefined;
   [compatibilityField: string]: unknown;
 };
 
@@ -10358,6 +10418,10 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Answers to the approval's `elicitation` forms; only with `approve`. */
+    content?: McpElicitationContent | undefined;
+    /** The `elicitation.round` an approval answers; required to approve one. */
+    elicitationRound?: number | undefined;
     /** Server-owned header rotation applied atomically when the response is accepted. */
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };

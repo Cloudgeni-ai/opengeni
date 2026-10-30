@@ -750,7 +750,8 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
-function validateSessionMcpServersForCreate(
+/** Session-create MCP server validation, shared by automations that start chats. */
+export function validateSessionMcpServersForCreate(
   settings: Settings,
   grant: AccessGrant,
   servers: SessionMcpServerInput[],
@@ -2072,6 +2073,7 @@ function finalizePostUserMessageTurn(
           model: result.draft.model,
           reasoningEffort: result.draft.reasoningEffort as ReasoningEffort,
           latencyMode: result.draft.latencyMode as ComposerDraft["latencyMode"],
+          policyFollowsSession: result.draft.policyFollowsSession,
           sourceTurnId: result.draft.sourceTurnId,
           sourceTurnVersion: result.draft.sourceTurnVersion,
           updatedAt: result.draft.updatedAt.toISOString(),
