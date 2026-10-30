@@ -37,6 +37,7 @@ import { betterAuth } from "better-auth";
 import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
+import { PostgresDialect } from "kysely";
 import { Client, Pool, type ClientConfig, type PoolClient, type PoolConfig } from "pg";
 import { parse as parseConnectionString } from "pg-connection-string";
 
@@ -432,7 +433,17 @@ export function createManagedAuth(
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
     secret: settings.betterAuthSecret,
-    database: pool,
+    database: {
+      dialect: new PostgresDialect({ pool }),
+      type: "postgres",
+      // Given a bare pool, Better Auth 1.7 runs sign-up (user, account and
+      // first session) and password changes inside one database transaction.
+      // The session hook below creates the canonical identity through the
+      // application database, a different connection, so it could neither see
+      // the uncommitted user nor safely wait on that transaction's locks. Keep
+      // Better Auth's writes non-transactional, as they were before 1.7.
+      transaction: false,
+    },
     trustedOrigins: betterAuthTrustedOrigins(settings),
     logger: { log: logBetterAuthMessage },
     hooks: {
@@ -484,6 +495,12 @@ export function createManagedAuth(
         : {}),
       database: {
         generateId: () => crypto.randomUUID(),
+        // Opengeni's migrations own the auth tables. Better Auth 1.7 otherwise
+        // introspects the database before every auth API call, so an
+        // unauthenticated request would depend on the database and a benign
+        // schema difference would fail every sign-in. The same check runs
+        // against the migrated schema in managed-auth-schema.integration.test.ts.
+        validateSchema: false,
       },
     },
     rateLimit: {
