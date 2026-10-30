@@ -15,6 +15,7 @@ import {
   type DefaultModelSelection,
   type WorkspaceModelCatalogResponse as WorkspaceModelCatalogResponseType,
 } from "@opengeni/contracts";
+import { isClaudeSubscriptionProviderId } from "@opengeni/contracts/claude-subscription-model-ids";
 import {
   resolveWorkspaceModelSelection,
   type WorkspaceModelSelection,
@@ -43,8 +44,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     directProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
-    model.providerId === "workspace-claude-subscription" ||
-    model.providerId === "organization-claude-subscription" ||
+    isClaudeSubscriptionProviderId(model.providerId) ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
     model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID ||
     model.providerId === OPPER_PROVIDER_ID ||
@@ -64,8 +64,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     anonymousProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
-    model.providerId === "workspace-claude-subscription" ||
-    model.providerId === "organization-claude-subscription"
+    isClaudeSubscriptionProviderId(model.providerId)
       ? { provider: model.providerId, providerLabel: model.providerLabel }
       : model.providerId === OPENROUTER_PROVIDER_ID
         ? { provider: "openrouter", providerLabel: "OpenRouter" }

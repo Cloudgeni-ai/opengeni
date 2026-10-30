@@ -52,6 +52,10 @@ import {
   type LatencyMode,
 } from "@opengeni/contracts";
 import {
+  CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX,
+  claudeSubscriptionUpstreamModelId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
+import {
   loadWorkspaceModelCatalogInputs,
   getDeploymentModelCatalog,
   listWorkspaceProviderCustomModelsByKind,
@@ -139,6 +143,21 @@ export function workspaceCustomModelReference(
   settings: Settings,
   modelId: string,
 ): WorkspaceCustomModelReference | null {
+  // A canonical `claude/` id names the model of whichever Claude list
+  // offers it here (the workspace list first), as the catalog aliases it.
+  if (modelId.startsWith(CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+    const upstreamModelId = claudeSubscriptionUpstreamModelId(modelId);
+    if (upstreamModelId === null) return null;
+    const owner = configuredModels(settings).find((model) => model.aliases.includes(modelId));
+    return {
+      scope:
+        owner?.providerId === claudeProviderId("claude_subscription", "workspace")
+          ? "workspace"
+          : "organization",
+      providerKind: "claude_subscription",
+      upstreamModelId,
+    };
+  }
   for (const scope of ["workspace", "organization"] as const)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
       const prefix = claudeProviderId(kind, scope) + "/";
@@ -215,6 +234,25 @@ export function workspaceCustomModelReference(
 
 export function isWorkspaceCustomModelId(settings: Settings, modelId: string): boolean {
   return workspaceCustomModelReference(settings, modelId) !== null;
+}
+
+/**
+ * The upstream model a retained product model id names in one scope's
+ * Claude list: its own legacy form, or the canonical `claude/` form, which
+ * either list may define. Null for any other id.
+ */
+export function retainedClaudeUpstreamModelId(
+  productModelId: string | null | undefined,
+  kind: (typeof CLAUDE_CONNECTION_KINDS)[number],
+  scope: "workspace" | "organization",
+): string | null {
+  if (!productModelId) return null;
+  const prefix = claudeProviderId(kind, scope) + "/";
+  if (productModelId.startsWith(prefix)) return productModelId.slice(prefix.length) || null;
+  return kind === "claude_subscription" &&
+    productModelId.startsWith(CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX)
+    ? claudeSubscriptionUpstreamModelId(productModelId)
+    : null;
 }
 
 export async function lockActiveCustomModelForAdmission(
@@ -543,17 +581,18 @@ export async function resolveWorkspaceCatalogSettings(
   if (organizationProviders)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
       const models = [...organizationProviders[kind].models];
-      const prefix = claudeProviderId(kind) + "/";
-      for (const productId of retainedProductModelIds)
-        if (productId?.startsWith(prefix)) {
+      for (const productId of retainedProductModelIds) {
+        const upstreamModelId = retainedClaudeUpstreamModelId(productId, kind, "organization");
+        if (upstreamModelId !== null) {
           const retained = await getOrganizationModelProviderCustomModelForExecution(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             providerKind: kind,
-            upstreamModelId: productId.slice(prefix.length),
+            upstreamModelId,
           });
           if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
         }
+      }
       claudeConnections[kind] = { models };
     }
   const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
@@ -561,14 +600,14 @@ export async function resolveWorkspaceCatalogSettings(
     for (const kind of CLAUDE_CONNECTION_KINDS) {
       if (kind === "claude_subscription" && !resolved.settings.claudeSubscriptionEnabled) continue;
       const models = [...workspaceCustomModels[kind]];
-      const prefix = claudeProviderId(kind, "workspace") + "/";
       for (const productId of retainedProductModelIds) {
-        if (!productId?.startsWith(prefix)) continue;
+        const upstreamModelId = retainedClaudeUpstreamModelId(productId, kind, "workspace");
+        if (upstreamModelId === null) continue;
         const retained = await getWorkspaceProviderCustomModelForExecution(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           providerKind: kind,
-          upstreamModelId: productId.slice(prefix.length),
+          upstreamModelId,
         });
         if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
       }

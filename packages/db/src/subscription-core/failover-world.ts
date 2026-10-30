@@ -416,9 +416,12 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         health: "stored",
       });
       // Background work carries each provider's own frozen compatibility
-      // pool. A live source change must not widen that accepted ceiling.
-      // The reader is scoped to the exact accepted carrier, not a new
-      // acceptance inferred from the current session owner.
+      // record. A record that accepted shared capacity (either legacy pool)
+      // may use every shared connection reaching the workspace: who manages
+      // a connection no longer divides shared capacity. A record without
+      // shared capacity keeps personal connections only. The reader is
+      // scoped to the exact accepted carrier, not a new acceptance inferred
+      // from the current session owner.
       const [frozen] = await rawRows<{
         authority: { authority?: string; sharedPool?: string } | null;
       }>(
@@ -434,9 +437,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         ? rows
         : rows.flatMap((connection) => {
             if (connection.ownership.kind === "personal") return [connection];
-            if (pool !== "workspace" && pool !== "organization") return [];
-            const managedHere = connection.ownership.managedByWorkspaceId === identity.workspaceId;
-            return (pool === "workspace" ? managedHere : !managedHere) ? [connection] : [];
+            return pool === "workspace" || pool === "organization" ? [connection] : [];
           });
       input.connections = [
         ...input.connections,
