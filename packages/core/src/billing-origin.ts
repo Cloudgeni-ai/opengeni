@@ -20,8 +20,9 @@ import { isAppCredentialGrant, type AccessGrantAuthorization } from "./access";
 const requestBillingOrigins = new WeakMap<Request, BillingOrigin>();
 
 /*
- * Accounts on the billing terms from before the split (CloudGeni's host
- * account by default): all their work is funded as app use, which is exactly
+ * Accounts on the billing terms from before the split (by default our internal
+ * accounts: CloudGeni's host account and our own team's organizations): all
+ * their work is funded as app use, which is exactly
  * how every turn was funded before origins existed. Processes install the
  * configured list at boot with `configureBillingLegacyAccounts`.
  */

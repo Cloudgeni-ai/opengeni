@@ -341,9 +341,29 @@ export const McpOperationRecoverySchema = z
 export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
 
-/** CloudGeni's production host account (Cloudgeni-Embedded). */
+/**
+ * Internal accounts kept on the billing terms from before the app/API split:
+ * CloudGeni's host account and our own team's organizations, whose work
+ * (heavy use of the team's own Claude and Codex subscriptions included) pays
+ * no own-key platform fee and meets no new billing block. Lower-case ids.
+ */
 export const DEFAULT_BILLING_LEGACY_ACCOUNT_IDS: readonly string[] = [
+  // CloudGeni's production host account (Cloudgeni-Embedded).
   "25eacc5d-f383-4f79-910a-b3d11dbf1310",
+  // Production: the team's main organization, "Cloudgeni Internal".
+  "67435f59-7f73-4996-8845-cd7baa2b7268",
+  // Production: "OpenGeni Internal".
+  "9d533546-b4a8-48e1-b9de-1b56c7ce0e50",
+  // Production: Bendik's own internal organization.
+  "7ee4f92f-dd65-4ac1-888e-e53d9b5f5b3b",
+  // Production: Himanshu's internal organization.
+  "d8afe24f-b593-463f-8f70-249e067a73ba",
+  // Production: Iuliia's internal organization.
+  "d955c979-cf01-4ee7-b130-8306cf099642",
+  // Production: Davlet's internal organization.
+  "2c9e60c8-d1d3-4d3d-849c-59a876488cf1",
+  // Staging: the team's "Cloudgeni Internal" organization.
+  "049d0b24-7665-4dbe-a7d8-4c2dc8e5674c",
 ];
 
 /**
@@ -2322,10 +2342,11 @@ const SettingsSchema = z.object({
   stripeCreditsProductId: z.string().optional(),
   // Enables subscription service paths only; top-up billing remains independent.
   subscriptionPlansEnabled: EnvBoolean.default(false),
-  // Accounts billed on the terms from before the app/API split
-  // (docs/billing-origin.md#cloudgeni): any credit pays any use, no own-key
-  // platform fee, no newly metered tool charges. Defaults to CloudGeni's host
-  // account; "none" lists no account.
+  // Internal accounts billed on the terms from before the app/API split
+  // (docs/billing-origin.md#internal-accounts-cloudgeni-and-our-team): any
+  // credit pays any use, no own-key platform fee, no newly metered tool
+  // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
+  // account and our own team's organizations); "none" lists no account.
   billingLegacyAccountIds: z.preprocess(
     (value) =>
       typeof value === "string"

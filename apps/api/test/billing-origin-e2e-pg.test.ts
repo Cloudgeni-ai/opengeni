@@ -1,12 +1,19 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHmac, randomBytes } from "node:crypto";
+import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS } from "@opengeni/config";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   configureBillingLegacyAccounts,
   pumpDueMcpEventSubscriptions,
   signStandardWebhook,
 } from "@opengeni/core";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  grantPlanCreditPeriod,
+  upsertOrganizationPlan,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
@@ -87,6 +94,99 @@ test("a person in the app starts app use; a delegated token for the same person 
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   expect(await create(`Bearer ${token}`)).toBe("api");
+}, 180_000);
+
+test("our team's internal organization starts an API caller's chat as app use with no credits; a normal account's is refused", async () => {
+  if (!client || !shared) return;
+  // The production "Cloudgeni Internal" organization (account id = org id),
+  // listed by default: no deployment configuration names it.
+  const INTERNAL = "67435f59-7f73-4996-8845-cd7baa2b7268";
+  const settings = testSettings({
+    productAccessMode: "local",
+    delegationSecret: SECRET,
+    sandboxBackend: "none",
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
+  });
+  try {
+    const app = createApp({
+      settings,
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        wakeSessionWorkflow: async () => undefined,
+        requestSessionWorkflowWakeDispatch: async () => undefined,
+      } as never,
+      managedAuth: null,
+    });
+    await shared.admin`
+      insert into managed_accounts (id, name, external_source, external_id)
+      values (${INTERNAL}::uuid, 'Cloudgeni Internal', 'test:internal-billing', 'team')
+      on conflict do nothing`;
+    // Each account has an active Pro plan's credit and no credits, so only
+    // app use can be funded.
+    const apiChat = async (externalId: string) => {
+      const access = await bootstrapWorkspace(client!.db, {
+        accountExternalSource: "test:internal-billing",
+        accountExternalId: externalId,
+        accountName: externalId,
+        workspaceExternalSource: "test:internal-billing",
+        workspaceExternalId: externalId,
+        workspaceName: externalId,
+        subjectId: `user:${externalId}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      const period = {
+        accountId: grant.accountId,
+        planKey: "pro",
+        periodStart: new Date(Date.now() - 1000),
+        periodEnd: new Date(Date.now() + 3_600_000),
+        stripeSubscriptionId: `sub_${crypto.randomUUID()}`,
+      };
+      await upsertOrganizationPlan(client!.db, {
+        ...period,
+        status: "active",
+        currentPeriodStart: period.periodStart,
+        currentPeriodEnd: period.periodEnd,
+      });
+      await grantPlanCreditPeriod(client!.db, period);
+      const token = await signDelegatedAccessToken(SECRET, {
+        ...grant,
+        principalKind: "human_session",
+        exp: Math.floor(Date.now() / 1_000) + 3_600,
+      });
+      const response = await app.request(`/v1/workspaces/${grant.workspaceId}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ initialMessage: "Run", tools: [], visibility: "workspace" }),
+      });
+      const body = (await response.json()) as { id?: string; code?: string };
+      const [turn] = body.id
+        ? await shared!.admin<{ billingOrigin: string | null }[]>`
+            select billing_origin as "billingOrigin" from session_turns
+            where workspace_id = ${grant.workspaceId}::uuid and session_id = ${body.id}::uuid`
+        : [];
+      return {
+        accountId: grant.accountId,
+        status: response.status,
+        body,
+        origin: turn?.billingOrigin,
+      };
+    };
+
+    const internal = await apiChat("team");
+    expect(internal.accountId).toBe(INTERNAL);
+    expect(internal.status).toBe(202);
+    expect(internal.origin).toBe("app");
+
+    const normal = await apiChat(crypto.randomUUID());
+    expect(normal.status).toBe(402);
+    expect(JSON.stringify(normal.body)).toContain("api_credits_required");
+    expect(normal.origin).toBeUndefined();
+  } finally {
+    configureBillingLegacyAccounts(testSettings().billingLegacyAccountIds ?? []);
+  }
 }, 180_000);
 
 test("a person's edits and manual runs keep an app schedule app; a delegated token's schedule is API use", async () => {

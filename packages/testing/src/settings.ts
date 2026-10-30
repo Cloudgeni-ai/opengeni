@@ -4,14 +4,14 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
 } from "@opengeni/config/defaults";
-import type { Settings } from "@opengeni/config";
+import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS, type Settings } from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     slackAccessMode: "limited",
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
-    billingLegacyAccountIds: ["25eacc5d-f383-4f79-910a-b3d11dbf1310"],
+    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],

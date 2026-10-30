@@ -3285,8 +3285,9 @@ The runtime secret must provide values such as:
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
 - `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` lists accounts kept on the billing terms
   from before the app/API split (any credit pays any use, no own-key fee); it
-  defaults to CloudGeni's host account and `none` lists no account. See
-  [billing-origin.md](billing-origin.md#cloudgeni).
+  defaults to our internal accounts (CloudGeni's host account and our own
+  team's organizations) and `none` lists no account. See
+  [billing-origin.md](billing-origin.md#internal-accounts-cloudgeni-and-our-team).
 - `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
   subscription API/webhook plan writes (and the separately integrated maintenance
   service); prepaid top-ups remain independent. Configure the operator runtime

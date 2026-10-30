@@ -67,7 +67,7 @@ inherit the origin of the chat they run in, never the credential's.
   replay does. That covers automations added to the source later and has no
   window between marking and the new secret: the secret and its holder are
   read from one row. A person's own secrets leave the source alone, and
-  CloudGeni's legacy account stays app (`fundedBillingOrigin` at intake).
+  an internal (legacy) account stays app (`fundedBillingOrigin` at intake).
   A custom format can't read its event type, delivery id or an event id part
   from the header its signature is in (compared without case), which would
   put the signature, or a `token` scheme's secret itself, into events and the
@@ -85,7 +85,7 @@ inherit the origin of the chat they run in, never the credential's.
   that sends its events, so an API caller creating one marks it. Its
   subscriptions read the mark in each delivery's transaction, polled or
   delivered to their callback (`recordMcpEventDelivery`), and the automations
-  those events fire are API use, CloudGeni's legacy account excepted.
+  those events fire are API use, internal (legacy) accounts excepted.
   Creating a source that already exists returns it unchanged and marks
   nothing.
   The match is on the raw secret, byte for byte, and only for secrets of at
@@ -179,25 +179,29 @@ for). API use pays for them from credits only. A failed video refunds what
 other credit paid; scoped plan credit it used is not returned, so it never
 turns into credits.
 
-## CloudGeni
+## Internal accounts (CloudGeni and our team)
 
-CloudGeni, our own product that embeds Opengeni, keeps exactly today's
-billing. Its host account (Cloudgeni-Embedded) is on legacy billing terms:
-`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` lists such accounts and its built-in
-default lists CloudGeni's production host account, so no deployment
-configuration is needed (`none` lists no account). For a listed account all
-work is funded as app use, which is how every turn was funded before origins
-existed: any credit pays any use, in today's order. Later billing changes
-(the own-key platform fee, newly metered tools) skip listed accounts too.
-Two shared changes do reach it, neither a new block or charge: paid tools may
-draw on a Free plan period's model-scoped credit first, and a failed video
-does not return the scoped plan credit it used.
+Our internal accounts keep exactly today's billing: CloudGeni's host account
+(Cloudgeni-Embedded; CloudGeni is our own product that embeds Opengeni) and
+our own team's organizations in production and staging, whose work uses the
+team's own Claude and Codex subscriptions heavily. They are on legacy billing
+terms: `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` lists such accounts and its
+built-in default (`DEFAULT_BILLING_LEGACY_ACCOUNT_IDS` in `packages/config`)
+lists these internal accounts, so no deployment configuration is needed
+(setting it replaces the list; `none` lists no account). For a listed account
+all work is funded as app use, which is how every turn was funded before
+origins existed: any credit pays any use, in today's order. Later billing
+changes (the own-key platform fee, newly metered tools) skip listed accounts
+too. Two shared changes do reach them, neither a new block or charge: paid
+tools may draw on a Free plan period's model-scoped credit first, and a failed
+video does not return the scoped plan credit it used.
 
 Why an account list: CloudGeni already pays cost plus margin from operator
-credit grants on that one account, and its people and embedded sessions must
-see no new blocks or charges. A list is one switch rather than a code path per
-product, and another account (a staging CloudGeni account) is added the same
-way. Processes install it at boot (`configureBillingLegacyAccounts`).
+credit grants on its one account, and its people and embedded sessions must
+see no new blocks or charges; our team's own work must not pay us a fee
+either. A list is one switch rather than a code path per product, and another
+internal account is added the same way. Processes install it at boot
+(`configureBillingLegacyAccounts`).
 
 ## Rollout
 

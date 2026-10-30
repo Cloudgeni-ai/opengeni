@@ -714,7 +714,7 @@ export async function receiveEventWebhook(input: {
     headers: retainedSourceHeaders(source, headers),
     // The secret and its holder come from the same row: a delivery verified
     // with a secret an API caller set or received fires its automations as
-    // API use. CloudGeni's legacy account stays app.
+    // API use. An internal (legacy) account stays app.
     ...(source.secretBillingOrigin === "api"
       ? { billingOrigin: fundedBillingOrigin(source.accountId, "api") }
       : {}),

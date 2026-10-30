@@ -164,7 +164,7 @@ describe("resolveTurnBillingOrigin", () => {
   });
 });
 
-describe("legacy billing accounts (CloudGeni)", () => {
+describe("legacy billing accounts (internal: CloudGeni and our team)", () => {
   afterEach(() => configureBillingLegacyAccounts(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS));
 
   test("CloudGeni's host account is listed by default and all its work is funded as app", async () => {
@@ -186,6 +186,22 @@ describe("legacy billing accounts (CloudGeni)", () => {
     expect(fundedBillingOrigin(cloudgeni.accountId.toUpperCase(), "api")).toBe("app");
     // Other accounts keep the split.
     expect(billingOriginForGrant({ ...cloudgeni, accountId: base.accountId })).toBe("api");
+  });
+
+  test("our team's organizations are listed by default and an API key there is funded as app", () => {
+    const team = "67435f59-7f73-4996-8845-cd7baa2b7268";
+    expect(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS).toContain(team);
+    for (const accountId of DEFAULT_BILLING_LEGACY_ACCOUNT_IDS) {
+      const grant: AccessGrant = {
+        ...base,
+        accountId,
+        subjectId: "api_key:internal",
+        principalKind: "api_key",
+      };
+      expect(billingOriginForGrant(grant)).toBe("app");
+      expect(fundedBillingOrigin(accountId.toUpperCase(), "api")).toBe("app");
+    }
+    expect(fundedBillingOrigin(base.accountId, "api")).toBe("api");
   });
 
   test("the configured list replaces the default", () => {

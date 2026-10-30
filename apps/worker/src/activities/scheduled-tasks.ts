@@ -1251,7 +1251,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
           initiatingHumanSubjectId: causalHumanSubjectId,
           // Runs are billed as whoever set the task up.
-          // CloudGeni's legacy account stays app even for a task it can't see.
+          // An internal (legacy) account stays app even for a task it can't see.
           billingOrigin: async () =>
             fundedBillingOrigin(
               task.accountId,

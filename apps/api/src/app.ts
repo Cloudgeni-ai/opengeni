@@ -537,7 +537,7 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
-  // Accounts on the billing terms from before the app/API split (CloudGeni).
+  // Internal accounts on the billing terms from before the app/API split.
   configureBillingLegacyAccounts(deps.settings.billingLegacyAccountIds);
   // Sessions created by this process freeze their code_search decision from
   // the boot-parsed deployment policy.
