@@ -947,10 +947,14 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
 
 function elevenLabsError(
   status: number,
-  detail: string,
+  detail: ElevenLabsErrorDetail,
   action = "transcribe this audio",
 ): RecordingTranscriptionError {
-  const message = `ElevenLabs could not ${action} (HTTP ${status}${detail ? `: ${detail}` : ""})`;
+  const message = `ElevenLabs could not ${action} (HTTP ${status}${detail.message ? `: ${detail.message}` : ""})`;
+  // An account out of credit answers 401 with status quota_exceeded.
+  if (status === 402 || detail.status === "quota_exceeded") {
+    return new RecordingTranscriptionError(message, "quota_exceeded", false);
+  }
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -958,7 +962,6 @@ function elevenLabsError(
   if (status === 400 || status === 415 || status === 422) {
     return new RecordingTranscriptionError(message, "invalid_audio", false);
   }
-  if (status === 402) return new RecordingTranscriptionError(message, "quota_exceeded", false);
   if (status === 429) return new RecordingTranscriptionError(message, "rate_limited", true);
   if (status >= 500) return new RecordingTranscriptionError(message, "unavailable", true);
   return new RecordingTranscriptionError(message, "provider", false);
@@ -970,13 +973,16 @@ function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null)
   throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
 }
 
-async function errorDetail(response: Response): Promise<string> {
+type ElevenLabsErrorDetail = { status: string; message: string };
+
+async function errorDetail(response: Response): Promise<ElevenLabsErrorDetail> {
   try {
     const body = (await response.json()) as { detail?: { message?: unknown; status?: unknown } };
-    const message = body.detail?.message ?? body.detail?.status;
-    return typeof message === "string" ? message.slice(0, 300) : "";
+    const status = typeof body.detail?.status === "string" ? body.detail.status : "";
+    const message = typeof body.detail?.message === "string" ? body.detail.message : status;
+    return { status, message: message.slice(0, 300) };
   } catch {
-    return "";
+    return { status: "", message: "" };
   }
 }
 

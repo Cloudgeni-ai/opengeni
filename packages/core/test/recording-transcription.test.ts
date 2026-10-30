@@ -476,6 +476,29 @@ describe("ElevenLabs provider", () => {
     expect((await attempt(400)).message).toContain("nope");
   });
 
+  test("an account out of credit is out of credit, not a bad key", async () => {
+    const provider = createElevenLabsRecordingTranscriptionProvider({
+      fetch: (async () =>
+        Response.json(
+          {
+            detail: {
+              status: "quota_exceeded",
+              message: "This request exceeds your quota of 90000. You have 970 credits remaining.",
+            },
+          },
+          { status: 401 },
+        )) as unknown as typeof fetch,
+    });
+    const failure = await provider
+      .transcribe({ audio, model: "scribe_v2", diarize: false }, { apiKey: "k" })
+      .then(
+        () => null,
+        (error: unknown) => error as RecordingTranscriptionError,
+      );
+    expect(failure).toMatchObject({ code: "quota_exceeded", retryable: false });
+    expect(failure?.message).toContain("970 credits remaining");
+  });
+
   test("network failures are retryable", async () => {
     const provider = createElevenLabsRecordingTranscriptionProvider({
       fetch: (async () => {
