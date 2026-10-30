@@ -980,6 +980,29 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("old Codex source entry points may disappear only after every subscription table", () => {
+    const posture = safePosture();
+    const signatures = [
+      "resolve_workspace_codex_subscription_source(uuid, uuid)",
+      "capture_legacy_codex_turn_sources(uuid, uuid)",
+    ];
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => !signatures.includes(routine.name),
+    );
+    const missing = () =>
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetSchemaCapabilityRoutines: signatures,
+      }).filter((violation) => signatures.some((signature) => violation.includes(signature)));
+    expect(missing()).toHaveLength(2);
+    const retired = new Set<string>(runtimePosture.RETIRING_FEATURE_TABLES.subscription);
+    posture.tables = posture.tables.filter((table) => !retired.has(table.name));
+    posture.retiringFeatureTablesPresent = { subscription: false, variableSets: true };
+    expect(missing()).toEqual([]);
+    posture.tables.push({ ...posture.tables[0]!, name: "codex_turn_source_bindings" });
+    expect(missing()).toHaveLength(2);
+  });
+
   test("a provider's legacy tables are read-only once its receipt exists", () => {
     const posture = safePosture();
     const existing = posture.tables.find((table) => table.name === "xai_subscription_credentials");

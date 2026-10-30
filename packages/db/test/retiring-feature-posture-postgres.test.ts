@@ -54,8 +54,11 @@ realTest(
     DROP TABLE opengeni_private.variable_set_authority_capabilities CASCADE;
     DROP FUNCTION opengeni_private.variable_set_authority_capability_active(text) CASCADE;
   `);
-    for (const signature of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter((name) =>
-      name.includes("variable_set"),
+    for (const signature of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
+      (name) =>
+        name.includes("variable_set") ||
+        name === "resolve_workspace_codex_subscription_source(uuid, uuid)" ||
+        name === "capture_legacy_codex_turn_sources(uuid, uuid)",
     )) {
       await database!.admin.unsafe(`DROP FUNCTION "${database!.schema}".${signature} CASCADE`);
     }

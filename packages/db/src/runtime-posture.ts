@@ -804,6 +804,7 @@ export const RETIRING_FEATURE_TABLES = {
     "codex_credential_leases",
     "codex_rotation_settings",
     "codex_subscription_credentials",
+    "codex_turn_source_bindings",
     "organization_codex_rotation_settings",
     "subscription_provider_cutovers",
     "workspace_codex_subscription_preferences",
@@ -825,6 +826,10 @@ const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
 const RETIRING_VARIABLE_SET_ROUTINES: ReadonlySet<string> = new Set([
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   "scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+]);
+const RETIRING_SUBSCRIPTION_TARGET_ROUTINES: ReadonlySet<string> = new Set([
+  "resolve_workspace_codex_subscription_source(uuid, uuid)",
+  "capture_legacy_codex_turn_sources(uuid, uuid)",
 ]);
 const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
 const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
@@ -4325,6 +4330,12 @@ export function evaluateRuntimeDatabasePosture(
       matches.length === 0 &&
       !retiringVariableSetsPresent &&
       RETIRING_VARIABLE_SET_ROUTINES.has(expectedRoutine)
+    )
+      continue;
+    if (
+      matches.length === 0 &&
+      !retiringSubscriptionPresent &&
+      RETIRING_SUBSCRIPTION_TARGET_ROUTINES.has(expectedRoutine)
     )
       continue;
     if (matches.length !== 1) {
