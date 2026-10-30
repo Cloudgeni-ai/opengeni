@@ -285,7 +285,7 @@ over-limit people remain; new additions fail. Previously reserved invitations
 may still be accepted without increasing seat usage. Writes that take no new
 seat are never refused, even over the limit: binding or re-targeting a pending
 invitation that already holds a seat, and an `ON CONFLICT DO NOTHING` insert
-for someone with an active or provisioning row (migration 1114). Sign-in
+for someone with an active or provisioning row (migration 1119). Sign-in
 binding isolates each organization: if one organization's binding fails for
 any reason, its invitations stay pending and unbound (the next sign-in retries),
 the database logs the WARNING "organization invitation binding skipped" with
