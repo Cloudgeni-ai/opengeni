@@ -9,13 +9,21 @@
 //! transcript, and runs of agreeing words become fixed points that cut the
 //! recording into short blocks. Each block is then aligned exactly. Memory and
 //! time stay proportional to the audio.
+//!
+//! The model only hears the audio that has sound in it. A meeting's tracks
+//! are quiet for much of the time (a microphone while its person listens, the
+//! call's audio while they talk), and a long quiet stretch can't hold a word.
+//! Such stretches are taken out, keeping a short margin on either side, and
+//! the rest is joined up and scored in the usual windows, so the model still
+//! hears each sound among its neighbours. The frames taken out read as
+//! silence.
 
 use crate::models::{Result, session};
 use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
@@ -39,6 +47,14 @@ const GAP: u32 = u32::MAX;
 const GAP_PENALTY: f32 = 1.0;
 /// Letters a run of agreeing words needs before it may anchor the audio.
 const MIN_ANCHOR_LETTERS: usize = 12;
+/// A frame quieter than this (-55 dBFS) has no speech in it: well below a
+/// voice, even a soft one across the room, and above the near-silence of an
+/// idle microphone or of a call while nobody on it talks.
+const QUIET_RMS: f32 = 0.001_78;
+/// Quiet kept on either side of a sound: a word's soft start and end.
+const QUIET_MARGIN_FRAMES: usize = 25;
+/// A quiet stretch at least this long (1.5 s) is taken out, but for its margins.
+const QUIET_CUT_FRAMES: usize = 75;
 
 /// A placed word: its first frame, the frame after its last, and its mean
 /// score when it was aligned on its own.
@@ -170,6 +186,134 @@ impl<R: Read> Samples<R> {
     }
 }
 
+fn loud(frame: &[f32]) -> bool {
+    let energy = frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32;
+    energy > QUIET_RMS * QUIET_RMS
+}
+
+/// The audio without its long quiet stretches, read like [`Samples`], and the
+/// recording frame each of its frames came from.
+struct Sounding<R: Read> {
+    samples: Samples<R>,
+    /// Recording samples read but not yet looked at.
+    raw: Vec<f32>,
+    /// Where in `raw` the next frame starts.
+    next: usize,
+    /// The current quiet stretch's frames not yet passed on or dropped.
+    held: VecDeque<(usize, Vec<f32>)>,
+    /// Frames in the current quiet stretch.
+    quiet: usize,
+    /// Recording frames read.
+    read: usize,
+    /// Recording samples read.
+    total: usize,
+    /// For each frame passed on, its frame in the recording.
+    origin: Vec<usize>,
+    ended: bool,
+}
+
+impl<R: Read> Sounding<R> {
+    fn new(input: R) -> Self {
+        Self {
+            samples: Samples::new(input),
+            raw: Vec::new(),
+            next: 0,
+            held: VecDeque::new(),
+            quiet: 0,
+            read: 0,
+            total: 0,
+            origin: Vec::new(),
+            ended: false,
+        }
+    }
+
+    fn pass(&mut self, out: &mut Vec<f32>, at: usize, frame: &[f32]) {
+        out.extend_from_slice(frame);
+        self.origin.push(at);
+    }
+
+    /// Read until `out` holds `count` samples or the audio ends.
+    fn fill(&mut self, out: &mut Vec<f32>, count: usize) -> Result<()> {
+        while out.len() < count && !self.ended {
+            if self.raw.len() - self.next < FRAME {
+                self.raw.drain(..self.next);
+                self.next = 0;
+                self.samples.fill(&mut self.raw, FRAME)?;
+            }
+            if self.raw.len() == self.next {
+                // A short pause at the end stays; a long one was cut.
+                if self.quiet < QUIET_CUT_FRAMES {
+                    while let Some((at, frame)) = self.held.pop_front() {
+                        self.pass(out, at, &frame);
+                    }
+                }
+                self.ended = true;
+                break;
+            }
+            let at = self.read;
+            self.read += 1;
+            let end = (self.next + FRAME).min(self.raw.len());
+            let frame = self.raw[self.next..end].to_vec();
+            self.next = end;
+            self.total += frame.len();
+            if loud(&frame) {
+                // The pause before it: whole when short, else its last margin.
+                while let Some((at, held)) = self.held.pop_front() {
+                    self.pass(out, at, &held);
+                }
+                self.quiet = 0;
+                self.pass(out, at, &frame);
+            } else {
+                self.quiet += 1;
+                self.held.push_back((at, frame));
+                if self.quiet == QUIET_CUT_FRAMES && !self.origin.is_empty() {
+                    // A long pause: the margin after the sound before it
+                    // stays.
+                    for _ in 0..QUIET_MARGIN_FRAMES {
+                        let (at, held) = self.held.pop_front().expect("held");
+                        self.pass(out, at, &held);
+                    }
+                }
+                if self.quiet >= QUIET_CUT_FRAMES {
+                    while self.held.len() > QUIET_MARGIN_FRAMES {
+                        self.held.pop_front();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Emissions over the joined-up sound, put back on the recording's frames.
+fn expand(sound: Emissions, origin: &[usize], samples: usize) -> Emissions {
+    let mut emissions = Emissions {
+        scores: Vec::new(),
+        columns: sound.columns,
+        column: sound.column,
+        best: Vec::new(),
+        gaps: Vec::new(),
+        frames: 0,
+        samples,
+    };
+    let columns = sound.columns;
+    for (index, &at) in origin.iter().enumerate().take(sound.frames) {
+        while emissions.frames < at {
+            emissions.push_silence();
+        }
+        emissions
+            .scores
+            .extend_from_slice(&sound.scores[index * columns..(index + 1) * columns]);
+        emissions.best.push(sound.best[index]);
+        emissions.gaps.push(sound.gaps[index]);
+        emissions.frames += 1;
+    }
+    while emissions.frames < samples.div_ceil(FRAME) {
+        emissions.push_silence();
+    }
+    emissions
+}
+
 impl Aligner {
     pub fn load(env: &Environment, model: &Path, tokens: &Path, threads: usize) -> Result<Self> {
         let session = session(env, model, threads)?;
@@ -240,7 +384,7 @@ impl Aligner {
         };
         let space_column = self.space.map(|space| emissions.column[&space]);
         let (core, context) = (CORE_SECONDS * SAMPLE_RATE, CONTEXT_SECONDS * SAMPLE_RATE);
-        let mut samples = Samples::new(audio);
+        let mut samples = Sounding::new(audio);
         // The audio from sample `base` on, as far as has been read.
         let (mut buffer, mut base) = (Vec::new(), 0usize);
         let mut core_start = 0;
@@ -310,7 +454,7 @@ impl Aligner {
             buffer.drain(..keep - base);
             base = keep;
         }
-        emissions.samples = base + buffer.len();
+        let mut emissions = expand(emissions, &samples.origin, samples.total);
         if emissions.frames == 0 {
             emissions.push_silence();
         }
@@ -860,5 +1004,112 @@ mod tests {
     fn repeated_short_words_never_anchor_at_first() {
         let words = ["yes", "yes", "yes", "no", "no"];
         assert!(anchors(&transcript(&words), &heard(&words), ANCHOR_LEVELS[0]).is_empty());
+    }
+
+    /// Audio with one frame per character of `script`: `x` a sound, `.`
+    /// near-silence. Each frame's samples carry its number, to follow it.
+    fn audio(script: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (at, c) in script.chars().enumerate() {
+            let level = if c == 'x' { 0.1 } else { 0.0001 };
+            let sample = level + at as f32 * 1e-7;
+            for _ in 0..FRAME {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    /// The recording frames the sound passes on, read `step` samples at a time.
+    fn sounding(script: &str, step: usize) -> (Vec<usize>, usize, Vec<f32>) {
+        let bytes = audio(script);
+        let mut sound = Sounding::new(bytes.as_slice());
+        let mut out = Vec::new();
+        loop {
+            let before = out.len();
+            sound.fill(&mut out, before + step).unwrap();
+            if out.len() == before && sound.ended {
+                break;
+            }
+        }
+        (sound.origin, sound.total, out)
+    }
+
+    fn script(parts: &[(char, usize)]) -> String {
+        parts
+            .iter()
+            .map(|&(c, n)| c.to_string().repeat(n))
+            .collect()
+    }
+
+    #[test]
+    fn a_long_quiet_stretch_is_taken_out_but_for_its_margins() {
+        let (origin, total, out) = sounding(&script(&[('x', 1), ('.', 200), ('x', 1)]), 4000);
+        let mut expected = vec![0];
+        expected.extend(1..=QUIET_MARGIN_FRAMES);
+        expected.extend(201 - QUIET_MARGIN_FRAMES..=201);
+        assert_eq!(origin, expected);
+        assert_eq!(total, 202 * FRAME);
+        // Every frame passed on is the recording's own frame.
+        assert_eq!(out.len(), origin.len() * FRAME);
+        for (index, &at) in origin.iter().enumerate() {
+            let level = if at == 0 || at == 201 { 0.1 } else { 0.0001 };
+            assert!((out[index * FRAME] - (level + at as f32 * 1e-7)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_short_pause_stays_whole() {
+        let (origin, _, _) = sounding(
+            &script(&[('x', 3), ('.', QUIET_CUT_FRAMES - 1), ('x', 3)]),
+            4000,
+        );
+        assert_eq!(origin, (0..QUIET_CUT_FRAMES + 5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn quiet_at_either_end_keeps_only_a_margin_beside_the_sound() {
+        let (origin, total, _) = sounding(&script(&[('.', 100), ('x', 2), ('.', 100)]), 4000);
+        assert_eq!(
+            origin,
+            (100 - QUIET_MARGIN_FRAMES..102 + QUIET_MARGIN_FRAMES).collect::<Vec<_>>()
+        );
+        assert_eq!(total, 202 * FRAME);
+        let (origin, _, _) = sounding(&script(&[('x', 2), ('.', 30)]), 4000);
+        assert_eq!(origin, (0..32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn how_the_audio_is_read_does_not_change_what_is_kept() {
+        let text = script(&[
+            ('x', 7),
+            ('.', 90),
+            ('x', 1),
+            ('.', 40),
+            ('x', 12),
+            ('.', 300),
+            ('x', 5),
+        ]);
+        let whole = sounding(&text, 1 << 20);
+        for step in [1, 319, 320, 321, 5000] {
+            assert_eq!(sounding(&text, step), whole);
+        }
+    }
+
+    #[test]
+    fn emissions_go_back_on_the_frames_they_came_from() {
+        let sound = emissions("ab");
+        let expanded = expand(sound, &[1, 4], 6 * FRAME - 10);
+        assert_eq!(expanded.frames, 6);
+        assert_eq!(expanded.samples, 6 * FRAME - 10);
+        assert_eq!(
+            expanded.best,
+            vec![u32::MAX, 1, u32::MAX, u32::MAX, 2, u32::MAX]
+        );
+        assert_eq!(&expanded.scores[3..6], &[-8.0, -0.01, -8.0]);
+        assert_eq!(&expanded.scores[12..15], &[-8.0, -8.0, -0.01]);
+        // A frame taken out reads as silence: the blank, and no gap.
+        assert_eq!(&expanded.scores[6..9], &[0.0, NEG, NEG]);
+        assert_eq!(expanded.gaps[2], NEG);
     }
 }
