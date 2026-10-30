@@ -295,4 +295,57 @@ describe("Slack agents administration", () => {
       slackAgentIntroText({ name: "Data Team", description: "Answers revenue questions." }, "UBOT"),
     ).toBe("Hi, I'm *Data Team*. Answers revenue questions.\nAsk me with <@UBOT> +data-team");
   });
+
+  test("only an organization admin opens an agent to anyone in Slack", async () => {
+    if (!available) return;
+    const install = await installation(`open-${Date.now()}`);
+    const scope = { accountId: install.accountId, workspaceId: install.home };
+    const workspaceAdmin = await headers(scope, "user:slack-agents-ws-admin", ["workspace:admin"]);
+    const organizationAdmin = await headers(scope, "user:slack-agents-org-admin", [
+      "workspace:admin",
+      "account:admin",
+    ]);
+    const base = `/v1/workspaces/${install.home}/integrations/slack/agents`;
+    const created = await app().request(base, {
+      method: "POST",
+      headers: workspaceAdmin,
+      body: JSON.stringify({
+        connectionId: install.connectionId,
+        name: "Front Desk",
+        description: "Answers anyone.",
+        avatar,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const { agent } = (await created.json()) as {
+      agent: { id: string; version: number; open: boolean };
+    };
+    // Off by default.
+    expect(agent.open).toBe(false);
+    const setOpen = (as: Record<string, string>, version: number, open: boolean) =>
+      app().request(`${base}/${agent.id}`, {
+        method: "PATCH",
+        headers: as,
+        body: JSON.stringify({ expectedVersion: version, open }),
+      });
+
+    // A workspace admin cannot turn it on, and nothing changes.
+    const refused = await setOpen(workspaceAdmin, agent.version, true);
+    expect(refused.status).toBe(403);
+    const [unchanged] = await shared!.admin<{ open: boolean; version: number }[]>`
+      select open, version from slack_agents where id = ${agent.id}`;
+    expect(unchanged).toEqual({ open: false, version: agent.version });
+
+    // An organization admin can.
+    const opened = await setOpen(organizationAdmin, agent.version, true);
+    expect(opened.status).toBe(200);
+    const openAgent = ((await opened.json()) as { agent: { open: boolean; version: number } })
+      .agent;
+    expect(openAgent.open).toBe(true);
+
+    // Any admin of its workspace can close it again.
+    const closed = await setOpen(workspaceAdmin, openAgent.version, false);
+    expect(closed.status).toBe(200);
+    expect(((await closed.json()) as { agent: { open: boolean } }).agent.open).toBe(false);
+  }, 90_000);
 });

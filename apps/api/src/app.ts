@@ -395,6 +395,7 @@ import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerSlackAgentRoutes } from "./routes/slack-agents";
+import { registerSlackAgentUpdateRoutes } from "./routes/slack-agent-updates";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
@@ -2513,6 +2514,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSlackTaskPolicyRoutes(app, routeDeps);
   registerSlackBotAccessRoutes(app, routeDeps);
   registerSlackAgentRoutes(app, routeDeps);
+  registerSlackAgentUpdateRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);

@@ -160,10 +160,27 @@ export const UpdateSlackAgentRequest = /* @__PURE__ */ defineSchema(() =>
       description: SlackAgentDescription.optional(),
       avatar: SessionAvatar.optional(),
       instructions: SlackAgentInstructions.optional(),
+      /**
+       * Anyone in Slack can use the agent. Only an organization admin can turn
+       * it on; an admin of the agent's workspace can turn it off.
+       */
+      open: z.boolean().optional(),
     })
     .strict(),
 );
 export type UpdateSlackAgentRequest = z.input<typeof UpdateSlackAgentRequest>;
+
+/** The label of the switch that opens an agent to anyone in Slack. */
+export const SLACK_AGENT_OPEN_LABEL = "Anyone in Slack can use this agent";
+
+/** What turning an agent open means, shown with the switch. */
+export function slackAgentOpenDisclosure(agentName: string, workspaceName: string): string {
+  const agent = agentName.trim() || "this agent";
+  const workspace = workspaceName.trim()
+    ? `the ${workspaceName.trim()} workspace`
+    : "its workspace";
+  return `Anyone in Slack can ask ${agent}. Its answers can use anything it can read in ${workspace} (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.`;
+}
 
 export const SlackAgentResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ agent: SlackAgent }),
