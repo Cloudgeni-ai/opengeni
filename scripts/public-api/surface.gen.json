@@ -26259,6 +26259,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.activeTurnId": "string! null",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
         "$.archiveVersion": "integer!",
@@ -26282,6 +26283,7 @@
         "$.inputWait.deadlineAt": "string!",
         "$.inputWait.reason": "string!",
         "$.lastSequence": "integer!",
+        "$.latestTurn": "ref(SessionListLatestTurn)? null",
         "$.model": "string?",
         "$.parentSessionId": "string! null",
         "$.pinVersion": "integer!",
@@ -26336,6 +26338,7 @@
         "$.pinned[]": "ref(SessionListEntry)",
         "$.pinnedTruncated": "boolean?",
         "$.projection": "const!=[\"\\\"summary\\\"\"]",
+        "$.sessionIdsApplied": "const?=[\"true\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(SessionListEntry)",
         "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
@@ -26344,6 +26347,18 @@
         "$.siteGroupsTruncated": "const?=[\"true\"]",
         "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
         "$.totals": "ref(SessionListTotals)?"
+      }
+    },
+    "SessionListLatestTurn": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.finishedAt": "string! null",
+        "$.id": "string!",
+        "$.startedAt": "string! null",
+        "$.status": "ref(SessionTurnStatus)!"
       }
     },
     "SessionListResponse": {
@@ -26362,6 +26377,7 @@
         "$.pinned": "array!",
         "$.pinned[]": "ref(Session)",
         "$.pinnedTruncated": "boolean?",
+        "$.sessionIdsApplied": "const?=[\"true\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(Session)",
         "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
@@ -32926,6 +32942,7 @@
       "ArtifactPinResponse": "type",
       "artifactViewerCapability": "value",
       "AssignableWorkspaceMemberRole": "type",
+      "AsUserOptions": "type",
       "asVaultClient": "value",
       "AtlassianBrowseItem": "type",
       "AtlassianBrowseResponse": "type",
@@ -33386,6 +33403,7 @@
       "EventTriggerInput": "type",
       "EventTriggerStatus": "type",
       "EventTypeDescriptor": "type",
+      "ExternalActorStatedMembership": "type",
       "ExternalAuthInteractiveRequest": "type",
       "ExternalAuthInteractiveResponse": "type",
       "ExternalAuthRunRequest": "type",
@@ -34227,6 +34245,7 @@
       "sessionListEntry": "value",
       "SessionListEntry": "type",
       "SessionListEntryResponse": "type",
+      "SessionListLatestTurn": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
       "SessionListTotals": "type",
@@ -42562,7 +42581,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ServiceContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "asUser": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"membership\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalActorStatedMembership\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "attachBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSessionAttachmentRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSessionAttachment\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

@@ -37,6 +37,7 @@ import {
   type CuaDesktopRuntime,
   type ListedWindow,
   type RunStepsOutcome,
+  WINDOWS_SET_VALUE_REFUSED,
 } from "./wire";
 import {
   dateFieldFormat,
@@ -512,6 +513,18 @@ export class CuaComputerBackend implements ComputerBackend {
                 false,
                 true,
               );
+            if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
+              // CUA resolved the token and refused before writing. It does
+              // not expose that element's native control identity. Matching
+              // a descendant by its rectangle is not a safe fallback: an
+              // omitted child or sibling can occupy the same rectangle.
+              throw new ComputerBackendError(
+                "unsupported",
+                "Windows would not set this element's value, so nothing was changed: if it is a text field, click into it and type the text instead",
+                false,
+                false,
+              );
+            }
             // CUA's own wording names its raw tools; say what the caller does.
             if (
               error instanceof ComputerBackendError &&

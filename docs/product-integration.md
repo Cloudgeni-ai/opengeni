@@ -229,6 +229,16 @@ permissions up front, and `updateExternalWorkspaceMember` with a new
 automatically. Explicit onboarding after a user's first request returns a `409`
 when its permissions differ from the automatic defaults; update instead.
 
+Products that already own their users' roles can skip that mirroring:
+`asUser(user, { source, membership: { permissions } })` states the user's
+permissions on every request, and the API makes the stored grant equal to them
+before it authorizes the request. It creates a missing member, writes only when
+the grant differs, applies the same ceiling and last-administrator rules as the
+explicit endpoints, and loses to a revoke that happened while the request was in
+flight. Work that runs later without a request uses the last stated grant.
+Removing a user is still an explicit revoke. See
+[state membership on each request](external-membership-operations.md#state-membership-on-each-request).
+
 ### Configure the agent
 
 Every session takes one `agent` object: `capabilities`, `identity`,
