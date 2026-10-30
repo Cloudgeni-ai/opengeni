@@ -42,29 +42,25 @@ import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui"
 
    One switch per provider says whether new chats share work between that
    provider's subscriptions. A rule that only matters while another is on
-   (personal fallback, the fallback order) is indented under it and shown
-   only then. On the Defaults scope each rule says which workspaces use it;
-   on a workspace each rule says whether it uses the default or was changed
-   there, with the default's value.
+   (the fallback order) is indented under it and shown only then. A person
+   turns their own subscription on per workspace on its own page (D-53), so
+   there is no separate personal-fallback rule. On the Defaults scope each
+   rule says which workspaces use it; on a workspace each rule says whether it
+   uses the default or was changed there, with the default's value.
    -------------------------------------------------------------------------- */
 
 /** The rules on these pages, in order. `providers` is changed on each provider's own page. */
 export type AccountRule =
   | "rotation"
   | "personalConnectionsAllowed"
-  | "personalFallbackAllowed"
   | "crossProviderFailover"
   | "fallbackOrder";
 
-type SwitchRule =
-  | "personalConnectionsAllowed"
-  | "personalFallbackAllowed"
-  | "crossProviderFailover";
+type SwitchRule = "personalConnectionsAllowed" | "crossProviderFailover";
 
 export const ACCOUNT_RULES: readonly AccountRule[] = [
   "rotation",
   "personalConnectionsAllowed",
-  "personalFallbackAllowed",
   "crossProviderFailover",
   "fallbackOrder",
 ];
@@ -76,11 +72,8 @@ const RULES: Record<AccountRule, { label: string; description: string }> = {
   },
   personalConnectionsAllowed: {
     label: "Personal subscriptions",
-    description: "People can connect their own subscriptions and use them in their own chats.",
-  },
-  personalFallbackAllowed: {
-    label: "Fall back to personal subscriptions",
-    description: "When shared subscriptions run out, people who opt in continue on their own.",
+    description:
+      "People can connect their own subscriptions and use them for their own messages, where they turn them on.",
   },
   crossProviderFailover: {
     label: "Switch models when subscriptions run out",
@@ -179,7 +172,6 @@ function failureMessage(caught: unknown): string {
 type RuleChange = {
   rotation?: Record<string, { mode: ModelAccountRotationMode }>;
   personalConnectionsAllowed?: boolean;
-  personalFallbackAllowed?: boolean;
   crossProviderFailover?: boolean;
 };
 
@@ -271,10 +263,7 @@ function AccountRuleRows({
           />
         );
       })}
-      {switchRow(
-        "personalConnectionsAllowed",
-        values.personalConnectionsAllowed ? switchRow("personalFallbackAllowed") : null,
-      )}
+      {switchRow("personalConnectionsAllowed")}
       {switchRow(
         "crossProviderFailover",
         values.crossProviderFailover ? (
@@ -670,9 +659,6 @@ export function accountRuleChanges(
       : []),
     ...(own("personalConnectionsAllowed")
       ? [`Personal subscriptions: ${onOff(values.personalConnectionsAllowed)}`]
-      : []),
-    ...(own("personalFallbackAllowed")
-      ? [`Personal fallback: ${onOff(values.personalFallbackAllowed)}`]
       : []),
     ...(own("crossProviderFailover")
       ? [`Switch models: ${onOff(values.crossProviderFailover)}`]

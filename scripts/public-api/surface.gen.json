@@ -9582,7 +9582,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/user-resource-authorities/:authorityId/grants",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.issueUserResourceGrant"
+        "OpenGeniClient.issueUserResourceGrant"
       ],
       "request": [
         "IssueUserResourceGrantRequest"
@@ -19632,7 +19632,7 @@
         "$.context": "ref(SessionTenancyVisibility)!",
         "$.expectedAuthorityEpoch": "integer? null",
         "$.mode": "ref(ManagedUserResourceGrantMode)!",
-        "$.resourceKind": "enum!=[\"\\\"connected_machine\\\"\",\"\\\"document\\\"\",\"\\\"rig\\\"\",\"\\\"variable_set\\\"\"]",
+        "$.resourceKind": "enum!=[\"\\\"connected_machine\\\"\",\"\\\"document\\\"\",\"\\\"rig\\\"\",\"\\\"subscription_connection\\\"\",\"\\\"variable_set\\\"\"]",
         "$.scope": "const!=[\"\\\"user\\\"\"]",
         "$.sessionId": "string? null",
         "$.workspaceSharedAcknowledged": "boolean?"
@@ -30645,7 +30645,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.action": "enum!=[\"\\\"connected_machine.use\\\"\",\"\\\"connection.use\\\"\",\"\\\"document.read\\\"\",\"\\\"rig.use\\\"\",\"\\\"variable_set.use\\\"\"]",
+        "$.action": "enum!=[\"\\\"connected_machine.use\\\"\",\"\\\"connection.use\\\"\",\"\\\"document.read\\\"\",\"\\\"rig.use\\\"\",\"\\\"subscription_connection.use\\\"\",\"\\\"variable_set.use\\\"\"]",
         "$.authorityEpoch": "integer! null",
         "$.context": "ref(SessionTenancyVisibility)!",
         "$.delegation": "ref(UserResourceDelegation)!",
@@ -30726,7 +30726,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"connected_machine\\\"\",\"\\\"connection\\\"\",\"\\\"document\\\"\",\"\\\"rig\\\"\",\"\\\"variable_set\\\"\"]"
+        "$": "enum=[\"\\\"connected_machine\\\"\",\"\\\"connection\\\"\",\"\\\"document\\\"\",\"\\\"rig\\\"\",\"\\\"subscription_connection\\\"\",\"\\\"variable_set\\\"\"]"
       }
     },
     "VaultAvailability": {
@@ -48690,6 +48690,9 @@
       ],
       "interaction": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniInteractionClient\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "issueUserResourceGrant": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"IssueUserResourceGrantRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UserResourceGrantMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "iterateOrganizationSessions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListOrganizationSessionsOptions\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"cursor\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Session\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSVoidKeyword\"},{\"type\":\"TSUndefinedKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"AsyncGenerator\",\"optional\":false,\"type\":\"Identifier\"}}}"

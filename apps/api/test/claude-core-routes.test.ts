@@ -729,4 +729,40 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
       ),
     ).rejects.toMatchObject({ status: 403 });
   });
+
+  test("a private account added from a shared workspace starts turned on there for its owner (D-53)", async () => {
+    const core = { connectedBySubjectId: subjectId };
+    // As the route does: the sign-in starts in the shared workspace and the
+    // account lives in the owner's Personal workspace.
+    const sharedScope = oauthScope(workspaceId);
+    const start = await startClaudeSubscriptionOAuth(
+      deps,
+      sharedScope,
+      { scope: "user" },
+      core,
+      personalWorkspaceId,
+    );
+    const complete = await completeClaudeSubscriptionOAuth(
+      deps,
+      sharedScope,
+      {
+        attemptId: start.attemptId,
+        code: "core-code#" + new URL(start.authorizationUrl).searchParams.get("state"),
+      },
+      async () => personalWorkspaceId,
+      claudeFetch(crypto.randomUUID(), "added-here@example.test"),
+      core,
+    );
+    expect(complete).toMatchObject({ connected: true, scope: "user" });
+    const grants = await shared!.admin<{ workspace_id: string; mode: string; context: string }[]>`
+      select grant_value.workspace_id::text, grant_value.mode, grant_value.context
+      from organization_user_resource_grants grant_value
+      join subscription_connections connection on connection.authority_id = grant_value.authority_id
+      where connection.id = ${complete.accountId}::uuid
+        and grant_value.action = 'subscription_connection.use' and grant_value.status = 'active'`;
+    // On where it was added, for the owner's own turns there; nowhere else.
+    expect(grants).toEqual([
+      { workspace_id: workspaceId, mode: "always", context: "workspace_shared" },
+    ]);
+  });
 });

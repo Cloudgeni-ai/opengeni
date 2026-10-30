@@ -200,7 +200,13 @@ const RULES: Rule[] = [
     method: "GET",
     pattern: /\/organizations\/:organizationId\/model-account-settings$/,
     text: () =>
-      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, whether personal accounts are allowed, and personal fallback, plus which ones are locked so workspaces cannot change them.",
+      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, and whether personal accounts are allowed, plus which ones are locked so workspaces cannot change them. The returned personal-fallback value is retired and changes nothing.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/organizations\/:organizationId\/me\/model-account-preferences$/,
+    text: () =>
+      "Retired: the personal-fallback opt-in no longer changes which account pays. To use your own subscription for the messages you send in a workspace, issue an always, workspace_shared grant on its subscription_connection user-resource authority in that workspace.",
   },
   {
     method: "PATCH",

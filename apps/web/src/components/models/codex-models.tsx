@@ -62,6 +62,7 @@ import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge
 import { Switch } from "@opengeni/react/ui/switch";
 import { UsageMeterGroup, UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
+import { OwnSubscriptionTurnsRow, type OwnTurnsPlace } from "./own-subscription-turns";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -87,6 +88,8 @@ export interface CodexPlaces {
   openConnect: () => void;
   openAccess: (accountId: string) => void;
   sharePersonal?: ((accountId: string) => void) | undefined;
+  /** Your own account, seen from a shared workspace: turn it on for your messages there. */
+  ownTurns?: OwnTurnsPlace | undefined;
   backToList: () => void;
 }
 
@@ -665,6 +668,14 @@ function CodexAccountDetail({
                 disabled={codex.busy}
                 onCheckedChange={(next) => void codex.setAllocator(account, next)}
               />
+              {places.ownTurns ? (
+                <OwnSubscriptionTurnsRow
+                  client={codex.client}
+                  place={places.ownTurns}
+                  connectionId={account.id}
+                  name={name}
+                />
+              ) : null}
               <SettingRow
                 label="Use extra credits"
                 description={CODEX_EXTRA_CREDITS_DESCRIPTION}

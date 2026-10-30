@@ -66,7 +66,6 @@ const legacyBrowserUnusedMethods = [
   // this standalone usage read stays available to SDK callers only.
   "organizationCodexAccountUsage",
   "rejectGoalRevision",
-  "revokeUserResourceGrant",
   "rollbackCompanyProfile",
   "rollbackGoalRevision",
   "setAtlassianLifecycle",
@@ -167,6 +166,9 @@ const retiredSettingsMethods = [
   "listWorkspaceInstructionPolicyOnboardingProposals",
   "rejectPreferenceRegistryProposal",
   "supersedePreferenceRegistry",
+  // The personal-fallback opt-in is retired (a person turns their own
+  // subscription on per workspace instead); the read stays for SDK callers.
+  "getModelAccountPreferences",
 ];
 
 // The web stopped calling the native Google Drive lifecycle methods when Drive

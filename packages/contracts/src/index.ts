@@ -1501,7 +1501,14 @@ export const SessionTenancyVisibility = /* @__PURE__ */ defineSchema(() =>
 
 export const UserResourceAuthorityScope = /* @__PURE__ */ defineSchema(() => z.literal("user"));
 export const UserResourceKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["connection", "document", "variable_set", "rig", "connected_machine"]),
+  z.enum([
+    "connection",
+    "document",
+    "variable_set",
+    "rig",
+    "connected_machine",
+    "subscription_connection",
+  ]),
 );
 export type UserResourceKind = z.infer<typeof UserResourceKind>;
 
@@ -1511,6 +1518,9 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
   variable_set: "variable_set.use",
   rig: "rig.use",
   connected_machine: "connected_machine.use",
+  // An `always` grant in a workspace turns a person's own Codex, Claude or
+  // SuperGrok subscription on for their own turns there.
+  subscription_connection: "subscription_connection.use",
 } as const satisfies Record<UserResourceKind, string>;
 
 export const UserResourceLifecycleGrantMode = /* @__PURE__ */ defineSchema(() =>
@@ -1586,6 +1596,7 @@ export const UserResourceAuthorityGrant = /* @__PURE__ */ defineSchema(() =>
       "variable_set.use",
       "rig.use",
       "connected_machine.use",
+      "subscription_connection.use",
     ]),
     mode: UserResourceLifecycleGrantMode,
     context: SessionTenancyVisibility,

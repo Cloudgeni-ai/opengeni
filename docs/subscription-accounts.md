@@ -144,8 +144,10 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 ### Settings and overrides
 
 - **SUB-SET-01** Rotation (Primary first or spread), cross-provider failover
-  (on or off, plus the fallback order), personal connections allowed, and
-  personal fallback allowed are organization settings with defaults.
+  (on or off, plus the fallback order) and personal connections allowed are
+  organization settings with defaults. The former "personal fallback allowed"
+  setting and each person's fallback opt-in are retired (D-53): both are
+  still stored and returned for compatibility, but neither changes selection.
   Verification: `packages/db/test/subscription-settings-postgres.test.ts`
   (organization read and write as the application role),
   `apps/api/test/model-account-settings-routes-postgres.test.ts` (routes).
@@ -202,13 +204,19 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-ELIG-04** Credential health and allocator eligibility are separate.
   Reconnecting restores health without silently changing allocator
   eligibility. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-ELIG-05** A personal connection serves only its owner's own work in
-  their private sessions and Personal workspace, or their own newly accepted
-  work after an explicit choice in a shared session they participate in. The
-  account owner need not be the session creator. Shared consent is restricted
-  to the exact session and connection; another sender never inherits it.
-  Live membership, resource generation and effective personal-account policy
-  still apply. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+- **SUB-ELIG-05** A personal connection serves only its owner's own work: in
+  their Personal workspace, or their own newly accepted turns in another
+  workspace after an explicit choice or where they turned the account on for
+  that workspace (D-53), in shared and private sessions alike. The account
+  owner need not be the session creator. Turned on is the owner's standing
+  `subscription_connection.use` grant for that workspace; acceptance freezes
+  it, or an explicit choice, into the turn as consent restricted to that exact
+  session and connection, so another sender never inherits it. A turn without
+  a signed-in initiating person (scheduled and service turns) gets no such
+  consent. Live membership, resource generation and effective
+  personal-account policy still apply. Verification:
+  `packages/db/test/helpers/subscription-core-conformance.ts`,
+  `packages/db/test/subscription-shared-personal-choice-postgres.test.ts`.
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
   counts as able to serve. Ordinary primary/spread ordering applies equally
@@ -217,16 +225,21 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 
 ### Selection
 
-- **SUB-SEL-01** Automatic selection prefers organization connections.
+- **SUB-SEL-01** For each model, automatic selection uses included allowance
+  before extra credits. Within that it tries the turn person's own account
+  turned on where the turn runs first (D-53), then the administrators'
+  primary account, then the workspace's own accounts, then the
+  organization's and other workspaces' accounts.
   Verification: `packages/subscriptions/test/reference-conformance.test.ts`.
 - **SUB-SEL-02** A connected personal account participates automatically in
-  its owner's Personal workspace. In other workspaces, private sessions need
-  an explicit account choice or permitted, per-person fallback opt-in (off by
-  default). Live ownership, organization permission and accepted-turn personal
-  authority remain required in every case (D-28). In a shared session a person
-  may explicitly choose their own personal account, but shared visibility
-  never permits automatic personal fallback. Already accepted work keeps its
-  frozen pool; a new choice cannot grant it missing authority.
+  its owner's Personal workspace, and in another workspace only for its
+  owner's own turns where they turned it on (D-53). An account added from a
+  shared workspace starts turned on there; its page in each workspace turns
+  it on or off, effective from the next accepted turn. Anywhere else it serves
+  only an explicit account choice. Live ownership, organization permission
+  and accepted-turn personal authority remain required in every case (D-28).
+  Already accepted work keeps its frozen pool; a new choice cannot grant it
+  missing authority.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
@@ -254,7 +267,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 ### Stickiness and the prompt cache
 
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
-  the message. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+  the message. The exception is a personal account, which serves only its
+  owner's own turns (SUB-ELIG-05): another sender's turn moves off it.
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
   across turns, senders, goal continuations, scheduled runs on the same session
   and recovery. Child sessions and new scheduled sessions have their own prompt
@@ -276,9 +291,10 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
-  is out of scope for previously accepted private work (SUB-STICK-03). A new
-  human acceptance may capture the owner's explicit shared-session choice
-  under SUB-ELIG-05; merely sharing a session never rewrites an accepted pool.
+  is out of scope for previously accepted private work (SUB-STICK-03). The
+  owner's next own turn may use it again under SUB-ELIG-05 (an explicit
+  choice, or the account turned on in that workspace); merely sharing a
+  session never rewrites an accepted pool.
   Otherwise it moves to an eligible organization account, or waits if none can serve.
   Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 
@@ -484,7 +500,7 @@ delivered as separate pull requests in roughly this order.
 | `provider-migration` | Claude and SuperGrok moved onto the core, deleting the generic duplicate paths. |
 | `cache-stickiness` | Session account binding, cache-coldness prediction and re-selection points. |
 | `failover` | Automatic same-provider and cross-provider failover, including mid-turn continuation and Codex remote-compaction sessions. |
-| `personal-connections` | Person-scoped connections for every provider, explicit choice, opt-in fallback and the organization switch. |
+| `personal-connections` | Person-scoped connections for every provider, explicit choice, turning one on per workspace (D-53) and the organization switch. |
 | `consumers` | Compaction, transcription, realtime, media, tool gateway, billing and API-key connectors on the core, plus the no-bypass check. |
 | `product-surface` | Shared account rows, scope and settings screens with effective values, the organization overview, session indicator and waiting states. |
 | `rollout` | Shadow comparison, per-provider switch, rollback and removal of compatibility aliases. |
@@ -550,6 +566,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-48 | 2026-10-13 | Finish-line implementation scope: chat-turn renewal is a lease ownership/liveness check, not a second authorization system; operation leases retain their existing extra access check. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
 | D-49 | 2026-10-14 | The product owner decided that a workspace administrator connects subscription accounts for their own workspace without being an organization administrator (SUB-OWN-09). Before, only an organization administrator could create any new shared connection, so a workspace administrator saw providers they could not add. The workspace's own account is exactly the shape an organization administrator already created from a workspace route, so selection, pools and settings are unchanged, and organization ownership, visibility and scope changes stay with the organization (SUB-OWN-01/04). |
 | D-50 | 2026-10-22 | The product owner decided that every connection has exactly one owner (the organization, one shared workspace, or one person) and serves exactly where it reaches (SUB-OWN-01, SUB-OWN-04). This retires the per-workspace "inference pool" split, where one connection could sit in a workspace twice, once as the workspace's own copy and once as the organization's, each with its own on/off switch; the per-workspace preference (`providers.<id>.inferenceSource` and the older `useOrganizationAccounts`) that chose between those copies; and the "Set aside" state it produced. A connection has one on/off switch. A workspace's own connection reaches only that workspace; making it serve more workspaces makes it the organization's. Migration 0907 keeps everyone's access exactly as it was: a workspace that used a connection keeps it, a workspace that had it switched off or excluded by its preference loses it from the connection's reach (an organization-wide connection becomes a list of the workspaces that used it, still reaching workspaces created later), and a connection whose only use was as one workspace's own copy becomes that workspace's. A connection that was switched off everywhere keeps its listed reach, so switching it on serves where it was meant to. The assignment-policy table is no longer read or written; it is emptied here and dropped in a later contract step. |
+| D-53 | 2026-10-30 | The product owner decided that a turn uses its person's own subscription first, where they turned it on (SUB-SEL-01, SUB-SEL-02, SUB-ELIG-05). A person's own Codex, Claude or SuperGrok account is used automatically in their Personal workspace and, in any other workspace, for the turns they themselves send there once they turn it on for that workspace, in shared and Only me chats alike, before the organization's accounts. Other people's turns never use it. Turned on is the owner's standing `subscription_connection.use` user-resource grant for that workspace, so it reuses the existing personal-resource authority, revocation and organization veto instead of a new setting; an account added from a shared workspace starts turned on there. Acceptance freezes it into the turn as consent restricted to that session and connection (the same shape as an explicit shared-session choice, at most one account per provider per turn), and in a shared chat the database refuses an automatic binding to a personal account without it. Turning it off applies from the next accepted turn. Turns without a signed-in initiating person, such as scheduled and service turns, never use it. This supersedes D-03, D-12, D-27 and D-28's opt-in path and D-42's personal-fallback order: the per-person fallback opt-in and the organization's "personal fallback allowed" setting are retired, still stored and returned but read by nothing. Existing opt-ins are deliberately not converted into grants, because that would silently widen where an account is used, from Only me chats after shared accounts ran out to every turn the person sends. |
 
 ### Open decisions
 

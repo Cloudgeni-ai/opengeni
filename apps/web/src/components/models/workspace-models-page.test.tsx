@@ -2379,7 +2379,7 @@ describe("One Models page for the organization and the workspace", () => {
     },
   ];
   const OWN_NOTE =
-    "It will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself. Nobody else can use it.";
+    "It will be yours. It pays for your Personal workspace and for the messages you send in Design preview, where it starts turned on. Nobody else can use it.";
 
   test("a shared workspace's member connects their own subscriptions right here", async () => {
     workspaceSettingsAdmin = false;

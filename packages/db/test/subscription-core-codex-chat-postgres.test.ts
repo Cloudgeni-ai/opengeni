@@ -887,13 +887,37 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       ),
     ).rejects.toThrow();
 
-    // A private session of the owner in a shared workspace is their own work.
+    // A private session of the owner in a shared workspace is their own work,
+    // but automatic selection uses their account there only once they turn
+    // it on in that workspace (D-53); until then it serves an explicit choice.
     const privateTurn = await runningTurn(org, {
       workspaceId: org.sharedWorkspaceId,
       visibility: "user_private",
       personalAuthority: true,
     });
-    expect(await place(privateTurn)).toMatchObject({ kind: "run", connectionId: personal });
+    expect(await place(privateTurn)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+    });
+    await shared!.admin`insert into organization_user_resource_grants (
+        account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+      )
+      select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+        ${org.sharedWorkspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+      from subscription_connections connection where connection.id = ${personal}::uuid`;
+    // Acceptance itself freezes the turned-on account for the owner's own turn.
+    const turnedOn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      visibility: "user_private",
+    });
+    expect(turnedOn.identity.acceptedAuthorityV2.personal).toEqual([
+      expect.objectContaining({
+        provider: "codex",
+        ownerMembershipId: org.ownerMembershipId,
+        sharedSessionChoice: { sessionId: turnedOn.identity.sessionId, connectionId: personal },
+      }),
+    ]);
+    expect(await place(turnedOn)).toMatchObject({ kind: "run", connectionId: personal });
 
     // A service turn in the owner's Personal workspace has no personal authority.
     const service = await runningTurn(org, {

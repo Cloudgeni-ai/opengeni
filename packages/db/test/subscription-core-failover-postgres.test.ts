@@ -115,6 +115,23 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
+/** The owner turns their own subscription on for their turns in a workspace (D-53). */
+async function turnOn(connectionId: string, workspaceId: string): Promise<void> {
+  await fixture.admin`insert into organization_user_resource_grants (
+      account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+    )
+    select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+      ${workspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+    from subscription_connections connection where connection.id = ${connectionId}::uuid`;
+}
+
+async function turnOff(workspaceId: string): Promise<void> {
+  await fixture.admin`update organization_user_resource_grants
+    set status = 'revoked', revoked_at = clock_timestamp()
+    where workspace_id = ${workspaceId}::uuid and action = 'subscription_connection.use'
+      and status = 'active'`;
+}
+
 describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role", () => {
   test("sharing a running private continuation preserves learning through failover and Retry", async () => {
     const org = await fixture.organization();
@@ -920,58 +937,54 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     ).toBeNull();
   });
 
-  test("D-12/D-28 personal home precedes provider fallback; target personal requires its own frozen authority", async () => {
+  test("D-53 own subscriptions turned on here come first; failover reaches only own turned-on targets", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
     const ownHome = await fixture.connection(org, home, { personal: true });
     const ownTarget = await fixture.connection(org, target, { personal: true });
     const sharedTarget = await fixture.connection(org, target);
-    await fixture.exhausted(org.accountId, source);
-    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true) on conflict do nothing`;
+    await turnOn(ownHome, org.workspaceId);
+    await turnOn(ownTarget, org.workspaceId);
     const work = await fixture.turn(org, { private: true });
+    // Each provider freezes the one account turned on here, for this session.
     expect(
-      work.identity.acceptedAuthorityV2.personal.map((value) => String(value.provider)),
-    ).toContain(home.adapter.provider);
-    expect(
-      work.identity.acceptedAuthorityV2.personal.map((value) => String(value.provider)),
-    ).toContain(target.adapter.provider);
+      Object.fromEntries(
+        work.identity.acceptedAuthorityV2.personal.map((value) => [
+          String(value.provider),
+          value.sharedSessionChoice,
+        ]),
+      ),
+    ).toEqual({
+      [home.adapter.provider]: { sessionId: work.identity.sessionId, connectionId: ownHome },
+      [target.adapter.provider]: { sessionId: work.identity.sessionId, connectionId: ownTarget },
+    });
+    // Your own plan comes first even while the shared account could serve.
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       connectionId: ownHome,
       personal: true,
     });
     await fixture.release(work);
+    await fixture.exhausted(org.accountId, source);
     await fixture.exhausted(org.accountId, ownHome);
-    await fixture.pin(org, work, target.adapter.provider, ownTarget, "target/model");
+    // Failover prefers your own turned-on target over the shared one too.
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       connectionId: ownTarget,
       personal: true,
     });
-    const { TurnExecutionPolicyV1 } = await import("@opengeni/contracts");
-    const [row] = await fixture.admin<{ metadata: Record<string, unknown> }[]>`
-      select metadata from session_turns where id = ${work.identity.turnId}::uuid`;
-    const policy = TurnExecutionPolicyV1.parse({
-      ...(row!.metadata.turnExecutionPolicyV1 as object),
-      productModelId: "target/model",
-      providerId: target.adapter.modelPolicyProviderId,
-      upstreamModelId: "target-upstream",
-      reasoningEffort: "medium",
-    });
-    expect(
-      await recordServing(fixture.client.db, {
-        ...work.identity,
-        ...work,
-        policy,
-        connectionId: ownTarget,
-        reason: "failover_cross_provider",
-      }),
-    ).toMatchObject({ accepted: true });
     await fixture.release(work);
-    await fixture.admin`update subscription_person_preferences set personal_fallback_opt_in = false where account_id = ${org.accountId}::uuid`;
-    expect(await place(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
-    // Personal workspace participation does not require fallback opt-in (D-28).
+    // Turned off here: the next turn's own accounts serve explicit choices only.
+    await turnOff(org.workspaceId);
+    const next = await fixture.turn(org, { private: true });
+    expect(
+      next.identity.acceptedAuthorityV2.personal.some((value) => value.sharedSessionChoice),
+    ).toBe(false);
+    expect(await evaluate(fixture.client.db, home, next)).toMatchObject({
+      kind: "run",
+      connectionId: sharedTarget,
+    });
+    // The Personal workspace needs no switch (D-28).
     const personal = await fixture.turn(org, { workspaceId: org.personalWorkspaceId });
     await fixture.exhausted(org.accountId, sharedTarget);
     expect(await place(fixture.client.db, home, personal)).toMatchObject({
@@ -982,13 +995,12 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await evaluate(fixture.client.db, home, sharedWork)).toMatchObject({ kind: "wait" });
   });
 
-  test("SUB-STICK-02 D-27/D-42 opt-out retains only an existing warm automatic personal fallback", async () => {
+  test("SUB-STICK-02 D-27/D-53 turning your own plan off keeps only a warm automatic Only me binding", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
     const personal = await fixture.connection(org, target, { personal: true });
     await fixture.exhausted(org.accountId, source);
-    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true)`;
+    await turnOn(personal, org.workspaceId);
     const work = await fixture.turn(org, { private: true });
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
@@ -1013,8 +1025,8 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
         reason: "failover_cross_provider",
       }),
     ).toMatchObject({ accepted: true });
-    await fixture.admin`update subscription_person_preferences set personal_fallback_opt_in = false where account_id = ${org.accountId}::uuid`;
-    // An already placed attempt also keeps its exact lease after opting out.
+    await turnOff(org.workspaceId);
+    // An already accepted turn keeps its frozen authority after turning off.
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "run",
       connectionId: personal,
@@ -1030,7 +1042,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(
       await evaluate(fixture.client.db, home, { ...next, now: new Date(Date.now() + 25 * 60_000) }),
     ).toMatchObject({ kind: "run", connectionId: source });
-    // Unlike an opt-out, revocation of the exact frozen authority is immediate.
+    // Unlike turning it off, revoking the exact frozen authority is immediate.
     await fixture.admin`update organization_user_resource_authorities set status = 'revoked', revoked_at = now()
       where resource_id = ${personal}::uuid`;
     expect(await place(fixture.client.db, home, next)).toMatchObject({ kind: "wait" });
@@ -1042,9 +1054,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     await fixture.exhausted(org.accountId, source);
     // Accept before the target personal account exists: it cannot be captured.
     const work = await fixture.turn(org, { private: true });
-    await fixture.connection(org, target, { personal: true });
-    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true) on conflict do nothing`;
+    await turnOn(await fixture.connection(org, target, { personal: true }), org.workspaceId);
     expect(
       work.identity.acceptedAuthorityV2.personal.some(
         (value) => value.provider === target.adapter.provider,

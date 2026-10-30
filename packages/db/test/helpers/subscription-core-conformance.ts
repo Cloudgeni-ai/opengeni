@@ -707,6 +707,11 @@ export function describeSubscriptionCoreConformance<Credential>(
       personalAuthority?: boolean | { authorityGeneration: number };
       /** The membership the frozen personal entry names (default: the owner's). */
       personalMembershipId?: string;
+      /**
+       * The person's own account they turned on in this workspace (D-53): the
+       * frozen entry is restricted to this session and that connection.
+       */
+      turnedOn?: string;
       model?: { productModelId: string; upstreamModelId: string };
       frozenUpstreamModel?: boolean;
       /** The next turn of this idle session instead of a new session (see `nextTurn`). */
@@ -822,6 +827,14 @@ export function describeSubscriptionCoreConformance<Credential>(
                       input.personalAuthority === true
                         ? 1
                         : input.personalAuthority.authorityGeneration,
+                    ...(input.turnedOn
+                      ? {
+                          sharedSessionChoice: {
+                            sessionId: session.id,
+                            connectionId: input.turnedOn,
+                          },
+                        }
+                      : {}),
                   },
                 ],
         })}::jsonb
@@ -877,6 +890,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       initiator?: "owner" | "service" | { subjectId: string };
       model?: { productModelId: string; upstreamModelId: string };
       personalAuthority?: boolean;
+      turnedOn?: string;
       /** Runs while the session is idle between the two turns. */
       between?: () => Promise<void>;
     } = {},
@@ -920,6 +934,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       ...(next.personalAuthority !== undefined
         ? { personalAuthority: next.personalAuthority }
         : {}),
+      ...(next.turnedOn ? { turnedOn: next.turnedOn } : {}),
       model:
         next.model ??
         subject.models.find((model) => model.productModelId === previous.productModelId)!,
@@ -1534,9 +1549,15 @@ export function describeSubscriptionCoreConformance<Credential>(
       await foreignPersonalConnection(org);
       const cases: Array<[string, Parameters<typeof runningTurn>[1], "run" | "wait"]> = [
         [
-          "private session with frozen authority",
-          { visibility: "user_private", personalAuthority: true },
+          "private session with the account turned on here",
+          { visibility: "user_private", personalAuthority: true, turnedOn: personal },
           "run",
+        ],
+        [
+          // In a shared workspace the owner entry serves explicit pins only.
+          "private session with the owner entry but not turned on here",
+          { visibility: "user_private", personalAuthority: true },
+          "wait",
         ],
         [
           "Personal workspace with frozen authority",
@@ -1550,7 +1571,11 @@ export function describeSubscriptionCoreConformance<Credential>(
         ],
         [
           "private session with a future authority generation",
-          { visibility: "user_private", personalAuthority: { authorityGeneration: 2 } },
+          {
+            visibility: "user_private",
+            personalAuthority: { authorityGeneration: 2 },
+            turnedOn: personal,
+          },
           "wait",
         ],
         [
@@ -1559,8 +1584,18 @@ export function describeSubscriptionCoreConformance<Credential>(
           "wait",
         ],
         [
+          "the owner's own turn in a shared session with the account turned on here",
+          { visibility: "workspace_shared", personalAuthority: true, turnedOn: personal },
+          "run",
+        ],
+        [
           "service turn in the owner's private session",
-          { visibility: "user_private", personalAuthority: true, initiator: "service" },
+          {
+            visibility: "user_private",
+            personalAuthority: true,
+            turnedOn: personal,
+            initiator: "service",
+          },
           "wait",
         ],
         ["ownerless session", { owner: "none" }, "wait"],
@@ -1629,7 +1664,11 @@ export function describeSubscriptionCoreConformance<Credential>(
     test("SUB-ACCESS-05 SUB-ACCESS-06: offboarding stops a leased personal turn before its next credential read", async () => {
       const org = await organization();
       const connectionId = await personalConnection(org, `offboard-${crypto.randomUUID()}`);
-      const turn = await runningTurn(org, { visibility: "user_private", personalAuthority: true });
+      const turn = await runningTurn(org, {
+        visibility: "user_private",
+        personalAuthority: true,
+        turnedOn: connectionId,
+      });
       expect(await placeChecked(turn)).toMatchObject({ kind: "run", connectionId, personal: true });
       // Shared capacity exists, but must not resurrect a turn whose owner lost access.
       await sharedConnection(org, `offboard-shared-${crypto.randomUUID()}`);
@@ -1655,23 +1694,43 @@ export function describeSubscriptionCoreConformance<Credential>(
             ? `wait:${placed.reason}`
             : placed.kind;
       };
-      const privateTurn = (org: Org, extra: Parameters<typeof runningTurn>[1] = {}) =>
-        runningTurn(org, { visibility: "user_private", personalAuthority: true, ...extra });
+      // Each of the owner's accounts is turned on in the shared workspace (D-53).
+      const privateTurn = (
+        org: Org,
+        turnedOn: string,
+        extra: Parameters<typeof runningTurn>[1] = {},
+      ) =>
+        runningTurn(org, {
+          visibility: "user_private",
+          personalAuthority: true,
+          turnedOn,
+          ...extra,
+        });
       // Exact owner membership: an entry naming any other membership is not this connection's.
       const named = await organization();
-      await personalConnection(named, `named-${crypto.randomUUID()}`);
-      expect(await outcome(await privateTurn(named))).toBe("run:personal");
+      const namedConnection = await personalConnection(named, `named-${crypto.randomUUID()}`);
+      expect(await outcome(await privateTurn(named, namedConnection))).toBe("run:personal");
       expect(
-        await outcome(await privateTurn(named, { personalMembershipId: crypto.randomUUID() })),
+        await outcome(
+          await privateTurn(named, namedConnection, { personalMembershipId: crypto.randomUUID() }),
+        ),
       ).toBe("wait:no_eligible_capacity");
       // Current authority generation: the connection moved to generation 2.
       const moved = await organization();
-      await personalConnection(moved, `moved-${crypto.randomUUID()}`, 2);
+      const movedConnection = await personalConnection(moved, `moved-${crypto.randomUUID()}`, 2);
       expect(
-        await outcome(await privateTurn(moved, { personalAuthority: { authorityGeneration: 1 } })),
+        await outcome(
+          await privateTurn(moved, movedConnection, {
+            personalAuthority: { authorityGeneration: 1 },
+          }),
+        ),
       ).toBe("wait:no_eligible_capacity");
       expect(
-        await outcome(await privateTurn(moved, { personalAuthority: { authorityGeneration: 2 } })),
+        await outcome(
+          await privateTurn(moved, movedConnection, {
+            personalAuthority: { authorityGeneration: 2 },
+          }),
+        ),
       ).toBe("run:personal");
       // A revoked resource authority.
       const revoked = await organization();
@@ -1680,14 +1739,18 @@ export function describeSubscriptionCoreConformance<Credential>(
         update organization_user_resource_authorities
         set status = 'revoked', revoked_at = clock_timestamp()
         where account_id = ${revoked.accountId}::uuid and resource_id = ${revokedConnection}::uuid`;
-      expect(await outcome(await privateTurn(revoked))).toBe("wait:no_eligible_capacity");
+      expect(await outcome(await privateTurn(revoked, revokedConnection))).toBe(
+        "wait:no_eligible_capacity",
+      );
       // The organization turned personal connections off.
       const off = await organization();
-      await personalConnection(off, `off-${crypto.randomUUID()}`);
+      const offConnection = await personalConnection(off, `off-${crypto.randomUUID()}`);
       await admin()`
         update subscription_settings set personal_connections_allowed = false
         where account_id = ${off.accountId}::uuid and workspace_id is null`;
-      expect(await outcome(await privateTurn(off))).toBe("wait:no_eligible_capacity");
+      expect(await outcome(await privateTurn(off, offConnection))).toBe(
+        "wait:no_eligible_capacity",
+      );
     });
 
     test("spreads across connections, and a primary is honoured or refused by the binding", async () => {
@@ -2093,10 +2156,15 @@ export function describeSubscriptionCoreConformance<Credential>(
         org,
         `stick-shared-${crypto.randomUUID()}`,
       );
-      // Only the owner's personal account can serve the private session at first.
+      // Only the owner's personal account, turned on in this workspace, can
+      // serve the private session at first.
       await admin()`update subscription_connections set allocator_enabled = false
         where id = ${organizationAccount}::uuid`;
-      const first = await runningTurn(org, { visibility: "user_private", personalAuthority: true });
+      const first = await runningTurn(org, {
+        visibility: "user_private",
+        personalAuthority: true,
+        turnedOn: personal,
+      });
       expect(await placeChecked(first)).toMatchObject({
         kind: "run",
         connectionId: personal,
@@ -2105,15 +2173,16 @@ export function describeSubscriptionCoreConformance<Credential>(
       await admin()`update subscription_connections set allocator_enabled = true
         where id = ${organizationAccount}::uuid`;
       // Still private and warm: the session keeps the personal account.
-      const second = await nextTurn(org, first, { personalAuthority: true });
+      const second = await nextTurn(org, first, { personalAuthority: true, turnedOn: personal });
       expect(await placeChecked(second)).toMatchObject({
         kind: "run",
         connectionId: personal,
         switch: "sticky",
         reselection: null,
       });
-      // Shared while its cache is warm: the personal account is out of scope
-      // for the session now, whatever authority the turn carries.
+      // Shared while its cache is warm: the owner entry no longer reaches the
+      // personal account. Only a turn whose sender froze their own account
+      // turned on here would keep it (D-53).
       const share = async () => {
         const [session] = await admin()<{ authority_epoch: number }[]>`
           select authority_epoch::int as authority_epoch from sessions
@@ -5108,7 +5177,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(await placeChecked(second)).toMatchObject({ kind: "run", personal: false });
       });
 
-      test("SUB-SEL-02: a person reads and changes only their own fallback opt-in, and placement honours it", async () => {
+      test("SUB-SEL-02: a person reads and changes only their own deprecated fallback opt-in, and placement ignores it", async () => {
         const org = await organization();
         const member = await workspaceMember(org);
         const owner = { accountId: org.accountId, subjectId: org.ownerSubjectId };
@@ -5209,8 +5278,9 @@ export function describeSubscriptionCoreConformance<Credential>(
           ).outcome,
         ).toBe("not_member");
 
-        // Placement: with only a personal account, the owner's private turn
-        // waits while they have not opted in, and runs on it once they have.
+        // Placement ignores the opt-in (D-53): with only a personal account,
+        // the owner's private turn in a shared workspace waits either way, and
+        // a turn runs on it once the account is turned on here.
         const fallback = await organization();
         const personal = await personalConnection(fallback, `opt-in-${crypto.randomUUID()}`);
         const fallbackOwner = { accountId: fallback.accountId, subjectId: fallback.ownerSubjectId };
@@ -5227,12 +5297,19 @@ export function describeSubscriptionCoreConformance<Credential>(
           ...fallbackOwner,
           personalFallbackOptIn: true,
         });
-        expect(await placeChecked(waiting)).toMatchObject({
+        expect(await placeChecked(waiting)).toMatchObject({ kind: "wait" });
+        const turnedOn = await runningTurn(fallback, {
+          visibility: "user_private",
+          personalAuthority: true,
+          turnedOn: personal,
+        });
+        expect(await placeChecked(turnedOn)).toMatchObject({
           kind: "run",
           connectionId: personal,
           personal: true,
         });
-        // The picker reports the opt-in and the effective settings.
+        // The picker still reports the stored opt-in and the effective
+        // settings, for API compatibility.
         expect((await picker(waiting, fallback.ownerSubjectId))!.personal).toEqual({
           connectionsAllowed: true,
           fallbackAllowed: true,
@@ -5293,7 +5370,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         }
       });
 
-      test("SUB-WAIT-02, SUB-SEL-04: a choice for a waiting turn wakes it, and turning the fallback opt-in on wakes only the person's own waiting turns", async () => {
+      test("SUB-WAIT-02, SUB-SEL-04: a choice for a waiting turn wakes it; the deprecated fallback opt-in wakes nothing", async () => {
         const armWaiter = async (org: Org, turn: Turn): Promise<string> => {
           const tenant = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
           const waiter = await withRlsContext(db(), tenant, (tx) =>
@@ -5337,59 +5414,19 @@ export function describeSubscriptionCoreConformance<Credential>(
         await deliverSubscriptionCoreProviderWakes(db(), chosen.wakes);
         expect(await revisionOf(waiter)).toBe(2);
 
-        // Only a personal account, and the owner has not opted in: the
-        // owner's private turn waits. Turning the opt-in on wakes it.
+        // Only a personal account, not turned on here: the owner's private
+        // turn waits. The opt-in no longer changes placement (D-53), so
+        // saving it wakes nothing and the turn keeps waiting.
         const fallback = await organization();
-        const personal = await personalConnection(fallback, `wake-personal-${crypto.randomUUID()}`);
+        await personalConnection(fallback, `wake-personal-${crypto.randomUUID()}`);
         const owner = { accountId: fallback.accountId, subjectId: fallback.ownerSubjectId };
-        await writeSubscriptionPersonPreferences(db(), { ...owner, personalFallbackOptIn: false });
         const waiting = await runningTurn(fallback, {
           visibility: "user_private",
           personalAuthority: true,
         });
         expect(await placeChecked(waiting)).toMatchObject({ kind: "wait" });
         const fallbackWaiter = await armWaiter(fallback, waiting);
-        // Waiting turns that the person's accounts can never serve: an
-        // ownerless session and a colleague's session. Placement offers a
-        // personal account only to its owner's sessions, so the opt-in wake
-        // leaves them alone.
-        const ownerless = await runningTurn(fallback, { owner: "none" });
-        const ownerlessWaiter = await armWaiter(fallback, ownerless);
-        const colleague = await workspaceMember(fallback);
-        const [colleagueMembership] = await admin()<{ id: string }[]>`
-          select id::text as id from organization_memberships
-          where account_id = ${fallback.accountId}::uuid and subject_id = ${colleague}`;
-        const theirs = await runningTurn(fallback, { visibility: "workspace_shared" });
-        // Fixture only: hand the session to the colleague. Session authority
-        // is guarded by triggers, which this superuser transaction skips.
-        await admin().begin(async (fixture) => {
-          await fixture`set local session_replication_role = replica`;
-          await fixture`update sessions
-            set owner_subject_id = ${colleague},
-              owner_organization_membership_id = ${colleagueMembership!.id}::uuid
-            where id = ${theirs.identity.sessionId}::uuid`;
-        });
-        const colleagueWaiter = await armWaiter(fallback, theirs);
-        const on = await writeSubscriptionPersonPreferences(
-          db(),
-          { ...owner, personalFallbackOptIn: true },
-          providers,
-        );
-        expect(on.outcome).toBe("written");
-        const wakes = on.outcome === "written" ? on.wakes : [];
-        expect(wakes.map((wake) => wake.provider)).toEqual([providerId]);
-        expect(wakes.map((wake) => wake.ownerMembershipId)).toEqual([fallback.ownerMembershipId]);
-        await deliverSubscriptionCoreProviderWakes(db(), wakes);
-        expect(await revisionOf(fallbackWaiter)).toBe(2);
-        expect(await revisionOf(ownerlessWaiter)).toBe(1);
-        expect(await revisionOf(colleagueWaiter)).toBe(1);
-        expect(await placeChecked(waiting)).toMatchObject({
-          kind: "run",
-          connectionId: personal,
-          personal: true,
-        });
-        // Saving the same value again, or turning it off, wakes nothing (D-27).
-        for (const optIn of [true, false]) {
+        for (const optIn of [true, true, false]) {
           const again = await writeSubscriptionPersonPreferences(
             db(),
             { ...owner, personalFallbackOptIn: optIn },
@@ -5397,6 +5434,8 @@ export function describeSubscriptionCoreConformance<Credential>(
           );
           expect(again.outcome === "written" ? again.wakes : null).toEqual([]);
         }
+        expect(await revisionOf(fallbackWaiter)).toBe(1);
+        expect(await placeChecked(waiting)).toMatchObject({ kind: "wait" });
       });
 
       test("concurrent choices and placements serialize on the binding and never lose a choice", async () => {

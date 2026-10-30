@@ -25,6 +25,7 @@ const LIST_PERMISSIONS = {
   variable_set: ["variable-sets:list"],
   rig: ["rigs:use"],
   connected_machine: ["enrollments:read"],
+  subscription_connection: ["connections:read"],
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;
 
 const ISSUE_PERMISSIONS = {
@@ -33,6 +34,7 @@ const ISSUE_PERMISSIONS = {
   variable_set: ["variable-sets:list", "variable-sets:attach", "variable-sets:use"],
   rig: ["rigs:use"],
   connected_machine: ["enrollments:read"],
+  subscription_connection: ["connections:personal"],
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;
 
 async function requireOwnerProductGate(

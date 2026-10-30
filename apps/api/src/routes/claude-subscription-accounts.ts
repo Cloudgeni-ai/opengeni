@@ -28,6 +28,7 @@ import {
 } from "../claude-subscription-core";
 import { deliverPoolCoreWake } from "./subscription-pool-core";
 import { managedCookieHuman } from "./subscription-pool-access";
+import { turnOnOwnSubscriptionWhereAdded } from "../own-subscription-turned-on";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
   return {
@@ -212,6 +213,15 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
         SETUP_TOKEN_CHANGED,
       );
       await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
+      // Their own account added from a shared workspace starts turned on
+      // there for the messages they send (D-53).
+      if (personal && workspaceId && requestWorkspaceId && requestWorkspaceId !== workspaceId)
+        await turnOnOwnSubscriptionWhereAdded(deps.db, {
+          accountId,
+          workspaceId: requestWorkspaceId,
+          subjectId,
+          connectionId: connected.id,
+        });
       await offerClaudeDefaultModels(deps, {
         ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
         actorSubjectId: subjectId,
