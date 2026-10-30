@@ -8,8 +8,10 @@ import type {
   PullSummary,
   RunSummary,
 } from "./github";
+import { GitHubError } from "./github";
 import { CI_WORKFLOW, DEFAULT_SETTINGS, QUEUE_LABEL, parseManifest } from "./model";
 import { LandingMismatch, PR_WORKFLOW, run } from "./pass";
+import type { RepoFile, TreeEntry } from "./renumber";
 
 const NOW = 1_800_000_000_000;
 const hash = (value: string) => createHash("sha1").update(value).digest("hex");
@@ -42,9 +44,30 @@ class FakeGitHub implements GitHub {
   landedExtra: string[] = [];
   /** A head that applies exactly what another head applies, like main merged in again. */
   sameContent = new Map<string, string>();
+  /** File texts, the same at every commit. */
+  texts = new Map<string, string>();
+  trees = new Map<string, { base: string; entries: TreeEntry[] }>();
+  branchUpdates: { name: string; sha: string }[] = [];
 
   constructor() {
-    this.refs.set("main", this.store([], [], "root"));
+    this.root = this.store([], [], "root");
+    this.refs.set("main", this.root);
+  }
+
+  root: string;
+
+  /** Make a PR's head a real commit: the root plus that PR. */
+  headCommit(number: number) {
+    const head = this.pulls.get(number)!.head;
+    const tree = hash(`tree:${head}`);
+    this.commits.set(head, {
+      sha: head,
+      tree,
+      message: `head ${number}`,
+      date: NOW,
+      applied: [head],
+      parents: [this.root],
+    });
   }
 
   store(applied: string[], parents: string[], message: string) {
@@ -118,8 +141,21 @@ class FakeGitHub implements GitHub {
       .filter((file) => file.slice(0, file.lastIndexOf("/")) === path);
   }
 
-  async compareFiles() {
-    return { files: [], mergeBase: this.refs.get("main")! };
+  async readFiles(_ref: string, paths: string[]) {
+    const files = new Map<string, RepoFile>();
+    for (const path of paths) {
+      const text = this.texts.get(path);
+      if (text !== undefined) files.set(path, { text, mode: "100644", oid: hash(`blob:${text}`) });
+    }
+    return files;
+  }
+
+  /** The merge base is `base` itself when `head` already contains it. */
+  async compareFiles(base: string, head: string) {
+    const from = this.commits.get(base);
+    const to = this.commits.get(head);
+    const contained = from && to && from.applied.every((item) => to.applied.includes(item));
+    return { files: [], mergeBase: contained ? base : this.root };
   }
 
   async branches(prefix: string) {
@@ -157,15 +193,40 @@ class FakeGitHub implements GitHub {
       )
     )
       return { kind: "conflict" };
-    const sha = this.store([...base.applied, this.content(head)], [base.sha, head], message);
+    // A known commit (main) brings what it applies; a PR head brings itself.
+    const incoming = this.commits.get(head)?.applied ?? [this.content(head)];
+    const sha = this.store([...base.applied, ...incoming], [base.sha, head], message);
     this.refs.set(branch, sha);
     return { kind: "merged", sha, tree: this.commits.get(sha)!.tree };
   }
 
   async createCommit(tree: string, parents: string[], message: string) {
     const parent = this.commits.get(parents[0]!)!;
+    if (this.trees.has(tree))
+      return this.store([...parent.applied, `tree:${tree}`], parents, message);
     if (parent.tree !== tree) throw new Error("fake only supports reusing the parent tree");
     return this.store(parent.applied, parents, message);
+  }
+
+  async createTree(base: string, entries: TreeEntry[]) {
+    const sha = hash(`tree:${base}:${JSON.stringify(entries)}`);
+    this.trees.set(sha, { base, entries });
+    return sha;
+  }
+
+  async updateBranch(name: string, sha: string) {
+    const pull = [...this.pulls.values()].find((p) => `branch-${p.number}` === name)!;
+    const ancestors = new Set<string>();
+    for (const queue = [sha]; queue.length;) {
+      const next = queue.pop()!;
+      if (ancestors.has(next)) continue;
+      ancestors.add(next);
+      queue.push(...(this.commits.get(next)?.parents ?? []));
+    }
+    if (!ancestors.has(pull.head)) throw new GitHubError(422, `git/refs/heads/${name}`, "not ff");
+    this.branchUpdates.push({ name, sha });
+    pull.head = sha;
+    pull.green = false;
   }
 
   async mergePull(
@@ -319,30 +380,100 @@ describe("a batcher pass", () => {
     expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
   });
 
-  test("ejects a PR whose migration number main already uses, and keeps equal numbers apart", async () => {
+  test("moves a PR's migration off a number main already uses, and keeps equal numbers apart", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
     const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
     gh.refs.set("main", landed);
     gh.pulls.get(1)!.merged = landed;
-    gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql", "packages/db/src/b.ts"] });
+    gh.addPull(2, {
+      files: [
+        "packages/db/drizzle/0007_b.sql",
+        "packages/db/test/migration-0007-b.test.ts",
+        "packages/db/src/b.ts",
+      ],
+    });
+    gh.headCommit(2);
+    gh.texts.set("packages/db/drizzle/0007_b.sql", "-- 0007: add b\ncreate table b ();\n");
+    gh.texts.set("packages/db/test/migration-0007-b.test.ts", 'const file = "0007_b.sql";\n');
+    gh.texts.set("packages/db/src/b.ts", "export const b = 1;\n");
     gh.addPull(3, { files: ["packages/db/drizzle/0008_c.sql"] });
     gh.addPull(4, { files: ["packages/db/drizzle/0008_d.sql"] });
     gh.addPull(5);
+    const head = gh.pulls.get(2)!.head;
 
     await run(gh, options());
+    // #2 stays queued on a new head: main merged in, its migration moved above
+    // every number main and the other queued PRs use.
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.branchUpdates).toHaveLength(1);
+    const moved = gh.commits.get(gh.pulls.get(2)!.head)!;
+    const merge = gh.commits.get(moved.parents[0]!)!;
+    expect(merge.parents).toEqual([head, landed]);
+    const tree = [...gh.trees.values()][0]!;
+    expect(tree.base).toBe(merge.tree);
+    expect(tree.entries).toEqual([
+      { path: "packages/db/drizzle/0007_b.sql", mode: "100644", sha: null },
+      {
+        path: "packages/db/drizzle/0009_b.sql",
+        mode: "100644",
+        content: "-- 0009: add b\ncreate table b ();\n",
+      },
+      { path: "packages/db/test/migration-0007-b.test.ts", mode: "100644", sha: null },
+      {
+        path: "packages/db/test/migration-0009-b.test.ts",
+        mode: "100644",
+        content: 'const file = "0009_b.sql";\n',
+      },
+    ]);
+    expect(gh.comments).toEqual([
+      {
+        number: 2,
+        body: expect.stringContaining("moved `0007_b.sql` to `0009_b.sql`"),
+      },
+    ]);
+    expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
+    // #4 adds the same number as #3, so it waits for the next batch.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([3, 5]);
+    expect(gh.pulls.get(4)!.labels).toContain(QUEUE_LABEL);
+  });
+
+  test("ejects with the manual command when a moved migration's number is named ambiguously", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
+    const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
+    gh.refs.set("main", landed);
+    gh.pulls.get(1)!.merged = landed;
+    gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql", "docs/b.md"] });
+    gh.headCommit(2);
+    gh.texts.set("packages/db/drizzle/0007_b.sql", "create table b ();\n");
+    gh.texts.set("docs/b.md", "Migration 0007 adds b.\n");
+
+    await run(gh, options());
+    expect(gh.branchUpdates).toEqual([]);
     expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
     expect(gh.comments).toEqual([
       {
         number: 2,
         body: expect.stringContaining(
-          "`0007_b.sql` uses number 0007, which main already uses for `0007_a.sql`. Merge main into the branch and move it to the next free number: `bun scripts/renumber-migration.ts 0007_b --next`.",
+          "`docs/b.md` mentions 0007 without naming `0007_b`, so the batcher cannot tell which migration it means. Merge main into the branch and move it to the next free number: `bun scripts/renumber-migration.ts 0007_b --next`.",
         ),
       },
     ]);
-    // #4 adds the same number as #3, so it waits for the next batch.
-    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([3, 5]);
-    expect(gh.pulls.get(4)!.labels).toContain(QUEUE_LABEL);
+  });
+
+  test("a Git conflict still ejects a PR whose migration number main already uses", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
+    const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
+    gh.refs.set("main", landed);
+    gh.pulls.get(1)!.merged = landed;
+    gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql"], mergeable: "CONFLICTING" });
+
+    await run(gh, options());
+    expect(gh.branchUpdates).toEqual([]);
+    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain("it conflicts with main");
   });
 
   test("stops when a landed tree differs from the tested tree", async () => {

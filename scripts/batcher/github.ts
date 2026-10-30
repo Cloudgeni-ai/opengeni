@@ -1,6 +1,8 @@
 // The few GitHub calls the batcher needs. All state lives in GitHub itself:
 // queued PRs, the batch/* branch with its manifest commit, and its CI runs.
 
+import type { RepoFile, TreeEntry } from "./renumber";
+
 export class GitHubError extends Error {
   constructor(
     readonly status: number,
@@ -72,6 +74,8 @@ export interface GitHub {
   pullFiles(number: number): Promise<PullFile[] | null>;
   /** Paths of the files directly in a directory at a commit. */
   listDirectory(path: string, ref: string): Promise<string[]>;
+  /** These files at a commit, keyed by path; a path that is not a file there is absent. */
+  readFiles(ref: string, paths: string[]): Promise<Map<string, RepoFile>>;
   compareFiles(base: string, head: string): Promise<{ files: string[]; mergeBase: string } | null>;
   branches(prefix: string): Promise<{ name: string; sha: string }[]>;
   commit(sha: string): Promise<CommitSummary>;
@@ -80,6 +84,9 @@ export interface GitHub {
   deleteBranch(name: string): Promise<void>;
   mergeInto(branch: string, head: string, message: string): Promise<MergeResult>;
   createCommit(tree: string, parents: string[], message: string): Promise<string>;
+  createTree(baseTree: string, entries: TreeEntry[]): Promise<string>;
+  /** Move a branch forward to a descendant of its head; fails with 422 otherwise. */
+  updateBranch(name: string, sha: string): Promise<void>;
   mergePull(
     number: number,
     input: { sha: string; method: "squash" | "merge"; title?: string; message: string },
@@ -297,6 +304,62 @@ export class RestGitHub implements GitHub {
     return { files, mergeBase: data.merge_base_commit.sha };
   }
 
+  async readFiles(ref: string, paths: string[]) {
+    const files = new Map<string, RepoFile>();
+    if (!/^[0-9a-f]{40}$/.test(ref)) throw new Error(`Not a commit SHA: ${ref}`);
+    const [owner, name] = this.repository.split("/");
+    const directory = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+    for (let start = 0; start < paths.length; start += 40) {
+      const chunk = paths.slice(start, start + 40);
+      const directories = [...new Set(chunk.map(directory))];
+      // Expressions travel as variables; a path never becomes query text.
+      const variables: Record<string, unknown> = { owner, name };
+      const fields: string[] = [];
+      chunk.forEach((path, index) => {
+        variables[`f${index}`] = `${ref}:${path}`;
+        fields.push(
+          `f${index}: object(expression: $f${index}) { ... on Blob { oid text isBinary isTruncated } }`,
+        );
+      });
+      directories.forEach((path, index) => {
+        variables[`d${index}`] = `${ref}:${path}`;
+        fields.push(
+          `d${index}: object(expression: $d${index}) { ... on Tree { entries { name mode type } } }`,
+        );
+      });
+      const declared = Object.keys(variables)
+        .filter((key) => key !== "owner" && key !== "name")
+        .map((key) => `$${key}: String!`)
+        .join(", ");
+      type Blob = { oid: string; text: string | null; isBinary: boolean; isTruncated: boolean };
+      type Tree = { entries: { name: string; mode: number; type: string }[] };
+      const data = await this.graphql<{ repository: Record<string, Blob | Tree | null> }>(
+        `query($owner: String!, $name: String!, ${declared}) {
+          repository(owner: $owner, name: $name) { ${fields.join("\n")} }
+        }`,
+        variables,
+      );
+      const modes = new Map<string, string>();
+      directories.forEach((path, index) => {
+        const tree = data.repository[`d${index}`] as Tree | null;
+        for (const entry of tree?.entries ?? [])
+          if (entry.type === "blob")
+            modes.set(path ? `${path}/${entry.name}` : entry.name, entry.mode.toString(8));
+      });
+      chunk.forEach((path, index) => {
+        const blob = data.repository[`f${index}`] as Blob | null;
+        const mode = modes.get(path);
+        if (!blob?.oid || mode === undefined) return;
+        files.set(path, {
+          oid: blob.oid,
+          mode,
+          text: blob.isBinary || blob.isTruncated ? null : blob.text,
+        });
+      });
+    }
+    return files;
+  }
+
   async branches(prefix: string) {
     const refs = await this.get<{ ref: string; object: { sha: string } }[]>(
       `git/matching-refs/heads/${prefix}`,
@@ -372,6 +435,19 @@ export class RestGitHub implements GitHub {
   async createCommit(tree: string, parents: string[], message: string) {
     const { data } = await this.request("POST", "git/commits", { tree, parents, message });
     return (data as { sha: string }).sha;
+  }
+
+  async createTree(baseTree: string, entries: TreeEntry[]) {
+    const { data } = await this.request("POST", "git/trees", {
+      base_tree: baseTree,
+      tree: entries.map((entry) => ({ ...entry, type: "blob" })),
+    });
+    return (data as { sha: string }).sha;
+  }
+
+  async updateBranch(name: string, sha: string) {
+    const ref = name.split("/").map(encodeURIComponent).join("/");
+    await this.request("PATCH", `git/refs/heads/${ref}`, { sha, force: false });
   }
 
   async mergePull(

@@ -30,6 +30,7 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     queuedAt: NOW - 30 * MINUTE + number,
     greenAt: NOW - 20 * MINUTE,
     conflict: null,
+    renumber: [],
     slots: [],
     priority: false,
     version: false,
@@ -189,6 +190,13 @@ describe("decide", () => {
       number: 1,
       reason: "it conflicts with main.",
     });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("moves a migration main took the number of, and batches the PR only after that", () => {
+    const moving = ["packages/db/drizzle/1071_usage_residency.sql"];
+    const actions = decide(observe([pull(1, { renumber: moving }), pull(2)]));
+    expect(actions[0]).toEqual({ kind: "renumber", number: 1, paths: moving });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
   });
 

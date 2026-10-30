@@ -10,23 +10,32 @@ export const CI_WORKFLOW = ".github/workflows/ci.yml";
 export const MANIFEST_TRAILER = "Batch-Manifest: ";
 
 /** Changes to CI or to the batcher itself are tested and landed alone. */
-export const CONTROL_PLANE = [/^\.github\//, /^scripts\/ci\//, /^scripts\/batcher\//];
+export const CONTROL_PLANE = [
+  /^\.github\//,
+  /^scripts\/ci\//,
+  /^scripts\/batcher\//,
+  // The batcher plans migration renumbering with it.
+  /^scripts\/migration-ordinals\.ts$/,
+];
 
 /**
  * Directories whose files carry a number that must be unique, such as database
  * migrations. Two changes that add the same number merge cleanly in Git but
- * fail CI together, so the batcher compares numbers before it tests anything.
+ * fail CI together, so the batcher compares numbers before it tests anything. A
+ * directory with `renumber` has files the batcher moves to a free number itself.
  */
 export const NUMBERED_FILES: {
   directory: string;
   pattern: RegExp;
   fix: (file: string) => string;
+  renumber?: true;
 }[] = [
   {
     directory: "packages/db/drizzle/",
     pattern: /^(\d+)_[^/]+\.sql$/,
     fix: (file) =>
       `Merge main into the branch and move it to the next free number: \`bun scripts/renumber-migration.ts ${file.replace(/\.sql$/, "")} --next\`.`,
+    renumber: true,
   },
 ];
 
@@ -50,20 +59,36 @@ export function numberedFiles(paths: string[]): NumberedFile[] {
   return found;
 }
 
+/** A change's added numbered files whose numbers main already uses for another file. */
+export function takenNumbers(
+  added: NumberedFile[],
+  onMain: NumberedFile[],
+): { file: NumberedFile; other: string }[] {
+  const taken = new Map(onMain.map((file) => [file.slot, file.path]));
+  return added.flatMap((file) => {
+    const other = taken.get(file.slot);
+    return other === undefined || other === file.path ? [] : [{ file, other }];
+  });
+}
+
+/** Whether the batcher moves this numbered file to a free number itself. */
+export function renumberable(file: NumberedFile): boolean {
+  return NUMBERED_FILES.some(
+    ({ directory, renumber }) => renumber === true && file.path.startsWith(directory),
+  );
+}
+
 /**
  * Why a change's added numbered files cannot land on main: the first one whose
  * number main already uses for another file, or null.
  */
 export function numberTaken(added: NumberedFile[], onMain: NumberedFile[]): string | null {
-  const taken = new Map(onMain.map((file) => [file.slot, file.path]));
-  for (const file of added) {
-    const other = taken.get(file.slot);
-    if (other === undefined || other === file.path) continue;
-    const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-    const entry = NUMBERED_FILES.find(({ directory }) => file.path.startsWith(directory))!;
-    return `\`${name(file.path)}\` uses number ${file.number}, which main already uses for \`${name(other)}\`. ${entry.fix(name(file.path))}`;
-  }
-  return null;
+  const [first] = takenNumbers(added, onMain);
+  if (!first) return null;
+  const { file, other } = first;
+  const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+  const entry = NUMBERED_FILES.find(({ directory }) => file.path.startsWith(directory))!;
+  return `\`${name(file.path)}\` uses number ${file.number}, which main already uses for \`${name(other)}\`. ${entry.fix(name(file.path))}`;
 }
 
 export interface Settings {
@@ -90,6 +115,11 @@ export interface QueuedPull {
   greenAt: number | null;
   /** Why the PR cannot land on main as it is (a Git conflict, a number main already uses), or null. */
   conflict: string | null;
+  /**
+   * Added files whose numbers main already uses, which the batcher moves to
+   * free numbers on the PR's branch before testing it; empty when none.
+   */
+  renumber: string[];
   /** Numbered slots its added files use; two members of one batch never share one. */
   slots: string[];
   priority: boolean;
@@ -149,6 +179,7 @@ export type Action =
   | { kind: "retry"; batch: Batch; runs: BatchRun[] }
   | { kind: "land"; batch: Batch }
   | { kind: "eject"; number: number; reason: string }
+  | { kind: "renumber"; number: number; paths: string[] }
   | { kind: "build"; members: QueuedPull[]; pending: number[][] }
   | { kind: "wait"; until: number };
 
@@ -200,7 +231,9 @@ export function nextBatch(
   now: number,
   settings: Settings,
 ): Action | null {
-  const ready = pulls.filter((p) => p.greenAt !== null && p.conflict === null).sort(fifo);
+  const ready = pulls
+    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length)
+    .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.version || p.controlPlane;
 
@@ -272,6 +305,8 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   for (const pull of pulls)
     if (pull.conflict !== null)
       actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
+    else if (pull.renumber.length)
+      actions.push({ kind: "renumber", number: pull.number, paths: pull.renumber });
 
   const batches = [...observation.batches].sort((a, b) => b.createdAt - a.createdAt);
   for (const extra of batches.slice(1))

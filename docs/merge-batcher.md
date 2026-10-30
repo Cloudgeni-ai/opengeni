@@ -29,12 +29,19 @@ exactly the same: merging the same `main` into the branch again, or rebasing
 it, leaves the batch running, and it lands the new head.
 
 Database migrations need unique numbers, and two PRs can add the same number
-without a Git conflict. A queued PR that adds a migration whose number `main`
-already uses for another migration leaves the queue right away, with the
-`scripts/renumber-migration.ts` command that fixes it, instead of failing a
-whole batch. Two queued PRs that add the same number never share a batch.
-The numbered directories are listed in `NUMBERED_FILES`
-(`scripts/batcher/model.ts`).
+without a Git conflict. When `main` already uses the number of a migration a
+queued PR adds, the batcher fixes it on the PR's branch instead of failing a
+whole batch: it merges `main` into the branch and moves the migration to the
+next free number above `main` and every number other queued PRs add, renaming
+its companion tests and rewriting references in the PR's changed files, as
+`scripts/renumber-migration.ts --next` does. It does this through GitHub's API
+with the planner from `main`, so it never runs PR code. The PR stays queued, a
+comment says what moved, and it is batched once PR CI passes on the new head.
+If the move needs judgment (a Git conflict, a changed file that names the
+number without naming the migration, or a file it cannot read), the PR leaves
+the queue with the `scripts/renumber-migration.ts` command instead. Two queued
+PRs that add the same number never share a batch. The numbered directories are
+listed in `NUMBERED_FILES` (`scripts/batcher/model.ts`).
 
 ## How a batch lands
 

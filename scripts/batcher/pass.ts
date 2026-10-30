@@ -1,4 +1,6 @@
-import type { CommitSummary, GitHub } from "./github";
+import { GitHubError, type CommitSummary, type GitHub, type PullFile } from "./github";
+import { MIGRATIONS_DIR } from "../migration-ordinals";
+import { planMigrationMoves } from "./renumber";
 import {
   BATCH_PREFIX,
   BUILD_PREFIX,
@@ -11,8 +13,10 @@ import {
   numberTaken,
   numberedFiles,
   parseManifest,
+  renumberable,
   renderManifest,
   squashTitle,
+  takenNumbers,
   type Action,
   type Batch,
   type Manifest,
@@ -52,6 +56,10 @@ interface Context {
   randomId: () => string;
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
+  /** Head, branch and changed files of each queued PR whose migration the pass moves. */
+  renumbering: Map<number, { headSha: string; headRef: string; files: PullFile[] }>;
+  /** Numbered slots each queued PR adds, as last observed. */
+  queuedSlots: Map<number, string[]>;
   /** Plan only: create no branches, not even scratch ones. */
   dryRun: boolean;
 }
@@ -64,6 +72,8 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
     autoMerge: new Map(),
+    renumbering: new Map(),
+    queuedSlots: new Map(),
     dryRun: options.dryRun ?? false,
   };
 }
@@ -74,6 +84,8 @@ async function observe(ctx: Context): Promise<Observation> {
   const mainSha = await gh.mainSha();
   const pulls: QueuedPull[] = [];
   ctx.autoMerge.clear();
+  ctx.renumbering.clear();
+  ctx.queuedSlots.clear();
   // Main's numbered files per directory, read once a pass and only when needed.
   const mainNumbered = new Map<string, Promise<NumberedFile[]>>();
   const onMain = (directory: string) => {
@@ -99,8 +111,28 @@ async function observe(ctx: Context): Promise<Observation> {
       (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
     );
     let conflict = pull.mergeable === "CONFLICTING" ? CONFLICTING : null;
-    for (const directory of new Set(added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1))))
-      conflict ??= numberTaken(added, await onMain(directory));
+    const renumber: string[] = [];
+    for (const directory of new Set(
+      added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
+    )) {
+      const main = await onMain(directory);
+      const taken = takenNumbers(added, main);
+      // A Git conflict needs a person anyway; otherwise the batcher moves what it can.
+      if (
+        pull.mergeable !== "CONFLICTING" &&
+        changed !== null &&
+        pull.headRef !== VERSION_BRANCH &&
+        taken.every(({ file }) => renumberable(file))
+      )
+        renumber.push(...taken.map(({ file }) => file.path));
+      else conflict ??= numberTaken(added, main);
+    }
+    if (conflict === null && renumber.length && changed !== null)
+      ctx.renumbering.set(pull.number, {
+        headSha: pull.headSha,
+        headRef: pull.headRef,
+        files: changed,
+      });
     pulls.push({
       number: pull.number,
       title: pull.title,
@@ -110,12 +142,17 @@ async function observe(ctx: Context): Promise<Observation> {
       ),
       greenAt: green ? (check.completedAt ?? now) : null,
       conflict,
+      renumber: conflict === null ? renumber : [],
       slots: added.map((f) => f.slot),
       priority: pull.labels.includes(PRIORITY_LABEL),
       version: pull.headRef === VERSION_BRANCH,
       // Too many files to list is treated like a CI change: it runs alone.
       controlPlane: files === null || isControlPlane(files),
     });
+    ctx.queuedSlots.set(
+      pull.number,
+      added.map((f) => f.slot),
+    );
   }
   const batches: Batch[] = [];
   for (const branch of await gh.branches(BATCH_PREFIX)) {
@@ -157,7 +194,11 @@ async function sameTree(
   const { gh } = ctx;
   const { manifest } = batch;
   const same: Record<number, string> = {};
-  const heads = new Map(pulls.filter((p) => p.conflict === null).map((p) => [p.number, p.headSha]));
+  const heads = new Map(
+    pulls
+      .filter((p) => p.conflict === null && !p.renumber.length)
+      .map((p) => [p.number, p.headSha]),
+  );
   const moved = manifest.members.flatMap((member, index) => {
     const head = heads.get(member.number);
     return head !== undefined && head !== member.head && !member.version
@@ -214,6 +255,76 @@ async function abandon(ctx: Context, batch: Batch, reason: string) {
   ctx.log(`Abandoning ${batch.branch}: ${reason}`);
   for (const ci of batch.runs) if (ci.status !== "completed") await ctx.gh.cancelRun(ci.id);
   await ctx.gh.deleteBranch(batch.branch);
+}
+
+const fileName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+
+/**
+ * Main took the number of a migration a queued PR adds. Merge main into the
+ * PR's branch and move the migration to the next free number with its
+ * companion tests and references, as `scripts/renumber-migration.ts --next`
+ * would, all through GitHub's API: the pass never runs PR code. The PR stays
+ * queued and is batched once PR CI passes on its new head. Anything the move
+ * cannot settle on its own ejects the PR with the manual command, as before.
+ */
+async function moveMigrations(ctx: Context, number: number, paths: string[]) {
+  const { gh } = ctx;
+  const pull = ctx.renumbering.get(number);
+  const manual = (reason: string) =>
+    eject(
+      ctx,
+      number,
+      `main already uses the number of ${paths.map((p) => `\`${fileName(p)}\``).join(", ")} and the batcher could not move it: ${reason} Merge main into the branch and move it to the next free number: \`bun scripts/renumber-migration.ts ${fileName(paths[0]!).replace(/\.sql$/, "")} --next\`.`,
+    );
+  if (!pull) return manual("its changed files could not be listed.");
+  const mainSha = await gh.mainSha();
+  const scratch = `${BUILD_PREFIX}renumber-${number}-${ctx.randomId()}`;
+  await gh.createBranch(scratch, pull.headSha);
+  try {
+    let base = { sha: pull.headSha, tree: (await gh.commit(pull.headSha)).tree };
+    if ((await gh.compareFiles(mainSha, pull.headSha))?.mergeBase !== mainSha) {
+      const merged = await gh.mergeInto(scratch, mainSha, `Merge main into #${number}`);
+      if (merged.kind === "conflict") return await eject(ctx, number, CONFLICTING);
+      base = merged;
+    }
+    const changed = pull.files.filter((f) => f.status !== "removed").map((f) => f.path);
+    const reserved = [...ctx.queuedSlots]
+      .filter(([other]) => other !== number)
+      .flatMap(([, slots]) => slots)
+      .filter((slot) => slot.startsWith(`${MIGRATIONS_DIR}/`))
+      .map((slot) => Number(slot.slice(MIGRATIONS_DIR.length + 1)));
+    const plan = planMigrationMoves({
+      paths,
+      ledger: (await gh.listDirectory(MIGRATIONS_DIR, base.sha)).map(fileName),
+      reserved,
+      files: await gh.readFiles(base.sha, changed),
+    });
+    if (plan.kind === "manual") return await manual(plan.reason);
+    const moved = plan.moves.map((m) => `\`${fileName(m.from)}\` to \`${fileName(m.to)}\``);
+    const tree = await gh.createTree(base.tree, plan.entries);
+    const commit = await gh.createCommit(
+      tree,
+      [base.sha],
+      `Move migration ${plan.moves.map((m) => fileName(m.from).replace(/\.sql$/, "")).join(", ")} to the next free number\n\nMain already uses its number. Moved by the merge batcher, as \`scripts/renumber-migration.ts --next\` does.`,
+    );
+    try {
+      // Fast-forward only: if the PR moved meanwhile, the next pass looks again.
+      await gh.updateBranch(pull.headRef, commit);
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 422) {
+        ctx.log(`Not moving #${number}'s migration: its branch moved meanwhile`);
+        return;
+      }
+      throw error;
+    }
+    ctx.log(`Moved #${number}'s migration ${moved.join(", ")} as ${commit}`);
+    await gh.comment(
+      number,
+      `Main already uses the number of a migration this PR adds, so the merge batcher merged main into the branch and moved ${moved.join(", ")}, with its tests and references (${commit}). The PR stays queued and is batched once PR CI passes on the new head. Pull the branch before you push to it again.`,
+    );
+  } finally {
+    await gh.deleteBranch(scratch);
+  }
 }
 
 /**
@@ -325,6 +436,8 @@ async function act(ctx: Context, action: Action) {
       return land(ctx, action.batch);
     case "eject":
       return eject(ctx, action.number, action.reason);
+    case "renumber":
+      return moveMigrations(ctx, action.number, action.paths);
     case "build":
       return build(ctx, action.members, action.pending);
     case "wait":
@@ -342,6 +455,8 @@ export function describe(action: Action): string {
       return `land ${action.batch.branch}: ${action.batch.manifest.members.map((m) => `#${m.number}`).join(", ")}`;
     case "eject":
       return `eject #${action.number}: ${action.reason}`;
+    case "renumber":
+      return `move #${action.number}'s ${action.paths.map(fileName).join(", ")} to the next free number`;
     case "build":
       return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}`;
     case "wait":
