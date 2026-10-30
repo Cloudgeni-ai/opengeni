@@ -82,7 +82,7 @@ const deleteConnection = (callId: string, connectionId: string, targets: AppActi
     targets,
   );
 
-/** The four connections Bendik's staging cleanup removed, as the server reads them. */
+/** The four connections a staging cleanup removed, as the server reads them. */
 const GMAIL = deleteConnection(
   "toolu_016mVqHqos4m2cH4WRPmqfvV",
   "e6b94031-cf62-4ec7-b31d-c19d73ea29f3",
@@ -90,7 +90,7 @@ const GMAIL = deleteConnection(
     connectionId: {
       kind: "connection",
       name: "Gmail",
-      account: "bendik@cloudgeni.ai",
+      account: "anna@example.com",
       facts: [
         { label: "Who can use it", value: "Only you" },
         { label: "Added", value: "14 Oct 2026, 07:41 UTC" },
@@ -106,7 +106,7 @@ const LINEAR_OLD = deleteConnection(
     connectionId: {
       kind: "connection",
       name: "Linear",
-      account: "Bendik · Cloudgeni",
+      account: "Anna · Example",
       facts: [
         { label: "Status", value: "Needs reconnecting" },
         { label: "Who can use it", value: "Only you" },
@@ -123,7 +123,7 @@ const LINEAR_NEWER = deleteConnection(
     connectionId: {
       kind: "connection",
       name: "Linear",
-      account: "Bendik · Cloudgeni",
+      account: "Anna · Example",
       facts: [
         { label: "Status", value: "Needs reconnecting" },
         { label: "Who can use it", value: "Only you" },
@@ -140,7 +140,7 @@ const DRIVE = deleteConnection(
     connectionId: {
       kind: "connection",
       name: "Google Drive",
-      account: "bendik@cloudgeni.ai",
+      account: "anna@example.com",
       facts: [
         { label: "Who can use it", value: "Everyone in this workspace" },
         { label: "Added", value: "18 Aug 2026, 12:30 UTC" },
@@ -164,7 +164,7 @@ const SCHEDULE = scene(
       name: "Weekly metrics digest",
       facts: [
         { label: "Runs", value: "Mondays at 08:00 (Europe/Oslo)" },
-        { label: "Created by", value: "bendik@cloudgeni.ai" },
+        { label: "Created by", value: "anna@example.com" },
       ],
     },
   },
@@ -178,8 +178,8 @@ const MEMBER = scene(
   {
     subjectId: {
       kind: "member",
-      name: "Jørgen",
-      account: "jorgen@cloudgeni.ai",
+      name: "Ola Nordmann",
+      account: "ola@example.com",
       facts: [{ label: "Role", value: "Admin" }],
     },
   },
