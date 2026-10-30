@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- An MCP server can stop a tool call to ask the person a question (1107).
+-- An MCP server can stop a tool call to ask the person a question (1112).
 -- Each question opens a new round of the call's connector action record: the
 -- record returns from executing to an undecided pending request, so the
 -- answer, possibly from a later turn attempt, is that round's decision and

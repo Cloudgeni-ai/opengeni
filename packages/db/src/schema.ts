@@ -8980,7 +8980,7 @@ export const connectorActionRequests = pgTable(
       withTimezone: true,
     }),
     outcome: text("outcome"),
-    // 1109: times the provider stopped this call to ask the person (MCP
+    // 1114: times the provider stopped this call to ask the person (MCP
     // elicitation). Each round has its own decision and single execution.
     inputRound: integer("input_round").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

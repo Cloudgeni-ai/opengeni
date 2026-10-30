@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- An approval whose tool's MCP server asks the person a question mid-call
--- (1107) reads as that question wherever approvals reach the person. Its
+-- (1112) reads as that question wherever approvals reach the person. Its
 -- inbox item is titled with the server's question, its body names the call,
 -- and it records which server asks, whether the question has fields to fill
 -- in (or is too long to answer from the title), and which of the call's
