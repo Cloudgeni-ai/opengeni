@@ -337,11 +337,26 @@ test("actual-auth response cache hits, isolates keys/scopes/queries, expires, re
   }
 }, 180_000);
 
-test("all four endpoints return validated HTTP 200 for genuinely empty data in all six ranges", async () => {
+test("all four endpoints return validated HTTP 200 for genuinely empty data in every range", async () => {
   const scope = await fixture();
   const authorization = await bearer(scope, ["workspace:admin", "billing:read"]);
   const app = api();
-  for (const range of ["today", "week", "month", "30d", "90d", "ytd"]) {
+  const minute = (offsetMs: number) =>
+    `${new Date(Date.now() + offsetMs).toISOString().slice(0, 16)}Z`;
+  for (const range of [
+    "today",
+    "week",
+    "month",
+    "30d",
+    "90d",
+    "ytd",
+    "1h",
+    "3h",
+    "24h",
+    `custom&from=${minute(-2 * 3_600_000)}&to=${minute(0)}`,
+    `custom&from=${minute(-30 * 3_600_000)}&to=${minute(0)}`,
+    "custom&from=2026-10-01&to=2026-10-05",
+  ]) {
     for (const organization of [false, true]) {
       const usage = await app.request(path(scope, organization, "usage", `range=${range}`), {
         headers: { authorization },
@@ -351,6 +366,7 @@ test("all four endpoints return validated HTTP 200 for genuinely empty data in a
       expect(body.totals).toMatchObject({ calls: 0, chargedMicros: 0, listMicros: 0 });
       expect(body.prior).toBeNull();
       expect(body.groups).toEqual([]);
+      expect(body.availableRanges).toContain("1h");
       const calls = await app.request(path(scope, organization, "calls", `range=${range}`), {
         headers: { authorization },
       });
@@ -359,6 +375,111 @@ test("all four endpoints return validated HTTP 200 for genuinely empty data in a
         calls: [],
         nextCursor: null,
       });
+    }
+  }
+}, 120_000);
+
+test("short ranges chart 5-minute and hourly buckets for visible and hidden usage", async () => {
+  const scope = await fixture();
+  const session = await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+    createSession(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "Insights short ranges",
+      resources: [],
+      metadata: {},
+      model: "fixture-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    }),
+  );
+  const now = Date.now();
+  const minutesAgo = [2, 20, 50, 90];
+  for (const minutes of minutesAgo) {
+    const sourceKey = `response:${crypto.randomUUID()}`;
+    await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+      recordModelCallFact(client.db, {
+        ...scope,
+        sessionId: session.id,
+        turnId: crypto.randomUUID(),
+        sourceKey,
+        provider: "openai",
+        providerApi: "responses",
+        model: "fixture-model",
+        billingPath: "external",
+        pricedCostMicros: 0,
+        estimatedProviderCostMicros: 13,
+        pricingSource: "configured_list_price",
+      }),
+    );
+    await shared.admin`update model_call_facts set occurred_at=${new Date(now - minutes * 60_000)}
+      where workspace_id=${scope.workspaceId} and source_key=${sourceKey}`;
+  }
+  const app = api();
+  const full = await bearer(scope, ["billing:read", "workspace:admin"]);
+  const billing = await bearer(scope, ["billing:read"]);
+  const minute = (offsetMs: number) => `${new Date(now + offsetMs).toISOString().slice(0, 16)}Z`;
+  const cases = [
+    { query: "range=1h", bucket: "five_minutes", points: 12, calls: 3, prior: 1 },
+    { query: "range=3h", bucket: "five_minutes", points: 36, calls: 4, prior: null },
+    { query: "range=24h", bucket: "hour", points: 24, calls: 4, prior: null },
+    {
+      query: `range=custom&from=${minute(-120 * 60_000)}&to=${minute(60_000)}`,
+      bucket: "five_minutes",
+      points: null,
+      calls: 4,
+      prior: null,
+    },
+    {
+      query: `range=custom&from=${minute(-6 * 3_600_000)}&to=${minute(60_000)}`,
+      bucket: "hour",
+      points: null,
+      calls: 4,
+      prior: null,
+    },
+  ] as const;
+  for (const expected of cases) {
+    for (const [organization, authorization] of [
+      [false, full],
+      [true, full],
+      // Billing alone sees amounts as hidden aggregates, bucketed the same way.
+      [true, billing],
+    ] as const) {
+      const response = await app.request(
+        path(scope, organization, "usage", `${expected.query}&seriesGroups=true`),
+        { headers: { authorization } },
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      const body = InsightsUsageResponse.parse(await response.json());
+      expect(body.bucket).toBe(expected.bucket);
+      expect(body.totals).toMatchObject({ calls: expected.calls, listMicros: 13 * expected.calls });
+      if (expected.prior === null) expect(body.prior).toBeNull();
+      else expect(body.prior).toMatchObject({ calls: expected.prior });
+      if (expected.points !== null) expect(body.series).toHaveLength(expected.points);
+      const step = expected.bucket === "five_minutes" ? 300_000 : 3_600_000;
+      expect(body.series[0]!.start).toBe(
+        new Date(Math.floor(Date.parse(body.windowStart) / step) * step).toISOString(),
+      );
+      for (const [index, point] of body.series.entries()) {
+        expect(Date.parse(point.start) % step).toBe(0);
+        if (index > 0)
+          expect(Date.parse(point.start) - Date.parse(body.series[index - 1]!.start)).toBe(step);
+      }
+      expect(body.series.reduce((sum, point) => sum + point.measures.calls, 0)).toBe(
+        expected.calls,
+      );
+      // Each call lands in the bucket holding its own time.
+      for (const minutes of minutesAgo) {
+        const at = now - minutes * 60_000;
+        if (at < Date.parse(body.windowStart)) continue;
+        const start = new Date(Math.floor(at / step) * step).toISOString();
+        expect(body.series.find((point) => point.start === start)?.measures.calls).toBeGreaterThan(
+          0,
+        );
+      }
     }
   }
 }, 120_000);
