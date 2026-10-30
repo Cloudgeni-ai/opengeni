@@ -209,6 +209,15 @@ type LookupContext = {
 type Lookup = (where: LookupContext) => Promise<AppActionTarget>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * Only a canonical id is looked up. PostgreSQL also reads other spellings of
+ * a UUID (no hyphens, braces), which some routes pass straight to SQL, so a
+ * miss on one of those could be a false "not found": it stays unresolved.
+ */
+function canonicalUuid(id: string): void {
+  if (!UUID.test(id)) unresolved();
+}
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** "14 Oct 2026", in UTC. */
@@ -370,7 +379,7 @@ function workspaceRow<T>(
 ): Lookup {
   return async (where) => {
     const workspaceId = await workspaceAccess(where, where.ids.workspaceId, permission);
-    if (!UUID.test(where.id)) return missing(kind);
+    canonicalUuid(where.id);
     const row = await asPersonIn(
       where,
       workspaceId,
@@ -390,7 +399,7 @@ function organizationRow<T>(
   return async (where) => {
     ownOrganization(where);
     await organizationMay(where, ...permissions);
-    if (!UUID.test(where.id)) return missing(kind);
+    canonicalUuid(where.id);
     const row = await withAccountRls(where.db, where.accountId, (db) =>
       read(db, where.accountId, where.id),
     );
@@ -399,7 +408,7 @@ function organizationRow<T>(
 }
 
 const workspaceLookup: Lookup = async (where) => {
-  if (!UUID.test(where.id)) return missing("workspace");
+  canonicalUuid(where.id);
   if (!(await ownsWorkspace(where, where.id))) unresolved();
   // Its name is a member's to see. Organization admins' pages list
   // workspaces too, but not members' Personal ones, which a lookup can't
@@ -577,7 +586,7 @@ const socialConnectionLookup = workspaceRow(
 const organizationMcpConnectionLookup: Lookup = async (where) => {
   ownOrganization(where);
   await organizationMay(where, "account:admin");
-  if (!UUID.test(where.id)) return missing("connected app");
+  canonicalUuid(where.id);
   const [row] = await listOrganizationMcpConnections(where.db, {
     accountId: where.accountId,
     connectionId: where.id,
@@ -738,17 +747,16 @@ const apiKeyLookup: Lookup = async (where) => {
     ownOrganization(where);
     // Someone's own key is theirs to see, so it's read first; nothing about
     // anyone else's (or a missing one) shows without account:admin.
-    row = UUID.test(where.id)
-      ? await withAccountRls(where.db, where.accountId, (db) =>
-          // A revoked one is gone from the route, as listPersonalApiKeys reads them.
-          read(db, and(eq(keys.credentialKind, "personal"), isNull(keys.revokedAt))),
-        )
-      : undefined;
+    canonicalUuid(where.id);
+    row = await withAccountRls(where.db, where.accountId, (db) =>
+      // A revoked one is gone from the route, as listPersonalApiKeys reads them.
+      read(db, and(eq(keys.credentialKind, "personal"), isNull(keys.revokedAt))),
+    );
     if (row?.ownerSubjectId !== where.subjectId) await organizationMay(where, "account:admin");
   } else if (where.organization) {
     ownOrganization(where);
     await organizationMay(where, "api_keys:manage", "account:admin");
-    if (!UUID.test(where.id)) return missing("API key");
+    canonicalUuid(where.id);
     row = await withAccountRls(where.db, where.accountId, (db) =>
       read(db, and(eq(keys.credentialKind, "organization"), isNull(keys.workspaceId))),
     );
@@ -756,7 +764,7 @@ const apiKeyLookup: Lookup = async (where) => {
     // A workspace's keys are for whoever manages them there.
     await managesWorkspace(where, where.ids.workspaceId, "api_keys:manage");
     const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "api_keys:manage");
-    if (!UUID.test(where.id)) return missing("API key");
+    canonicalUuid(where.id);
     row =
       (await asPersonIn(
         where,
@@ -834,7 +842,7 @@ function organizationRoutine<T>(
   return async (where) => {
     ownOrganization(where);
     await organizationMay(where, "members:manage", "account:admin");
-    if (!UUID.test(where.id)) return missing(kind);
+    canonicalUuid(where.id);
     const row = await read(where.db, {
       organizationId: where.accountId,
       actorSubjectId: where.subjectId,
@@ -914,7 +922,7 @@ async function asVaultReader<T>(
   read: (context: VaultDbContext) => Promise<T>,
 ): Promise<T | undefined> {
   const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "secrets:list");
-  if (!UUID.test(where.id)) return undefined;
+  canonicalUuid(where.id);
   try {
     return await read({
       kind: "subject",
@@ -963,7 +971,7 @@ const webhookLookup: Lookup = async (where) => {
     await managesWorkspace(where, where.ids.workspaceId, "workspace:admin");
     workspaceId = await workspaceAccess(where, where.ids.workspaceId, "workspace:admin");
   }
-  if (!UUID.test(where.id)) return missing("webhook");
+  canonicalUuid(where.id);
   const row = !workspaceId
     ? await withAccountRls(
         where.db,
@@ -1055,7 +1063,7 @@ function named(
 /** A rig through the rig routes' own read, which applies its scope and status. */
 const rigLookup: Lookup = async (where) => {
   const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "rigs:use");
-  if (!UUID.test(where.id)) return missing("rig");
+  canonicalUuid(where.id);
   const rig = await getRig(
     where.db,
     { accountId: where.accountId, workspaceId, subjectId: where.subjectId },
@@ -1214,7 +1222,7 @@ const workspaceCustomModelLookup = workspaceRow(
 const organizationCustomModelLookup: Lookup = async (where) => {
   ownOrganization(where);
   await organizationMay(where, "account:admin");
-  if (!UUID.test(where.id)) return missing("custom model");
+  canonicalUuid(where.id);
   const models = schema.organizationModelProviderCustomModels;
   const provider = customModelProvider(where);
   const row = await withRlsContext(
@@ -1278,7 +1286,7 @@ const subscriptionAccountLookup: Lookup = async (where) => {
     // The organization's accounts are an owner's or admin's to manage.
     await organizationMay(where, "members:manage", "account:admin");
   } else workspaceId = await workspaceAccess(where, where.ids.workspaceId, "workspace:read");
-  if (!UUID.test(where.id)) return missing("account");
+  canonicalUuid(where.id);
   // Subscription accounts are visible only to a person, in a workspace for workspace routes.
   const asPerson = <T>(run: (db: Database) => Promise<T>) =>
     !workspaceId
@@ -1325,8 +1333,7 @@ const subscriptionAccountLookup: Lookup = async (where) => {
 const githubInstallationLookup: Lookup = async (where) => {
   const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "github:use");
   // As the route reads it: digits, as a number ("0042" is installation 42).
-  if (!/^[0-9]+$/.test(where.id)) return missing("GitHub installation");
-  const installationId = Number(where.id);
+  const installationId = /^[0-9]+$/.test(where.id) ? Number(where.id) : Number.NaN;
   // An id the route refuses names nothing.
   if (!Number.isSafeInteger(installationId) || installationId <= 0) unresolved();
   const row = await asPersonIn(where, workspaceId, async (db) => {

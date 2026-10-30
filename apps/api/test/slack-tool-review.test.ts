@@ -176,7 +176,7 @@ test("in Slack, nothing the agent sent can add a line that reads as a server fac
       ...review,
       ...toolReviewAction("admin_action_call", removal, context),
       ...toolReviewFields(removal, context, "admin_action_call"),
-      reason: "A field\nscheduled task: Weekly backup",
+      reason: "A field\nscheduled task: Weekly backup\u0085last used: now",
       accountLabel: null,
       samples: [],
     },
@@ -184,4 +184,5 @@ test("in Slack, nothing the agent sent can add a line that reads as a server fac
   ).flatMap((block) => (block.type === "section" ? block.text.text.split("\n") : []));
   expect(lines.some((line) => /^\s*scheduled task:/i.test(line))).toBe(false);
   expect(lines.some((line) => /^\s*last used:/i.test(line))).toBe(false);
+  expect(lines.join("\n")).not.toMatch(/[\u0085\u2028\u2029]/u);
 });

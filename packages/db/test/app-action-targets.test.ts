@@ -197,7 +197,7 @@ test("what the person can't see reads as not found; another organization's stays
   // An id that isn't one, or a route without a lookup, names nothing either.
   expect(
     await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, "Gmail")),
-  ).toMatchObject({ connectionId: { kind: "connection" } });
+  ).toEqual({});
   expect(
     await resolveAppActionTargets(client.db, scope, {
       id: "cancelSessionBackgroundCommand",
@@ -992,6 +992,24 @@ test("ids are read as their routes read them; the organization's custom models a
   }
   // One the route refuses (beyond a safe integer) names nothing.
   expect(await resolveAppActionTargets(client.db, scope, unlink("9".repeat(20)))).toEqual({});
+  expect(await resolveAppActionTargets(client.db, scope, unlink("acme"))).toEqual({});
+  // PostgreSQL reads a UUID without hyphens or in braces too, and some routes
+  // pass it straight to SQL: only the canonical spelling is looked up, so
+  // another one is never a false "not found".
+  const sharedConnection = await connection({
+    accountId: org.accountId,
+    workspaceId: org.workspaceId,
+    providerDomain: "gmail.googleapis.com",
+  });
+  expect(
+    (await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, sharedConnection)))
+      .connectionId,
+  ).toMatchObject({ kind: "connection" });
+  for (const spelling of [sharedConnection.replaceAll("-", ""), `{${sharedConnection}}`]) {
+    expect(
+      await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, spelling)),
+    ).toEqual({});
+  }
   // A call that leaves out its workspace runs in the chat's, as the app sends it.
   expect(
     (

@@ -399,8 +399,12 @@ test("a sent key can't start a line of its own", () => {
   const consequence = toolReviewAction("admin_action_call", {
     id: "deleteConnection",
     pathParameters: { workspaceId: "ws-1", connectionId: gmailId },
-    body: { "reason\nscheduled task: Weekly backup\u2028last used": "now" },
+    body: {
+      "reason\nscheduled task: Weekly backup\u2028last used": "now",
+      note: "x\u0085Status: Already removed\u202e",
+    },
   }).consequence;
   expect(consequence).toStartWith("Sent by the agent: Reason scheduled task");
-  expect(consequence).not.toMatch(/[\n\r\u2028\u2029]/u);
+  expect(consequence).toContain("Note: x Status: Already removed");
+  expect(consequence).not.toMatch(/[\n\r\u0085\u2028\u2029\u202e]/u);
 });

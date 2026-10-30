@@ -82,6 +82,11 @@ export function slackToolReviewBlocks(
   return blocks;
 }
 
+/** Line breaks, other controls and invisible format characters (joiners kept) read as one space. */
+function oneLine(text: string): string {
+  return text.replace(/(?![\u200c\u200d])\p{Cf}/gu, "").replace(/[\s\p{Cc}\u2028\u2029]+/gu, " ");
+}
+
 function reviewLines(review: ToolActionReview): string[] {
   const fields = review.fields.map((field) => `${field.label}: ${field.preview}`);
   // An app action's fields are what the server found about its target; they
@@ -103,6 +108,6 @@ function reviewLines(review: ToolActionReview): string[] {
     ]
       .filter((line): line is string => Boolean(line))
       // One line each, so no value or name can add a line that reads as another.
-      .map((line) => line.replace(/[\r\n\u2028\u2029]+/g, " "))
+      .map(oneLine)
   );
 }

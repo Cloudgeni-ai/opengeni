@@ -848,11 +848,13 @@ const APP_ACTION_CODED_FIELDS: Readonly<
   },
 };
 
-/** A sent key as a one-line label: the agent's text can't start another line. */
-const sentLabel = (key: string) =>
-  toolReviewFieldLabel(key)
+/** Sent text as one line: no line breaks, controls or invisible format characters (joiners stay). */
+const oneLine = (text: string) =>
+  text
+    .replace(/(?![\u200c\u200d])\p{Cf}/gu, "")
     .replace(/[\s\p{Cc}\u2028\u2029]+/gu, " ")
     .trim();
+const sentLabel = (key: string) => oneLine(toolReviewFieldLabel(key));
 
 /**
  * One short readable line of an app action's key values, for example
@@ -895,7 +897,7 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
       : scalar(value)
         ? shown(value)
         : "";
-    const line = text.replace(/\s+/g, " ").trim();
+    const line = oneLine(text);
     if (line) parts.push(`${sentLabel(key)}: ${bound(line, 80)}`);
   };
   for (const source of [args.body, args.query]) {
