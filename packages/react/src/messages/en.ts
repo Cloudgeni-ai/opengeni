@@ -329,6 +329,8 @@ export const englishMessages = {
   "automations.editor.includeOwn": "Also run for what {product} does",
   "automations.editor.includeOwnDescription":
     "Off by default, so the agent's own comments and messages don't start another run.",
+  "automations.editor.includeOwnWorkspaceDescription":
+    "Off by default, so what automations do, such as their chats finishing, doesn't start another run. Chains of automations stop after three.",
   "automations.editor.loadEventsFailed": "The events couldn't load.",
   "automations.editor.loadingSources": "Loading sources…",
   "automations.editor.mcpOneEventHint": "Each MCP server trigger listens to one event.",
@@ -477,6 +479,9 @@ export const englishMessages = {
   "automations.picker.choose": "Choose an event",
   "automations.picker.empty": "No matching events. Type the exact event type to use it.",
   "automations.picker.everyEventDescription": "Anything this source sends.",
+  "automations.picker.groupChats": "Chats",
+  "automations.picker.groupMeetings": "Meetings",
+  "automations.picker.groupUsage": "Usage",
   "automations.picker.loadFailed":
     "The list of events couldn't load ({reason}). You can still type an event type.",
   "automations.picker.loading": "Loading events…",
@@ -512,6 +517,8 @@ export const englishMessages = {
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",
+  "automations.run.error.chainLimit":
+    "Skipped so automations don't wake each other in a loop: its events came from a chain of automations that reached the limit.",
   "automations.run.error.chatBusy": "Skipped because the chat was still busy with earlier work.",
   "automations.run.error.chatWaitingForAccount":
     "Skipped because the chat is waiting for a model account. Pick another model in the chat.",
@@ -617,6 +624,12 @@ export const englishMessages = {
   "automations.statusReason.unavailable": "{source} can't receive events right now.",
   "automations.statusReason.withDetail": "{reason} It said: {detail}",
   "automations.summary.from": "From",
+  "automations.template.automationFailed.description":
+    "What went wrong when one of your automations' chats fails, sent to you.",
+  "automations.template.automationFailed.instructions":
+    "A chat one of my automations ran failed; the event's data.sessionId names it and data.error says how. Read the end of that chat with session_events and work out what went wrong. Then notify me with notify_user: say in two plain sentences what failed and what would fix it. Don't retry the work yourself.",
+  "automations.template.automationFailed.name": "When an automation fails",
+  "automations.template.automationFailed.when": "When a chat one of your automations ran fails",
   "automations.template.costCheck.description": "Flag unusual cloud spend from the last day.",
   "automations.template.costCheck.instructions":
     "Summarize yesterday's cloud spend by service and flag anything that is more than 20% above the weekly average.",

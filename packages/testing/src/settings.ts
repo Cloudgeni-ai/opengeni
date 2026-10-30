@@ -176,6 +176,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     // Tests model a complete deployment; the production defaults are false.
     artifactMaterializerDeployed: true,
     eventTriggersEnabled: true,
+    automationMaxChainDepth: 3,
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     workDiscoveryEnabled: true,

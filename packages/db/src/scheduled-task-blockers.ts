@@ -180,6 +180,8 @@ export async function reviewScheduledTaskBlockers(
             where workspace_id = ${workspaceId} and task_id = ${taskId}
               and account_id = ${task.account_id}
               and trigger_type in ('scheduled', 'event') and action_kind = 'agent_turn'
+              -- The chain limit leaving events out is not a blocker; it has its own notice.
+              and error is distinct from 'chain_limit'
             order by created_at desc, id desc
             limit ${SCHEDULED_TASK_BLOCKER_REVIEW_RUNS}`,
       );

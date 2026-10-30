@@ -72,6 +72,34 @@ describe("built-in templates", () => {
     expect(automationTemplateWhenWords(t, notes, NOW)).toBe("When a meeting's transcript is ready");
   });
 
+  test("When an automation fails listens for the person's own automations' failed chats", () => {
+    const failed = byId("automation-failed");
+    expect(failed.name).toBe("When an automation fails");
+    expect(failed.schedule).toBeNull();
+    expect(failed.triggers).toEqual([
+      {
+        source: { kind: "workspace" },
+        eventTypes: ["turn.failed"],
+        // A chat an automation ran is Opengeni's own, so the trigger opts in,
+        // then keeps to automation chats that ran for this person.
+        includeOwnEvents: true,
+        conditions: [
+          { field: "data.automationRunId", op: "exists" },
+          { field: "data.startedByYou", op: "equals", value: true },
+        ],
+      },
+    ]);
+    expect(failed.instructions).toContain("session_events");
+    expect(failed.instructions).toContain("notify_user");
+    expect(automationTemplateWhenWords(t, failed, NOW)).toBe(
+      "When a chat one of your automations ran fails",
+    );
+    // Like Meeting notes, it needs "This workspace".
+    expect(
+      automationTemplatesFor(builtin, { eventTriggers: true }).map((template) => template.id),
+    ).not.toContain("automation-failed");
+  });
+
   test("every built-in template has distinct words and fits the API's limits", () => {
     expect(new Set(builtin.map((template) => template.id)).size).toBe(builtin.length);
     for (const template of builtin) {

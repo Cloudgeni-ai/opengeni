@@ -2255,6 +2255,7 @@ export const FORCE_RLS_TABLES = [
   "vaults",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_uploads",
   "workspace_artifact_versions",
@@ -2720,6 +2721,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
+  // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
+  "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_versions",
   "workspace_instruction_policy_activation_events",
