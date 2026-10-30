@@ -59,6 +59,10 @@ async function livePolicies() {
   );
 }
 
+function applyContract() {
+  return migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
+}
+
 beforeAll(async () => {
   if (!realDatabase) return;
   owned = await acquireOwnerMigratedTestDatabase("retired-variable-set-contract");
@@ -113,6 +117,7 @@ beforeAll(async () => {
     variableSetIds: [setId],
   });
   before = await definitions();
+  await copyFile(join(source, migration), join(prefix, migration));
 }, 600_000);
 
 afterAll(async () => {
@@ -147,7 +152,7 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
         await owner!`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
       expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
       expect(await owner!`select id from workspace_variable_set_variables`).toHaveLength(0);
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow("values must migrate to vaults");
+      await expect(applyContract()).rejects.toThrow("values must migrate to vaults");
       await assertRolledBack();
     } finally {
       await owned!
@@ -166,7 +171,7 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
         values (${id}, ${scope.accountId}, ${scope.workspaceId}, 'personal-negative-control', 'user', ${crypto.randomUUID()}, ${crypto.randomUUID()})`;
     });
     try {
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow("personal Variable Set authority");
+      await expect(applyContract()).rejects.toThrow("personal Variable Set authority");
       await assertRolledBack();
     } finally {
       await owned!.admin`delete from workspace_variable_sets where id = ${id}`;
@@ -177,7 +182,7 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
     await owner!`create view unexpected_variable_set_reader as select id from workspace_variable_sets`;
     try {
       const policies = await livePolicies();
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow();
+      await expect(applyContract()).rejects.toThrow();
       await assertRolledBack();
       expect(await livePolicies()).toEqual(policies);
     } finally {
@@ -190,7 +195,7 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
       .admin`select * from session_turns where session_id = ${sessionId} order by id`;
     const sessionRows = await owned!.admin`select * from sessions where id = ${sessionId}`;
     const policies = await livePolicies();
-    await migrate(owned!.ownerUrl);
+    await applyContract();
     expect(
       await owned!.admin`select * from session_turns where session_id = ${sessionId} order by id`,
     ).toEqual(turnRows);
@@ -223,7 +228,7 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
       initialVersion: { setupScript: "echo test" },
     });
     expect(rig.name).toBe("post-contract");
-    await migrate(owned!.ownerUrl);
+    await applyContract();
     expect(await definitions()).toEqual(after);
   }, 180_000);
 });

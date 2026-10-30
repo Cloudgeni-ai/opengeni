@@ -48,6 +48,10 @@ async function definitions() {
   );
 }
 
+function applyContract() {
+  return migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
+}
+
 beforeAll(async () => {
   if (!realDatabase) return;
   owned = await acquireOwnerMigratedTestDatabase("retired-provider-waiter-contract");
@@ -101,6 +105,7 @@ beforeAll(async () => {
   before = await definitions();
   expect(before).toHaveLength(5);
   expect(before.every((routine) => /(?:codex|xai)_capacity_waiters/.test(routine.body))).toBe(true);
+  await copyFile(join(source, migration), join(prefix, migration));
 }, 600_000);
 
 afterAll(async () => {
@@ -164,7 +169,7 @@ describe.skipIf(!realDatabase)("retired provider capacity-waiter contraction", (
       const id = await seedOldWaiter(provider, "waiting");
       try {
         expect(await owner!.unsafe(`select id from ${provider}_capacity_waiters`)).toHaveLength(0);
-        await expect(migrate(owned!.ownerUrl)).rejects.toThrow(
+        await expect(applyContract()).rejects.toThrow(
           "retired provider capacity waiters must be settled",
         );
         await assertRolledBack();
@@ -179,7 +184,7 @@ describe.skipIf(!realDatabase)("retired provider capacity-waiter contraction", (
       "create view unexpected_old_waiter_reader as select id from codex_capacity_waiters",
     );
     try {
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow("depend");
+      await expect(applyContract()).rejects.toThrow("depend");
       await assertRolledBack();
     } finally {
       await owner!.unsafe("drop view unexpected_old_waiter_reader");
@@ -198,7 +203,7 @@ describe.skipIf(!realDatabase)("retired provider capacity-waiter contraction", (
     const identities = await owned!.admin`
       select p.oid, p.proowner, p.proacl, p.prosecdef, p.prorettype
       from pg_proc p where p.proname = any(${names}::text[]) order by p.oid`;
-    await migrate(owned!.ownerUrl);
+    await applyContract();
     expect(
       await owned!.admin`select * from subscription_capacity_waiters where turn_id = ${turnId}`,
     ).toEqual(current);
@@ -230,7 +235,7 @@ describe.skipIf(!realDatabase)("retired provider capacity-waiter contraction", (
     await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
     await assertRuntimeDatabasePosture(client!.db, { rlsStrategy: "force" });
-    await migrate(owned!.ownerUrl);
+    await applyContract();
     expect(await definitions()).toEqual(after);
   }, 180_000);
 });

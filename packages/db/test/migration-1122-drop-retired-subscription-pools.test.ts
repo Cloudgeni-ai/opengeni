@@ -71,6 +71,10 @@ async function definitions() {
   );
 }
 
+function applyContract() {
+  return migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
+}
+
 beforeAll(async () => {
   if (!realDatabase) return;
   owned = await acquireOwnerMigratedTestDatabase("retired-subscription-pool-contract");
@@ -135,6 +139,7 @@ beforeAll(async () => {
     }
   });
   before = await definitions();
+  await copyFile(join(source, migration), join(prefix, migration));
 }, 600_000);
 
 afterAll(async () => {
@@ -184,9 +189,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
       });
       try {
         expect(await owner!.unsafe(`select id from ${provider}_credential_leases`)).toHaveLength(0);
-        await expect(migrate(owned!.ownerUrl)).rejects.toThrow(
-          "legacy subscription leases must drain",
-        );
+        await expect(applyContract()).rejects.toThrow("legacy subscription leases must drain");
         await assertRolledBack();
       } finally {
         await owned!.admin.unsafe(`delete from ${provider}_credential_leases where id = $1`, [id]);
@@ -196,7 +199,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
   test("an unexpected dependent view refuses RESTRICT and preserves the source and fact queue", async () => {
     await owner!`create view unexpected_pool_reader as select id from codex_subscription_credentials`;
     try {
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow("depend");
+      await expect(applyContract()).rejects.toThrow("depend");
       await assertRolledBack();
     } finally {
       await owner!`drop view unexpected_pool_reader`;
@@ -206,7 +209,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
   test("a schema-bound Insights reader prevents replacement without being cascaded away", async () => {
     await owner!`create view unexpected_insights_reader as select id from insights_audience_sessions`;
     try {
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow("depend");
+      await expect(applyContract()).rejects.toThrow("depend");
       await assertRolledBack();
     } finally {
       await owner!`drop view unexpected_insights_reader`;
@@ -216,9 +219,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
   test("unmapped view-column grants refuse contraction rather than silently disappearing", async () => {
     await owner!`grant select (id) on insights_audience_sessions to opengeni_app`;
     try {
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow(
-        "view column grants require explicit review",
-      );
+      await expect(applyContract()).rejects.toThrow("view column grants require explicit review");
       await assertRolledBack();
     } finally {
       await owner!`revoke select (id) on insights_audience_sessions from opengeni_app`;
@@ -234,7 +235,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
         from generate_series(1, 10000)`;
     });
     try {
-      await expect(migrate(owned!.ownerUrl)).rejects.toThrow(
+      await expect(applyContract()).rejects.toThrow(
         "large retired credential history requires batched preservation",
       );
       await assertRolledBack();
@@ -257,7 +258,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
       where c.oid = 'insights_audience_sessions'::regclass
       order by acl.grantee, acl.privilege_type`;
     const beforeView = await viewAuthority();
-    await migrate(owned!.ownerUrl);
+    await applyContract();
     expect(
       await owned!
         .admin`select * from subscription_connections where account_id = ${scope.accountId}`,
@@ -289,7 +290,7 @@ describe.skipIf(!realDatabase)("retired subscription pool contraction", () => {
       sandboxBackend: "none",
     });
     const after = await definitions();
-    await migrate(owned!.ownerUrl);
+    await applyContract();
     expect(await definitions()).toEqual(after);
   }, 180_000);
 
