@@ -125,6 +125,10 @@ describe("brand-neutral error presentation", () => {
     expect(refusal({ askOwner: true })).toBe(
       "This organization is full. Ask an organization owner to upgrade. Reference: seat-refusal.",
     );
+    // An admin who can invite but not manage billing is told which plan to ask for.
+    expect(refusal({ askOwner: true, upgradePlan: "max", upgradePlanLabel: "Max" })).toBe(
+      "Ask an organization owner to upgrade to Max. Reference: seat-refusal.",
+    );
   });
 
   test("Site refusals are friendly before a conversation exists too", () => {

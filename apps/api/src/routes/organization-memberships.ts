@@ -380,8 +380,26 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
   return parsed.data;
 }
 
+/** Whether the caller holds billing:manage in the organization; unknown keeps the upgrade copy. */
+async function callerLacksBillingManage(context: Context, deps: ApiRouteDeps): Promise<boolean> {
+  const organizationId = context.req.param("organizationId");
+  if (!organizationId) return false;
+  try {
+    const access = await requireAccessContext(context, deps);
+    const grant = access.accountGrants.find((candidate) => candidate.accountId === organizationId);
+    return Boolean(
+      grant &&
+      !grant.permissions.includes("billing:manage") &&
+      !grant.permissions.includes("account:admin"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Reads the live plan catalog so a seat refusal can name the plan that adds the seat. */
 async function rethrowMembershipErrorWithPlans(
+  context: Context,
   deps: ApiRouteDeps,
   error: unknown,
   resourceLimitMessage?: string,
@@ -395,7 +413,9 @@ async function rethrowMembershipErrorWithPlans(
             () => null,
           )
         : null;
-    throw seatLimitHttpError(facts, plans);
+    throw seatLimitHttpError(facts, plans, {
+      askOwner: await callerLacksBillingManage(context, deps),
+    });
   }
   rethrowMembershipError(error, resourceLimitMessage);
 }
@@ -462,7 +482,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
     } catch (error) {
       if (error instanceof HTTPException) throw error;
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
   app.post("/v1/organizations", async (context) => {
@@ -484,7 +504,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         201,
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -504,6 +524,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
     } catch (error) {
       return await rethrowMembershipErrorWithPlans(
+        context,
         deps,
         error,
         "additional organization limit reached",
@@ -562,7 +583,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           message: "organization membership is not active",
         });
       }
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -589,7 +610,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -610,7 +631,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -633,7 +654,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -660,7 +681,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -685,7 +706,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         201,
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -740,7 +761,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           ),
         );
       } catch (error) {
-        return await rethrowMembershipErrorWithPlans(deps, error);
+        return await rethrowMembershipErrorWithPlans(context, deps, error);
       }
     },
   );
@@ -774,7 +795,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           ),
         );
       } catch (error) {
-        return await rethrowMembershipErrorWithPlans(deps, error);
+        return await rethrowMembershipErrorWithPlans(context, deps, error);
       }
     },
   );
@@ -839,7 +860,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           ),
         );
       } catch (error) {
-        return await rethrowMembershipErrorWithPlans(deps, error);
+        return await rethrowMembershipErrorWithPlans(context, deps, error);
       }
     },
   );
@@ -864,7 +885,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         }),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -890,7 +911,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -916,7 +937,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -942,7 +963,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       if (error instanceof OrganizationPrivacyLockedError) {
         throw new HTTPException(409, { message: error.message });
       }
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1000,7 +1021,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           message: error.message,
         });
       }
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
     return context.json(
       OrganizationInferenceResidency.parse({
@@ -1071,7 +1092,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
     } catch (error) {
       if (error instanceof HTTPException) throw error;
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1098,7 +1119,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1136,7 +1157,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           ),
         );
       } catch (error) {
-        return await rethrowMembershipErrorWithPlans(deps, error);
+        return await rethrowMembershipErrorWithPlans(context, deps, error);
       }
     },
   );
@@ -1171,7 +1192,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       if (error instanceof HTTPException) throw error;
       // An accepted invitation already holds its seat, so this is a safety net.
       if (nestedPostgresSqlState(error) === "P0S01") throw seatLimitInviteeHttpError();
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1203,7 +1224,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           ),
         );
       } catch (error) {
-        return await rethrowMembershipErrorWithPlans(deps, error);
+        return await rethrowMembershipErrorWithPlans(context, deps, error);
       }
     },
   );
@@ -1225,7 +1246,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         }),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1251,7 +1272,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1272,7 +1293,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 
@@ -1298,7 +1319,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      return await rethrowMembershipErrorWithPlans(deps, error);
+      return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
   });
 }

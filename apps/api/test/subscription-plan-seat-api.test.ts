@@ -3,6 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { BillingBalance, ErrorEnvelope, OPENGENI_CORRELATION_HEADER } from "@opengeni/contracts";
 import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
 import {
+  acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   completeSelfServiceOrganizationSetup,
   createDb,
@@ -282,5 +283,91 @@ test("an invitee refused by a full organization is told to ask an owner", async 
     await shared.admin.unsafe(`
       DROP TRIGGER refuse_accept_${suffix} ON organization_memberships;
       DROP FUNCTION refuse_accept_${suffix}();`);
+  }
+}, 180_000);
+
+test("an admin without billing access is told which plan to ask an owner for", async () => {
+  if (!app || !client || !shared || !settings) return;
+  const founder = await signInUser("Owner");
+  const organizationId = (
+    await completeSelfServiceOrganizationSetup(client.db, {
+      authUserId: founder.id,
+      actorSubjectId: `user:${founder.id}`,
+      organizationName: "Admin-invited organization",
+      operationId: crypto.randomUUID(),
+      requestFingerprint: "c".repeat(64),
+      trialCreditsEnabled: false,
+    })
+  ).organizationId;
+  const admin = await signInUser("Admin");
+  const invitation = await createOrganizationInvitation(client.db, {
+    organizationId,
+    actorSubjectId: `user:${founder.id}`,
+    operationId: crypto.randomUUID(),
+    targetSubjectId: null,
+    targetEmail: admin.email,
+    role: "admin",
+    expiresAt: new Date(Date.now() + 3600000).toISOString(),
+  });
+  await bindPendingOrganizationInvitationsForVerifiedEmail(client.db, {
+    subjectId: `user:${admin.id}`,
+    email: admin.email,
+  });
+  const [{ revision }] = await shared.admin<Array<{ revision: number }>>`
+    select revision from organization_membership_invitations where id = ${invitation.id}`;
+  await acceptOrganizationInvitation(client.db, {
+    organizationId,
+    actorSubjectId: `user:${admin.id}`,
+    operationId: crypto.randomUUID(),
+    invitationId: invitation.id,
+    expectedRevision: Number(revision),
+  });
+  const initial = await readSubscriptionPlanCatalog(client.db);
+  const limits: Record<string, number | null> = { free: 1, pro: 2, max: 10, enterprise: null };
+  const catalog = initial.plans.map((plan) => ({
+    ...plan,
+    seatLimit: limits[plan.key] ?? null,
+    ...(plan.key === "pro" || plan.key === "max" ? { stripePriceId: `price_${plan.key}` } : {}),
+  }));
+  const previous = {
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+    billingMode: settings.billingMode,
+  };
+  await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(catalog)}, 'seat-api-test', 'Admin seat refusal')`;
+  await upsertOrganizationPlan(client.db, {
+    accountId: organizationId,
+    planKey: "free",
+    status: "active",
+  });
+  Object.assign(settings, { subscriptionPlansEnabled: true, billingMode: "stripe" });
+  sessionUser = admin;
+  try {
+    const response = await app.request(`http://x/v1/organizations/${organizationId}/invitations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: "session=present" },
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        email: "admin-invite@example.test",
+        role: "member",
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      }),
+    });
+    const body = await response.text();
+    expect(response.status).toBe(402);
+    const refusal = ErrorEnvelope.parse(JSON.parse(body)).error;
+    // Two people on Free (1 seat) need a third seat: Max adds it, Pro doesn't.
+    expect(refusal).toMatchObject({
+      code: "seat_limit_reached",
+      message: "Ask an organization owner to upgrade to Max.",
+      details: { seatLimit: 1, seatsUsed: 2, upgradePlan: "max", askOwner: true },
+    });
+    expect(refusal.details).not.toHaveProperty("action");
+    expect(
+      formatErrorMessage(new OpenGeniApiError(response.status, body, { mutation: true })),
+    ).toStartWith("Ask an organization owner to upgrade to Max.");
+  } finally {
+    sessionUser = null;
+    Object.assign(settings, previous);
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}, 'seat-api-test', 'Restore fixture catalog')`;
   }
 }, 180_000);

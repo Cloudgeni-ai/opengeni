@@ -32,11 +32,13 @@ export function seatLimitFacts(detail: string | null | undefined): SeatLimitFact
 /**
  * A seat-limit refusal names its one fix: the plan that adds the seat
  * ("Upgrade to Pro" or "Upgrade to Max"), or Enterprise, which we assign.
- * Without a catalog to choose from it keeps the generic sentence.
+ * Without a catalog to choose from it keeps the generic sentence. People who
+ * can't manage billing are told to ask an owner, with no upgrade action.
  */
 export function seatLimitHttpError(
   facts: SeatLimitFacts | null,
   plans: readonly SubscriptionPlan[] | null,
+  options: { askOwner?: boolean } = {},
 ): ApiHttpError {
   const target =
     facts && plans
@@ -46,19 +48,26 @@ export function seatLimitHttpError(
           facts.seatsUsed + 1,
         )
       : null;
+  const askOwner = options.askOwner === true;
   return new ApiHttpError(402, {
     code: "seat_limit_reached",
-    message: !target
-      ? SEAT_LIMIT_FALLBACK_MESSAGE
-      : target.key === "enterprise"
-        ? `Talk to us about ${target.label} to add more people.`
-        : `Upgrade to ${target.label} to add more people.`,
+    message: askOwner
+      ? !target
+        ? "Ask an organization owner to upgrade the plan to add people."
+        : target.key === "enterprise"
+          ? `Ask an organization owner about ${target.label}.`
+          : `Ask an organization owner to upgrade to ${target.label}.`
+      : !target
+        ? SEAT_LIMIT_FALLBACK_MESSAGE
+        : target.key === "enterprise"
+          ? `Talk to us about ${target.label} to add more people.`
+          : `Upgrade to ${target.label} to add more people.`,
     retryable: false,
     outcomeUnknown: false,
     details: {
       ...(facts ? { seatLimit: facts.seatLimit, seatsUsed: facts.seatsUsed } : {}),
       ...(target ? { upgradePlan: target.key, upgradePlanLabel: target.label } : {}),
-      action: { type: "upgrade", href: "/billing" },
+      ...(askOwner ? { askOwner: true } : { action: { type: "upgrade", href: "/billing" } }),
     },
   });
 }

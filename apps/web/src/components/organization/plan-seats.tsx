@@ -12,8 +12,8 @@ export function PlanSeats({ plan }: { plan: BillingPlanBalance | null }) {
 }
 
 /**
- * A seat refusal names its one fix: the plan that adds the seats, with one
- * button for people who manage billing. Everyone else is told to ask an owner.
+ * A seat refusal names its one fix once: on the one button for people who
+ * manage billing ("Upgrade to Pro"). Everyone else is told to ask an owner.
  */
 export function SeatLimitNotice({
   canManage,
@@ -33,7 +33,7 @@ export function SeatLimitNotice({
   return (
     <Notice
       tone="waiting"
-      title={canManage && fix ? `${fix} to add more people` : "Your plan's seat limit is reached"}
+      title="Your plan's seat limit is reached"
       live="assertive"
       actionLayout="responsive"
       action={
@@ -45,9 +45,11 @@ export function SeatLimitNotice({
       }
     >
       {canManage
-        ? fix
-          ? null
-          : "Upgrade your plan to invite more people."
+        ? !upgrade
+          ? "Upgrade your plan to invite more people."
+          : enterprise
+            ? `${fix} to add more people.`
+            : null
         : !upgrade
           ? "Ask an organization owner to upgrade the plan before inviting more people."
           : enterprise

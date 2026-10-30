@@ -494,14 +494,19 @@ export function formatErrorMessage(
     } else if (error.code === "seat_limit_reached") {
       // The refusal names the one plan that adds the seat when the server knows it.
       const label = error.details?.upgradePlanLabel;
+      const named = typeof label === "string" && label.trim() ? label.trim() : null;
       message =
         error.details?.askOwner === true
-          ? "This organization is full. Ask an organization owner to upgrade."
-          : typeof label !== "string" || !label.trim()
+          ? !named
+            ? "This organization is full. Ask an organization owner to upgrade."
+            : error.details?.upgradePlan === "enterprise"
+              ? `Ask an organization owner about ${named}.`
+              : `Ask an organization owner to upgrade to ${named}.`
+          : !named
             ? "Your organization has reached its seat limit. Upgrade the plan to add people."
             : error.details?.upgradePlan === "enterprise"
-              ? `Talk to us about ${label.trim()} to add more people.`
-              : `Upgrade to ${label.trim()} to add more people.`;
+              ? `Talk to us about ${named} to add more people.`
+              : `Upgrade to ${named} to add more people.`;
     } else if (error instanceof OpenGeniSessionListCursorError) {
       message = "The conversation list changed. Refresh and try again.";
     } else if (error.status === 401) {

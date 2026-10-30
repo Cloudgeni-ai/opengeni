@@ -11,6 +11,8 @@ export type SeatUpgradeCandidate = {
  * The one plan that fixes a seat-limit refusal: the cheapest self-service plan
  * above the current one with room for `seatsNeeded` people, else Enterprise
  * (assigned by us, not bought). Null when nothing in the catalog adds the seats.
+ * A current plan whose price is unknown (not in the catalog, or custom-priced)
+ * is never "upgraded" to a self-service plan that might cost less.
  */
 export function seatUpgradePlan<T extends SeatUpgradeCandidate>(
   plans: readonly T[],
@@ -18,16 +20,20 @@ export function seatUpgradePlan<T extends SeatUpgradeCandidate>(
   seatsNeeded: number,
 ): T | null {
   if (currentKey === "enterprise") return null;
-  const currentPrice = plans.find((plan) => plan.key === currentKey)?.monthlyPriceMicros ?? 0;
+  const current = currentKey ? plans.find((plan) => plan.key === currentKey) : undefined;
+  const currentPrice = currentKey ? (current?.monthlyPriceMicros ?? null) : 0;
   const fits = (plan: T) => plan.seatLimit === null || plan.seatLimit >= seatsNeeded;
-  const paid = plans
-    .filter(
-      (plan) =>
-        plan.selfService &&
-        plan.key !== currentKey &&
-        (plan.monthlyPriceMicros ?? 0) > currentPrice &&
-        fits(plan),
-    )
-    .sort((a, b) => (a.monthlyPriceMicros ?? 0) - (b.monthlyPriceMicros ?? 0));
+  const paid =
+    currentPrice === null
+      ? []
+      : plans
+          .filter(
+            (plan) =>
+              plan.selfService &&
+              plan.key !== currentKey &&
+              (plan.monthlyPriceMicros ?? 0) > currentPrice &&
+              fits(plan),
+          )
+          .sort((a, b) => (a.monthlyPriceMicros ?? 0) - (b.monthlyPriceMicros ?? 0));
   return paid[0] ?? plans.find((plan) => plan.key === "enterprise" && fits(plan)) ?? null;
 }

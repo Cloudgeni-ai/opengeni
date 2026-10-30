@@ -455,7 +455,8 @@ test("a seat refusal names one plan with one button, and members are told to ask
   const owner = await mount(
     <SeatLimitNotice canManage upgrade={{ key: "pro", label: "Pro" }} onUpgrade={upgrade} />,
   );
-  expect(owner.textContent).toBe("Upgrade to Pro to add more peopleUpgrade to Pro");
+  // The plan is named once, on the button.
+  expect(owner.textContent).toBe("Your plan's seat limit is reachedUpgrade to Pro");
   expect(document.querySelectorAll("button").length).toBe(1);
   await click("Upgrade to Pro");
   expect(upgrade).toHaveBeenCalledTimes(1);

@@ -1108,18 +1108,9 @@ function InvitePage({
   const [seatLimitError, setSeatLimitError] = useState<{
     message: string;
     upgrade: SeatUpgrade | null;
-    seats: number;
   } | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
-  // The catalog picks the plan with room for everyone still waiting (the
-  // server names a plan for one more person); the server's plan is the
-  // fallback without a catalog. A full plan says so up front.
-  const seatUpgrade = seatLimitError
-    ? (seatUpgradeFor(directory.plan, directory.plans, seatLimitError.seats) ??
-      seatLimitError.upgrade)
-    : seatUpgradeFor(directory.plan, directory.plans);
-  const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
 
   const members = new Map(
     directory.members.value
@@ -1139,6 +1130,12 @@ function InvitePage({
   });
   const problems = chips.filter((chip) => chip.problem);
   const count = Math.max(1, chips.length - problems.length);
+  // The catalog picks the plan with room for everyone in the form (the
+  // server names a plan for one more person); the server's plan is the
+  // fallback without a catalog. A full plan says so up front.
+  const seatUpgrade =
+    seatUpgradeFor(directory.plan, directory.plans, count) ?? seatLimitError?.upgrade ?? null;
+  const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
   const emailError =
     emails.length === 0
       ? showErrors
@@ -1186,14 +1183,15 @@ function InvitePage({
             setSeatLimitError({
               message: seatFailure.message,
               upgrade: seatFailure.upgrade ?? null,
-              seats: result.failed.filter((each) => each.seatLimitReached).length,
             });
-            return false;
           }
+          // Other failures still say why, next to the seat notice.
+          const other = result.failed.filter((each) => !each.seatLimitReached);
+          if (other.length === 0) return false;
           throw new Error(
-            result.failed.length === 1
-              ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
-              : `Couldn't invite ${joinNames(result.failed.map((each) => each.email))}. ${result.failed[0]!.message}`,
+            other.length === 1
+              ? `Couldn't invite ${other[0]!.email}. ${other[0]!.message}`
+              : `Couldn't invite ${joinNames(other.map((each) => each.email))}. ${other[0]!.message}`,
           );
         }
         nav.openSection("people");

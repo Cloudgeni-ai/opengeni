@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { seatUpgradePlan } from "../src/seat-upgrade";
+import { seatUpgradePlan, type SeatUpgradeCandidate } from "../src/seat-upgrade";
 
 // Bendik's limits: Free 1, Pro ($20) 2, Max ($100) 10, Enterprise unlimited.
 const plans = [
@@ -14,8 +14,11 @@ const plans = [
     selfService: false,
   },
 ];
-const pick = (current: string | null, seatsNeeded: number, catalog = plans) =>
-  seatUpgradePlan(catalog, current, seatsNeeded)?.key ?? null;
+const pick = (
+  current: string | null,
+  seatsNeeded: number,
+  catalog: readonly SeatUpgradeCandidate[] = plans,
+) => seatUpgradePlan(catalog, current, seatsNeeded)?.key ?? null;
 
 test("the fix is the cheapest self-service plan above the current one with room", () => {
   expect(pick("free", 2)).toBe("pro");
@@ -38,4 +41,14 @@ test("nothing above Enterprise, and no plan when nothing in the catalog adds the
       plans.map((plan) => ({ ...plan, selfService: false })),
     ),
   ).toBe("enterprise");
+});
+
+test("a current plan with an unknown price is only ever pointed at Enterprise", () => {
+  // Not in the catalog: it might cost more than Pro, so Pro is not an upgrade.
+  expect(pick("legacy-team", 2)).toBe("enterprise");
+  const custom = [
+    ...plans,
+    { key: "team", label: "Team", monthlyPriceMicros: null, seatLimit: 1, selfService: false },
+  ];
+  expect(pick("team", 2, custom)).toBe("enterprise");
 });
