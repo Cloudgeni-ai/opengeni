@@ -382,20 +382,44 @@ test("app and database agree on debt after an API own-key fee: renewal never re-
   await usage(accountId, plan + 2 * M, "app");
   const owing = await balanceOf(accountId);
   expect(owing.creditsMicros).toBe(-2 * M);
-  for (let renewal = 0; renewal < 2; renewal += 1) {
-    const next = await renew(accountId);
-    // The database: the $2 is credit debt, not netted from the new allowance.
-    expect(next.openingDebt).toBe(0);
-    const balance = await balanceOf(accountId);
-    expect(balance.plan!.creditRemainingMicros).toBe(plan);
-    expect(balance.creditsMicros).toBe(-2 * M);
-    // The app agrees: the whole allowance is spendable, every period.
-    expect(spendableCreditMicros(balance, undefined, "app")).toBe(plan);
-    expect(spendableCreditMicros(balance, undefined, "api")).toBe(0);
-  }
-  // The next top-up repays it.
-  await credit(accountId, "credit_topup", 3 * M);
-  expect((await balanceOf(accountId)).creditsMicros).toBe(1 * M);
+  // A fee paid in full is not debt (probe E): the $2 is an app overdraft.
+  expect(owing.apiDebtMicros).toBeUndefined();
+  expect(owing.byokFeeDebtMicros).toBeUndefined();
+  expect(spendableCreditMicros(owing, undefined, "app")).toBe(0);
+  // The next period nets it once, and the app agrees with the database.
+  let next = await renew(accountId);
+  expect(next.openingDebt).toBe(2 * M);
+  let balance = await balanceOf(accountId);
+  expect(balance.plan!.creditRemainingMicros).toBe(plan - 2 * M);
+  expect(balance.creditsMicros).toBe(0);
+  expect(spendableCreditMicros(balance, undefined, "app")).toBe(plan - 2 * M);
+  // Never again: the following period opens in full.
+  next = await renew(accountId);
+  expect(next.openingDebt).toBe(0);
+  balance = await balanceOf(accountId);
+  expect(balance.plan!.creditRemainingMicros).toBe(plan);
+  expect(spendableCreditMicros(balance, undefined, "app")).toBe(plan);
+  expect(spendableCreditMicros(balance, undefined, "api")).toBe(0);
+}, 180_000);
+
+test("unpaid fee debt stays out of plan credit at renewal; paid fees never do", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("pro");
+  const plan = (await openPeriod(accountId)).granted;
+  // $3 of API fees with no paid credit: fee debt. Then $1 past the plan in app use.
+  expect((await fee(accountId, 3 * M, "api")).unfundedMicros).toBe(3 * M);
+  await usage(accountId, plan + 1 * M, "app");
+  const owing = await balanceOf(accountId);
+  expect(owing.creditsMicros).toBe(-4 * M);
+  expect(owing.byokFeeDebtMicros).toBe(3 * M);
+  // The fee debt waits for a top-up; only the app overdraft is netted.
+  const next = await renew(accountId);
+  expect(next.openingDebt).toBe(1 * M);
+  const balance = await balanceOf(accountId);
+  expect(balance.plan!.creditRemainingMicros).toBe(plan - 1 * M);
+  expect(balance.creditsMicros).toBe(-3 * M);
+  expect(balance.byokFeeDebtMicros).toBe(3 * M);
+  expect(spendableCreditMicros(balance, undefined, "app")).toBe(plan - 1 * M);
 }, 180_000);
 
 test("app spending a paid plan covers never spends paid credit (probe A)", async () => {
@@ -564,18 +588,69 @@ test("repaid fee debt stays repaid: a later clawback is never fee debt", async (
   expect(after.paidCreditsMicros).toBe(0);
 }, 180_000);
 
+test("rows an older release writes during the rollout never zero paid credit (probe H)", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "credit_topup", 3 * M); // with a receipt
+  // The previous release writes a top-up and an unscoped grant, no receipts.
+  await shared.admin`
+    insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+    values (${accountId}::uuid, 'credit_topup', ${5 * M}, ${crypto.randomUUID()})`;
+  await shared.admin`
+    insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+    values (${accountId}::uuid, 'grant', ${2 * M}, ${crypto.randomUUID()})`;
+  const balance = await balanceOf(accountId);
+  expect(balance.creditsMicros).toBe(10 * M);
+  // At most the $2 grant is unpaid.
+  expect(balance.paidCreditsMicros).toBe(8 * M);
+  // The next receipt keeps it.
+  expect((await fee(accountId, 1 * M, "api")).creditPaidMicros).toBe(1 * M);
+  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(7 * M);
+  // Spending still draws the unpaid $2 first.
+  await usage(accountId, 3 * M, "api");
+  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(6 * M);
+}, 180_000);
+
+test("the balance read never touches an ordinary debit's metadata", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "credit_topup", 10 * M);
+  // Receipt-shaped keys on a debit would fail the read if it parsed them.
+  const junk = {
+    paidCreditMicros: "x",
+    paidFundingBeforeMicros: "x",
+    paidCreditsBeforeMicros: "x",
+    feeDebtRepaidMicros: "x",
+    unfundedMicros: "x",
+  };
+  await shared.admin`
+    insert into credit_ledger_entries (account_id, type, amount_micros, source_type, source_id,
+      usage_origin, idempotency_key, metadata)
+    values (${accountId}::uuid, 'model_usage_debit', ${-1 * M}, 'model_response', ${crypto.randomUUID()},
+      'api', ${crypto.randomUUID()}, ${shared.admin.json(junk)})`;
+  const balance = await balanceOf(accountId);
+  expect(balance.creditsMicros).toBe(9 * M);
+  expect(balance.paidCreditsMicros).toBe(9 * M);
+  expect(await spendable(accountId, "api")).toBe(9 * M);
+}, 180_000);
+
 /**
  * Ledger rows the work reads, from this transaction's statistics: rows
- * sequential scans return plus index entries index scans read.
+ * sequential scans return plus index entries index scans read (only those of
+ * `index` when given).
  */
-async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>) {
+async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>, index?: string) {
   return await client!.db.transaction(async (tx) => {
     const db = tx as unknown as DbClient["db"];
     const count = async () => {
-      const [row] = (await tx.execute(sql`
+      const [row] = (await tx.execute(
+        index
+          ? sql`select pg_stat_get_xact_tuples_returned(${index}::regclass)::text n`
+          : sql`
         select sum(pg_stat_get_xact_tuples_returned(c.oid))::text n from pg_class c
         where c.oid = 'credit_ledger_entries'::regclass or c.oid in (
-          select indexrelid from pg_index where indrelid = 'credit_ledger_entries'::regclass)`)) as unknown as {
+          select indexrelid from pg_index where indrelid = 'credit_ledger_entries'::regclass)`,
+      )) as unknown as {
         n: string;
       }[];
       return Number(row!.n);
@@ -585,6 +660,33 @@ async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>) {
     return (await count()) - before;
   });
 }
+
+test("paid credit and fee debt are read from receipt rows alone, not from every debit", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "credit_topup", 10 * M);
+  expect((await fee(accountId, 12 * M, "api")).unfundedMicros).toBe(2 * M);
+  await credit(accountId, "credit_topup", 100 * M);
+  const rows = 3_000;
+  await shared.admin`
+    insert into credit_ledger_entries (account_id, type, amount_micros, source_type, source_id,
+      usage_origin, idempotency_key)
+    select ${accountId}::uuid, 'model_usage_debit', -1, 'model_response', gen_random_uuid()::text,
+      'api', gen_random_uuid()::text
+    from generate_series(1, ${rows})`;
+  await shared.admin`analyze credit_ledger_entries`;
+  // The receipt sums read the three receipt rows from their partial index;
+  // the one pass over every row computes only the balance and API spending.
+  const receiptRows = await ledgerRowsRead(
+    (db) => getByokFeeSpendableBalance(db, accountId, "api"),
+    "credit_ledger_receipt_rows_idx",
+  );
+  expect(receiptRows).toBeGreaterThanOrEqual(3);
+  expect(receiptRows).toBeLessThan(10);
+  const balance = await balanceOf(accountId);
+  expect(balance.paidCreditsMicros).toBe(98 * M - rows);
+  expect(balance.byokFeeDebtMicros).toBeUndefined();
+}, 180_000);
 
 test("fee reads and settlement read the ledger once, even after an unfunded fee", async () => {
   if (!client || !shared) return;

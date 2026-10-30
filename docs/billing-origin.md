@@ -104,19 +104,21 @@ running API call settles past it, exactly like general debt today; the next
 top-up repays it first.
 
 Plan credit never repays that API debt, nor own-key fee debt (see below).
-Negative credits up to what API work and own-key fees charged to credits have
-spent (a fee's `creditPaidMicros` and `unfundedMicros`, whatever its origin)
+Negative credits up to what API work (other than own-key fees) has spent plus
+own-key fee debt still owed (fees' `unfundedMicros` less `feeDebtRepaidMicros`)
 are never repaid from plan credit; of that, own-key fee debt
 (`BillingBalance.byokFeeDebtMicros`) is owed first and the rest is
-`BillingBalance.apiDebtMicros`. App admission and plan allocation add both
+`BillingBalance.apiDebtMicros`. Fees paid in full never raise the cap, so an
+ordinary app overdraft of an account that once paid fees is still netted
+from the next period. App admission and plan allocation add both
 back, so app use keeps the whole allowance. The database applies the same
 cap with `opengeni_private.plan_app_general_balance`: period expiry removes
 the whole unused allowance and leaves that debt as credit debt, and a new
 period's opening debt nets only older app debt. The app's read and the
 database use the same figure, so a renewal never nets debt the app does not
 show. Debt is attributed to API use up to that lifetime spend, which can count
-a later app overrun as API debt when the account once paid for API use or
-own-key fees; that errs towards keeping plan credit.
+a later app overrun as API debt when the account once paid for API use; that
+errs towards keeping plan credit.
 
 `plan_period_usage` ignores `usage_origin = 'api'` debits (and refunds of
 them), so API use never consumes the monthly allowance, and
@@ -294,29 +296,37 @@ plain spending records a receipt on its own row under the account lock
 (`packages/db/src/paid-credit.ts`): the paid credit it adds or removes
 (`paidCreditMicros`), fee debt it repays (`feeDebtRepaidMicros`), and a mark,
 the paid credits and paid funding just before it (`paidCreditsBeforeMicros`,
-`paidFundingBeforeMicros`, and `paidRestoredMicros` for a usage refund).
-Paid credit is then
+`paidFundingBeforeMicros`, and `paidRestoredMicros` for a usage refund) and
+the unpaid credit just after it (`unpaidCreditsAfterMicros`). Paid credit is
+then
 
     min(paid funding + min(0, lowest mark), credits + fee debt)
 
 where paid funding is the receipts' paid credit less fees paid from it and
 fee debt repaid, and a mark is paid credits before it (plus what it restores)
 less paid funding before it. Between receipts plain spending only lowers
-credits, so the lowest point is either now or a mark. The ordinary balance
-read computes it in the same single pass over the ledger (a few sums, plus the
-paid inflows and any unrecorded unpaid inflows, which scale with top-ups and
-grants rather than usage), so fee admission and settlement cost the same as
-a plain balance read, and settling a fee reads the balance once.
+credits, so the lowest point is either now or a mark. The balance read sums
+the balance and API spending in one pass over the ledger, exactly as without
+the fee, and reads the receipts only from the rows that can carry one (credit
+added, Stripe refunds and dispute holds, fees) through the partial index
+`credit_ledger_receipt_rows_idx`. Ordinary debits' metadata is never read, so
+an account without fees reads its balance as fast as before, and the
+paid-credit figures scale with top-ups, grants, refunds and fees rather than
+usage. Fee admission and settlement cost the same as a plain balance read,
+and settling a fee reads the balance once.
 
 A video refund returns as paid credit what its debit drew from paid credit
 (`paidDrawnMicros` on the debit); other usage refunds return unpaid credit,
 which can understate paid credit but never overstate it. Rows without a
 receipt (written before this release, or by the previous release during a
-rolling deploy) are bounded conservatively: an unrecorded unpaid inflow after
-the latest mark is taken to arrive when paid credit was zero, and with no mark
-at all paid credit is also at most credits less every unrecorded unpaid
-inflow, whichever bound is larger. An unrecorded top-up after the latest mark
-repays fee debt first, and the next receipt records it.
+rolling deploy) are bounded conservatively, never above what receipts
+recorded: an unrecorded unpaid inflow after the latest mark is taken to
+arrive when paid credit was zero, and paid credit is also at least credits
+less the unpaid credit the latest receipt left (none before the first) less
+the unrecorded unpaid inflows since, whichever bound is larger. So an older
+release's top-up and grant written after a receipt keep the paid credit
+before them. An unrecorded top-up after the latest mark repays fee debt
+first, and the next receipt records it.
 
 Workspace and member allowances count fee debits like any other debit, so an
 allowance that also counts unbilled usage at list price sees an own-key call
@@ -344,10 +354,15 @@ until its next API secret or format write on a new pod.
 Migration 1102 is rolling: same-signature replacements of
 `opengeni_private.plan_period_usage` (an own-key fee counts only its
 `planPaidMicros`) and `opengeni_private.plan_app_general_balance` (the debt
-cap includes own-key fees charged to credits). The previous release never
-writes `byok_platform_fee` rows, so its results are unchanged. Paid-credit
-receipts are plain row metadata; rows the previous release writes during the
-rollout are read conservatively (see Paid credit).
+cap adds own-key fee debt still owed). The previous release never writes
+`byok_platform_fee` rows, so its results are unchanged. Paid-credit receipts
+are plain row metadata; rows the previous release writes during the rollout
+are read conservatively (see Paid credit).
+
+Migration 1103 builds `credit_ledger_receipt_rows_idx` concurrently (a
+non-unique partial index, so it may land after traffic returns). Reads are
+correct without it; until it exists the receipt figures take a second pass
+over the account's ledger.
 
 The fee's default (500) turns it on wherever Stripe billing is active once
 deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0` to deploy it switched off.

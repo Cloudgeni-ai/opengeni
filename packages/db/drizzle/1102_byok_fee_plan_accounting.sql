@@ -9,10 +9,11 @@
 --   paid plan is past due, and a leftover unrestricted Free period never pays
 --   one.
 -- * plan_app_general_balance never lets plan credit repay debt up to what API
---   work and own-key fees charged to credits have spent, so fee debt waits
---   for paid-for credit (the next top-up) and is never repaid by plan credit
---   at period expiry or in a new period's opening debt. The app's balance
---   read uses the same cap (packages/db/src/credit-balances.ts).
+--   work has spent plus own-key fee debt still owed (unfundedMicros less
+--   feeDebtRepaidMicros), so fee debt waits for paid-for credit (the next
+--   top-up) and is never repaid by plan credit at period expiry or in a new
+--   period's opening debt. Fees paid in full never raise it. The app's
+--   balance read uses the same terms (packages/db/src/credit-balances.ts).
 --
 -- Rolling: same-signature replacements of two function bodies. The previous
 -- release never writes byok_platform_fee rows, so its results are unchanged.
@@ -68,14 +69,20 @@ BEGIN
         LANGUAGE sql STABLE
         SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
         AS $$
-      -- Debt up to what API work and own-key fees charged to credits have
-      -- spent is never repaid from plan credit.
+      -- Debt up to what API work has spent plus own-key fee debt still owed
+      -- is never repaid from plan credit.
       SELECT general + least(greatest(0, p_plan_remaining - general), credit_spent)
       FROM (SELECT opengeni_private.plan_general_balance(p_account_id) AS general,
-        greatest(0, coalesce((SELECT sum(CASE WHEN type = 'byok_platform_fee'
-            THEN -amount_micros - coalesce((metadata->>'planPaidMicros')::bigint, 0)
-            ELSE -amount_micros END) FROM credit_ledger_entries
-          WHERE account_id = p_account_id AND (usage_origin = 'api' OR type = 'byok_platform_fee')), 0)) AS credit_spent) balances
+        greatest(0,
+          (SELECT coalesce(sum(-amount_micros)
+              FILTER (WHERE usage_origin = 'api' AND type <> 'byok_platform_fee'), 0)
+            FROM credit_ledger_entries WHERE account_id = p_account_id)
+          + (SELECT coalesce(sum((metadata->>'unfundedMicros')::bigint)
+                FILTER (WHERE type = 'byok_platform_fee'), 0)
+              - coalesce(sum((metadata->>'feeDebtRepaidMicros')::bigint), 0)
+            FROM credit_ledger_entries WHERE account_id = p_account_id
+              AND (amount_micros > 0
+                OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee')))) AS credit_spent) balances
     $$;
   $create$, data_schema);
 END $install$;
