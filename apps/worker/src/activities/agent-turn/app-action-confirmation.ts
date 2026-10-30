@@ -22,12 +22,10 @@ export type AppActionAuthority = {
   kind: AppActionAuthorityKind;
   /** The person the chat acts for, when there is one. */
   subjectId?: string;
-  /** Their permissions in the chat's workspace. */
-  permissions?: readonly string[];
 };
 
-/** The person a card's targets are read as. */
-export type AppActionReader = { subjectId: string; permissions: readonly string[] };
+/** The person a card's targets are read as; what they may see is read live. */
+export type AppActionReader = { subjectId: string };
 
 const APP_ACTION_CALL_MODEL_NAME = prefixedMcpToolName("opengeni", APP_ACTION_CALL_TOOL_NAME);
 
@@ -48,8 +46,15 @@ function confirmationTitle(args: unknown, chat: AppActionChat, targets?: AppActi
   const title = appActionConfirmationTitle(args, chat, targets);
   const price = chat.settings ? videoPolicyCardPrice(chat.settings, args) : null;
   const full = price ? `${title} ${price}` : title;
-  // The saved review's title holds at most 256 characters.
-  return full.length > TITLE_LIMIT ? `${full.slice(0, TITLE_LIMIT - 1).trimEnd()}…` : full;
+  // The saved review's title holds at most 256 characters. Cut by code
+  // point, so half an emoji never reaches the saved review's JSON.
+  if (full.length <= TITLE_LIMIT) return full;
+  let cut = "";
+  for (const point of full) {
+    if (cut.length + point.length > TITLE_LIMIT - 1) break;
+    cut += point;
+  }
+  return `${cut.trimEnd()}…`;
 }
 
 const TITLE_LIMIT = 256;
@@ -145,13 +150,15 @@ export function withAppActionConfirmation(
     }
     const card = await pending;
     if (card) {
+      // The card's own facts only: none when it has none.
+      const { targetFacts: _earlier, ...context } = call.reviewContext ?? {};
       return {
         ...call,
         approvalMode: "session_mcp",
         defaultDecision: "ask",
         reviewContext: {
           kind: "generic",
-          ...call.reviewContext,
+          ...context,
           title: card.title,
           ...(card.targetFacts.length > 0 ? { targetFacts: card.targetFacts } : {}),
         },
@@ -168,12 +175,7 @@ export function withAppActionConfirmation(
     // the plain wording, and the card still asks.
     const targets =
       chat.targets && authority.subjectId
-        ? await chat
-            .targets(args, {
-              subjectId: authority.subjectId,
-              permissions: authority.permissions ?? [],
-            })
-            .catch(() => undefined)
+        ? await chat.targets(args, { subjectId: authority.subjectId }).catch(() => undefined)
         : undefined;
     return {
       title: confirmationTitle(args, chat, targets),

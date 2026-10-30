@@ -290,11 +290,13 @@ function plainName(text: string | undefined): string | undefined {
     // Format characters (bidi overrides, zero-width) could reorder the question.
     .replace(/\p{Cf}/gu, "")
     // Quotes that could pass for the question's own.
-    .replace(/[“”„‟«»‹›＂〝〞]/gu, '"')
+    .replace(/[“”„‟«»‹›＂〝〞″‶˝〃]/gu, '"')
     .replace(/\s+/g, " ")
     .trim();
   if (!line) return undefined;
-  return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+  // By code point, so a cut never leaves half an emoji (invalid JSON text).
+  const points = Array.from(line);
+  return points.length > 80 ? `${points.slice(0, 79).join("").trimEnd()}…` : line;
 }
 
 /** "Gmail · anna@example.com": a target's name and account, as one quoted label. */

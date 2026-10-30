@@ -19,7 +19,9 @@ import {
   listOrganizationMembers,
   listSelfOrganizationMemberships,
 } from "./organization-membership-lifecycle";
+import { accountPermissionsForOrganizationRole } from "./organization-role-permissions";
 import { getVault, getVaultItem, VaultError, type VaultDbContext } from "./vaults";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import * as schema from "./schema";
 
 /**
@@ -51,14 +53,25 @@ export async function resolveAppActionTargets(
   const subjectId = scope.subjectId;
   if (!call || !subjectId) return {};
   const segments = call.entry.path.split("/");
-  let role: Promise<boolean> | undefined;
-  // Read live, once per call, as the API's routes do: a turn's frozen
+  // Read live, once per call, as the API's routes read them: a turn's frozen
   // permissions can imply account:admin for a workspace admin.
-  const organizationAdmin = () =>
-    (role ??= liveOrganizationAdmin(db, scope.accountId, subjectId).catch((error: unknown) => {
-      scope.onLookupError?.(error, "organizationRole");
-      return false;
-    }));
+  let role: Promise<readonly string[]> | undefined;
+  const organizationPermissions = () =>
+    (role ??= liveOrganizationPermissions(db, scope.accountId, subjectId).catch(
+      (error: unknown) => {
+        scope.onLookupError?.(error, "organizationRole");
+        return [];
+      },
+    ));
+  const memberships = new Map<string, Promise<readonly string[] | null>>();
+  const workspacePermissions = (workspaceId: string) => {
+    let read = memberships.get(workspaceId);
+    if (!read) {
+      read = membershipPermissions(db, scope.accountId, workspaceId, subjectId);
+      memberships.set(workspaceId, read);
+    }
+    return read;
+  };
   const found = await Promise.all(
     Object.entries(call.ids).map(async ([parameter, id]) => {
       // The chat's own workspace reads as "this workspace"; nothing to look up.
@@ -73,7 +86,8 @@ export async function resolveAppActionTargets(
             accountId: scope.accountId,
             chatWorkspaceId: scope.workspaceId,
             subjectId,
-            organizationAdmin,
+            organizationPermissions,
+            workspacePermissions,
             ids: call.ids,
             id,
             organization: segments[2] === "organizations",
@@ -99,19 +113,48 @@ export async function resolveAppActionTargets(
 
 const LOOKUP_TIMEOUT_MS = 3_000;
 
-/** The person is an active owner or admin of the chat's organization, right now. */
-async function liveOrganizationAdmin(
+/** The account permissions the person's active role in the chat's organization holds, right now. */
+async function liveOrganizationPermissions(
   db: Database,
   accountId: string,
   subjectId: string,
-): Promise<boolean> {
-  const memberships = await listSelfOrganizationMemberships(db, subjectId);
-  return memberships.some(
-    (membership) =>
-      membership.organizationId === accountId &&
-      membership.status === "active" &&
-      (membership.role === "owner" || membership.role === "admin"),
+): Promise<readonly string[]> {
+  const membership = (await listSelfOrganizationMemberships(db, subjectId)).find(
+    (candidate) => candidate.organizationId === accountId && candidate.status === "active",
   );
+  return membership ? accountPermissionsForOrganizationRole(membership.role) : [];
+}
+
+/**
+ * The person's permissions in a workspace, as the API's workspace grant reads
+ * them (its membership's permissions, never its role label), or null for
+ * someone who isn't a member.
+ */
+async function membershipPermissions(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  subjectId: string,
+): Promise<readonly string[] | null> {
+  return await withAccountRls(db, accountId, async (scoped) => {
+    const [found] = await scoped
+      .select({ permissions: schema.workspaceMemberships.permissions })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.accountId, accountId),
+          eq(schema.workspaceMemberships.workspaceId, workspaceId),
+          eq(schema.workspaceMemberships.subjectId, subjectId),
+        ),
+      )
+      .limit(1);
+    return found ? normalizeWorkspaceMembershipPermissions(found.permissions) : null;
+  });
+}
+
+/** As hasPermission reads a person's grant: the permission itself, or workspace:admin. */
+function holds(permissions: readonly string[] | null, permission: string): boolean {
+  return Boolean(permissions?.includes(permission) || permissions?.includes("workspace:admin"));
 }
 
 /**
@@ -131,8 +174,10 @@ type LookupContext = {
   /** The chat's own workspace. */
   chatWorkspaceId: string;
   subjectId: string;
-  /** They administer the chat's organization, read live. */
-  organizationAdmin: () => Promise<boolean>;
+  /** Their account permissions in the chat's organization, from their live role. */
+  organizationPermissions: () => Promise<readonly string[]>;
+  /** Their permissions in a workspace, from its membership; null when they aren't a member. */
+  workspacePermissions: (workspaceId: string) => Promise<readonly string[] | null>;
   /** Every path id of the call, by parameter. */
   ids: Record<string, string>;
   /** The id this lookup resolves. */
@@ -189,31 +234,19 @@ async function inWorkspace<T>(
 }
 
 /**
- * The person acts in this workspace: it's the chat's own (their access was
- * checked for this turn), they're a member, or they administer the
- * organization.
+ * The person reads this workspace: it's the chat's own (their access was
+ * checked for this turn), or their membership grants workspace:read. An
+ * organization role reaches no further into workspaces, as in the API.
  */
 async function actsIn(where: LookupContext, workspaceId: string): Promise<boolean> {
-  if (workspaceId === where.chatWorkspaceId || (await where.organizationAdmin())) return true;
-  return await withAccountRls(where.db, where.accountId, async (db) => {
-    const [found] = await db
-      .select({ id: schema.workspaceMemberships.subjectId })
-      .from(schema.workspaceMemberships)
-      .where(
-        and(
-          eq(schema.workspaceMemberships.accountId, where.accountId),
-          eq(schema.workspaceMemberships.workspaceId, workspaceId),
-          eq(schema.workspaceMemberships.subjectId, where.subjectId),
-        ),
-      )
-      .limit(1);
-    return Boolean(found);
-  });
+  if (workspaceId === where.chatWorkspaceId) return true;
+  return holds(await where.workspacePermissions(workspaceId), "workspace:read");
 }
 
-/** Organization records are read only for someone who administers it. */
-async function organizationAdminOnly(where: LookupContext): Promise<void> {
-  if (!(await where.organizationAdmin())) unresolved();
+/** Organization records are read only by someone whose role holds one of these, as its route requires. */
+async function organizationMay(where: LookupContext, ...permissions: string[]): Promise<void> {
+  const held = await where.organizationPermissions();
+  if (!permissions.some((permission) => held.includes(permission))) unresolved();
 }
 
 /** Only the chat's own organization is read; another's may exist, so it stays unresolved. */
@@ -222,37 +255,17 @@ function ownOrganization(where: LookupContext): void {
 }
 
 /**
- * The person manages this workspace's keys or webhooks, as the API requires
- * (api_keys:manage, workspace settings): they administer the organization, or
- * hold the workspace's admin role, or the permission literally.
+ * The person manages this workspace's keys (api_keys:manage) or webhooks
+ * (workspace settings, workspace:admin), as their routes require, from their
+ * membership's permissions.
  */
 async function managesWorkspace(
   where: LookupContext,
-  workspaceId: string,
-  permission?: "api_keys:manage",
+  workspaceId: string | undefined,
+  permission: "api_keys:manage" | "workspace:admin",
 ): Promise<void> {
-  if (await where.organizationAdmin()) return;
-  const row = await withAccountRls(where.db, where.accountId, async (db) => {
-    const [found] = await db
-      .select({
-        role: schema.workspaceMemberships.role,
-        permissions: schema.workspaceMemberships.permissions,
-      })
-      .from(schema.workspaceMemberships)
-      .where(
-        and(
-          eq(schema.workspaceMemberships.accountId, where.accountId),
-          eq(schema.workspaceMemberships.workspaceId, workspaceId),
-          eq(schema.workspaceMemberships.subjectId, where.subjectId),
-        ),
-      )
-      .limit(1);
-    return found;
-  });
-  const literal = Array.isArray(row?.permissions) ? row.permissions : [];
-  if (row?.role === "admin" || literal.includes("workspace:admin")) return;
-  if (permission && literal.includes(permission)) return;
-  unresolved();
+  if (!workspaceId || !UUID.test(workspaceId)) unresolved();
+  if (!holds(await where.workspacePermissions(workspaceId), permission)) unresolved();
 }
 
 /** Shared with the workspace, or the person's own. */
@@ -302,15 +315,16 @@ function workspaceRow<T>(
   };
 }
 
-/** A row of an organization table by uuid, only in the chat's own organization. */
+/** A row of an organization table by uuid, only in the chat's own organization, for a role its route allows. */
 function organizationRow<T>(
   kind: string,
+  permissions: string[],
   read: (db: Database, accountId: string, id: string) => Promise<T | undefined>,
   target: (row: T) => AppActionTarget,
 ): Lookup {
   return async (where) => {
     ownOrganization(where);
-    await organizationAdminOnly(where);
+    await organizationMay(where, ...permissions);
     if (!UUID.test(where.id)) return missing(kind);
     const row = await withAccountRls(where.db, where.accountId, (db) =>
       read(db, where.accountId, where.id),
@@ -322,7 +336,9 @@ function organizationRow<T>(
 const workspaceLookup: Lookup = async (where) => {
   if (!UUID.test(where.id)) return missing("workspace");
   if (!(await ownsWorkspace(where, where.id))) unresolved();
-  if (!(await actsIn(where, where.id))) unresolved();
+  // Its name is a member's to see, or an organization admin's, whose pages list workspaces.
+  if (!(await actsIn(where, where.id)))
+    await organizationMay(where, "members:manage", "account:admin");
   const row = await withAccountRls(where.db, where.accountId, async (db) => {
     const [found] = await db
       .select({ name: schema.workspaces.name })
@@ -476,7 +492,7 @@ const socialConnectionLookup = workspaceRow(
 
 const organizationMcpConnectionLookup: Lookup = async (where) => {
   ownOrganization(where);
-  await organizationAdminOnly(where);
+  await organizationMay(where, "account:admin");
   if (!UUID.test(where.id)) return missing("connected app");
   const [row] = await listOrganizationMcpConnections(where.db, {
     accountId: where.accountId,
@@ -642,11 +658,9 @@ const apiKeyLookup: Lookup = async (where) => {
   // keys are for whoever manages them there.
   const ownKey = row?.credentialKind === "personal" && row.ownerSubjectId === where.subjectId;
   if (!ownKey) {
-    if (where.organization || row?.credentialKind === "personal") {
-      await organizationAdminOnly(where);
-    } else {
-      await managesWorkspace(where, where.ids.workspaceId!, "api_keys:manage");
-    }
+    if (row?.credentialKind === "personal") await organizationMay(where, "account:admin");
+    else if (where.organization) await organizationMay(where, "api_keys:manage", "account:admin");
+    else await managesWorkspace(where, where.ids.workspaceId, "api_keys:manage");
   }
   return row
     ? {
@@ -710,7 +724,7 @@ function organizationRoutine<T>(
 ): Lookup {
   return async (where) => {
     ownOrganization(where);
-    await organizationAdminOnly(where);
+    await organizationMay(where, "members:manage", "account:admin");
     if (!UUID.test(where.id)) return missing(kind);
     const row = await read(where.db, {
       organizationId: where.accountId,
@@ -838,7 +852,9 @@ const webhookLookup: Lookup = async (where) => {
   if (!UUID.test(where.id)) return missing("webhook");
   if (where.organization) {
     ownOrganization(where);
-    await organizationAdminOnly(where);
+    await organizationMay(where, "account:admin");
+  } else {
+    await managesWorkspace(where, where.ids.workspaceId, "workspace:admin");
   }
   const row = where.organization
     ? await withAccountRls(
@@ -863,7 +879,6 @@ const webhookLookup: Lookup = async (where) => {
           )[0],
       )
     : ((await inWorkspace(where, async (db, workspaceId) => {
-        await managesWorkspace(where, workspaceId);
         const [found] = await db
           .select({
             url: schema.workspaceWebhooks.url,
@@ -995,6 +1010,7 @@ const eventSourceLookup = workspaceRow(
 
 const serviceAccountLookup = organizationRow(
   "service account",
+  ["api_keys:manage", "account:admin"],
   async (db, accountId, id) =>
     (
       await db
@@ -1047,6 +1063,7 @@ const workspaceCustomModelLookup = workspaceRow(
 
 const organizationCustomModelLookup = organizationRow(
   "custom model",
+  ["account:admin"],
   async (db, accountId, id) =>
     (
       await db

@@ -36,11 +36,16 @@ async function organization(label: string) {
   return { accountId: account!.id, workspaceId: await workspace("Staging"), workspace };
 }
 
-/** A member of the organization and of the workspace, with their roles in each. */
+/**
+ * A member of the organization, with a role there, and of the workspace,
+ * with the permissions the API's workspace grant reads (its role label is
+ * only a label).
+ */
 async function member(
   accountId: string,
   workspaceId: string,
   role = "member",
+  permissions: string[] = ["workspace:read"],
   workspaceRole = "member",
 ) {
   const subjectId = `user:${crypto.randomUUID()}`;
@@ -50,8 +55,9 @@ async function member(
     insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
     values (${accountId}, ${subjectId}, ${role}, 'active', ${personal!.id})`;
   await shared!.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id, role)
-    values (${accountId}, ${workspaceId}, ${subjectId}, ${workspaceRole})`;
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${accountId}, ${workspaceId}, ${subjectId}, ${workspaceRole},
+      ${shared!.admin.json(permissions)})`;
   return subjectId;
 }
 
@@ -191,8 +197,10 @@ test("another workspace is named only for someone who acts in it", async () => {
   const marketing = await org.workspace("Marketing");
   const subjectId = `user:${crypto.randomUUID()}`;
   await shared!.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role)
-    values (${org.accountId}, ${marketing}, ${subjectId}, 'jorgen@cloudgeni.ai', 'admin')`;
+    insert into workspace_memberships
+      (account_id, workspace_id, subject_id, subject_label, role, permissions)
+    values (${org.accountId}, ${marketing}, ${subjectId}, 'jorgen@cloudgeni.ai', 'admin',
+      ${shared!.admin.json(["workspace:admin"])})`;
   const call = {
     id: "removeWorkspaceMember",
     pathParameters: { workspaceId: marketing, subjectId },
@@ -202,24 +210,24 @@ test("another workspace is named only for someone who acts in it", async () => {
   const scope = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: outsider };
   expect(await resolveAppActionTargets(client.db, scope, call)).toEqual({});
   // A workspace admin of Staging is still an outsider to Marketing.
-  const stagingAdmin = await member(org.accountId, org.workspaceId, "member", "admin");
+  const stagingAdmin = await member(org.accountId, org.workspaceId, "member", ["workspace:admin"]);
   expect(
     await resolveAppActionTargets(client.db, { ...scope, subjectId: stagingAdmin }, call),
   ).toEqual({});
-  // An organization admin, or a member of Marketing, sees it as the API does.
-  const organizationAdmin = await member(org.accountId, org.workspaceId, "admin");
-  for (const reader of [
-    { ...scope, subjectId: organizationAdmin },
-    { ...scope, subjectId: subjectId },
-  ]) {
-    const targets = await resolveAppActionTargets(client.db, reader, call);
-    expect(targets.workspaceId).toEqual({ kind: "workspace", name: "Marketing" });
-    expect(targets.subjectId).toMatchObject({
-      kind: "member",
-      name: "jorgen@cloudgeni.ai",
-      facts: [{ label: "Role", value: "Admin" }, { label: "Member since" }],
-    });
-  }
+  // An organization owner who isn't a member of Marketing sees its name, as
+  // the organization's pages list it, but nothing inside it.
+  const owner = await member(org.accountId, org.workspaceId, "owner");
+  expect(await resolveAppActionTargets(client.db, { ...scope, subjectId: owner }, call)).toEqual({
+    workspaceId: { kind: "workspace", name: "Marketing" },
+  });
+  // A member of Marketing sees it as the API does.
+  const targets = await resolveAppActionTargets(client.db, { ...scope, subjectId }, call);
+  expect(targets.workspaceId).toEqual({ kind: "workspace", name: "Marketing" });
+  expect(targets.subjectId).toMatchObject({
+    kind: "member",
+    name: "jorgen@cloudgeni.ai",
+    facts: [{ label: "Role", value: "Admin" }, { label: "Member since" }],
+  });
   // Without a person nothing is read at all.
   expect(await resolveAppActionTargets(client.db, { ...scope, subjectId: null }, call)).toEqual({});
 });
@@ -285,7 +293,7 @@ test("a colleague's Only me Site or schedule is never named; shared ones and you
   ).toEqual({ kind: "scheduled task" });
 });
 
-test("organization records and other people's keys need an admin; webhooks show only their host", async () => {
+test("organization keys, others' keys and webhooks need the role their routes need; webhooks show only their host", async () => {
   if (!client) return;
   const org = await organization("Cloudgeni");
   const person = await member(org.accountId, org.workspaceId);
@@ -313,12 +321,17 @@ test("organization records and other people's keys need an admin; webhooks show 
     pathParameters: { organizationId: org.accountId, [parameter]: value },
   });
   const member_ = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: person };
-  const admin = { ...member_, subjectId: await member(org.accountId, org.workspaceId, "admin") };
+  // Only the owner role holds account:admin and api_keys:manage.
+  const admin = { ...member_, subjectId: await member(org.accountId, org.workspaceId, "owner") };
+  const organizationAdmin = {
+    ...member_,
+    subjectId: await member(org.accountId, org.workspaceId, "admin"),
+  };
   // A workspace admin whose organization role is member: the turn's frozen
   // grant can imply account:admin for them, but the API's routes don't.
   const workspaceAdmin = {
     ...member_,
-    subjectId: await member(org.accountId, org.workspaceId, "member", "admin"),
+    subjectId: await member(org.accountId, org.workspaceId, "member", ["workspace:admin"]),
   };
   const read = async (scope: typeof member_, value: ReturnType<typeof call>, parameter: string) =>
     (await resolveAppActionTargets(client!.db, scope, value))[parameter];
@@ -335,6 +348,11 @@ test("organization records and other people's keys need an admin; webhooks show 
     expect(await read(workspaceAdmin, value, "apiKeyId")).toBeUndefined();
   }
   expect(await read(workspaceAdmin, deleteHook, "webhookId")).toBeUndefined();
+  // An organization admin who isn't an owner can't list these through the API either.
+  for (const value of [deleteOrgKey, revokeTheirs]) {
+    expect(await read(organizationAdmin, value, "apiKeyId")).toBeUndefined();
+  }
+  expect(await read(organizationAdmin, deleteHook, "webhookId")).toBeUndefined();
   // Another organization's id is unresolved, not "not found".
   expect(
     await read(
@@ -398,7 +416,7 @@ test("every confirmed action's lookup runs against the real schema and says not 
   const { appActionTargetLookupKey } = await import("../src/app-action-targets");
   const org = await organization("Cloudgeni");
   // An owner, who may read every target an action can name, read live.
-  const person = await member(org.accountId, org.workspaceId, "owner");
+  const person = await member(org.accountId, org.workspaceId, "owner", ["workspace:admin"]);
   const failures: string[] = [];
   let checked = 0;
   for (const entry of ACTION_CATALOG.filter(appActionNeedsConfirmation)) {
@@ -446,7 +464,17 @@ test("a member never sees a colleague's private rows or the workspace's keys and
   const org = await organization("Cloudgeni");
   const person = await member(org.accountId, org.workspaceId);
   const colleague = await member(org.accountId, org.workspaceId);
-  const workspaceAdmin = await member(org.accountId, org.workspaceId, "member", "admin");
+  const workspaceAdmin = await member(org.accountId, org.workspaceId, "member", [
+    "workspace:admin",
+  ]);
+  // An "admin" role label without the permissions: the API reads permissions.
+  const labelOnly = await member(
+    org.accountId,
+    org.workspaceId,
+    "member",
+    ["workspace:read"],
+    "admin",
+  );
   const [source] = await shared!.admin<{ id: string }[]>`
     insert into event_sources (account_id, workspace_id, kind, name, visibility,
       owner_subject_id, created_by_subject_id)
@@ -483,10 +511,12 @@ test("a member never sees a colleague's private rows or the workspace's keys and
         { id, pathParameters: { workspaceId: org.workspaceId, [parameter]: value } },
       )
     )[parameter];
-  for (const call of calls) {
-    const target = await read(person, call);
-    expect(target?.name).toBeUndefined();
-    expect(JSON.stringify(target ?? {})).not.toMatch(/Colleague|Prod deploy|ops\.example/u);
+  for (const reader of [person, labelOnly]) {
+    for (const call of reader === person ? calls : calls.slice(2)) {
+      const target = await read(reader, call);
+      expect(target?.name).toBeUndefined();
+      expect(JSON.stringify(target ?? {})).not.toMatch(/Colleague|Prod deploy|ops\.example/u);
+    }
   }
   // Their owner sees the private ones; a workspace admin manages keys and webhooks.
   expect((await read(colleague, calls[0]))?.name).toBe("Colleague private source");
@@ -549,4 +579,41 @@ test("a resumed attempt reads the wording its approval was first saved with", as
       approvalId: "call-1",
     }),
   ).toBeUndefined();
+});
+
+test("an organization owner sees nothing inside a workspace they aren't a member of", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const secret = await org.workspace("Secret team");
+  const owner = await member(org.accountId, org.workspaceId, "owner");
+  const [key] = await shared!.admin<{ id: string }[]>`
+    insert into api_keys (account_id, workspace_id, name, prefix, key_hash, credential_kind)
+    values (${org.accountId}, ${secret}, 'Secret key', 'og_ss12', ${crypto.randomUUID()},
+      'workspace')
+    returning id`;
+  const [hook] = await shared!.admin<{ id: string }[]>`
+    insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types)
+    values (${org.accountId}, ${secret}, 'https://secret.example.com/hook', 'sealed',
+      ${["turn.completed"]})
+    returning id`;
+  const gmail = await connection({
+    accountId: org.accountId,
+    workspaceId: secret,
+    providerDomain: "gmail.example",
+    metadata: { email: "secret@cloudgeni.ai" },
+  });
+  const scope = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: owner };
+  for (const [id, parameter, value] of [
+    ["deleteApiKey", "apiKeyId", key!.id],
+    ["deleteWorkspaceWebhook", "webhookId", hook!.id],
+    ["deleteConnection", "connectionId", gmail],
+  ] as const) {
+    const targets = await resolveAppActionTargets(client.db, scope, {
+      id,
+      pathParameters: { workspaceId: secret, [parameter]: value },
+    });
+    expect(targets[parameter]).toBeUndefined();
+    expect(targets.workspaceId).toEqual({ kind: "workspace", name: "Secret team" });
+    expect(JSON.stringify(targets)).not.toMatch(/Secret key|secret\.example|secret@/u);
+  }
 });

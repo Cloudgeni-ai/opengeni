@@ -579,7 +579,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         return {
           kind: authority.kind,
           ...("subjectId" in authority ? { subjectId: authority.subjectId } : {}),
-          ...("permissions" in authority ? { permissions: authority.permissions } : {}),
         };
       },
       // Names what a confirmed change touches, read as the person it asks.

@@ -1032,6 +1032,10 @@ import {
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
+  accountPermissionsForOrganizationRole,
+  allAccountPermissions,
+} from "./organization-role-permissions";
+import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
   omitOutputOnlyHistoryItemFields,
@@ -2350,23 +2354,7 @@ export async function turnWorkspaceSettingsAccess(
   return allowed ? authority.kind : null;
 }
 
-export const allAccountPermissions: Permission[] = [
-  "account:read",
-  "account:admin",
-  "members:manage",
-  "workspace:create",
-  "billing:read",
-  "billing:manage",
-  "api_keys:manage",
-];
-
-function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
-  if (role === "owner") return allAccountPermissions;
-  if (role === "admin") {
-    return ["account:read", "members:manage", "workspace:create", "billing:read"];
-  }
-  return ["account:read"];
-}
+export { allAccountPermissions } from "./organization-role-permissions";
 
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;

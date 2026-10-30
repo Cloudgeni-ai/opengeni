@@ -56,7 +56,7 @@ function wrapped(kind: AppActionAuthorityKind) {
     sessionId: "chat-1",
     authority: async () => {
       checks += 1;
-      return { kind, subjectId: "user:anna", permissions: [] };
+      return { kind, subjectId: "user:anna" };
     },
   });
   return { seen, hooks, checks: () => checks };
@@ -168,7 +168,7 @@ test("turning on video paid with credits asks once, with the price on the card a
     workspaceId: "ws-1",
     sessionId: "chat-1",
     settings,
-    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik" }),
   });
   await hooks.prepare(appCall("call-video", turnOn));
   expect(seen[0]!.call).toMatchObject({ defaultDecision: "ask", reviewContext: { title } });
@@ -206,11 +206,11 @@ test("each parallel removal's card names its own connection, read by the server,
   const hooks = withAppActionConfirmation(policy, {
     workspaceId: "ws-1",
     sessionId: "chat-1",
-    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik" }),
     targets: async (args, reader) => {
       looked.push(args);
       // Read as the person the live check found, never a shared guess.
-      expect(reader).toEqual({ subjectId: "user:bendik", permissions: [] });
+      expect(reader).toEqual({ subjectId: "user:bendik" });
       const id = (args as { pathParameters: { connectionId: keyof typeof found } }).pathParameters
         .connectionId;
       const hit = found[id];
@@ -296,7 +296,7 @@ test("a failed lookup keeps the plain question; the card still asks", async () =
   const hooks = withAppActionConfirmation(policy, {
     workspaceId: "ws-1",
     sessionId: "chat-1",
-    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik" }),
     targets: async () => {
       throw new Error("database unavailable");
     },
@@ -316,7 +316,7 @@ test("a resumed attempt asks with the words first saved, without reading the tar
   const hooks = withAppActionConfirmation(policy, {
     workspaceId: "ws-1",
     sessionId: "chat-1",
-    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik" }),
     targets: async () => {
       looked += 1;
       // Renamed since, or a lookup that timed out this time.
@@ -354,7 +354,7 @@ test("hooks running at once for one call share one decision and one lookup", asy
     sessionId: "chat-1",
     authority: async () => {
       checks += 1;
-      return { kind: "confirm", subjectId: "user:bendik", permissions: [] };
+      return { kind: "confirm", subjectId: "user:bendik" };
     },
     targets: async () => {
       looked += 1;
@@ -377,7 +377,7 @@ test("a card's title fits the saved review's 256 characters", async () => {
   const hooks = withAppActionConfirmation(policy, {
     workspaceId: "ws-1",
     sessionId: "chat-1",
-    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik" }),
     targets: async () => ({
       workspaceId: { kind: "workspace", name: "W".repeat(80) },
       connectionId: { kind: "connection", name: "N".repeat(80), account: "A".repeat(80) },
@@ -390,4 +390,35 @@ test("a card's title fits the saved review's 256 characters", async () => {
     }),
   );
   expect(seen[0]!.call.reviewContext!.title!.length).toBeLessThanOrEqual(256);
+});
+
+test("a cut title never splits an emoji, and a card without facts keeps no old ones", async () => {
+  const { seen, policy } = recording();
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik" }),
+    targets: async () => ({
+      workspaceId: { kind: "workspace", name: `${"W".repeat(77)}😀😀😀` },
+      connectionId: {
+        kind: "connection",
+        name: `${"N".repeat(77)}😀😀😀`,
+        account: "😀".repeat(80),
+      },
+    }),
+  });
+  const call = appCall("call-1", {
+    id: "deleteConnection",
+    pathParameters: { workspaceId: "ws-2", connectionId: "c-1" },
+  });
+  await hooks.prepare({
+    ...call,
+    reviewContext: { kind: "generic", title: "x", targetFacts: [{ label: "Old", value: "fact" }] },
+  });
+  const title = seen[0]!.call.reviewContext!.title!;
+  expect(title.length).toBeLessThanOrEqual(256);
+  expect(JSON.parse(JSON.stringify(title))).toBe(title);
+  expect(title).not.toMatch(/[\ud800-\udbff]…$/u);
+  expect(Buffer.from(title, "utf8").toString("utf8")).toBe(title);
+  expect(seen[0]!.call.reviewContext).not.toHaveProperty("targetFacts");
 });

@@ -337,3 +337,15 @@ test("nothing the agent writes reaches the question, the facts or Details above 
     expect(JSON.stringify(items.slice(0, heading))).not.toContain(marker);
   }
 });
+
+test("a long name is cut whole, never through an emoji", () => {
+  const long: AppActionTargets = {
+    connectionId: { kind: "connection", name: `${"a".repeat(78)}😀tail` },
+  };
+  const title = appActionConfirmationTitle(removeGmail, here, long);
+  // No lone surrogate: the saved review's JSON would refuse it.
+  expect(title).not.toMatch(
+    /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u,
+  );
+  expect(title).toContain("😀…");
+});
