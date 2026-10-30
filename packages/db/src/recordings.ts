@@ -13,6 +13,7 @@ import {
   type RecordingTranscriptSegment,
   type RecordingTranscriptVersion,
   type RecordingPurpose,
+  type RecordingTitleSource,
   type RecordingVisibility,
   type Permission,
 } from "@opengeni/contracts";
@@ -138,6 +139,7 @@ function recordingView(
     ownerSubjectId: row.ownerSubjectId,
     visibility: fromVisibility(row.visibility),
     title: row.title,
+    titleSource: row.titleSource,
     purpose: row.purpose,
     errorCode: row.errorCode,
     // Reads never return a recording being deleted; keep the type honest.
@@ -206,6 +208,23 @@ async function voiceprintUpdates(
 
 function defaultTitle(startedAt: Date): string {
   return `Recording ${startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/** How good each title source is: a title is replaced only by a better one. */
+const TITLE_SOURCE_RANK: Record<RecordingTitleSource, number> = {
+  default: 0,
+  app: 1,
+  conversation: 2,
+  calendar: 3,
+  person: 4,
+};
+
+/** Whether a title from `next` may replace one from `current`. */
+export function recordingTitleSourceOutranks(
+  next: RecordingTitleSource,
+  current: RecordingTitleSource,
+): boolean {
+  return TITLE_SOURCE_RANK[next] > TITLE_SOURCE_RANK[current];
 }
 
 /**
@@ -309,7 +328,10 @@ export type CreateRecordingInput = RecordingActor & {
   recordingId: string;
   /** meeting unless given; browser recordings have their own constructor. */
   purpose?: "meeting" | "dictation" | undefined;
+  /** Without one the recording is named after when it starts. */
   title?: string | undefined;
+  /** Where `title` came from; `person` unless given. Ignored without a title. */
+  titleSource?: "person" | "calendar" | "app" | undefined;
   visibility?: RecordingVisibility | undefined;
   startedAt?: Date | undefined;
   externalRef?: string | undefined;
@@ -348,6 +370,7 @@ export async function createRecording(
           input.purpose === "dictation" ? "private" : (input.visibility ?? "private"),
         ),
         title: input.title ?? defaultTitle(startedAt),
+        titleSource: input.title === undefined ? "default" : (input.titleSource ?? "person"),
         startedAt,
         externalRef: input.externalRef ?? null,
         metadata: input.metadata ?? {},
@@ -876,7 +899,10 @@ export async function updateRecording(
     const [updated] = await tx
       .update(schema.recordings)
       .set({
-        ...(input.title === undefined ? {} : { title: input.title }),
+        // A title someone gives is theirs: nothing names the meeting over it.
+        ...(input.title === undefined
+          ? {}
+          : { title: input.title, titleSource: "person" as const }),
         ...(visibility === undefined ? {} : { visibility }),
         ...(input.externalRef === undefined ? {} : { externalRef: input.externalRef }),
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
@@ -891,6 +917,46 @@ export async function updateRecording(
       .returning();
     const [recording] = await loadViews(tx, input.workspaceId, [updated!]);
     return recording!;
+  });
+}
+
+export type NameRecordingInput = RecordingActor & {
+  recordingId: string;
+  title: string;
+  source: Exclude<RecordingTitleSource, "person" | "default">;
+};
+
+/**
+ * Name a meeting automatically: from the owner's calendar, the conversation
+ * or the recording app. The title changes only when `source` is better than
+ * where its current title came from, so a title a person gave is never
+ * replaced. Anyone who can see the meeting may, as they may rename it.
+ */
+export async function nameRecording(
+  db: Database,
+  input: NameRecordingInput,
+): Promise<{ renamed: boolean; recording: Recording }> {
+  const title = input.title.replace(/\s+/gu, " ").trim().slice(0, 300).trim();
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const row = await lockRecording(tx, input.workspaceId, input.recordingId);
+    const renamed =
+      title.length > 0 &&
+      row.purpose === "meeting" &&
+      recordingTitleSourceOutranks(input.source, row.titleSource);
+    const [current] = renamed
+      ? await tx
+          .update(schema.recordings)
+          .set({ title, titleSource: input.source, updatedAt: sql`clock_timestamp()` })
+          .where(
+            and(
+              eq(schema.recordings.workspaceId, input.workspaceId),
+              eq(schema.recordings.id, input.recordingId),
+            ),
+          )
+          .returning()
+      : [row];
+    const [recording] = await loadViews(tx, input.workspaceId, [current!]);
+    return { renamed, recording: recording! };
   });
 }
 
@@ -1200,6 +1266,7 @@ export async function createBrowserRecording(
         ownerSubjectId: input.subjectId,
         visibility: toVisibility(input.visibility),
         title: `Browser recording ${input.startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+        titleSource: "default",
         purpose: "browser",
         state: "processing",
         startedAt: input.startedAt,
@@ -3171,6 +3238,7 @@ export type MeetingSummaryCandidate =
       recording: {
         id: string;
         title: string;
+        titleSource: RecordingTitleSource;
         ownerSubjectId: string;
         visibility: RecordingVisibility;
       };
@@ -3244,6 +3312,7 @@ export async function meetingSummaryCandidate(
       recording: {
         id: recording.id,
         title: recording.title,
+        titleSource: recording.titleSource,
         ownerSubjectId: recording.ownerSubjectId,
         visibility: fromVisibility(recording.visibility),
       },

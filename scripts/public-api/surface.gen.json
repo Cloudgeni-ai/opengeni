@@ -15253,6 +15253,7 @@
         "$.recordingId": "string!",
         "$.startedAt": "string?",
         "$.title": "string?",
+        "$.titleSource": "ref(RecordingCreateTitleSource)?",
         "$.tracks": "array!",
         "$.tracks[]": "object",
         "$.tracks[].mimeType": "string!",
@@ -23765,6 +23766,7 @@
         "$.startedAt": "string!",
         "$.state": "ref(RecordingState)!",
         "$.title": "string!",
+        "$.titleSource": "ref(RecordingTitleSource)?",
         "$.tracks": "array!",
         "$.tracks[]": "ref(RecordingTrack)",
         "$.transcript": "ref(RecordingTranscriptVersion)! null",
@@ -23824,6 +23826,14 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"h264-mp4\\\"\",\"\\\"vp9-webm\\\"\"]"
+      }
+    },
+    "RecordingCreateTitleSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"app\\\"\",\"\\\"person\\\"\"]"
       }
     },
     "RecordingDiarization": {
@@ -23979,6 +23989,14 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"capturing\\\"\",\"\\\"failed\\\"\",\"\\\"processing\\\"\",\"\\\"ready\\\"\"]"
+      }
+    },
+    "RecordingTitleSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"app\\\"\",\"\\\"calendar\\\"\",\"\\\"conversation\\\"\",\"\\\"default\\\"\",\"\\\"person\\\"\"]"
       }
     },
     "RecordingTrack": {

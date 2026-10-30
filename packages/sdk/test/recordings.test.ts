@@ -38,6 +38,9 @@ function fakeServer() {
     refuse: null as null | { status: number; code: string },
     calls: [] as string[],
     createdTitle: undefined as string | undefined,
+    createdTitleSource: undefined as string | undefined,
+    /** A title the server names an unnamed or app-named recording with, as from a calendar event. */
+    calendarTitle: undefined as string | undefined,
     titles: [] as string[],
   };
   const key = (track: number, chunk: number) => `${track}/${chunk}`;
@@ -56,7 +59,18 @@ function fakeServer() {
       refusal();
       state.created += 1;
       state.createdTitle = request.title;
-      return { id: request.recordingId } as never;
+      state.createdTitleSource = request.titleSource;
+      const fromCalendar =
+        state.calendarTitle !== undefined &&
+        (request.title === undefined || request.titleSource === "app");
+      return {
+        id: request.recordingId,
+        ...(fromCalendar
+          ? { title: state.calendarTitle, titleSource: "calendar" }
+          : request.title
+            ? { title: request.title, titleSource: request.titleSource ?? "person" }
+            : { title: "Recording", titleSource: "default" }),
+      } as never;
     },
     async createRecordingUploads(
       _workspaceId: string,
@@ -556,6 +570,58 @@ describe("RecordingUploader", () => {
     expect(server.state.calls.indexOf("update")).toBeGreaterThan(
       server.state.calls.indexOf("create"),
     );
+  });
+
+  test("a name the server found for an unnamed recording shows in its status", async () => {
+    const server = fakeServer();
+    server.state.calendarTitle = "Quarterly planning with Acme";
+    const { uploader } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(status.serverTitle).toBe("Quarterly planning with Acme");
+    expect(server.state.titles).toEqual([]);
+  });
+
+  test("a name someone typed is sent as theirs and never replaced by the server's", async () => {
+    const server = fakeServer();
+    server.state.calendarTitle = "Quarterly planning with Acme";
+    const { uploader } = uploaderFor(server);
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create: { ...create, title: "Board prep" },
+    });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(server.state.createdTitle).toBe("Board prep");
+    expect(status.serverTitle).toBeUndefined();
+  });
+
+  test("renaming before the server has it turns the app's guess into the person's name", async () => {
+    const server = fakeServer();
+    server.state.calendarTitle = "Quarterly planning with Acme";
+    server.state.refuse = { status: 503, code: "unavailable" };
+    const { uploader } = uploaderFor(server);
+    let refused = true;
+    const create0 = server.client.createRecording.bind(server.client);
+    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+      if (refused) throw Object.assign(new Error("offline"), { status: 0, retryable: true });
+      return await create0(...args);
+    };
+    server.state.refuse = null;
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create: { ...create, title: "Zoom meeting", titleSource: "app" },
+    });
+    await uploader.rename(WORKSPACE, RECORDING, "Customer call");
+    refused = false;
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(server.state.createdTitle).toBe("Customer call");
+    expect(server.state.createdTitleSource).toBeUndefined();
+    expect(status.serverTitle).toBeUndefined();
   });
 
   test("a rename after the server has the recording waits out a dropped connection", async () => {

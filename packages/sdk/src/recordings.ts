@@ -22,6 +22,7 @@ import type {
   CreateRecordingLiveSessionRequest,
   CreateRecordingPersonRequest,
   CreateRecordingRequest,
+  RecordingCreateTitleSource,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   CreateRecordingUploadsResponse,
@@ -532,6 +533,12 @@ export type RecordingUploadStatus = {
   recordingId: string;
   /** The server has the recording, so it shows in recording lists. */
   created: boolean;
+  /**
+   * The title the server named the recording with itself when it created
+   * it, such as its owner's calendar event at the time; absent when it kept
+   * the one it was given or has none yet.
+   */
+  serverTitle?: string;
   /** Chunks stored locally and not confirmed by the server yet. */
   pendingChunks: number;
   pendingBytes: number;
@@ -683,12 +690,16 @@ export class RecordingUploader {
    * local copy is gone, the server is updated directly.
    */
   async rename(workspaceId: string, recordingId: string, title: string): Promise<void> {
-    const stored = await this.mutate(recordingId, (recording) => ({
-      ...recording,
-      create: { ...recording.create, title },
-      ...(recording.created ? { pendingTitle: title } : {}),
-      updatedAt: Date.now(),
-    }));
+    const stored = await this.mutate(recordingId, (recording) => {
+      // A name someone gives is theirs, not a guess for the server to replace.
+      const { titleSource: _guess, ...create } = recording.create;
+      return {
+        ...recording,
+        create: { ...create, title },
+        ...(recording.created ? { pendingTitle: title } : {}),
+        updatedAt: Date.now(),
+      };
+    });
     if (stored) {
       this.kick(recordingId);
       return;
@@ -934,7 +945,7 @@ export class RecordingUploader {
     if (!recording.created) {
       const workspaceId = recording.workspaceId;
       const sent = recording.create;
-      await guarded(() => client.createRecording(workspaceId, sent));
+      const made = await guarded(() => client.createRecording(workspaceId, sent));
       recording = await this.mutate(recordingId, (current) => ({
         ...current,
         created: true,
@@ -960,6 +971,14 @@ export class RecordingUploader {
           discarded: true,
         });
         return true;
+      }
+      // Named by the server, such as after a calendar event: the recorder shows it.
+      if (
+        made?.titleSource === "calendar" &&
+        made.title !== sent.title &&
+        recording.create.title === sent.title
+      ) {
+        this.update(pump, { serverTitle: made.title });
       }
     }
     if (!pump.status.created) this.update(pump, { created: true });
@@ -1523,7 +1542,10 @@ export type RecorderOptions = {
   store?: RecordingChunkStore;
   /** Share one uploader between recorders; one is created otherwise. */
   uploader?: RecordingUploader;
+  /** Leave it out unless the person gave one; Opengeni then names the meeting. */
   title?: string;
+  /** `app` when `title` is your app's guess, such as the call app's name; see CreateRecordingRequest. */
+  titleSource?: RecordingCreateTitleSource;
   visibility?: RecordingVisibility;
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
@@ -1907,11 +1929,14 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       store: options.store ?? createIndexedDbRecordingChunkStore(),
     });
   let unsubscribe: (() => void) | null = null;
+  // Until someone names it, a name the server found replaces the guess shown.
+  let titleIsGuess = !options.title || options.titleSource === "app";
   const watchUploads = () => {
     unsubscribe ??= uploader.subscribe((status) => {
       if (status.recordingId !== snapshot.recordingId) return;
       emit({
         upload: status,
+        ...(status.serverTitle && titleIsGuess ? { title: status.serverTitle } : {}),
         ...(status.failed
           ? {
               error: {
@@ -2182,6 +2207,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           recordingId,
           ...(options.purpose ? { purpose: options.purpose } : {}),
           ...(options.title ? { title: options.title } : {}),
+          ...(options.title && options.titleSource ? { titleSource: options.titleSource } : {}),
           ...(options.visibility ? { visibility: options.visibility } : {}),
           startedAt: new Date().toISOString(),
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
@@ -2336,6 +2362,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       const recordingId = snapshot.recordingId;
       if (!recordingId) throw new Error("Nothing is being recorded to rename.");
       await uploader.rename(options.workspaceId, recordingId, title);
+      titleIsGuess = false;
       if (snapshot.recordingId === recordingId) emit({ title });
     },
 

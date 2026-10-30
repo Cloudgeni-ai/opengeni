@@ -2739,12 +2739,12 @@ export const englishMessages = {
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
-  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting (optional)",
+  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
+  "meetings.recorderPanel.namedForYouWhenItEnds": "Named for you when it ends",
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
     "Live transcription isn't set up. Ask an admin to connect it.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
-  "meetings.recorderPanel.noNameYet": "No name yet",
   "meetings.recorderPanel.noSoundServerIsRunning":
     "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
   "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",

@@ -88,6 +88,7 @@ import {
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { meetingCalendarLookup, meetingCalendarTitle } from "../meeting-calendar-title";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
@@ -714,13 +715,37 @@ export function registerRecordingRoutes(
         body.ownerName ??
         null)
       : null;
+    const startedAt = body.startedAt ? new Date(body.startedAt) : new Date();
+    // Without a name from the person, the owner's calendar event at the
+    // time names it. Capture is already running, so this never delays it.
+    const calendarTitle =
+      body.title === undefined || body.titleSource === "app"
+        ? await meetingCalendarTitle(
+            meetingCalendarLookup({
+              db,
+              settings: deps.settings,
+              workspaceId: actor.workspaceId,
+              subjectId: actor.subjectId,
+              ...(deps.meetingCalendarFetch ? { fetch: deps.meetingCalendarFetch } : {}),
+            }),
+            { subjectId: actor.subjectId, at: startedAt },
+          ).catch((error: unknown) => {
+            observability?.warn("couldn't read the recording owner's calendar", {
+              workspaceId: actor.workspaceId,
+              error: errorMessage(error),
+            });
+            return null;
+          })
+        : null;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
         recordingId: body.recordingId,
-        title: body.title,
+        ...(calendarTitle
+          ? { title: calendarTitle, titleSource: "calendar" as const }
+          : { title: body.title, titleSource: body.titleSource }),
         visibility: body.visibility ?? settings.defaultVisibility ?? "private",
-        startedAt: body.startedAt ? new Date(body.startedAt) : undefined,
+        startedAt,
         externalRef: body.externalRef,
         metadata: body.metadata,
         tracks: body.tracks,

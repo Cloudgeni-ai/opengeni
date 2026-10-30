@@ -8,9 +8,18 @@
  * Mentions are a contract with the meeting page, which renders them:
  * `[Name](speaker:<speakerLabel>)` and `[Name](person:<personId>)`, with the
  * labels and ids `meeting_read` gives.
+ *
+ * The notes also name the meeting: `meeting_notes_save` keeps the name only
+ * while the meeting has none from a person or a calendar event.
  */
-export function meetingSummaryPrompt(input: { recordingId: string; title: string | null }): string {
-  const title = input.title?.replace(/\s+/gu, " ").trim().slice(0, 300) || null;
+export function meetingSummaryPrompt(input: {
+  recordingId: string;
+  title: string | null;
+  /** A title that is only a date or an app's guess says nothing about the meeting. */
+  titleSource?: "person" | "calendar" | "conversation" | "app" | "default" | undefined;
+}): string {
+  const named = input.titleSource !== "default" && input.titleSource !== "app";
+  const title = (named && input.title?.replace(/\s+/gu, " ").trim().slice(0, 300)) || null;
   const meeting = title ? `the meeting "${title}"` : "this meeting";
   return [
     `Write the notes for ${meeting} (meeting id ${input.recordingId}). Its transcript is ready.`,
@@ -27,6 +36,8 @@ export function meetingSummaryPrompt(input: { recordingId: string; title: string
     "",
     "Link people when you name them: a person from the workspace (a speaker with a personId) as [Display name](person:<personId>), and any other speaker as [Display name](speaker:<label>), using exactly the labels and ids meeting_read gave. Name anyone else in plain text.",
     "",
-    `Save them with meeting_notes_save: meetingId ${input.recordingId}, the Markdown as notes, and expectedRevision 0. If it answers notes_changed, someone saved notes first: keep theirs. Then reply in one short sentence.`,
+    "Name the meeting too: a title of at most eight words saying what it was about, in the meeting's language, such as the main topic and who it was with. No date, no quotes, and not a generic word like Meeting or Call.",
+    "",
+    `Save them with meeting_notes_save: meetingId ${input.recordingId}, the Markdown as notes, the name as title, and expectedRevision 0. The name is kept only if nobody named the meeting yet. If it answers notes_changed, someone saved notes first: keep theirs. Then reply in one short sentence.`,
   ].join("\n");
 }
