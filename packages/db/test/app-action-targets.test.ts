@@ -233,12 +233,12 @@ test("another workspace is named only for someone who acts in it", async () => {
   expect(
     await resolveAppActionTargets(client.db, { ...scope, subjectId: stagingAdmin }, call),
   ).toEqual({});
-  // An organization owner who isn't a member of Marketing sees its name, as
-  // the organization's pages list it, but nothing inside it.
+  // Nor is an organization owner who isn't a member: admins' pages list
+  // workspaces but not members' Personal ones, which a lookup can't tell apart.
   const owner = await member(org.accountId, org.workspaceId, "owner");
-  expect(await resolveAppActionTargets(client.db, { ...scope, subjectId: owner }, call)).toEqual({
-    workspaceId: { kind: "workspace", name: "Marketing" },
-  });
+  expect(await resolveAppActionTargets(client.db, { ...scope, subjectId: owner }, call)).toEqual(
+    {},
+  );
   // A member of Marketing sees it as the API does.
   const targets = await resolveAppActionTargets(client.db, { ...scope, subjectId }, call);
   expect(targets.workspaceId).toEqual({ kind: "workspace", name: "Marketing" });
@@ -466,12 +466,13 @@ test("routes whose ids belong to something else get no lookup", async () => {
     appActionTargetLookupKey("/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId", "itemId"),
   ).toBe("items/:itemId");
   // Browser and computer sessions read through their source chat's
-  // visibility, and private-task summaries through an organization setting:
-  // no lookup approximates those.
+  // visibility, private-task summaries through an organization setting, and
+  // Skills from their facets: no lookup approximates those.
   for (const [path, parameter] of [
     ["/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId", "browserSessionId"],
     ["/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end", "computerSessionId"],
     ["/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause", "taskId"],
+    ["/v1/workspaces/:workspaceId/skills/:capabilityId", "capabilityId"],
   ] as const) {
     expect(appActionTargetLookupKey(path, parameter)).toBeUndefined();
   }
@@ -534,6 +535,8 @@ test("every confirmed action's lookup runs against the real schema and says not 
     );
     for (const name of names) {
       if (!appActionTargetLookupKey(entry.path, name) || name === "workspaceId") continue;
+      // Integrations can be defined in code, so one missing from the catalog stays unresolved.
+      if (name === "capabilityId") continue;
       checked += 1;
       // Found (the workspace and organization themselves) or plainly not found; never an error.
       if (!targets[name]) failures.push(`${entry.id} ${name}: unresolved`);
@@ -700,9 +703,7 @@ test("an organization owner sees nothing inside a workspace they aren't a member
       id,
       pathParameters: { workspaceId: secret, [parameter]: value },
     });
-    expect(targets[parameter]).toBeUndefined();
-    expect(targets.workspaceId).toEqual({ kind: "workspace", name: "Secret team" });
-    expect(JSON.stringify(targets)).not.toMatch(/Secret key|secret\.example|secret@/u);
+    expect(targets).toEqual({});
   }
 });
 
@@ -910,4 +911,41 @@ test("documents follow the document routes' authority, wherever they were added"
   expect((await named(mine))?.name).toBe("My notes");
   expect((await named(theirs))?.name).toBeUndefined();
   expect((await named(elsewhere))?.name).toBeUndefined();
+});
+
+test("an integration missing from the catalog stays unresolved, and a suspended member sees nothing", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const person = await member(org.accountId, org.workspaceId, "member", [
+    "workspace:read",
+    "connections:read",
+  ]);
+  const scope = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: person };
+  // Defined in code or a plugin's manifest, not the catalog: never "not found".
+  const uninstall = await resolveAppActionTargets(client.db, scope, {
+    id: "uninstallApiIntegration",
+    pathParameters: { workspaceId: org.workspaceId, capabilityId: "api:fiken", instanceKey: "x" },
+  });
+  expect(uninstall).not.toHaveProperty("capabilityId");
+  expect(
+    await resolveAppActionTargets(client.db, scope, {
+      id: "uninstallSkill",
+      pathParameters: { workspaceId: org.workspaceId, capabilityId: "skill:pdf" },
+    }),
+  ).toEqual({});
+  // A shared connection, named while they're active and not once they're suspended.
+  const gmail = await connection({
+    ...org,
+    providerDomain: "gmail.example",
+    metadata: { email: "team@cloudgeni.ai" },
+  });
+  expect(
+    (await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, gmail))).connectionId,
+  ).toMatchObject({ name: "gmail.example" });
+  await shared!.admin`
+    update organization_memberships set status = 'suspended'
+    where account_id = ${org.accountId} and subject_id = ${person}`;
+  expect(await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, gmail))).toEqual(
+    {},
+  );
 });

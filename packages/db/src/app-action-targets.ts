@@ -60,7 +60,7 @@ export async function resolveAppActionTargets(
   const organizationMembership = () =>
     (role ??= liveOrganizationMembership(db, scope.accountId, subjectId).catch((error: unknown) => {
       scope.onLookupError?.(error, "organizationRole");
-      return { permissions: [], personalWorkspaceId: null };
+      return { permissions: [], personalWorkspaceId: null, inactive: true };
     }));
   const memberships = new Map<string, Promise<readonly string[] | null>>();
   const workspacePermissions = (workspaceId: string) => {
@@ -71,6 +71,9 @@ export async function resolveAppActionTargets(
     }
     return read;
   };
+  // Someone whose organization membership is suspended or ended has no live
+  // workspace authority, as the API reads it: nothing is named for them.
+  if ((await organizationMembership()).inactive) return {};
   const found = await Promise.all(
     Object.entries(call.ids).map(async ([parameter, id]) => {
       // The chat's own workspace reads as "this workspace"; nothing to look up.
@@ -118,6 +121,8 @@ type LiveMembership = {
   permissions: readonly string[];
   /** Their own Personal workspace in this organization. */
   personalWorkspaceId: string | null;
+  /** Their membership exists but isn't active (suspended, ended), or couldn't be read. */
+  inactive: boolean;
 };
 
 /** The person's active membership in the chat's organization, right now. */
@@ -126,15 +131,17 @@ async function liveOrganizationMembership(
   accountId: string,
   subjectId: string,
 ): Promise<LiveMembership> {
-  const membership = (await listSelfOrganizationMemberships(db, subjectId)).find(
-    (candidate) => candidate.organizationId === accountId && candidate.status === "active",
+  const memberships = (await listSelfOrganizationMemberships(db, subjectId)).filter(
+    (candidate) => candidate.organizationId === accountId,
   );
+  const membership = memberships.find((candidate) => candidate.status === "active");
   return membership
     ? {
         permissions: accountPermissionsForOrganizationRole(membership.role),
         personalWorkspaceId: membership.personalWorkspaceId ?? null,
+        inactive: false,
       }
-    : { permissions: [], personalWorkspaceId: null };
+    : { permissions: [], personalWorkspaceId: null, inactive: memberships.length > 0 };
 }
 
 /**
@@ -394,9 +401,10 @@ function organizationRow<T>(
 const workspaceLookup: Lookup = async (where) => {
   if (!UUID.test(where.id)) return missing("workspace");
   if (!(await ownsWorkspace(where, where.id))) unresolved();
-  // Its name is a member's to see, or an organization admin's, whose pages list workspaces.
-  if (!(await mayIn(where, where.id, "workspace:read")))
-    await organizationMay(where, "members:manage", "account:admin");
+  // Its name is a member's to see. Organization admins' pages list
+  // workspaces too, but not members' Personal ones, which a lookup can't
+  // tell apart; for anyone else it stays unresolved.
+  if (!(await mayIn(where, where.id, "workspace:read"))) unresolved();
   const row = await withAccountRls(where.db, where.accountId, async (db) => {
     const [found] = await db
       .select({ name: schema.workspaces.name })
@@ -728,7 +736,8 @@ const apiKeyLookup: Lookup = async (where) => {
   let row: Awaited<ReturnType<typeof read>>;
   if (where.segments.includes("personal-api-keys")) {
     ownOrganization(where);
-    // Someone's own key is theirs to see; anyone else's only an account admin's.
+    // Someone's own key is theirs to see, so it's read first; nothing about
+    // anyone else's (or a missing one) shows without account:admin.
     row = UUID.test(where.id)
       ? await withAccountRls(where.db, where.accountId, (db) =>
           // A revoked one is gone from the route, as listPersonalApiKeys reads them.
@@ -1165,7 +1174,7 @@ const serviceAccountLookup = organizationRow(
 const workspaceCustomModelLookup = workspaceRow(
   "custom model",
   "workspace:read",
-  async (db, workspaceId, id) =>
+  async (db, workspaceId, id, where) =>
     (
       await db
         .select({
@@ -1178,6 +1187,10 @@ const workspaceCustomModelLookup = workspaceRow(
             eq(schema.workspaceGatewayCustomModels.id, id),
             eq(schema.workspaceGatewayCustomModels.workspaceId, workspaceId),
             isNull(schema.workspaceGatewayCustomModels.retiredAt),
+            // Only the provider the route manages.
+            customModelProvider(where)
+              ? eq(schema.workspaceGatewayCustomModels.providerKind, customModelProvider(where)!)
+              : undefined,
           ),
         )
         .limit(1)
@@ -1225,6 +1238,21 @@ const SUBSCRIPTION_NAMES: Record<string, string> = {
   xai: "SuperGrok",
 };
 
+/** The stored provider a subscription route manages, from its words ("supergrok/accounts/…"). */
+function subscriptionProviders(where: LookupContext): string[] {
+  const product = where.segments[where.segments.lastIndexOf("accounts") - 1];
+  return product === "supergrok" ? ["xai"] : product ? [product] : [];
+}
+
+type CustomModelProvider = typeof schema.workspaceGatewayCustomModels.$inferSelect.providerKind;
+/** The provider a custom-model route manages, when its words name one. */
+function customModelProvider(where: LookupContext): CustomModelProvider | undefined {
+  if (where.segments.includes("gateway-custom-models")) return "vercel_gateway";
+  if (where.segments.includes("openrouter-custom-models")) return "openrouter";
+  if (where.segments.includes("opper-custom-models")) return "opper";
+  return (where.ids.providerKind as CustomModelProvider | undefined) ?? undefined;
+}
+
 const subscriptionAccountLookup: Lookup = async (where) => {
   let workspaceId: string | undefined;
   if (where.organization) {
@@ -1255,6 +1283,12 @@ const subscriptionAccountLookup: Lookup = async (where) => {
         and(
           eq(schema.subscriptionConnections.id, where.id),
           eq(schema.subscriptionConnections.accountId, where.accountId),
+          // Only the product the route manages ("codex/accounts/…").
+          or(
+            ...subscriptionProviders(where).map((provider) =>
+              eq(schema.subscriptionConnections.provider, provider),
+            ),
+          ),
         ),
       )
       .limit(1);
@@ -1299,7 +1333,11 @@ const githubInstallationLookup: Lookup = async (where) => {
     : missing("GitHub installation");
 };
 
-/** A capability (integration or Skill) by its catalog id, as the workspace sees it. */
+/**
+ * An integration by its catalog id, as the workspace sees it. Integrations
+ * can also be defined in code or a plugin's manifest ("api:fiken"), so one
+ * missing from the catalog stays unresolved, never "not found".
+ */
 function capabilityLookup(kind: string): Lookup {
   return async (where) => {
     const row = await inWorkspace(where, "workspace:read", async (db, workspaceId) => {
@@ -1334,7 +1372,8 @@ function capabilityLookup(kind: string): Lookup {
         null
       );
     });
-    return row ? { kind, name: row.name } : missing(kind);
+    if (!row) unresolved();
+    return { kind, name: row.name };
   };
 }
 
@@ -1373,9 +1412,10 @@ const pluginLookup: Lookup = async (where) => {
  * first where those words mean different tables ("workspaces/members" and
  * "organizations/members"). Ids named the same in every route (workspace,
  * chat, organization) resolve by their parameter. Browser and computer
- * sessions and admins' private-task summaries have none: their routes read
- * through rules (the source chat's visibility, the organization's privacy
- * setting) a lookup would only approximate, so they stay unresolved.
+ * sessions, admins' private-task summaries and Skills have none: their routes
+ * read through rules or stores (the source chat's visibility, the
+ * organization's privacy setting, Skill facets) a lookup would only
+ * approximate, so they stay unresolved.
  */
 const LOOKUPS: Record<string, Lookup> = {
   ":workspaceId": workspaceLookup,
@@ -1421,7 +1461,6 @@ const LOOKUPS: Record<string, Lookup> = {
   "github/installations/:installationId": githubInstallationLookup,
   "integrations/:capabilityId": capabilityLookup("integration"),
   "capabilities/:capabilityId": capabilityLookup("integration"),
-  "skills/:capabilityId": capabilityLookup("Skill"),
   "plugins/:pluginKey": pluginLookup,
 };
 
