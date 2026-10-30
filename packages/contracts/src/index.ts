@@ -188,6 +188,8 @@ export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
+export * from "./mcp-elicitation";
+import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,
@@ -1176,6 +1178,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
   "slack_bot_list_channels",
   "slack_bot_search",
   "slack_bot_channel_history",
@@ -10172,6 +10177,14 @@ export const ComposerDraft = /* @__PURE__ */ defineSchema(() =>
     model: primitives.nonEmptyString,
     reasoningEffort: ReasoningEffort,
     latencyMode: LatencyMode,
+    /**
+     * True when the draft has no model choice of its own: `model`,
+     * `reasoningEffort` and `latencyMode` are then the chat's current settings
+     * and follow every later change to them (for example by the agent). A
+     * client sends a model with this draft only after the person picks one.
+     * Servers from before this field send no value, which reads as false.
+     */
+    policyFollowsSession: primitives.boolean.default(false),
     sourceTurnId: primitives.nullableUuid,
     sourceTurnVersion: z.number().int().positive().nullable(),
     updatedAt: primitives.nullableString,
@@ -10222,6 +10235,22 @@ export const DeleteSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueItemRequest>;
 
+/** A composer policy is sent whole (the person's pick) or not at all (follow the chat). */
+function refineWholeComposerPolicy(
+  value: { model?: unknown; reasoningEffort?: unknown; latencyMode?: unknown },
+  context: z.RefinementCtx,
+): void {
+  const present = [value.model, value.reasoningEffort, value.latencyMode].filter(
+    (field) => field !== undefined,
+  ).length;
+  if (present === 0 || present === 3) return;
+  context.addIssue({
+    code: "custom",
+    message: "Send model, reasoningEffort and latencyMode together, or none of them",
+    path: ["model"],
+  });
+}
+
 export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
   ComposerDraft.pick({
     text: true,
@@ -10230,7 +10259,12 @@ export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
     model: true,
     reasoningEffort: true,
     latencyMode: true,
-  }).extend({ expectedRevision: primitives.nonnegativeInteger }),
+  })
+    // Omit all three to keep (or return) the draft to the chat's own
+    // settings; send them when the person picked a model in the composer.
+    .partial({ model: true, reasoningEffort: true, latencyMode: true })
+    .extend({ expectedRevision: primitives.nonnegativeInteger })
+    .superRefine(refineWholeComposerPolicy),
 );
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
@@ -10253,6 +10287,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       reasoningEffort: true,
       latencyMode: true,
     })
+      // A draft that follows the chat's settings is submitted without them.
+      .partial({ model: true, reasoningEffort: true, latencyMode: true })
       .extend({
         expectedDraftRevision: primitives.positiveInteger,
         clientEventId: SessionOperationKey,
@@ -10267,7 +10303,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
 
         personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
       })
-      .superRefine(requireEstablishedPersonalResourceEpoch),
+      .superRefine(requireEstablishedPersonalResourceEpoch)
+      .superRefine(refineWholeComposerPolicy),
   ),
 );
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
@@ -11899,6 +11936,9 @@ export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Pure organizational metadata: filing a session into a
 // channel never affects execution, authority, memory, or history.
+// A project's description and avatar are its profile, the same display
+// metadata a chat carries (see ./bots): shown to people in the sidebar and
+// never part of an agent's context.
 export const Channel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -11906,6 +11946,8 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     workspaceId: primitives.uuid,
     name: primitives.string,
     description: primitives.nullableString,
+    /** Shown instead of the folder icon; absent from servers that predate it. */
+    avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
     createdBy: primitives.nullableString,
@@ -11919,6 +11961,7 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
+    avatar: SessionAvatar.nullable().optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -11927,6 +11970,8 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: primitives.string.trim().min(1).max(80).optional(),
     description: z.string().max(2000).nullable().optional(),
+    /** null clears it; omitted keeps it. */
+    avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
   }),
 );
@@ -16124,6 +16169,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     contentArchivedOnly: z.literal(true).optional(),
     /** Explicit receipt for the started-or-messaged-by-you filter. */
     mineOnly: z.literal(true).optional(),
+    /** Explicit receipt for the `sessionIds` selection; older servers ignore it. */
+    sessionIdsApplied: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -16148,6 +16195,20 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
+/**
+ * A listed session's newest turn in execution order: the last queued turn,
+ * else the turn currently executing, else the most recently finished turn.
+ */
+export const SessionListLatestTurn = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    status: SessionTurnStatus,
+    startedAt: z.string().datetime().nullable(),
+    finishedAt: z.string().datetime().nullable(),
+  }),
+);
+export type SessionListLatestTurn = z.infer<typeof SessionListLatestTurn>;
+
 /** Compact list-only records; full Session and SessionSummary contracts are unchanged. */
 export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
   Session.pick({
@@ -16155,6 +16216,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: true,
     accountId: true,
     status: true,
+    activeTurnId: true,
     backgroundCommandActivity: true,
     hasSchedules: true,
     hasUpcomingSchedules: true,
@@ -16202,6 +16264,11 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
      */
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
+    /**
+     * Null when the session has no turn. Absent from older servers and from
+     * rows the SDK projects from full sessions; read turns for those.
+     */
+    latestTurn: SessionListLatestTurn.nullable().optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -16970,6 +17037,23 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     eventSequence: z.number().int().positive().nullable().optional(),
     /** One-tap answers for a single short choice question; empty otherwise. */
     choices: z.array(z.object({ id: primitives.string, label: primitives.string })).max(4),
+    /**
+     * An approval whose tool's MCP server asks the person a question in the
+     * middle of the call: which server asks, how the person answers and which
+     * of the call's questions it is (`round`, sent back as
+     * `elicitationRound`). The item's title is then the server's question. A
+     * `confirm` is one question with nothing to fill in, shown whole by the
+     * title, so it can be allowed from the item; anything else is a `form`,
+     * answered in the session. Null otherwise.
+     */
+    serverQuestion: z
+      .object({
+        server: primitives.string,
+        kind: z.enum(["confirm", "form"]),
+        round: z.number().int().positive(),
+      })
+      .nullable()
+      .default(null),
     urgency: NotificationUrgency,
     status: InboxItemStatus,
     /** True while the person has not seen the item's current content. */
@@ -19316,12 +19400,14 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // Standard timeline rendering omits it, while full event/audit reads retain
         // it. This is ordinary user-role content, not secret or privileged input.
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
-        // First-party tools the opening context is for, such as the tool that
-        // reaches the open document or record it names. The first turn loads
-        // them before its first model request, as a search by name would, so it
-        // can use them without searching; the session's tool block is unchanged.
-        // Decided once at creation. Names outside the session's tool selection
-        // are ignored; this grants no tool or permission.
+        // Tools the opening context is for, such as the tool that reaches the
+        // open document or record it names: first-party names, or the names an
+        // application's MCP server publishes for its tools. The first turn
+        // loads them before its first model request, as a search by name
+        // would, so it can use them without searching; the session's tool
+        // block is unchanged. Decided once at creation. Names outside the
+        // session's tool selection are ignored; this grants no tool or
+        // permission.
         modelContextTools: z.array(z.string().min(1).max(200)).max(OPENING_TOOLS_MAX).optional(),
         // The IANA time zone of the person sending the initial message, so the
         // model sees its local time. Ignored without an initial message.
@@ -19920,6 +20006,12 @@ export type SessionApprovalRequestPublicFields = {
   id: string;
   name: string;
   arguments: unknown;
+  /**
+   * Present when an MCP server asked the person a question in the middle of
+   * this call (form elicitation). Approving answers it; see `content` on
+   * `user.approvalDecision`.
+   */
+  elicitation?: McpElicitationApprovalRequest;
 };
 
 export function withPublicApprovalFields<T>(
@@ -19999,6 +20091,19 @@ export const ClientSessionEvent = /* @__PURE__ */ defineSchema(() =>
         approvalId: primitives.nonEmptyString.max(SESSION_OPERATION_KEY_MAX_CHARS),
         decision: z.enum(["approve", "reject"]),
         message: z.string().optional(),
+        /**
+         * Answers to an approval's `elicitation` questions, keyed by request
+         * id. Checked against each form; omitted fields take the server's
+         * defaults, so a form without required fields needs no content.
+         */
+        content: McpElicitationContent.optional(),
+        /**
+         * The `elicitation.round` this decision answers. Required to approve
+         * an approval with `elicitation`, so an approval sent for an earlier
+         * question (or by a surface that never showed it) cannot answer the
+         * server's current one.
+         */
+        elicitationRound: z.number().int().positive().optional(),
         // Write-only header rotation committed with the response before resume.
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
       }),

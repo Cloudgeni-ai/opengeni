@@ -173,3 +173,106 @@ e2e(
   },
   120_000,
 );
+
+// A relaunched managed browser restores its tabs, and for a moment after it
+// starts Chromium refuses to capture a restored tab that has not drawn yet
+// ("Unable to capture screenshot"). A capture in that moment waits for the
+// tab to draw instead of failing.
+e2e(
+  "captures tabs a relaunched browser has just restored",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-restored-capture-");
+    const pages = server();
+    const profileDirectory = join(directory, "profile");
+    const executable = process.env.OPENGENI_BROWSER_EXECUTABLE ?? "chromium";
+    const argumentsList = managedChromeArguments({
+      platform: process.platform,
+      windowed: headed,
+      profileDirectory,
+      proxyServer: null,
+    });
+    expect(argumentsList).toContain("--restore-last-session");
+    const launch = async (urls: string[]) => {
+      await rm(join(profileDirectory, "DevToolsActivePort"), { force: true });
+      const browser = spawn(executable, [...argumentsList, ...urls], { stdio: "ignore" });
+      const exited = new Promise((resolve) => browser.once("exit", resolve));
+      let endpoint = "";
+      for (let attempt = 0; attempt < 1_500 && !endpoint; attempt += 1) {
+        const active = await readFile(join(profileDirectory, "DevToolsActivePort"), "utf8").catch(
+          () => "",
+        );
+        const [port, path] = active.trim().split("\n");
+        if (port && path) endpoint = `ws://127.0.0.1:${port}${path}`;
+        else await Bun.sleep(10);
+      }
+      expect(endpoint).not.toBe("");
+      return { browser, exited, endpoint };
+    };
+    const stop = async (running: Awaited<ReturnType<typeof launch>>) => {
+      // A clean shutdown, as an idle release does, so the next launch restores the tabs.
+      const connection = await CdpConnection.connect(running.endpoint);
+      await connection.send("Browser.close").catch(() => undefined);
+      connection.close();
+      await running.exited;
+    };
+    let running = await launch([`${pages.url.origin}/front`]);
+    try {
+      const opener = await CdpConnection.connect(running.endpoint);
+      for (const label of ["second", "third"]) {
+        await opener.send("Target.createTarget", {
+          url: `${pages.url.origin}/${label}`,
+          background: true,
+        });
+      }
+      await Bun.sleep(1_000);
+      opener.close();
+      await stop(running);
+      let captures = 0;
+      for (let round = 0; round < 5; round += 1) {
+        running = await launch([]);
+        const endpoint = running.endpoint;
+        const driver = new AgentBrowserDriver({
+          browserSessionId: randomUUID(),
+          controllerGeneration: `controller-${randomUUID()}`,
+          focusEmulation: true,
+          runner: {
+            async run<T>(args: readonly string[]) {
+              return (args[0] === "get" ? { cdpUrl: endpoint } : {}) as T;
+            },
+          },
+        });
+        try {
+          const tabs = await driver.listTargets();
+          expect(tabs.map((tab) => new URL(tab.url).pathname).sort()).toEqual([
+            "/front",
+            "/second",
+            "/third",
+          ]);
+          // As the supervisor does after a relaunch: the reopened tabs are
+          // known as restored, so one Chrome has not started loading yet is
+          // loaded on first use instead of reported as crashed.
+          driver.noteRelaunchedTabs({
+            reason: "idle_release",
+            tabs: [],
+            restoredTargetIds: tabs.map((tab) => tab.id),
+          });
+          // Before, a capture in the first moments failed about every other relaunch.
+          const frames = await Promise.all(
+            tabs.map(async (tab) => await driver.captureScreenshot(tab.id)),
+          );
+          for (const frame of frames) expect(frame.width).toBeGreaterThan(100);
+          captures += frames.length;
+        } finally {
+          await driver.close().catch(() => undefined);
+          await stop(running);
+        }
+      }
+      expect(captures).toBe(15);
+    } finally {
+      running.browser.kill("SIGKILL");
+      pages.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  120_000,
+);

@@ -46,6 +46,7 @@ import { copyText } from "@/clipboard";
 import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
+import { readPendingPrompt, forgetPendingPrompt } from "@/pending-prompt";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-access";
 import { AppThemeProvider } from "@/theme";
@@ -142,6 +143,7 @@ export default function SessionScreen() {
   return (
     <AppThemeProvider>
       <LiveSession
+        key={`${account?.id ?? "signed-out"}:${workspaceId}:${id}`}
         client={client}
         models={models}
         baseUrl={account?.baseUrl ?? null}
@@ -313,6 +315,13 @@ function LiveSession(props: {
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
   const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
+  const [pendingPrompt] = useState(() =>
+    readPendingPrompt(props.client, props.workspaceId, props.sessionId),
+  );
+  useEffect(() => {
+    if (controller.initialHistoryReady)
+      forgetPendingPrompt(props.client, props.workspaceId, props.sessionId);
+  }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
@@ -558,6 +567,7 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        pendingPrompt={pendingPrompt}
         focusSequence={props.focusSequence}
         client={props.client}
         models={props.models}

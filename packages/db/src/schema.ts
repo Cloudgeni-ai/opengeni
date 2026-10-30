@@ -106,6 +106,9 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
 
 const opengeniPrivateSchema = pgSchema("opengeni_private");
 
+/** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
+export type CompactRequestTrigger = "operator" | "proactive";
+
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
 export type ConnectorActionPolicySnapshotEntry = {
@@ -5194,6 +5197,9 @@ export const channels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    // The project's avatar (1100), the same shape and bounds as a chat's.
+    // Display metadata for people only.
+    avatar: jsonb("avatar").$type<SessionAvatar>(),
     pinned: boolean("pinned").notNull().default(false),
     // Explicit user order within the pinned and unpinned project groups.
     sortOrder: integer("sort_order").notNull().default(0),
@@ -5478,6 +5484,11 @@ export const sessions = pgTable(
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
+    // Who asked for the pending request (migration 1102): 'operator' for
+    // /compact, 'proactive' for the worker's idle checkpoint after a turn that
+    // reached the automatic threshold. NULL (older writers) reads as operator.
+    // Meaningful only while compactRequested is true.
+    compactRequestTrigger: text("compact_request_trigger").$type<CompactRequestTrigger>(),
     queueVersion: integer("queue_version").notNull().default(0),
     queueHeadPosition: bigint("queue_head_position", { mode: "number" }).notNull().default(0),
     queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),
@@ -8969,6 +8980,9 @@ export const connectorActionRequests = pgTable(
       withTimezone: true,
     }),
     outcome: text("outcome"),
+    // 1114: times the provider stopped this call to ask the person (MCP
+    // elicitation). Each round has its own decision and single execution.
+    inputRound: integer("input_round").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -9270,6 +9284,13 @@ export const composerDrafts = pgTable(
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
+    /**
+     * True while the person has not picked a model in this composer: reads
+     * then return the chat's current settings, so a change made elsewhere
+     * (for example by the agent) is what the next Send uses. The three
+     * columns above keep the settings the draft was last saved with.
+     */
+    policyFollowsSession: boolean("policy_follows_session").notNull().default(true),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10430,6 +10451,8 @@ export const sessionPendingToolCalls = pgTable(
     eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
+    /** Private state of an MCP server question that paused this call; never in events. */
+    mcpInputRequest: jsonb("mcp_input_request").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

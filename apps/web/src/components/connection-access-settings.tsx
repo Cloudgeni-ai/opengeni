@@ -539,26 +539,17 @@ export function ConnectionAccessFormPage({
               </EmptyChoiceHint>
             ) : null}
             {/* Personal workspaces are their own choice, not one of the shared workspaces above. */}
-            {scope === "people" ? null : (
+            {scope === "people" || !data.personalWorkspacesSupported ? null : (
               <div className="mt-2 border-t border-border pt-4">
-                {data.personalWorkspacesSupported ? (
-                  <CheckboxField
-                    label="Personal workspaces"
-                    description="Each member's own private workspace."
-                    disabled={disabled}
-                    checked={draft.allowPersonalWorkspaces}
-                    onCheckedChange={(checked) =>
-                      setDraft({ ...draft, allowPersonalWorkspaces: checked })
-                    }
-                  />
-                ) : (
-                  <CheckboxField
-                    label="Personal workspaces"
-                    description="Organization API keys can't be used in Personal workspaces."
-                    disabled
-                    checked={false}
-                  />
-                )}
+                <CheckboxField
+                  label="Personal workspaces"
+                  description="Each member's own private workspace."
+                  disabled={disabled}
+                  checked={draft.allowPersonalWorkspaces}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, allowPersonalWorkspaces: checked })
+                  }
+                />
               </div>
             )}
             {reachesNoWorkspace ? (

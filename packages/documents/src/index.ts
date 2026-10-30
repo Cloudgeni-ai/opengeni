@@ -704,12 +704,22 @@ export function parseCurationOutcome(
   };
 }
 
+/** The deployment's configured document embedder, as Knowledge uses it. */
+export function createDocumentEmbedder(settings?: Settings): DocumentEmbedder {
+  const dimensions = settings?.documentEmbeddingDimensions ?? DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS;
+  return settings?.documentEmbeddingProvider === "deterministic"
+    ? new DeterministicEmbeddingProvider(dimensions, settings.documentEmbeddingModel)
+    : new OpenAIEmbeddingProvider({
+        ...documentOpenAIEmbeddingConfig(settings),
+        model: settings?.documentEmbeddingModel ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+        dimensions,
+      });
+}
+
 export function createDocumentServices(
   settings?: Settings,
   overrides: Partial<DocumentServices> = {},
 ): DocumentServices {
-  const dimensions = settings?.documentEmbeddingDimensions ?? DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS;
-  const openAIEmbeddingConfig = documentOpenAIEmbeddingConfig(settings);
   return {
     parser: overrides.parser ?? new LiteParseDocumentParser(),
     chunker:
@@ -718,15 +728,7 @@ export function createDocumentServices(
         settings?.documentChunkSize ?? DEFAULT_DOCUMENT_CHUNK_SIZE,
         settings?.documentChunkOverlap ?? DEFAULT_DOCUMENT_CHUNK_OVERLAP,
       ),
-    embedder:
-      overrides.embedder ??
-      (settings?.documentEmbeddingProvider === "deterministic"
-        ? new DeterministicEmbeddingProvider(dimensions, settings.documentEmbeddingModel)
-        : new OpenAIEmbeddingProvider({
-            ...openAIEmbeddingConfig,
-            model: settings?.documentEmbeddingModel ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL,
-            dimensions,
-          })),
+    embedder: overrides.embedder ?? createDocumentEmbedder(settings),
     curator: overrides.curator ?? createDocumentCurator(settings),
   };
 }

@@ -172,7 +172,7 @@ export type {
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 export type { Chats } from "./chats";
-export type { ServiceContext } from "./embedding-client";
+export type { AsUserOptions, ServiceContext } from "./embedding-client";
 export {
   OPENGENI_TEST_REQUEST_NIL_ID,
   OPENGENI_WEBHOOK_HEADERS,
@@ -298,6 +298,7 @@ export type {
   ConfirmExternalIdentityLinkRequest,
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
+  ExternalActorStatedMembership,
 } from "@opengeni/contracts/external-identities";
 export type { OfficeWorkbook, OfficeWorkbookTicket } from "./types";
 export type {
@@ -1139,6 +1140,7 @@ export type {
   InboxItemLink,
   InboxItemKind,
   InboxItemSender,
+  InboxItemServerQuestion,
   InboxSettings,
   MemberNotificationsSetting,
   SessionInboxMute,
@@ -1165,6 +1167,12 @@ export type {
   IntegrationSourceInput,
   IntegrationSourceProjection,
   SessionApprovalRequest,
+  McpElicitationAnswer,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationRequestedSchema,
+  McpElicitationValue,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -1402,6 +1410,7 @@ export type {
   SessionListTotals,
   SiteConversationGroup,
   SessionListEntry,
+  SessionListLatestTurn,
   SessionListEntryResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,

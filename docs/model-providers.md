@@ -309,9 +309,9 @@ not connected) and save nothing. Products are
 kind `direct-azure-organization`), use Responses with the `azure-openai` wire
 profile with reasoning controls (the same default and allowed efforts as the
 built-in provider), no hosted web search, and send the key as Azure's `api-key` header on
-`<endpoint>/responses`. They inherit into current and future shared workspaces
-only (Personal workspaces stay local, by the same RLS rule as the other
-organization API-key rails), are billed to the organization's Azure account with
+`<endpoint>/responses`. They inherit into current and future workspaces,
+Personal workspaces included (the same reach rule as the other organization
+API-key rails), are billed to the organization's Azure account with
 no Opengeni credits, and are narrowed by
 `/v1/organizations/:id/model-connections/azure_openai/current/access`. The
 workspace catalog reads the endpoint without decrypting; the worker loads the
@@ -756,8 +756,10 @@ deployment names). Active products use `organization-gateway/`,
 `organization-openrouter/`, `organization-opper/`, `organization-openai/`, or
 `organization-azure-openai/`,
 are externally billed to
-the organization provider account, and inherit into current and future shared
-workspaces only. Canonical Personal workspaces remain local. Workspace provider
+the organization provider account, and inherit into current and future
+workspaces of the organization, Personal workspaces included, narrowed by each
+connection's "Available in" (migration 1092; never another organization's
+workspaces). Workspace provider
 connections coexist under their existing IDs; no payer rail falls back or
 migrates implicitly.
 
@@ -1226,8 +1228,8 @@ model definition, so Opengeni never calls Opper `GET /models` at runtime:
 
 Organization owners/admins connect Opper once (`OrganizationModelProviderKind`
 `opper`) and curate exact ids. `organization-opper/<upstream>` products inherit
-into current and future shared workspaces only; Personal workspaces stay local,
-and per-connection access policies (`/model-connections/opper/...`) narrow
+into current and future workspaces, Personal workspaces included, and
+per-connection access policies (`/model-connections/opper/...`) narrow
 models and workspaces exactly as for OpenRouter.
 
 ### Runtime quirks
@@ -1482,7 +1484,10 @@ Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
 Registry models may set `hostedWebSearchContextSize` to `low`, `medium`, or
-`high` for Responses routes that support `search_context_size`. The worker
+`high` for Responses routes that support `search_context_size` and have hosted
+web search enabled. Configuration rejects the setting for other APIs or a
+disabled hosted-search capability, rather than changing a route's execution
+digest for an option that its adapter cannot use. The worker
 passes this static route setting to the hosted search tool. Omission preserves
 the SDK's current `medium` default byte-for-byte; it does not add a new field
 to the executable definition. The option neither enables search nor changes
@@ -1516,7 +1521,9 @@ hosted client `tool_search`, `tool_list`, native search output definitions and
 direct function calls. `generic_dispatch` retains ordinary search/list/invoke
 controls. Ranked discovery loads the strongest match per explicit query clause;
 generic receipts also return compact alternatives. Native search outputs cannot
-carry compact suggestions, so use `tool_list` to browse alternatives. Exact ties,
+carry compact suggestions, so a search that neither names a tool nor matches one
+clearly is followed by a developer note listing its unloaded close candidates
+and any unresolved exact names. Exact ties,
 operation-only queries and no matches disclose no schemas. Exact
 `names` loads complete schemas. An optional decision model handles ambiguous
 searches from a wider candidate set; strong lexical matches skip inference.

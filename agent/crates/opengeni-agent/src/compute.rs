@@ -29,8 +29,9 @@ pub const RELAY_SUBJECT: &str = "_compute.relay";
 /// directory.
 pub const DEFAULT_ACTIVITY_DIR: &str = "/run/compute/activity";
 
-/// How long a stream may carry nothing before it stops keeping its sandbox
-/// awake (compute's stream silence limit), unless the link file says.
+/// How long a stream may carry nothing, or a running command write nothing,
+/// before it stops keeping its sandbox awake (compute's stream silence
+/// limit), unless the link file says.
 pub const DEFAULT_STREAM_SILENCE: Duration = Duration::from_secs(600);
 
 /// How often the activity file is brought up to date.
@@ -83,7 +84,8 @@ pub struct ComputeConfig {
     pub nats_url: String,
     /// Where the agent registers its activity file.
     pub activity_dir: PathBuf,
-    /// How long a silent stream still counts as in use.
+    /// How long a silent stream, or a running command that writes nothing,
+    /// still counts as in use.
     pub stream_silence: Duration,
 }
 

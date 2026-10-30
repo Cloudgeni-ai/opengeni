@@ -3,7 +3,6 @@ import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
   DEFERRED_RUNTIME_PRIVATE_ROUTINES,
-  DEFERRED_RUNTIME_TARGET_ROUTINES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
@@ -652,6 +651,7 @@ async function grantAppRoleIfSchemaExists(
   const managedAuthSessionSetRoutines = `ARRAY[${[
     "assert_managed_sign_in_recovery(text,text,uuid,jsonb)",
     "replay_managed_sign_in_method(text,text,jsonb)",
+    "mutate_managed_passkey(text,text,jsonb)",
     "claim_managed_sign_in_notification(uuid,text,text,integer)",
     "settle_managed_sign_in_notification(uuid,uuid,text)",
     "get_canonical_human_exact_login_binding(text,text)",
@@ -1483,16 +1483,6 @@ BEGIN
         );
         EXECUTE format(
           'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
-          ${literal(schema)}, routine_signature, ${literal(role)}
-        );
-      END IF;
-    END LOOP;
-    -- Deferred target-schema capabilities stay withheld until the previous
-    -- release knows them (DEFERRED_RUNTIME_TARGET_ROUTINES).
-    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_TARGET_ROUTINES.map(literal).join(",")} ]::text[] LOOP
-      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
-        EXECUTE format(
-          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC, %I',
           ${literal(schema)}, routine_signature, ${literal(role)}
         );
       END IF;

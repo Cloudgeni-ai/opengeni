@@ -1,4 +1,5 @@
 import type { Tool } from "@openai/agents";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   LazyToolRuntime,
   type LazyToolTransport,
@@ -8,6 +9,10 @@ import {
   createToolSelector,
   type ToolSelector,
 } from "../../../packages/runtime/src/tool-discovery-decision";
+import {
+  createEmbeddingToolRanker,
+  type EmbeddingToolRanker,
+} from "../../../packages/runtime/src/tool-discovery-meaning";
 import type { DecisionModel } from "../../../packages/decisions/src";
 import { cardText, type TaskCard } from "./cards";
 import { cosine, type ChatClient, type EmbeddingClient } from "./providers";
@@ -53,13 +58,14 @@ export function lexicalRanker(tools: readonly Tool[]): Ranker {
 export type CostedSelector = {
   label: string;
   select: ToolSelector;
-  /** Cost and decision details since the last drain. */
-  drain(): { costUsd: number; decisions: unknown[] };
+  /** Cost, decision details and selector errors since the last drain. */
+  drain(): { costUsd: number; decisions: unknown[]; errors: string[] };
 };
 
 export function decisionToolSelector(model: DecisionModel, label: string): CostedSelector {
   let costUsd = 0;
   let decisions: unknown[] = [];
+  let errors: string[] = [];
   let candidates: readonly string[] = [];
   const choose = createToolSelector(model, {
     onUsage: (usage) => {
@@ -76,16 +82,55 @@ export function decisionToolSelector(model: DecisionModel, label: string): Coste
   });
   return {
     label,
-    select: (input) => {
+    select: async (input) => {
       candidates = input.candidates.map((candidate) => candidate.name);
-      return choose(input);
+      try {
+        return await choose(input);
+      } catch (error) {
+        // The runtime only reports that it fell back; the trace keeps why.
+        const { name, message, status, code } = error as Error & {
+          status?: number;
+          code?: string;
+        };
+        errors.push(
+          [name, status, code, message?.slice(0, 200)]
+            .filter((part) => part !== undefined)
+            .join(" "),
+        );
+        throw error;
+      }
     },
     drain() {
-      const drained = { costUsd, decisions };
+      const drained = { costUsd, decisions, errors };
       costUsd = 0;
       decisions = [];
+      errors = [];
       return drained;
     },
+  };
+}
+
+// The embedding spend of the search running in this async context.
+const meaningSpend = new AsyncLocalStorage<{ usd: number }>();
+
+/** The runtime's own meaning ranker over an evaluation embedding client. */
+export type RuntimeMeaning = { label: string; ranker: EmbeddingToolRanker };
+
+export function runtimeMeaningRanker(client: EmbeddingClient): RuntimeMeaning {
+  return {
+    label: `meaning ${client.label}`,
+    ranker: createEmbeddingToolRanker(
+      {
+        space: client.label,
+        async embed(texts) {
+          const { vectors, costUsd } = await client.embed(texts);
+          const spend = meaningSpend.getStore();
+          if (spend) spend.usd += costUsd;
+          return vectors;
+        },
+      },
+      { onError: (error) => console.error("meaning ranking failed:", error) },
+    ),
   };
 }
 
@@ -100,14 +145,18 @@ export function runtimeStrategy(
   catalog: Catalog,
   transport: LazyToolTransport,
   selector?: { label: string; create(): CostedSelector },
+  meaning?: RuntimeMeaning,
 ): Strategy {
   const servers = new Map(
     catalog.tools.flatMap((tool) => (tool.server ? [[tool.name, tool.server] as const] : [])),
   );
+  const published = new Map(
+    catalog.tools.flatMap((tool) => (tool.published ? [[tool.name, tool.published] as const] : [])),
+  );
   const serverIds = new Set(servers.values());
   const eager = new Set(catalog.tools.filter((tool) => tool.eager).map((tool) => tool.name));
-  const label = `runtime ${transport}${selector ? ` + ${selector.label}` : ""}`;
-  const description = `The runtime's own tool_search on the ${transport} route${selector ? ` with ${selector.label} as decision model` : ""}.`;
+  const label = `runtime ${transport}${meaning ? ` + ${meaning.label}` : ""}${selector ? ` + ${selector.label}` : ""}`;
+  const description = `The runtime's own tool_search on the ${transport} route${meaning ? `, ranking by keywords and ${meaning.label}` : ""}${selector ? ` with ${selector.label} as decision model` : ""}.`;
   const turn = (): Strategy => {
     const costed = selector?.create();
     const runtime = new LazyToolRuntime(
@@ -123,6 +172,11 @@ export function runtimeStrategy(
       undefined,
       () => eager,
       costed?.select,
+      undefined,
+      undefined,
+      undefined,
+      meaning?.ranker,
+      () => published,
     );
     runtime.refresh(catalog.functionTools);
     return {
@@ -130,10 +184,13 @@ export function runtimeStrategy(
       description,
       async search({ query }) {
         costed?.drain();
+        const spend = { usd: 0 };
         const started = performance.now();
-        const marker = await runtime.prepareSearch({ query });
+        const marker = await meaningSpend.run(spend, () => runtime.prepareSearch({ query }));
         const latencyMs = performance.now() - started;
-        const { costUsd, decisions } = costed?.drain() ?? { costUsd: 0, decisions: [] };
+        const drained = costed?.drain() ?? { costUsd: 0, decisions: [], errors: [] };
+        const { decisions, errors } = drained;
+        const costUsd = drained.costUsd + spend.usd;
         const output = JSON.parse(marker.output) as {
           tools?: { name?: string }[];
           suggestions?: { name?: string }[];
@@ -158,7 +215,13 @@ export function runtimeStrategy(
           shown,
           agentText: text,
           stages: decisions.map((detail) => ({ name: "selector", detail })),
-          ...(output.fallback ? { fallback: output.fallback } : {}),
+          ...(output.fallback
+            ? {
+                fallback: errors.length
+                  ? `${output.fallback}: ${errors.join("; ")}`
+                  : output.fallback,
+              }
+            : {}),
           latencyMs,
           costUsd,
         };

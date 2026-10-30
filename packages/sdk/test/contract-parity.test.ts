@@ -719,7 +719,7 @@ describe("SDK / contracts parity", () => {
     ).toBe(false);
   });
 
-  test("established-session submit requires one exact policy snapshot", () => {
+  test("established-session submit carries one whole policy snapshot or none", () => {
     const submit: SubmitComposerDraftRequest = {
       expectedDraftRevision: 4,
       clientEventId: "submit-draft-4",
@@ -735,6 +735,9 @@ describe("SDK / contracts parity", () => {
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
     expect(ContractSubmitComposerDraftRequest.safeParse(missingLatency).success).toBe(false);
+    // A draft that follows the chat's settings is submitted without any.
+    const { model: _model, reasoningEffort: _effort, ...following } = missingLatency;
+    expect(ContractSubmitComposerDraftRequest.safeParse(following).success).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {

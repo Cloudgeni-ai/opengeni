@@ -34,8 +34,10 @@ import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
 import { requestValidationError } from "../http/request-body";
-import { requireOrganizationCodexHuman } from "./codex";
-import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import {
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 
 const Uuid = z.string().uuid();
 
@@ -130,7 +132,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   app.get(organizationPath, async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     try {
       return c.json(
         OrganizationModelAccountSettings.parse(
@@ -146,9 +148,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   });
 
   app.patch(organizationPath, async (c) => {
-    requireSameOriginBrowserMutation(c, deps);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = UpdateOrganizationModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
       throw requestValidationError(parsed.error, "body", {
@@ -174,7 +176,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   app.get(`${organizationPath}/overview`, async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const after = c.req.query("after");
     if (after !== undefined && !Uuid.safeParse(after).success) {
       throw new HTTPException(422, { message: "invalid cursor" });
