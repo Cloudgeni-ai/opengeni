@@ -152,13 +152,22 @@ export const recordingTracks = pgTable(
       table.recordingId,
       table.trackNumber,
     ),
-    // Migration 1104. A person's tracks that streamed live in the last day,
-    // for the daily bound on live time no reported audio accounts for (see
-    // recording-live.ts); only tracks that streamed live are in it.
-    index("recording_tracks_live_counted")
-      .on(table.workspaceId, table.liveCountedAt)
-      .where(sql`live_counted_at IS NOT NULL`),
   ],
+);
+
+// Migration 1103. Live transcript time no reported audio accounts for, per
+// person (`api_key` for every API key of the workspace together) and hour,
+// for the daily bound on it (see recording-live.ts). RLS: own rows only.
+export const recordingLiveUnbackedHours = pgTable(
+  "recording_live_unbacked_hours",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    boundSubjectId: text("bound_subject_id").notNull(),
+    hourStart: timestamp("hour_start", { withTimezone: true }).notNull(),
+    unbackedMilliseconds: bigint("unbacked_milliseconds", { mode: "number" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.workspaceId, table.boundSubjectId, table.hourStart] })],
 );
 
 export const recordingChunks = pgTable(

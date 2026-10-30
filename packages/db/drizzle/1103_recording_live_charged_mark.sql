@@ -24,12 +24,20 @@
 -- plus a minute (or, for a session never reported on, the time up to the next
 -- request); live_unbacked_milliseconds is the rest of that time, which no
 -- reported audio accounts for; and live_unreported_grants counts sessions
--- never reported on.
+-- never reported on. Time counts only within the latest session's longest
+-- possible run (an hour from its grant), so a long pause counts at most that.
+--
+-- recording_live_unbacked_hours adds up the unbacked time per person (every
+-- API key of a workspace together, since no key records who made it) and
+-- workspace, per hour, so a person's live sessions are bounded per day across
+-- recordings. Each row is private to its own person (or to the workspace's
+-- API keys): it holds no recording, only time.
 --
 -- Rolling: nullable columns without default or check are catalog-only, and
 -- the previous release never reads or writes them; null means none charged
 -- or granted yet. The allowance trigger function keeps its signature and,
--- with the charged column null, counts exactly what it counted before.
+-- with the charged column null, counts exactly what it counted before. The
+-- new table is only used by this release.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE recording_tracks
@@ -57,9 +65,45 @@ COMMENT ON COLUMN recording_tracks.live_counted_at IS
 COMMENT ON COLUMN recording_tracks.live_covered_milliseconds IS
   'Time by the server''s clock that ended in a report of more streamed audio for this track, or in a request after a session never reported on.';
 COMMENT ON COLUMN recording_tracks.live_unbacked_milliseconds IS
-  'Time between this track''s live reports that no reported audio accounts for (a pause, or audio nobody reported); a person''s tracks may have only so much of it a day.';
+  'Time between this track''s live reports that no reported audio accounts for (a pause, or audio nobody reported), within each session''s longest possible run.';
 COMMENT ON COLUMN recording_tracks.live_unreported_grants IS
   'Live transcript sessions of this track the recorder never reported on before asking for another.';
+
+CREATE TABLE IF NOT EXISTS recording_live_unbacked_hours (
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  -- The person, or 'api_key' for every API key of the workspace.
+  bound_subject_id text NOT NULL CHECK (length(bound_subject_id) BETWEEN 1 AND 1024),
+  hour_start timestamp with time zone NOT NULL,
+  unbacked_milliseconds bigint NOT NULL CHECK (unbacked_milliseconds >= 0),
+  PRIMARY KEY (workspace_id, bound_subject_id, hour_start),
+  FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
+);
+COMMENT ON TABLE recording_live_unbacked_hours IS
+  'Live transcript time no reported audio accounts for, per person (or the workspace''s API keys together) and hour; a day of it is bounded.';
+ALTER TABLE recording_live_unbacked_hours ENABLE ROW LEVEL SECURITY;
+ALTER TABLE recording_live_unbacked_hours FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS workspace_isolation ON recording_live_unbacked_hours;
+CREATE POLICY workspace_isolation ON recording_live_unbacked_hours
+  USING (
+    opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND bound_subject_id = CASE
+      WHEN opengeni_private.current_subject_id() LIKE 'api\_key:%' THEN 'api_key'
+      ELSE opengeni_private.current_subject_id()
+    END
+  )
+  WITH CHECK (
+    opengeni_private.workspace_rls_visible(account_id, workspace_id)
+    AND bound_subject_id = CASE
+      WHEN opengeni_private.current_subject_id() LIKE 'api\_key:%' THEN 'api_key'
+      ELSE opengeni_private.current_subject_id()
+    END
+  );
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON recording_live_unbacked_hours TO opengeni_app;
+  END IF;
+END $$;
 
 -- Same signature; only the recording_tracks branch changes: it counts the
 -- growth of the list price of audio not charged in credits.

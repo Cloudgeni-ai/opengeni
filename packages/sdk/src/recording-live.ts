@@ -676,7 +676,10 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   };
 
   const connect = async () => {
-    if (connecting || closed || !canStream || Date.now() < retryAt) return;
+    // No new session while paused: the server counts a session's time up to
+    // an hour from its start, so one asked for during a long pause would
+    // count it. Resuming pushes audio, which connects again.
+    if (connecting || closed || paused || !canStream || Date.now() < retryAt) return;
     connecting = true;
     if (granted) {
       // Report the audio so far before asking again: the server counts time

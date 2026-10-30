@@ -415,6 +415,35 @@ describe("live transcriber", () => {
     live.abort();
   });
 
+  test("asks for no new session while paused, and asks again on resuming", async () => {
+    FakeSocket.opened = [];
+    const api = client();
+    const live = createLiveTranscriber({
+      client: api,
+      workspaceId: "w",
+      recordingId: "r",
+      trackNumber: 0,
+      WebSocket: FakeSocket,
+    });
+    live.push(tenth(0), 16_000, 0);
+    await settle();
+    FakeSocket.opened[0]!.open();
+    live.setPaused(true);
+    // The provider ends the session during the pause; audio arriving anyway
+    // asks for no new one.
+    FakeSocket.opened[0]!.close();
+    await new Promise((done) => setTimeout(done, 1_050));
+    live.push(tenth(0), 16_000, 100);
+    await settle();
+    expect(api.grants()).toBe(1);
+    live.setPaused(false);
+    live.push(tenth(0), 16_000, 200);
+    await settle();
+    await settle();
+    expect(api.grants()).toBe(2);
+    live.abort();
+  });
+
   test("a dropped connection holds audio and reconnects with a new grant", async () => {
     FakeSocket.opened = [];
     const api = client();

@@ -384,14 +384,25 @@ measured between them so a pause never counts:
   audio by more than 10 minutes plus a quarter of it, once 4 of its sessions
   went unreported, or after 20 sessions plus one for every 5 minutes it
   reported (at most 100).
+- A provider session runs at most an hour (OpenAI and Azure end it then), so
+  time counts only within an hour of the latest session's start, and the
+  recorder asks for no new session while paused: a long pause counts at most
+  what is left of that hour, however long it lasts.
 - The rest of the time between reports, which no reported audio accounts
-  for (pauses, and sessions never reported on), adds up per person: once the
-  person's tracks in the workspace that streamed live in the last 24 hours
-  have 4 hours of it, none of their tracks gets another session until older
-  ones drop out of the day. New recordings don't reset it. Pauses count, as
-  the server can't tell a pause from audio nobody reported, so a day with
-  more than 4 hours of pauses in live meetings loses the live preview for the
-  rest of it; the recordings and their transcripts are unaffected.
+  for (pauses, and sessions never reported on), adds up per person and
+  workspace, by the hour: once the person has 4 hours of it in the last 24
+  hours, none of their tracks gets another session until older hours drop
+  out of the day. New recordings don't reset it. The person is the human
+  behind the request; a personal API key or a delegated session acts as
+  them. Organization and workspace API keys record no person, so all of a
+  workspace's keys share one bound and a new key doesn't reset it (an
+  integration that records for its users should act as each user to get
+  each their own). Pauses inside a session count, as the server can't tell
+  a pause from audio nobody reported while the provider session is open, so
+  a day with more than about 4 hours of such pauses (for example a dozen
+  20-minute pauses, each shorter than the session's hour) loses the live
+  preview for the rest of it; the recordings and their transcripts are
+  unaffected.
 
 A refused grant is a 409 (`live_grant_limit` or `live_streamed_behind`, "The
 live transcript stopped for this track. The recording continues and is
@@ -404,13 +415,21 @@ bounded.
 Residual risk: each grant still opens one provider session (up to the
 provider's session limit) whose audio is only as metered as the recorder
 reports. A modified client that reports its audio as paused (no more audio)
-while it streams, or holds several sessions at once, streams up to 4 hours
-of unpaid audio a day per person and workspace before the daily bound stops
-it. The bound is per person and workspace, not per billing account: row
-security lets the API read only the person's own recordings in a workspace,
-so other people of the account, and the same person's other workspaces,
-each have their own 4 hours; an account-wide sum needs a database function
-that a later release can add. A modified client that reports invented
+while it streams streams about 4 hours of unpaid audio a day per person and
+workspace (at most an hour more in its last session) before the daily bound
+stops it. One that asks for a new session while its earlier ones still run
+keeps each running up to the provider's hour, counted only until the next
+request, so parallel sessions are bounded only by a track's session limits
+(20, plus one per 5 minutes reported). The bound is per person and workspace, not per billing account: the
+person's hours are stored per workspace, so other people of the account, and
+the same person's other workspaces, each have their own 4 hours (about $1.44
+a day per extra workspace at 6000 µ$ a minute). This is accepted for now; an
+account-wide sum needs a SECURITY DEFINER database function, which a later
+release can add (granting a new definer function to the runtime takes two
+releases). Telling an honest pause from a fake one needs a meter the client
+doesn't control, for example the server holding each provider session (and
+hanging it up on a pause or a new request) or reading the provider's own
+usage; that is also follow-up work. A modified client that reports invented
 audio is charged for it. A save whose receipt never commits, after the
 recorder's last retries, leaves that last stretch unpaid, and a debit not
 reconciled within 3 days stays a receipt without a ledger entry.

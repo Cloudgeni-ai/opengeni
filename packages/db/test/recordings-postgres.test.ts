@@ -62,11 +62,13 @@ import {
   workspaceMemberDisplayName,
   LIVE_GRANT_REFUSED_MESSAGE,
   LIVE_UNBACKED_DAILY_MAX_MILLISECONDS,
+  withWorkspaceSubjectRls,
   type Database,
   type DbClient,
   type RecordingLiveModel,
   type RecordingLiveRange,
 } from "../src";
+import * as schema from "../src/schema";
 
 // The production posture: a NOSUPERUSER NOBYPASSRLS migration owner and FORCE
 // RLS, so the owner-run recovery inventory is bound by row security exactly as
@@ -2104,11 +2106,11 @@ describe("recordings and usage allowances", () => {
   });
 
   /** A meeting with two tracks streaming live, and its recorder's moves. */
-  async function liveMeeting(existing?: Awaited<ReturnType<typeof workspace>>) {
+  async function liveMeeting(existing?: Awaited<ReturnType<typeof workspace>>, subjectId?: string) {
     const db = client!.db;
     const scope = existing ?? (await workspace());
     const recordingId = crypto.randomUUID();
-    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const actor = { workspaceId: scope.workspaceId, subjectId: subjectId ?? scope.owner };
     await createRecording(db, {
       ...actor,
       accountId: scope.accountId,
@@ -2139,7 +2141,10 @@ describe("recordings and usage allowances", () => {
           segments: [],
         });
       },
-      /** Let `minutes` pass: every live timestamp of the recording's tracks moves back. */
+      /**
+       * Let `minutes` pass: every live timestamp of the recording's tracks,
+       * and the workspace's hours of unbacked live time, move back.
+       */
       elapse: async (minutes: number) => {
         await shared!.admin`
           update recording_tracks set
@@ -2147,6 +2152,13 @@ describe("recordings and usage allowances", () => {
             live_reported_at = live_reported_at - make_interval(secs => ${minutes * 60}),
             live_counted_at = live_counted_at - make_interval(secs => ${minutes * 60})
           where recording_id = ${recordingId}`;
+        // Through a century ago, so no hour lands on one not yet moved.
+        for (const by of [minutes * 60 + 3_155_760_000, -3_155_760_000]) {
+          await shared!.admin`
+            update recording_live_unbacked_hours
+            set hour_start = hour_start - make_interval(secs => ${by})
+            where workspace_id = ${scope.workspaceId}`;
+        }
       },
     };
   }
@@ -2318,8 +2330,62 @@ describe("recordings and usage allowances", () => {
     // Another person in another workspace isn't affected.
     await (await liveMeeting()).start(0);
     // A day later, the earlier recordings no longer count.
-    for (const meeting of recordings.slice(0, 2)) await meeting.elapse(24 * 60);
+    await recordings[0]!.elapse(24 * 60);
     await recordings[2]!.start(0);
+  });
+
+  test("an honest recorder talking ten minutes, then paused five hours, again and again, is never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // The pause is reported on pausing and on resuming. The session stays
+    // open (muted) until the provider ends it an hour after it began, and the
+    // recorder asks for no new one while paused: of each pause only what is
+    // left of that hour counts.
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await meeting.start(0);
+      for (let minute = 0; minute < 10; minute++) {
+        await meeting.elapse(1);
+        await meeting.report(60_000);
+      }
+      await meeting.report(0);
+      await meeting.elapse(5 * 60);
+      await meeting.report(0);
+    }
+    await meeting.start(0);
+    const [row] = await shared.admin<{ unbacked: string }[]>`
+      select live_unbacked_milliseconds::text as unbacked from recording_tracks
+      where recording_id = ${meeting.recordingId} and track_number = 0`;
+    // Fifty minutes of each pause (less the test's own few milliseconds).
+    expect(Number(row!.unbacked)).toBeLessThanOrEqual(3 * 50 * 60_000);
+    expect(Number(row!.unbacked)).toBeGreaterThan(3 * 50 * 60_000 - 10_000);
+  });
+
+  test("the workspace's API keys share one daily bound, so a new key doesn't reset it", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // A key's sessions, each streaming half an hour ended by a report of no
+    // new audio, reach the day's four hours.
+    const first = await liveMeeting(scope, `api_key:${crypto.randomUUID()}`);
+    for (let session = 0; session < 8; session++) {
+      await first.start(0);
+      await first.elapse(30);
+      await first.report(0);
+    }
+    await expect(first.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // Another key of the workspace, as a new one made to start over, is
+    // refused too.
+    const second = await liveMeeting(scope, `api_key:${crypto.randomUUID()}`);
+    await expect(second.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // A person of the workspace has their own bound, and sees none of the
+    // keys' time.
+    await (await liveMeeting(scope)).start(0);
+    const visible = await withWorkspaceSubjectRls(
+      client.db,
+      scope.workspaceId,
+      scope.owner,
+      async (tx) => await tx.select().from(schema.recordingLiveUnbackedHours),
+    );
+    expect(visible).toEqual([]);
   });
 
   test("an honest heavy day, eight hours of audio across recordings with pauses, is never refused", async () => {

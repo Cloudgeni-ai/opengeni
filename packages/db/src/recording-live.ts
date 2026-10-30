@@ -63,13 +63,21 @@ function trackWhere(input: { workspaceId: string; recordingId: string; trackNumb
  * doesn't. A session the recorder never reported on before asking for another
  * counts all its time up to that request as covered, and as unreported.
  *
+ * A session can stream at most {@link LIVE_SESSION_MAX_MILLISECONDS} (the
+ * providers end it then), so time counts only within the latest session's
+ * longest possible run: a long pause, even one the recorder never reported,
+ * counts at most what is left of that hour, and the recorder asks for no new
+ * session while paused.
+ *
  * Time no reported audio accounts for (the rest of every gap between reports,
  * and an unreported session's time) is "unbacked": a provider session may
  * have been open, streaming audio nobody reported. It adds up per track, and
- * the person's tracks in the workspace active in the last day may have at
- * most {@link LIVE_UNBACKED_DAILY_MAX_MILLISECONDS} of it, so new recordings
- * don't reset the bound. (Row security lets the API read only the person's
- * own recordings in this workspace, so this is per person and workspace.)
+ * per person and workspace by the hour: the person may have at most
+ * {@link LIVE_UNBACKED_DAILY_MAX_MILLISECONDS} of it in the last day, so new
+ * recordings don't reset the bound. The person is the human behind the
+ * request (a personal API key and a delegated session act as them); the
+ * workspace's other API keys record no person, so they share one bound
+ * ({@link liveBoundSubject}) and a new key doesn't reset it.
  *
  * A track gets no more sessions once:
  * - {@link LIVE_UNREPORTED_GRANTS_MAX} of its sessions went unreported;
@@ -90,6 +98,17 @@ export const LIVE_BEHIND_SLACK_FRACTION = 0.25;
 export const LIVE_REPORT_GAP_MAX_MILLISECONDS = 3 * 60_000;
 export const LIVE_REPORT_GROWTH_SLACK_MILLISECONDS = 60_000;
 export const LIVE_UNBACKED_DAILY_MAX_MILLISECONDS = 4 * 60 * 60_000;
+/** The longest a provider's realtime session runs (OpenAI and Azure: an hour). */
+export const LIVE_SESSION_MAX_MILLISECONDS = 60 * 60_000;
+
+/**
+ * Whose daily bound a live session counts against: the person, or, for the
+ * workspace's API keys (`api_key:<id>`, which record no person), all of them
+ * together. Matches the row security of recording_live_unbacked_hours.
+ */
+export function liveBoundSubject(subjectId: string): string {
+  return subjectId.startsWith("api_key:") ? "api_key" : subjectId;
+}
 
 /** Why a track gets no more live sessions, or null when it may have one. */
 export function liveGrantRefusal(input: {
@@ -121,38 +140,69 @@ export function liveGrantRefusal(input: {
   return null;
 }
 
-/**
- * Unbacked live time of the person's other tracks in this workspace that
- * streamed live in the last day (see {@link liveGrantRefusal}).
- */
-async function personUnbackedMilliseconds(
+/** The person's unbacked live time in this workspace in the last day. */
+async function boundUnbackedMilliseconds(
   tx: Database,
-  input: { workspaceId: string; recordingId: string; trackNumber: number },
-  ownerSubjectId: string,
+  input: { workspaceId: string; subjectId: string },
 ): Promise<number> {
+  const table = schema.recordingLiveUnbackedHours;
   const [row] = await tx
-    .select({
-      total: sql<string>`coalesce(sum(${schema.recordingTracks.liveUnbackedMilliseconds}), 0)`,
-    })
-    .from(schema.recordingTracks)
-    .innerJoin(
-      schema.recordings,
-      and(
-        eq(schema.recordings.workspaceId, schema.recordingTracks.workspaceId),
-        eq(schema.recordings.id, schema.recordingTracks.recordingId),
-      ),
-    )
+    .select({ total: sql<string>`coalesce(sum(${table.unbackedMilliseconds}), 0)` })
+    .from(table)
     .where(
       and(
-        eq(schema.recordingTracks.workspaceId, input.workspaceId),
-        sql`${schema.recordingTracks.liveCountedAt} > clock_timestamp() - interval '24 hours'`,
-        sql`${schema.recordingTracks.liveUnbackedMilliseconds} > 0`,
-        eq(schema.recordings.ownerSubjectId, ownerSubjectId),
-        sql`not (${schema.recordingTracks.recordingId} = ${input.recordingId} and ${schema.recordingTracks.trackNumber} = ${input.trackNumber})`,
+        eq(table.workspaceId, input.workspaceId),
+        eq(table.boundSubjectId, liveBoundSubject(input.subjectId)),
+        sql`${table.hourStart} > clock_timestamp() - interval '24 hours'`,
       ),
     );
   return Number(row?.total ?? 0);
 }
+
+/** Add unbacked live time to the person's current hour, dropping old hours. */
+async function addBoundUnbacked(
+  tx: Database,
+  recording: RecordingRow,
+  input: { subjectId: string },
+  milliseconds: number,
+): Promise<void> {
+  const added = Math.round(milliseconds);
+  if (added <= 0) return;
+  const table = schema.recordingLiveUnbackedHours;
+  const bound = liveBoundSubject(input.subjectId);
+  await tx
+    .delete(table)
+    .where(
+      and(
+        eq(table.workspaceId, recording.workspaceId),
+        eq(table.boundSubjectId, bound),
+        sql`${table.hourStart} < clock_timestamp() - interval '2 days'`,
+      ),
+    );
+  await tx
+    .insert(table)
+    .values({
+      accountId: recording.accountId,
+      workspaceId: recording.workspaceId,
+      boundSubjectId: bound,
+      hourStart: sql`date_trunc('hour', clock_timestamp(), 'UTC')`,
+      unbackedMilliseconds: added,
+    })
+    .onConflictDoUpdate({
+      target: [table.workspaceId, table.boundSubjectId, table.hourStart],
+      set: {
+        unbackedMilliseconds: sql`${table.unbackedMilliseconds} + excluded.unbacked_milliseconds`,
+      },
+    });
+}
+
+/**
+ * The time since the track's last grant or report, within its latest
+ * session's longest possible run; null when no session is open.
+ */
+const sinceCountedInSession = sql<
+  number | null
+>`case when ${schema.recordingTracks.liveGrantedAt} is not null then greatest(0, extract(epoch from least(clock_timestamp(), ${schema.recordingTracks.liveGrantedAt} + ${sql.raw(`interval '${LIVE_SESSION_MAX_MILLISECONDS} milliseconds'`)}) - ${schema.recordingTracks.liveCountedAt}) * 1000)::float8 end`;
 
 /** The one message for a track refused more live sessions. */
 export const LIVE_GRANT_REFUSED_MESSAGE =
@@ -195,14 +245,12 @@ export async function startRecordingLiveTrack(
         unbacked: schema.recordingTracks.liveUnbackedMilliseconds,
         unreported: schema.recordingTracks.liveUnreportedGrants,
         // The latest session, which this request ends: whether the recorder
-        // reported on it, and the time since the last grant or report (null
-        // when no session is open).
+        // reported on it, and the time since the last grant or report within
+        // its longest possible run (null when no session is open).
         latestReported: sql<
           boolean | null
         >`${schema.recordingTracks.liveReportedAt} >= ${schema.recordingTracks.liveGrantedAt}`,
-        sinceCounted: sql<
-          number | null
-        >`case when ${schema.recordingTracks.liveGrantedAt} is not null then (extract(epoch from clock_timestamp() - ${schema.recordingTracks.liveCountedAt}) * 1000)::float8 end`,
+        sinceCounted: sinceCountedInSession,
       })
       .from(schema.recordingTracks)
       .where(trackWhere(input))
@@ -216,7 +264,8 @@ export async function startRecordingLiveTrack(
     const tail = open ? Math.max(0, Number(current.sinceCounted)) : 0;
     const counted = reported ? Math.min(tail, LIVE_REPORT_GROWTH_SLACK_MILLISECONDS) : tail;
     const covered = Number(current.covered ?? 0) + counted;
-    const unbacked = Number(current.unbacked ?? 0) + (reported ? tail - counted : tail);
+    const unbackedAdded = reported ? tail - counted : tail;
+    const unbacked = Number(current.unbacked ?? 0) + unbackedAdded;
     const unreported = (current.unreported ?? 0) + (open && !reported ? 1 : 0);
     if (input.bounded) {
       const refusal = liveGrantRefusal({
@@ -224,11 +273,11 @@ export async function startRecordingLiveTrack(
         unreportedGrants: unreported,
         streamedMilliseconds: Number(current.streamed),
         coveredMilliseconds: covered,
-        unbackedMilliseconds:
-          unbacked + (await personUnbackedMilliseconds(tx, input, recording.ownerSubjectId)),
+        unbackedMilliseconds: unbackedAdded + (await boundUnbackedMilliseconds(tx, input)),
       });
       if (refusal) throw new RecordingConflictError(LIVE_GRANT_REFUSED_MESSAGE, refusal);
     }
+    await addBoundUnbacked(tx, recording, input, unbackedAdded);
     const [track] = await tx
       .update(schema.recordingTracks)
       .set({
@@ -355,11 +404,10 @@ export async function appendRecordingLiveSegments(
         chargedCost: schema.recordingTracks.liveChargedCostUsdMicros,
         covered: schema.recordingTracks.liveCoveredMilliseconds,
         unbacked: schema.recordingTracks.liveUnbackedMilliseconds,
-        // The time since the last grant or report (null when no session was
-        // granted, or the last one was taken back).
-        sinceCounted: sql<
-          number | null
-        >`case when ${schema.recordingTracks.liveGrantedAt} is not null then (extract(epoch from clock_timestamp() - ${schema.recordingTracks.liveCountedAt}) * 1000)::float8 end`,
+        // The time since the last grant or report within the latest
+        // session's longest possible run (null when no session was granted,
+        // or the last one was taken back).
+        sinceCounted: sinceCountedInSession,
       })
       .from(schema.recordingTracks)
       .where(trackWhere(input))
@@ -374,6 +422,20 @@ export async function appendRecordingLiveSegments(
     const { listPriceMicros, charge } = input.pricing(live);
     const streamedBefore = Number(before.streamed);
     const streamed = Math.max(streamedBefore, input.streamedMilliseconds);
+    // The time since the last grant or report: what the new audio (plus
+    // slack) accounts for is covered, the rest unbacked; any report ends
+    // what is counted (see liveGrantRefusal).
+    const gap = before.sinceCounted !== null ? Math.max(0, Number(before.sinceCounted)) : null;
+    const grew = streamed - streamedBefore;
+    const gapCovered =
+      gap !== null && grew > 0
+        ? Math.min(
+            gap,
+            grew + LIVE_REPORT_GROWTH_SLACK_MILLISECONDS,
+            LIVE_REPORT_GAP_MAX_MILLISECONDS,
+          )
+        : 0;
+    if (gap !== null) await addBoundUnbacked(tx, recording, input, gap - gapCovered);
     // Nothing charged yet: charging starts at what had streamed before it
     // (an older release's or a time credits weren't billed).
     const chargedUpTo = before.charged ?? streamedBefore;
@@ -391,28 +453,13 @@ export async function appendRecordingLiveSegments(
       .update(schema.recordingTracks)
       .set({
         liveStreamedMilliseconds: streamed,
-        // The time since the last grant or report: what the new audio (plus
-        // slack) accounts for is covered, the rest unbacked; any report ends
-        // what is counted (see liveGrantRefusal).
         liveReportedAt: sql`clock_timestamp()`,
         liveCountedAt: sql`clock_timestamp()`,
-        ...(before.sinceCounted !== null
-          ? (() => {
-              const gap = Math.max(0, Number(before.sinceCounted));
-              const grew = streamed - streamedBefore;
-              const counted =
-                grew > 0
-                  ? Math.min(
-                      gap,
-                      grew + LIVE_REPORT_GROWTH_SLACK_MILLISECONDS,
-                      LIVE_REPORT_GAP_MAX_MILLISECONDS,
-                    )
-                  : 0;
-              return {
-                liveCoveredMilliseconds: Math.round(Number(before.covered ?? 0) + counted),
-                liveUnbackedMilliseconds: Math.round(Number(before.unbacked ?? 0) + gap - counted),
-              };
-            })()
+        ...(gap !== null
+          ? {
+              liveCoveredMilliseconds: Math.round(Number(before.covered ?? 0) + gapCovered),
+              liveUnbackedMilliseconds: Math.round(Number(before.unbacked ?? 0) + gap - gapCovered),
+            }
           : {}),
         // Audio streamed to a model not charged in credits counts at list
         // price instead, so once charging began the mark moves past it too.
