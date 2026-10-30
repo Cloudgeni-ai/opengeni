@@ -993,6 +993,7 @@ describe("durable structured human input", () => {
       action: "conflict",
       request: { id: parallelRequestId, status: "pending" },
     });
+    // An ordinary sibling approval stays decidable; a later resume applies it.
     expect(
       await acceptSessionApprovalDecision(client.db, {
         accountId: frozen.grant.accountId,
@@ -1001,7 +1002,7 @@ describe("durable structured human input", () => {
         subjectId: frozen.grant.subjectId,
         payload: { approvalId: "ordinary-call", decision: "approve" },
       }),
-    ).toMatchObject({ action: "conflict" });
+    ).toMatchObject({ action: "accepted" });
 
     if (first.action !== "accepted") throw new Error("first response was not accepted");
     const resumedAttemptId = crypto.randomUUID();

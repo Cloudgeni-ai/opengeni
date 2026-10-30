@@ -51,6 +51,7 @@ import {
   listSessionEventPage,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
+  listTurnApprovalDecisions,
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionSystemUpdatesForTurn,
@@ -8255,7 +8256,12 @@ describe("clean session control plane", () => {
         payload: { approvalId: "approval-stale", decision: "approve" },
         clientEventId: crypto.randomUUID(),
       }),
-    ).toEqual({ action: "conflict", sessionStatus: "requires_action" });
+    ).toMatchObject({
+      action: "conflict",
+      sessionStatus: "requires_action",
+      reason: "not_pending",
+      message: "This approval is no longer waiting for a decision.",
+    });
 
     const accepted = await acceptSessionApprovalDecision(client.db, {
       accountId: grant.accountId,
@@ -8266,6 +8272,191 @@ describe("clean session control plane", () => {
       clientEventId: crypto.randomUUID(),
     });
     expect(accepted.action).toBe("accepted");
+  });
+
+  test("parallel approvals stay decidable while a sibling decision resumes the turn", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "delete the four connections");
+    const firstAttemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: firstAttemptId },
+    );
+    if (!turn) throw new Error("parallel approval turn was not claimed");
+    const callIds = ["parallel-a", "parallel-b", "parallel-c"];
+    const firstAttempt = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      executionGeneration: turn.executionGeneration,
+      attemptId: firstAttemptId,
+    };
+    for (const callId of callIds) {
+      await registerPendingSessionToolCall(client.db, {
+        ...firstAttempt,
+        callId,
+        callType: "function_call",
+        callItem: { type: "function_call", name: "delete_connection", callId, arguments: "{}" },
+      });
+    }
+    expect(
+      await attachOpenSuffixToPendingToolCalls(client.db, {
+        ...firstAttempt,
+        members: callIds.map((callId) => ({
+          callId,
+          interruptionKind: "approval" as const,
+          reasoningItems: [],
+        })),
+      }),
+    ).toEqual({ accepted: true, attached: 3 });
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ fixture: "parallel-approvals" }),
+        pendingApprovals: callIds.map((id) => ({ id })),
+      },
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvals: callIds.map((id) => ({ id })) },
+        },
+      ],
+    });
+    const decide = async (approvalId: string, decision: "approve" | "reject") =>
+      await acceptSessionApprovalDecision(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        payload: { approvalId, decision },
+        clientEventId: crypto.randomUUID(),
+      });
+
+    const first = await decide("parallel-a", "approve");
+    if (first.action !== "accepted") throw new Error("first approval was refused");
+    // A double click is the same decision: accepted, nothing new recorded.
+    const doubleClick = await decide("parallel-a", "approve");
+    expect(doubleClick).toMatchObject({ action: "accepted", events: [] });
+    if (doubleClick.action !== "accepted") throw new Error("double click was refused");
+    expect(doubleClick.event.id).toBe(first.event.id);
+    expect(await decide("parallel-a", "reject")).toMatchObject({
+      action: "conflict",
+      reason: "already_decided",
+      message: "This action was already approved.",
+    });
+    // A sibling decided before the resume starts is applied by that resume.
+    const second = await decide("parallel-b", "reject");
+    if (second.action !== "accepted") throw new Error("sibling decision was refused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "approval-pending",
+      triggerEventId: second.event.id,
+    });
+
+    const resumedAttemptId = crypto.randomUUID();
+    const resumed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      {
+        attemptId: resumedAttemptId,
+        trigger: { kind: "approval", triggerEventId: second.event.id },
+      },
+    );
+    expect(resumed).toMatchObject({ id: turn.id, status: "running" });
+    expect(
+      (
+        await listTurnApprovalDecisions(client.db, {
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn.id,
+          throughSequence: second.event.sequence,
+        })
+      ).map((decision) => [decision.approvalId, decision.payload.decision]),
+    ).toEqual([
+      ["parallel-a", "approve"],
+      ["parallel-b", "reject"],
+    ]);
+
+    // The person decides the last card while the turn is resuming.
+    const whileRunning = await decide("parallel-c", "approve");
+    expect(whileRunning.action).toBe("accepted");
+    if (whileRunning.action !== "accepted") throw new Error("decision while running was refused");
+    const whileRunningAgain = await decide("parallel-c", "approve");
+    expect(whileRunningAgain).toMatchObject({ action: "accepted", events: [] });
+
+    const resumedAttempt = {
+      ...firstAttempt,
+      executionGeneration: resumed!.executionGeneration,
+      attemptId: resumedAttemptId,
+    };
+    for (const callId of ["parallel-a", "parallel-b"]) {
+      await recordPendingSessionToolCallResult(client.db, {
+        ...resumedAttempt,
+        callId,
+        resultItem: { type: "function_call_result", callId, output: "done" },
+      });
+    }
+    // A finished call refuses a different decision with a specific reason.
+    expect(await decide("parallel-a", "reject")).toMatchObject({
+      action: "conflict",
+      reason: "already_decided",
+    });
+
+    // The resume re-freezes the call it did not apply. Its decision is
+    // already recorded, so the person is not asked again: the turn resumes.
+    const beforeRefreeze = (await listSessionEvents(client.db, grant.workspaceId!, session.id))
+      .length;
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: second.event.id,
+      attemptId: resumedAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ fixture: "parallel-approvals-refreeze" }),
+        pendingApprovals: [{ id: "parallel-c" }],
+      },
+      events: [{ type: "session.requiresAction", payload: { approvals: [{ id: "parallel-c" }] } }],
+    });
+    const refreezeEvents = (
+      await listSessionEvents(client.db, grant.workspaceId!, session.id)
+    ).slice(beforeRefreeze);
+    expect(refreezeEvents.some((event) => event.type === "session.requiresAction")).toBe(false);
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "approval-pending",
+      triggerEventId: whileRunning.event.id,
+    });
+  });
+
+  test("an approval decision after its turn ended names the reason", async () => {
+    const { grant, session } = await fixture();
+    expect(
+      await acceptSessionApprovalDecision(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        payload: { approvalId: "approval-after-turn", decision: "approve" },
+        clientEventId: crypto.randomUUID(),
+      }),
+    ).toMatchObject({
+      action: "conflict",
+      reason: "turn_ended",
+      message: "This approval closed: the agent's turn ended before it was decided.",
+    });
   });
 
   test("connector policies enforce Allow/Ask/Block with frozen actors, idempotency, and secret-free audit", async () => {

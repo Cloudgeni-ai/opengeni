@@ -12,6 +12,7 @@ import {
   getActiveSessionHistoryItems,
   interruptedToolCallResult,
   listRecordedInteractionToolCallIds,
+  listTurnApprovalDecisions,
   listTurnOpenSuffixToolCalls,
   nextSessionHistoryPosition,
   recordPendingSessionToolCallResult,
@@ -153,6 +154,96 @@ export function resolveOpenSuffixResumeTarget(
     return null;
   }
   return rows.find((row) => row.callId === callId) ?? null;
+}
+
+/** The trigger of a resume: the decision or answer that claimed it, with its log position. */
+export type OpenSuffixResumeTrigger = Pick<SessionEvent, "type" | "payload"> & {
+  sequence?: number;
+};
+
+/** The question round a still-open call asks, if its MCP server asked one. */
+function openSuffixRowRound(row: OpenSuffixPendingToolCall): number | undefined {
+  return row.mcpInputRequest ? parseMcpInputRequest(row.mcpInputRequest).round : undefined;
+}
+
+/**
+ * The other approvals of this pause that already hold a decision: every
+ * still-open approval call with a decision recorded up to the resume's
+ * trigger, for the question round it asks now. A pause's decisions are
+ * applied in one resume, so deciding several approvals never costs a
+ * restart (or a fresh ask) per decision. A decision recorded after the
+ * trigger resumes the turn again; it is never lost and never applied twice.
+ */
+export async function openSuffixSiblingDecisions(input: {
+  db: Database;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  trigger: OpenSuffixResumeTrigger;
+  rows?: readonly OpenSuffixPendingToolCall[];
+}): Promise<Array<{ row: OpenSuffixPendingToolCall; payload: Record<string, unknown> }>> {
+  if (
+    typeof input.trigger.sequence !== "number" ||
+    (input.trigger.type !== "user.approvalDecision" &&
+      input.trigger.type !== "user.humanInputResponse")
+  ) {
+    return [];
+  }
+  const rows =
+    input.rows ??
+    (await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId));
+  const triggerCallId =
+    input.trigger.type === "user.approvalDecision"
+      ? (input.trigger.payload as { approvalId?: unknown }).approvalId
+      : undefined;
+  const open = rows.filter(
+    (row) =>
+      row.resultItem == null &&
+      row.callId !== triggerCallId &&
+      (row.interruptionKind === "approval" || row.interruptionKind === "interaction_intervention"),
+  );
+  if (open.length === 0) return [];
+  const decisions = await listTurnApprovalDecisions(input.db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    throughSequence: input.trigger.sequence,
+  });
+  const siblings: Array<{ row: OpenSuffixPendingToolCall; payload: Record<string, unknown> }> = [];
+  for (const row of open) {
+    const round = openSuffixRowRound(row);
+    // Oldest first: the newest decision for this round wins.
+    const decision = [...decisions]
+      .reverse()
+      .find(
+        (candidate) => candidate.approvalId === row.callId && candidate.elicitationRound === round,
+      );
+    if (decision) siblings.push({ row, payload: decision.payload });
+  }
+  return siblings;
+}
+
+/** The calls a resume runs as approved: its trigger's and its approved siblings'. */
+export async function openSuffixApprovedCallIds(input: {
+  db: Database;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  trigger: OpenSuffixResumeTrigger;
+}): Promise<string[]> {
+  const ids: string[] = [];
+  const payload = input.trigger.payload as { approvalId?: unknown; decision?: unknown };
+  if (
+    input.trigger.type === "user.approvalDecision" &&
+    payload.decision === "approve" &&
+    typeof payload.approvalId === "string"
+  ) {
+    ids.push(payload.approvalId);
+  }
+  for (const sibling of await openSuffixSiblingDecisions(input)) {
+    if (sibling.payload.decision === "approve") ids.push(sibling.row.callId);
+  }
+  return ids;
 }
 
 /** True when the paired call and result already exist in durable history. */
@@ -340,7 +431,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   turnId: string;
   executionGeneration: number;
   attemptId: string;
-  trigger: Pick<SessionEvent, "type" | "payload">;
+  trigger: OpenSuffixResumeTrigger;
   humanInputResume: {
     requestId: string;
     toolCallId: string;
@@ -385,6 +476,14 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   }
   if (target && callId) {
     const settled = await settleOpenSuffixTarget(input, target);
+    if (settled === "cancelled") return { action: "cancelled" };
+  }
+  // The pause's other decisions, made before this resume began, run now too.
+  for (const sibling of await openSuffixSiblingDecisions(input)) {
+    const settled = await settleOpenSuffixTarget(
+      { ...input, trigger: { type: "user.approvalDecision", payload: sibling.payload } },
+      sibling.row,
+    );
     if (settled === "cancelled") return { action: "cancelled" };
   }
   const remaining = (
