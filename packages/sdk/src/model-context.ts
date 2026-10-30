@@ -34,7 +34,8 @@ export type AgentPromptModuleId =
   | "skills"
   | "secrets"
   | "admin"
-  | "attachments";
+  | "attachments"
+  | "unattended";
 
 export type ModelContextInstructionModule = {
   id: AgentPromptModuleId;

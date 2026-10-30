@@ -130,6 +130,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       provider: deps.turnExecutionPolicy.providerId,
       backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
       publish: deps.eventing.publish,
+      publishInBackground: deps.eventing.publishInBackground,
     },
     (measure) => prepareRunCredentialsObserved(deps, measure),
   );

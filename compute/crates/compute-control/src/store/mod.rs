@@ -12,13 +12,16 @@
 //! the same rules ([`admits`] and [`rule`]).
 
 mod memory;
+mod pointers;
 mod postgres;
 mod templates;
 
 use std::collections::BTreeMap;
 use std::future::Future;
 
-use compute_fleet::{Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Verdict};
+use compute_fleet::{
+    Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Stamp, Verdict,
+};
 use compute_protocol::fleet::Verdict as Wire;
 use compute_protocol::fleet::{Boot, Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId, SandboxConfig};
@@ -27,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::e2b::lifecycle::Record;
 
 pub use memory::MemoryStore;
+pub use pointers::{Found, Import, Imported, PointerRow};
 pub use postgres::{PostgresLead, PostgresStore};
 pub use templates::{Collector, Inserted, TEMPLATE_PREFIX, TemplateRow, valid_template_name};
 
@@ -208,6 +212,9 @@ pub enum Admission {
     },
     /// Its previous registration may still be running VMs.
     StillLive,
+    /// It keeps its pointers in the object store itself, and the service
+    /// holds the fleet's (ADR 25): what it wrote would never be seen.
+    Outdated,
 }
 
 /// What a registration attempt meets in the host's row.
@@ -278,14 +285,18 @@ pub trait Store: Send + Sync + 'static {
 
     /// Registers a host, in one transaction: answers another copy of the
     /// attempt it last answered with the same answer, refuses while the
-    /// last registration is live, and otherwise gives a new host epoch,
+    /// last registration is live, refuses a host that keeps its pointers in
+    /// the object store once the store holds the fleet's
+    /// ([`Admission::Outdated`]), and otherwise gives a new host epoch,
     /// rules on every sandbox listed (applying reclaims) and stores the
     /// answer.
     fn register(&self, register: &Register) -> impl Future<Output = Result<Admission>> + Send;
 
     /// Accepts a renewal while it renews the host's current registration
     /// and the host is not given up on, and records its capacity. Only a
-    /// host named one of `names` may renew.
+    /// host named one of `names` may renew, and, once the store holds the
+    /// fleet's pointers, only with a capacity that says it keeps its
+    /// pointers in the service, if it gives one.
     fn renew(&self, renew: &Renew, names: &[String]) -> impl Future<Output = Result<bool>> + Send;
 
     /// Records a host's capacity, under the same conditions as a renewal,
@@ -544,6 +555,59 @@ pub trait Store: Send + Sync + 'static {
     /// its claim on it.
     fn collected(&self, image: ImageId, collector: &str)
     -> impl Future<Output = Result<()>> + Send;
+
+    /// Whether a host holds the registration of host epoch `epoch` (no two
+    /// registrations share one), is not given up on and is named one of
+    /// `names`: a host whose pointer requests the service answers.
+    fn registered(&self, epoch: u64, names: &[String])
+    -> impl Future<Output = Result<bool>> + Send;
+
+    /// Pointer `name`, or `None` when there is none.
+    fn pointer(&self, name: &str) -> impl Future<Output = Result<Option<PointerRow>>> + Send;
+
+    /// Keeps `pointer` under `owner` as `name` only if it is still version
+    /// `on` (with `None`, only if there is none): the version it is kept
+    /// as, or `None` when it changed or appeared meanwhile.
+    fn write_pointer(
+        &self,
+        name: &str,
+        owner: Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> impl Future<Output = Result<Option<i64>>> + Send;
+
+    /// The name of every pointer kept.
+    fn pointer_names(&self) -> impl Future<Output = Result<Vec<String>>> + Send;
+
+    /// When the fleet's pointers were moved into the store, if they were.
+    fn pointers_imported(&self) -> impl Future<Output = Result<Option<Imported>>> + Send;
+
+    /// Keeps each of `found`, pointers the object store still holds from
+    /// before the import, that the store has none of: answers how many it
+    /// kept. A pointer the store keeps always wins, as in the import.
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send;
+
+    /// The fleet's clock: the time, in milliseconds since 1970, as the
+    /// store reads it (its database's clock), which every host names the
+    /// day of what it stores by and every sweep starts by.
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send;
+
+    /// Moves `found`, the pointers read from the object store `from`, into
+    /// the store and records them imported at `at_ms`, in one transaction,
+    /// a pointer already kept winning over one found: only while no live
+    /// or draining host keeps its pointers in the object store itself, and
+    /// ordered with every registration and renewal of such a host, so none
+    /// writes there after. Nor while such a host changed after `seen`, a
+    /// [`HostRow::changed`] read before `found` was: one that registered,
+    /// renewed or was given up on since may have written a pointer `found`
+    /// lacks. Answers the earlier import if there was one.
+    fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> impl Future<Output = Result<Import>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.

@@ -304,6 +304,7 @@ import {
   sessionPolicyPickerIds,
 } from "../lib/session-tools";
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
+import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -320,6 +321,7 @@ import { isPersonalMachine, moveChatToMachine } from "../lib/move-chat-to-machin
 import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
+  McpElicitationAnswer,
   LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
@@ -1095,14 +1097,16 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // The account whose card in this chat opened the reconnect: once it is done,
+  // the agent continues the request that stopped, as after a first setup.
+  const reconnectCardConnection = useRef<string | null>(null);
   // Workspace GitHub App setup from the follow-up repository menu uses this
   // route-level Connect dialog: the menu closes when GitHub's authorization
   // popup takes focus, which would unmount a dialog hosted inside it.
-  const connectGitHubApp = useCallback(
-    () =>
-      setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href())),
-    [page, reconnectTransport, workspaceId],
-  );
+  const connectGitHubApp = useCallback(() => {
+    reconnectCardConnection.current = null;
+    setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
+  }, [page, reconnectTransport, workspaceId]);
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -1121,11 +1125,20 @@ export function SessionRoute({
           item.connectionId,
         );
         if (account) {
+          reconnectCardConnection.current = item.connectionId;
           setReconnectRequest({
             scope: { workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
             reconnectAccountId: account.id,
+            // A tool needed more access than the account was connected with:
+            // the reconnect asks the provider for exactly that (incremental consent).
+            // Other providers keep their fixed permission set.
+            ...(item.reason === "insufficient_scope" &&
+            item.scopes.length > 0 &&
+            connectProviderAcceptsRequestedScopes(account.providerId)
+              ? { requestedScopes: [...item.scopes] }
+              : {}),
             displayName: account.label,
             returnUrl: page.href(),
             idempotencyKey: crypto.randomUUID(),
@@ -1487,7 +1500,7 @@ export function SessionRoute({
             params: { workspaceId },
           }))
       }
-      onApprove={(approvalId) => approve(approvalId, "approve")}
+      onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       onConnectGitHubApp={connectGitHubApp}
@@ -1521,6 +1534,20 @@ export function SessionRoute({
                 });
                 return;
               }
+              // Same continuation as after a first setup from a card: the
+              // server checks the account now has what its card asked for,
+              // wakes the agent at most once per card, and not at all once
+              // the person has written since. Never fails the finished setup.
+              const connectionId = reconnectCardConnection.current;
+              reconnectCardConnection.current = null;
+              if (connectionId)
+                void Promise.resolve()
+                  .then(() =>
+                    context.client.continueAfterCapabilitySetup(workspaceId, sessionId, {
+                      connectionId,
+                    }),
+                  )
+                  .catch(() => undefined);
               toast.success("Connection updated", {
                 description: "New tool calls can use the updated connection.",
               });
@@ -1566,11 +1593,16 @@ export function SessionRoute({
     <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
   );
 
-  async function approve(approvalId: string, decision: "approve" | "reject") {
+  async function approve(
+    approvalId: string,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) {
     try {
       await context.client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId,
         decision,
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
@@ -2100,7 +2132,7 @@ function SessionChatPane(props: {
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
-  onApprove: (approvalId: string) => Promise<void>;
+  onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
@@ -2401,7 +2433,7 @@ function SessionChatPane(props: {
     }
   }, [props.session.status]);
   const decideApproval = useCallback(
-    async (approvalId: string, decision: "approve" | "reject") => {
+    async (approvalId: string, decision: "approve" | "reject", answer?: McpElicitationAnswer) => {
       if (approvalPending[approvalId] || approvalSettled[approvalId]) {
         return;
       }
@@ -2409,7 +2441,9 @@ function SessionChatPane(props: {
       // A failure propagates so the approval surface releases its fence and
       // the buttons stay live for a retry.
       try {
-        await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
+        await (decision === "approve"
+          ? props.onApprove(approvalId, answer)
+          : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
           [approvalId]: decision,
@@ -2929,7 +2963,7 @@ function SessionChatPane(props: {
       props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
     personalMachineIntent: personalMachineUseIntent(props.session.tenancy),
     extras: {
-      ...(composer.policy ?? {}),
+      ...(composer.sendPolicy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
         ? {
             controlEtag: (props.queue.effectiveControl ?? props.session.effectiveControl)!
@@ -3975,7 +4009,9 @@ function SessionChatPane(props: {
                                     onSelectedApprovalChange={setSelectedApprovalId}
                                     loadReview={loadToolReview}
                                     onViewDetails={viewToolReviewDetails}
-                                    onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                    onApprove={(approval, answer) =>
+                                      decideApproval(approval.id, "approve", answer)
+                                    }
                                     onReject={(approval) => decideApproval(approval.id, "reject")}
                                   />
                                 )}

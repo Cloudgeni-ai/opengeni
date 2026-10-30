@@ -24,7 +24,14 @@ import type {
   SteerMessageResult,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
-import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import {
+  fakeClient,
+  fakeGoal,
+  fakeTurn,
+  savedComposerPolicy,
+  SESSION_ID,
+  WORKSPACE_ID,
+} from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
@@ -2539,6 +2546,7 @@ describe("useComposer queue-vs-steer", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: request.expectedRevision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -3850,9 +3858,10 @@ describe("useComposer durable draft and control binding", () => {
           text: request.text,
           resources: request.resources,
           annotations: request.annotations ?? [],
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
-          latencyMode: request.latencyMode,
+          ...savedComposerPolicy(
+            { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+            request,
+          ),
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -3890,7 +3899,7 @@ describe("useComposer durable draft and control binding", () => {
 
   test("typing before first hydrate still autosaves against the fetched OCC base", async () => {
     let resolveDraft!: (draft: ComposerDraft) => void;
-    const saved: Array<{ text: string; model: string; expectedRevision: number }> = [];
+    const saved: Array<{ text: string; model: string | undefined; expectedRevision: number }> = [];
     const client = fakeClient({
       getComposerDraft: async () =>
         await new Promise<ComposerDraft>((resolve) => {
@@ -3907,9 +3916,10 @@ describe("useComposer durable draft and control binding", () => {
           text: request.text,
           resources: request.resources,
           annotations: request.annotations ?? [],
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
-          latencyMode: request.latencyMode,
+          ...savedComposerPolicy(
+            { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+            request,
+          ),
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -4162,6 +4172,7 @@ describe("useComposer durable draft and control binding", () => {
         return {
           ...initial,
           ...request,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -4221,6 +4232,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: serverDraft.revision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -4361,6 +4373,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: serverDraft.revision + 1,
           resources: canonicalizeResources(request.resources),
           updatedAt: new Date().toISOString(),
@@ -4454,8 +4467,7 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         }),
         sendMessage: async (_ws, _session, input) => {
@@ -4580,6 +4592,7 @@ describe("useComposer durable draft and control binding", () => {
         serverDraft = {
           ...serverDraft,
           ...request,
+          ...savedComposerPolicy(serverDraft, request),
           revision: request.expectedRevision + 1,
           updatedAt: new Date().toISOString(),
         };
@@ -4670,8 +4683,7 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          model: request.model,
-          reasoningEffort: request.reasoningEffort,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },
@@ -4841,6 +4853,7 @@ describe("useComposer durable draft and control binding", () => {
           serverDraft = {
             ...serverDraft,
             ...request,
+            ...savedComposerPolicy(serverDraft, request),
             revision: request.expectedRevision + 1,
             updatedAt: new Date().toISOString(),
           };
@@ -5961,6 +5974,7 @@ describe("useComposer file-only send", () => {
         return {
           ...initial,
           ...request,
+          ...savedComposerPolicy(initial, request),
           revision: request.expectedRevision + 1,
         };
       },

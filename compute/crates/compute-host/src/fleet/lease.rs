@@ -399,6 +399,8 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         awake: status.capacity.as_ref().map_or(0, |held| held.awake),
         sandboxes: u32::try_from(status.sandboxes.len()).unwrap_or(u32::MAX),
         guest: renewer.guest.clone(),
+        // A host of this release keeps its pointers in the service.
+        pointers_in_service: true,
     }
 }
 

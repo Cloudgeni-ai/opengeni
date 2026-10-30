@@ -49,6 +49,18 @@ take `agentConfig` creation settings. After a reusable chat exists, change its
 execution settings in that chat. The schedule editor and MCP summary identify
 those settings as inherited rather than displaying stale creation defaults.
 
+Those creation settings also take the chat settings a session create takes:
+`mcpServers` (session MCP servers by id and URL, without headers),
+`skills`, `memoryScope` and `agentAccess`. A generated chat gets them, and
+the run's dispatch fence checks that its skills and servers match the
+accepted snapshot. `memoryScope` and `agentAccess` only narrow: the chat gets
+the narrower of the setting and the creator's own policy. An existing-chat
+schedule rejects them. The agent schedule tools do not offer these fields.
+
+With `overlapPolicy: "skip"`, a `new_session_per_run` occurrence is skipped
+(`scheduled_session_not_idle`) while the chat of the task's previous run is
+still working, so a slow run is never doubled up.
+
 ## Editing messages and destinations
 
 `scheduled_tasks_update`, HTTP PATCH and the SDK accept `prompt` for a lossless
@@ -123,6 +135,14 @@ are ownerless: the key stays the audited creator (`createdBy` with
 `kind: "service"`), runs use service authority with workspace accounts only,
 and anyone holding `scheduled_tasks:manage` (including the key) may change or
 run them.
+
+A creator may lock a schedule with `creatorLocked: true` when creating it.
+Only the same creator subject can then change, run or delete it;
+`scheduled_tasks:manage` alone is not enough, and agents always get 403. A
+workspace admin can still pause it. An agent cannot create a locked schedule
+(422). Products use it for schedules
+they manage on a workspace's behalf, so the workspace's own agents cannot edit
+them.
 
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in
@@ -401,6 +421,18 @@ A proactive channel (email or a Slack message from the bot) would need its own
 durable delivery outbox and is not part of this change.
 
 ## Runs waiting on a person
+
+A chat that a scheduled task or event trigger starts is unattended by default
+(see [`http-api.md`](http-api.md)): the agent is told nobody answers during the
+run, it gets no tool that waits for a person, and a call that needs approval
+is refused at once instead of waiting, so such a run does not wait on a person
+at all. The rest of this section applies to runs that are attended: tasks that
+set `agentConfig.unattended: false`, tasks that set
+`agentConfig.approvalTimeoutSeconds` without `unattended`, runs posted into an
+existing chat, chats whose **Work without me** switch is off, and turns after a
+person wrote into a chat that was unattended only by default (those turns keep
+the instructions and tools the chat started with; only their approvals and
+questions now wait for a person).
 
 A dispatched run whose own turn stops for a tool approval or a structured
 question stays `dispatched` (its lifecycle settles only when the turn
