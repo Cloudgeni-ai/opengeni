@@ -122,7 +122,9 @@ describe("workspace subscription administration", () => {
         (select count(*)::int from pg_policies
           where coalesce(qual, '') || coalesce(with_check, '')
             like '%workspace_membership_administers(%') as policies`;
-    expect(rewritten).toEqual({ routines: 6, policies: 4 });
+    // The fifth policy is workspace_activity_read (1105): workspace-wide usage
+    // facts reach the workspace's administrators.
+    expect(rewritten).toEqual({ routines: 6, policies: 5 });
   });
 
   test("the administrator predicate is executable by the application, not by every role", async () => {
