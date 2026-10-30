@@ -3,12 +3,15 @@ import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
+import { sql } from "drizzle-orm";
 import {
+  applyByokPlatformFeeDebit,
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   completeSelfServiceOrganizationSetup,
   createDb,
   ensureManagedAccessForUser,
+  expirePlanCreditPeriod,
   getBillingBalance,
   getByokFeeSpendableBalance,
   grantPlanCreditPeriod,
@@ -85,18 +88,22 @@ const credit = (accountId: string, type: string, amountMicros: number) =>
     amountMicros,
     idempotencyKey: crypto.randomUUID(),
   });
-const fee = (accountId: string, amountMicros: number, origin: "app" | "api", key?: string) =>
-  applyCreditDebitAfterUse(client!.db, {
+const fee = (
+  accountId: string,
+  amountMicros: number,
+  origin: "app" | "api",
+  key?: string,
+  db: DbClient["db"] = client!.db,
+) =>
+  applyByokPlatformFeeDebit(db, {
     accountId,
-    type: "byok_platform_fee",
     amountMicros,
     sourceType: "model_response",
     sourceId: key ?? crypto.randomUUID(),
     idempotencyKey: key ? `credit:byok_platform_fee:${key}` : crypto.randomUUID(),
     usageOrigin: origin,
-    byokPlatformFee: true,
   });
-// Fee reads also walk the ledger for paid credits.
+// Fee reads also report paid credits.
 const balanceOf = (accountId: string) =>
   getBillingBalance(client!.db, accountId, undefined, undefined, false, true);
 const usage = (accountId: string, amountMicros: number, origin: "app" | "api") =>
@@ -231,20 +238,19 @@ test("parallel fees past paid credit become debt the next top-up repays, never p
   expect(repaid.paidCreditsMicros).toBe(5 * M + 1);
 }, 180_000);
 
-test("an own-key fee must be a general byok_platform_fee debit", async () => {
+test("an own-key fee settles only through applyByokPlatformFeeDebit", async () => {
   if (!client || !shared) return;
   const accountId = await account("free");
   await expect(
     applyCreditDebitAfterUse(client.db, {
       accountId,
-      type: "model_usage_debit",
+      type: "byok_platform_fee",
       amountMicros: M,
       sourceType: "model_response",
       sourceId: crypto.randomUUID(),
       idempotencyKey: crypto.randomUUID(),
-      byokPlatformFee: true,
     }),
-  ).rejects.toThrow("byok_platform_fee");
+  ).rejects.toThrow("applyByokPlatformFeeDebit");
 }, 180_000);
 
 test("spent paid credit stays spent: a later promotional grant never pays the fee", async () => {
@@ -280,7 +286,7 @@ test("ordinary spending draws promotional credit before paid credit", async () =
   expect(balance.paidCreditsMicros).toBe(8 * M);
 }, 180_000);
 
-test("fee debt a paid plan absorbs when its period opens is repaid once", async () => {
+test("fee debt is never repaid by plan credit, only by the next top-up", async () => {
   if (!client || !shared) return;
   const userId = crypto.randomUUID();
   const accountId = (await ensureManagedAccessForUser(client.db, {
@@ -290,7 +296,7 @@ test("fee debt a paid plan absorbs when its period opens is repaid once", async 
   }))!.defaultAccountId!;
   await fee(accountId, 2 * M, "app");
   expect((await balanceOf(accountId)).byokFeeDebtMicros).toBe(2 * M);
-  // Subscribing to Pro: the new period's credit opens net of the debt.
+  // Subscribing to Pro: the new period opens in full; the fee debt waits for paid-for credit.
   const periodStart = new Date(Date.now() - 500);
   const periodEnd = new Date(Date.now() + 3_600_000);
   const stripeSubscriptionId = `sub_${crypto.randomUUID()}`;
@@ -312,15 +318,293 @@ test("fee debt a paid plan absorbs when its period opens is repaid once", async 
   const [period] = await shared.admin<{ openingDebt: string; granted: string }[]>`
     select opening_debt_micros::text "openingDebt", granted_micros::text granted
     from plan_credit_periods where account_id = ${accountId}::uuid and plan_key = 'pro'`;
-  expect(Number(period!.openingDebt)).toBe(2 * M);
+  expect(Number(period!.openingDebt)).toBe(0);
+  const granted = Number(period!.granted);
   const balance = await balanceOf(accountId);
-  expect(balance.byokFeeDebtMicros).toBeUndefined();
-  expect(balance.creditsMicros).toBe(0);
-  expect(balance.plan!.creditRemainingMicros).toBe(Number(period!.granted) - 2 * M);
+  expect(balance.byokFeeDebtMicros).toBe(2 * M);
+  expect(balance.creditsMicros).toBe(-2 * M);
+  expect(balance.plan!.creditRemainingMicros).toBe(granted);
   expect(spendableCreditMicros(balance, undefined, "api")).toBe(0);
-  expect(spendableCreditMicros(balance, undefined, "app")).toBe(Number(period!.granted) - 2 * M);
-  // A later top-up is all paid credit; nothing is repaid twice.
+  expect(spendableCreditMicros(balance, undefined, "app")).toBe(granted);
+  // The next top-up repays the fee debt first, once.
   await credit(accountId, "credit_topup", 10 * M);
-  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(10 * M);
+  const repaid = await balanceOf(accountId);
+  expect(repaid.byokFeeDebtMicros).toBeUndefined();
+  expect(repaid.paidCreditsMicros).toBe(8 * M);
+  expect(await spendable(accountId, "api")).toBe(8 * M);
+  await credit(accountId, "credit_topup", 1 * M);
+  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(9 * M);
+}, 180_000);
+
+/** The account's open plan period. */
+async function openPeriod(accountId: string) {
+  const [row] = await shared!.admin<{ id: string; openingDebt: string; granted: string }[]>`
+    select id, opening_debt_micros::text "openingDebt", granted_micros::text granted
+    from plan_credit_periods where account_id = ${accountId}::uuid and expired_at is null`;
+  return { id: row!.id, openingDebt: Number(row!.openingDebt), granted: Number(row!.granted) };
+}
+/** Expire the open Pro period and open the next one. */
+async function renew(accountId: string) {
+  await expirePlanCreditPeriod(client!.db, {
+    accountId,
+    periodId: (await openPeriod(accountId)).id,
+    force: true,
+  });
+  const periodStart = new Date(Date.now() - 500);
+  const periodEnd = new Date(Date.now() + 3_600_000);
+  const stripeSubscriptionId = `sub_${crypto.randomUUID()}`;
+  await upsertOrganizationPlan(client!.db, {
+    accountId,
+    planKey: "pro",
+    status: "active",
+    currentPeriodStart: periodStart,
+    currentPeriodEnd: periodEnd,
+    stripeSubscriptionId,
+  });
+  await grantPlanCreditPeriod(client!.db, {
+    accountId,
+    planKey: "pro",
+    periodStart,
+    periodEnd,
+    stripeSubscriptionId,
+  });
+  return await openPeriod(accountId);
+}
+
+test("app and database agree on debt after an API own-key fee: renewal never re-deducts it", async () => {
+  if (!client || !shared) return;
+  // Reviewer's blocker probe: $5 top-up spent on an API own-key fee, then
+  // app use $2 past the plan.
+  const accountId = await account("pro");
+  const plan = (await openPeriod(accountId)).granted;
+  await credit(accountId, "credit_topup", 5 * M);
+  expect((await fee(accountId, 5 * M, "api")).creditPaidMicros).toBe(5 * M);
+  await usage(accountId, plan + 2 * M, "app");
+  const owing = await balanceOf(accountId);
+  expect(owing.creditsMicros).toBe(-2 * M);
+  for (let renewal = 0; renewal < 2; renewal += 1) {
+    const next = await renew(accountId);
+    // The database: the $2 is credit debt, not netted from the new allowance.
+    expect(next.openingDebt).toBe(0);
+    const balance = await balanceOf(accountId);
+    expect(balance.plan!.creditRemainingMicros).toBe(plan);
+    expect(balance.creditsMicros).toBe(-2 * M);
+    // The app agrees: the whole allowance is spendable, every period.
+    expect(spendableCreditMicros(balance, undefined, "app")).toBe(plan);
+    expect(spendableCreditMicros(balance, undefined, "api")).toBe(0);
+  }
+  // The next top-up repays it.
+  await credit(accountId, "credit_topup", 3 * M);
+  expect((await balanceOf(accountId)).creditsMicros).toBe(1 * M);
+}, 180_000);
+
+test("app spending a paid plan covers never spends paid credit (probe A)", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("pro");
+  const plan = (await openPeriod(accountId)).granted;
+  await credit(accountId, "grant", 5 * M); // unscoped promotional credit
+  await credit(accountId, "credit_topup", 10 * M);
+  // $10 of app use beyond the plan: the promotional $5 goes first.
+  await usage(accountId, plan + 10 * M, "app");
+  const before = await balanceOf(accountId);
+  expect(before.plan!.creditRemainingMicros).toBe(0);
+  expect(before.creditsMicros).toBe(5 * M);
+  expect(before.paidCreditsMicros).toBe(5 * M);
+  expect(await spendable(accountId, "app")).toBe(5 * M);
+  const funding = await fee(accountId, 3 * M, "app");
+  expect(funding).toMatchObject({ planPaidMicros: 0, creditPaidMicros: 3 * M, unfundedMicros: 0 });
+  const after = await balanceOf(accountId);
+  expect(after.byokFeeDebtMicros).toBeUndefined();
+  expect(after.paidCreditsMicros).toBe(2 * M);
+  expect(spendableCreditMicros(after, undefined, "app")).toBe(2 * M);
+  expect(spendableCreditMicros(after, undefined, "api")).toBe(2 * M);
+}, 180_000);
+
+test("a plan that is not active never pays a fee, and the fee is charged once (probe B)", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("pro");
+  const period = await shared.admin<{ start: Date; end: Date; sub: string }[]>`
+    select period_start start, period_end "end", stripe_subscription_id sub
+    from plan_credit_periods where account_id = ${accountId}::uuid and expired_at is null`;
+  // Past due in the middle of a paid period.
+  await upsertOrganizationPlan(client.db, {
+    accountId,
+    planKey: "pro",
+    status: "past_due",
+    currentPeriodStart: new Date(period[0]!.start),
+    currentPeriodEnd: new Date(period[0]!.end),
+    stripeSubscriptionId: period[0]!.sub,
+  });
+  await credit(accountId, "credit_topup", 10 * M);
+  const before = await balanceOf(accountId);
+  expect(before.paidPlanCreditMicros).toBe(0);
+  const plan = before.plan!.creditRemainingMicros;
+  expect(plan).toBeGreaterThan(0);
+  expect(before.paidCreditsMicros).toBe(10 * M);
+  expect(await fee(accountId, 3 * M, "app")).toMatchObject({
+    planPaidMicros: 0,
+    creditPaidMicros: 3 * M,
+  });
+  const after = await balanceOf(accountId);
+  // Charged once: to paid credits, not also to the plan.
+  expect(after.plan!.creditRemainingMicros).toBe(plan);
+  expect(after.creditsMicros).toBe(7 * M);
+  expect(after.paidCreditsMicros).toBe(7 * M);
+}, 180_000);
+
+test("a refunded usage debit the plan covered leaves paid credit whole (probe D)", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("pro");
+  await credit(accountId, "credit_topup", 10 * M);
+  const sourceId = crypto.randomUUID();
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "video_generation_debit",
+    amountMicros: 4 * M,
+    sourceType: "video_generation_operation",
+    sourceId,
+    idempotencyKey: crypto.randomUUID(),
+    usageOrigin: "app",
+  });
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "video_generation_refund",
+    amountMicros: 4 * M,
+    sourceType: "video_generation_operation",
+    sourceId,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const balance = await balanceOf(accountId);
+  expect(balance.creditsMicros).toBe(10 * M);
+  expect(balance.paidCreditsMicros).toBe(10 * M);
+}, 180_000);
+
+test("a refunded usage debit that drew paid credit returns it as paid credit", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "grant", 2 * M); // unscoped promotional credit
+  await credit(accountId, "credit_topup", 10 * M);
+  const sourceId = crypto.randomUUID();
+  // $5 of API use: the promotional $2, then $3 of paid credit.
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "video_generation_debit",
+    amountMicros: 5 * M,
+    sourceType: "video_generation_operation",
+    sourceId,
+    idempotencyKey: crypto.randomUUID(),
+    usageOrigin: "api",
+  });
+  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(7 * M);
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "video_generation_refund",
+    amountMicros: 5 * M,
+    sourceType: "video_generation_operation",
+    sourceId,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  // Never more paid credit than was paid for.
+  const balance = await balanceOf(accountId);
+  expect(balance.creditsMicros).toBe(12 * M);
+  expect(balance.paidCreditsMicros).toBeLessThanOrEqual(10 * M);
+  expect(balance.paidCreditsMicros).toBeGreaterThanOrEqual(7 * M);
+}, 180_000);
+
+test("a coupon's discount on a top-up is promotional credit, never paid credit", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  // $20 of credit for $10: half of it was the coupon's discount.
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "credit_topup",
+    amountMicros: 20 * M,
+    idempotencyKey: crypto.randomUUID(),
+    metadata: { stripeAmountTotalCents: 1000, stripeDiscountCents: 1000 },
+  });
+  const start = await balanceOf(accountId);
+  expect(start.creditsMicros).toBe(20 * M);
+  expect(start.paidCreditsMicros).toBe(10 * M);
   expect(await spendable(accountId, "api")).toBe(10 * M);
+  // Ordinary spending draws the discount first.
+  await usage(accountId, 5 * M, "api");
+  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(10 * M);
+  await usage(accountId, 10 * M, "api");
+  expect((await balanceOf(accountId)).paidCreditsMicros).toBe(5 * M);
+}, 180_000);
+
+test("a top-up repays fee debt before API debt", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  expect((await fee(accountId, 3 * M, "api")).unfundedMicros).toBe(3 * M);
+  await usage(accountId, 2 * M, "api");
+  const owing = await balanceOf(accountId);
+  expect(owing.byokFeeDebtMicros).toBe(3 * M);
+  expect(owing.apiDebtMicros).toBe(2 * M);
+  await credit(accountId, "credit_topup", 4 * M);
+  const after = await balanceOf(accountId);
+  expect(after.byokFeeDebtMicros).toBeUndefined();
+  expect(after.apiDebtMicros).toBe(1 * M);
+  expect(after.paidCreditsMicros).toBe(0);
+}, 180_000);
+
+test("repaid fee debt stays repaid: a later clawback is never fee debt", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "credit_topup", 10 * M);
+  expect((await fee(accountId, 12 * M, "api")).unfundedMicros).toBe(2 * M);
+  await credit(accountId, "credit_topup", 5 * M);
+  expect((await balanceOf(accountId)).byokFeeDebtMicros).toBeUndefined();
+  // The second top-up is refunded through Stripe after it repaid the debt.
+  await credit(accountId, "credit_refund", -5 * M);
+  await credit(accountId, "grant", 1 * M); // promotional credit
+  const after = await balanceOf(accountId);
+  expect(after.creditsMicros).toBe(-1 * M);
+  expect(after.byokFeeDebtMicros).toBeUndefined();
+  expect(after.paidCreditsMicros).toBe(0);
+}, 180_000);
+
+/**
+ * Ledger rows the work reads, from this transaction's statistics: rows
+ * sequential scans return plus index entries index scans read.
+ */
+async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>) {
+  return await client!.db.transaction(async (tx) => {
+    const db = tx as unknown as DbClient["db"];
+    const count = async () => {
+      const [row] = (await tx.execute(sql`
+        select sum(pg_stat_get_xact_tuples_returned(c.oid))::text n from pg_class c
+        where c.oid = 'credit_ledger_entries'::regclass or c.oid in (
+          select indexrelid from pg_index where indrelid = 'credit_ledger_entries'::regclass)`)) as unknown as {
+        n: string;
+      }[];
+      return Number(row!.n);
+    };
+    const before = await count();
+    await work(db);
+    return (await count()) - before;
+  });
+}
+
+test("fee reads and settlement read the ledger once, even after an unfunded fee", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "credit_topup", 10 * M);
+  // An unfunded fee, repaid by the next top-up.
+  expect((await fee(accountId, 12 * M, "api")).unfundedMicros).toBe(2 * M);
+  await credit(accountId, "credit_topup", 1_000 * M);
+  const rows = 3_000;
+  await shared.admin`
+    insert into credit_ledger_entries (account_id, type, amount_micros, source_type, source_id,
+      usage_origin, idempotency_key)
+    select ${accountId}::uuid, 'model_usage_debit', -1, 'model_response', gen_random_uuid()::text,
+      'api', gen_random_uuid()::text
+    from generate_series(1, ${rows})`;
+  const plain = await ledgerRowsRead((db) => getBillingBalance(db, accountId));
+  const feeRead = await ledgerRowsRead((db) => getByokFeeSpendableBalance(db, accountId, "api"));
+  const settle = await ledgerRowsRead((db) => fee(accountId, M, "api", undefined, db));
+  expect(plain).toBeGreaterThanOrEqual(rows);
+  // No second pass over the ledger for paid credit, and no trailing balance read.
+  expect(feeRead).toBeLessThan(plain + rows / 2);
+  expect(settle).toBeLessThan(plain + rows / 2);
 }, 180_000);

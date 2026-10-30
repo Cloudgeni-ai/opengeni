@@ -471,11 +471,7 @@ export async function ensureRunAllowed(
         billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
       );
     }
-  } else if (
-    !chargesOpenGeniCredits &&
-    byok &&
-    byokPlatformFeeActive(settings, accountId)
-  ) {
+  } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings, accountId)) {
     // The person's own key pays a platform fee, payable only from paid credit.
     const balance = await getByokFeeSpendableBalance(db, accountId, billingOrigin);
     if (balance.balanceMicros <= 0) {
