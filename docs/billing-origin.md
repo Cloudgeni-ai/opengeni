@@ -361,7 +361,7 @@ write handled by an old pod leaves the source unmarked, and an old pod's
 intake doesn't mark the automations a delivery fires. Such a source stays app
 until its next API secret or format write on a new pod.
 
-Migration 1108 is rolling: same-signature replacements of
+Migration 1129 is rolling: same-signature replacements of
 `opengeni_private.plan_period_usage` (an own-key fee counts only its
 `planPaidMicros`) and `opengeni_private.plan_app_general_balance` (the debt
 cap adds own-key fee debt still owed). The previous release never writes
@@ -380,7 +380,7 @@ Two accepted residuals if the database clock steps back:
   (after the latest receipt), so `plan_period_usage` can undercount for the
   length of the skew, milliseconds in practice.
 
-Migration 1111 builds `credit_ledger_receipt_rows_idx` concurrently (a
+Migration 1130 builds `credit_ledger_receipt_rows_idx` concurrently (a
 non-unique partial index, so it may land after traffic returns). Reads are
 correct without it; until it exists the read finds the latest receipt through
 the account's `(account_id, created_at)` index, walking back over the spending
