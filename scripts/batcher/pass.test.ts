@@ -55,6 +55,10 @@ class FakeGitHub implements GitHub {
   updateRefusal: "refused" | "moved" | null = null;
   /** Thrown by readFiles, to stand for GitHub or the planner failing. */
   readFailure: Error | null = null;
+  /** Thrown by comment, to stand for GitHub failing after a branch update. */
+  commentFailure: Error | null = null;
+  /** Exact branch names looked up with branchHead. */
+  headLookups: string[] = [];
 
   constructor() {
     this.root = this.store([], [], "root");
@@ -179,6 +183,12 @@ class FakeGitHub implements GitHub {
       .map(([name, sha]) => ({ name, sha }));
   }
 
+  async branchHead(name: string) {
+    this.headLookups.push(name);
+    const pull = [...this.pulls.values()].find((p) => this.headRef(p) === name);
+    return pull?.head ?? this.refs.get(name) ?? null;
+  }
+
   async commit(sha: string) {
     const commit = this.commits.get(sha);
     if (!commit) throw new Error(`no commit ${sha}`);
@@ -275,6 +285,7 @@ class FakeGitHub implements GitHub {
   }
 
   async comment(number: number, body: string) {
+    if (this.commentFailure) throw this.commentFailure;
     this.comments.push({ number, body });
   }
 
@@ -516,6 +527,8 @@ describe("a batcher pass", () => {
       gh.updateRefusal = refusal;
       await run(gh, options());
       expect(gh.branchUpdates).toEqual([]);
+      // The branch is looked up by its exact name, never as a prefix.
+      expect(gh.headLookups).toEqual(["branch-2"]);
       expect(gh.pulls.get(2)!.labels.includes(QUEUE_LABEL)).toBe(refusal === "moved");
       if (refusal === "refused")
         expect(gh.comments[0]!.body).toContain("GitHub refused to update its branch.");
@@ -524,9 +537,27 @@ describe("a batcher pass", () => {
     }
   });
 
+  test("a refused branch whose name looks like a path is looked up as that one name", async () => {
+    const gh = new FakeGitHub();
+    await mainTakes0007(gh);
+    const headRef = "x/%2e%2e/%2e%2e/user";
+    addsMigration0007(gh, 2, "b", { headRef });
+    gh.updateRefusal = "refused";
+    await run(gh, options());
+    expect(gh.headLookups).toEqual([headRef]);
+    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain("GitHub refused to update its branch.");
+  });
+
   test("an outage postpones a move, any other failure ejects that PR, and the queue goes on", async () => {
     for (const [failure, ejected] of [
       [new GitHubError(502, "graphql", "bad gateway"), false],
+      [new GitHubError(429, "graphql", "slow down"), false],
+      [new GitHubError(403, "graphql", "API rate limit exceeded for installation"), false],
+      [new TypeError("fetch failed"), false],
+      [new DOMException("The operation timed out.", "TimeoutError"), false],
+      [new GitHubError(403, "graphql", "Resource not accessible by integration"), true],
+      [new Error("GraphQL: Could not resolve to a Repository"), true],
       [new Error("10000 does not fit a four-digit migration number"), true],
     ] as const) {
       const gh = new FakeGitHub();
@@ -537,10 +568,22 @@ describe("a batcher pass", () => {
       await run(gh, options());
       expect(gh.branchUpdates).toEqual([]);
       expect(gh.pulls.get(2)!.labels.includes(QUEUE_LABEL)).toBe(!ejected);
-      if (ejected) expect(gh.comments[0]!.body).toContain("moving it failed (10000 does not fit");
+      if (ejected)
+        expect(gh.comments[0]!.body).toContain(`moving it failed (${failure.message.slice(0, 20)}`);
       else expect(gh.comments).toEqual([]);
       expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([5]);
     }
+  });
+
+  test("a failure after the branch update never ejects the moved PR", async () => {
+    const gh = new FakeGitHub();
+    await mainTakes0007(gh);
+    addsMigration0007(gh, 2, "b");
+    gh.commentFailure = new Error("comments are down");
+    await run(gh, options());
+    expect(gh.branchUpdates).toHaveLength(1);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments).toEqual([]);
   });
 
   test("never moves a migration on a production or release branch", async () => {

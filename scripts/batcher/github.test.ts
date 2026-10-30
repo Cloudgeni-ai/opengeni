@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { gitFileMode, RestGitHub } from "./github";
+import { gitFileMode, GitHubError, isTransientGitHubFailure, RestGitHub } from "./github";
 
 const SHA = "a".repeat(40);
 
@@ -88,5 +88,43 @@ describe("RestGitHub file and branch writes", () => {
         body: { sha: SHA, force: false },
       },
     ]);
+  });
+
+  test("branchHead reads exactly one branch, whose name never changes the request path", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      requests.push(String(url));
+      return String(url).endsWith("/gone")
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+        : new Response(JSON.stringify({ object: { sha: SHA } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const gh = new RestGitHub("owner/repo", "token", fetchImpl);
+    expect(await gh.branchHead("x/%2e%2e/%2e%2e/user")).toBe(SHA);
+    expect(await gh.branchHead("gone")).toBeNull();
+    expect(requests).toEqual([
+      "https://api.github.com/repos/owner/repo/git/ref/heads/x/%252e%252e/%252e%252e/user",
+      "https://api.github.com/repos/owner/repo/git/ref/heads/gone",
+    ]);
+    // The encoded name stays inside the repository's refs once the URL is parsed.
+    expect(new URL(requests[0]!).pathname).toBe(
+      "/repos/owner/repo/git/ref/heads/x/%252e%252e/%252e%252e/user",
+    );
+  });
+
+  test("only outages and the network count as transient", () => {
+    expect(isTransientGitHubFailure(new GitHubError(503, "p", ""))).toBe(true);
+    expect(isTransientGitHubFailure(new GitHubError(429, "p", ""))).toBe(true);
+    expect(isTransientGitHubFailure(new GitHubError(403, "p", "API rate limit exceeded"))).toBe(
+      true,
+    );
+    expect(isTransientGitHubFailure(new TypeError("fetch failed"))).toBe(true);
+    expect(isTransientGitHubFailure(new DOMException("timed out", "TimeoutError"))).toBe(true);
+    expect(isTransientGitHubFailure(new GitHubError(403, "p", "Resource not accessible"))).toBe(
+      false,
+    );
+    expect(isTransientGitHubFailure(new GitHubError(422, "p", "Reference update failed"))).toBe(
+      false,
+    );
+    expect(isTransientGitHubFailure(new Error("GraphQL: Something"))).toBe(false);
   });
 });

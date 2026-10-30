@@ -78,6 +78,8 @@ export interface GitHub {
   readFiles(ref: string, paths: string[]): Promise<Map<string, RepoFile>>;
   compareFiles(base: string, head: string): Promise<{ files: string[]; mergeBase: string } | null>;
   branches(prefix: string): Promise<{ name: string; sha: string }[]>;
+  /** The head of exactly this branch, or null when it no longer exists. */
+  branchHead(name: string): Promise<string | null>;
   commit(sha: string): Promise<CommitSummary>;
   runs(branch: string, sha: string): Promise<RunSummary[]>;
   createBranch(name: string, sha: string): Promise<void>;
@@ -107,6 +109,26 @@ const time = (value: unknown) => {
 export function gitFileMode(mode: number): string {
   return mode.toString(8);
 }
+
+/**
+ * A failure that says nothing about the request itself: GitHub down or
+ * throttling, or the network. Anything else would fail the same way again.
+ */
+export function isTransientGitHubFailure(error: unknown): boolean {
+  if (error instanceof GitHubError)
+    return (
+      error.status >= 500 ||
+      error.status === 429 ||
+      (error.status === 403 && /rate limit/i.test(error.body))
+    );
+  if (!(error instanceof Error)) return false;
+  // fetch rejects with a TypeError when the network fails, and the request
+  // signal's timeout rejects with a TimeoutError.
+  return error instanceof TypeError || error.name === "TimeoutError" || error.name === "AbortError";
+}
+
+/** A branch name as URL path segments, so no part of it can change the request path. */
+const branchPath = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 
 export class RestGitHub implements GitHub {
   private readonly api: string;
@@ -372,6 +394,17 @@ export class RestGitHub implements GitHub {
     return refs.map((r) => ({ name: r.ref.slice("refs/heads/".length), sha: r.object.sha }));
   }
 
+  async branchHead(name: string) {
+    const { status, data } = await this.request(
+      "GET",
+      `git/ref/heads/${branchPath(name)}`,
+      undefined,
+      [404],
+    );
+    if (status === 404) return null;
+    return (data as { object: { sha: string } }).object.sha;
+  }
+
   async commit(sha: string) {
     const data = await this.get<{
       sha: string;
@@ -451,8 +484,7 @@ export class RestGitHub implements GitHub {
   }
 
   async updateBranch(name: string, sha: string) {
-    const ref = name.split("/").map(encodeURIComponent).join("/");
-    await this.request("PATCH", `git/refs/heads/${ref}`, { sha, force: false });
+    await this.request("PATCH", `git/refs/heads/${branchPath(name)}`, { sha, force: false });
   }
 
   async mergePull(

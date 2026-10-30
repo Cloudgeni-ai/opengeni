@@ -1,4 +1,10 @@
-import { GitHubError, type CommitSummary, type GitHub, type PullFile } from "./github";
+import {
+  GitHubError,
+  isTransientGitHubFailure,
+  type CommitSummary,
+  type GitHub,
+  type PullFile,
+} from "./github";
 import { MIGRATIONS_DIR } from "../migration-ordinals";
 import { planMigrationMoves } from "./renumber";
 import {
@@ -270,8 +276,9 @@ const slotOf = (path: string) => numberedFiles([path])[0]?.slot ?? path;
  * references, as `scripts/renumber-migration.ts --next` would, all through
  * GitHub's API: the pass never runs PR code. The PR stays queued and is
  * batched once PR CI passes on its new head. Anything the move cannot settle
- * on its own ejects the PR with the manual command, as before; a GitHub
- * outage only postpones the move to the next pass.
+ * on its own ejects the PR with the manual command, as before; GitHub being
+ * down or throttling, or the network failing, only postpones the move to the
+ * next pass. Once the branch is updated, nothing after it ejects the PR.
  */
 async function moveMigrations(ctx: Context, number: number, paths: string[]) {
   const manual = (reason: string) =>
@@ -283,8 +290,10 @@ async function moveMigrations(ctx: Context, number: number, paths: string[]) {
   try {
     await tryMoveMigrations(ctx, number, paths, manual);
   } catch (error) {
-    if (error instanceof GitHubError && (error.status >= 500 || error.status === 429)) {
-      ctx.log(`Not moving #${number}'s migration this pass: GitHub answered ${error.status}`);
+    if (isTransientGitHubFailure(error)) {
+      const detail =
+        error instanceof GitHubError ? `GitHub answered ${error.status}` : String(error);
+      ctx.log(`Not moving #${number}'s migration this pass: ${detail}`);
       return;
     }
     const detail = error instanceof Error ? error.message : String(error);
@@ -341,8 +350,8 @@ async function tryMoveMigrations(
       await gh.updateBranch(pull.headRef, commit);
     } catch (error) {
       if (!(error instanceof GitHubError && error.status === 422)) throw error;
-      const head = (await gh.branches(pull.headRef)).find((b) => b.name === pull.headRef)?.sha;
-      if (head !== undefined && head !== pull.headSha) {
+      const head = await gh.branchHead(pull.headRef);
+      if (head !== null && head !== pull.headSha) {
         ctx.log(`Not moving #${number}'s migration: its branch moved meanwhile`);
         return;
       }
@@ -358,12 +367,20 @@ async function tryMoveMigrations(
       ...plan.moves.map((move) => slotOf(move.to)),
     ]);
     ctx.log(`Moved #${number}'s migration ${moved.join(", ")} as ${commit}`);
-    await gh.comment(
-      number,
-      `Main already uses the number of a migration this PR adds, so the merge batcher merged main into the branch and moved ${moved.join(", ")}, with its tests and references (${commit}). The PR stays queued and is batched once PR CI passes on the new head. Pull the branch before you push to it again.`,
-    );
+    // The branch is fixed; a failed note must not eject the PR as unmoved.
+    await gh
+      .comment(
+        number,
+        `Main already uses the number of a migration this PR adds, so the merge batcher merged main into the branch and moved ${moved.join(", ")}, with its tests and references (${commit}). The PR stays queued and is batched once PR CI passes on the new head. Pull the branch before you push to it again.`,
+      )
+      .catch((error: unknown) =>
+        ctx.log(`Could not tell #${number} about the move: ${String(error)}`),
+      );
   } finally {
-    await gh.deleteBranch(scratch);
+    // Leftover scratch branches are removed at the start of every pass.
+    await gh
+      .deleteBranch(scratch)
+      .catch((error: unknown) => ctx.log(`Could not delete ${scratch}: ${String(error)}`));
   }
 }
 

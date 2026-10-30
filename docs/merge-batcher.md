@@ -42,8 +42,10 @@ a comment says what moved, and it is batched once PR CI passes on the new head.
 If the move needs judgment (a Git conflict, a changed file that names the
 number without naming the migration, a changed text file it cannot read, a
 branch GitHub will not update, or any other failure), the PR leaves the queue
-with the `scripts/renumber-migration.ts` command instead; a GitHub outage only
-postpones the move to the next pass. Migrations on the `production` and
+with the `scripts/renumber-migration.ts` command instead. GitHub being down or
+throttling (5xx, 429, a rate-limit 403) or the network failing only postpones
+the move to the next pass, and once the branch is updated nothing after it
+takes the PR out of the queue. Migrations on the `production` and
 release branches are never moved. Two queued PRs that add the same number
 never share a batch. The numbered directories are listed in `NUMBERED_FILES`
 (`scripts/batcher/model.ts`).
