@@ -12367,6 +12367,8 @@ export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflig
  * They bound create/update requests and freshly accepted occurrence snapshots;
  * already-stored tasks are read back through the unbounded storage shape so a
  * legacy row can never become unreadable or undispatchable by a later cap.
+ * Inline `agentConfig.skills` are outside these byte caps: they are bounded by
+ * the Skill limits, exactly as on session create (see ScheduledTaskSkill).
  */
 export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
 export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 64 * 1024;
@@ -12403,6 +12405,19 @@ function scheduledTaskJsonUtf8Bytes(value: unknown): number {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
+}
+
+/**
+ * An agent config without its inline Skills, for the byte caps. A chat the
+ * task starts takes the same Skills a session create does, so they are bounded
+ * by the Skill limits rather than by the size of the rest of the config.
+ */
+function scheduledTaskAgentConfigWithoutSkills(agentConfig: unknown): unknown {
+  if (!agentConfig || typeof agentConfig !== "object" || Array.isArray(agentConfig)) {
+    return agentConfig;
+  }
+  const { skills: _skills, ...rest } = agentConfig as Record<string, unknown>;
+  return rest;
 }
 
 /**
@@ -12743,7 +12758,10 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ def
           "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
-    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
+    if (
+      scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
+      SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
+    ) {
       context.addIssue({
         code: "custom",
         message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
@@ -13226,7 +13244,16 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
     })
     .strict()
     .superRefine((value, context) => {
-      if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+      // The task's inline Skills are bounded by the Skill limits it was saved
+      // under, so a task that passed ingress can always be accepted.
+      const measured = {
+        ...value,
+        task: {
+          ...value.task,
+          agentConfig: scheduledTaskAgentConfigWithoutSkills(value.task.agentConfig),
+        },
+      };
+      if (scheduledTaskJsonUtf8Bytes(measured) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
         context.addIssue({
           code: "custom",
           message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
