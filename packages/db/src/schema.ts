@@ -4989,6 +4989,8 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .$type<"workspace_shared" | "user_private">()
     .notNull()
     .default("workspace_shared"),
+  // Off: only owners and admins connect new machines of their own (1148).
+  membersConnectOwnMachines: boolean("members_connect_own_machines").notNull().default(true),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
   personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),

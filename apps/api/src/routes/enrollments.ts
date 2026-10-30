@@ -63,6 +63,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   requireMachineAccessGrant,
   requireMachineScopeAuthority,
+  requireOwnMachineConnectAllowed,
 } from "../sandbox/machine-authority";
 import {
   approveDeviceEnrollment,
@@ -367,6 +368,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         : undefined;
     // No scope keeps the legacy workspace machine.
     requireMachineScopeAuthority(authorization, effectiveScope ?? "workspace", "connect");
+    // The organization may keep machines of one's own to its owners and admins.
+    await requireOwnMachineConnectAllowed(deps, authorization, effectiveScope ?? "workspace");
     const allowOrganization = effectiveScope === "organization";
     const approved = await approveDeviceEnrollment(
       { db, settings },
@@ -461,6 +464,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
           "only a person, or a credential acting as that person, can connect a machine for themselves; keys, services and agents acting as themselves can connect workspace machines",
       });
     }
+    await requireOwnMachineConnectAllowed(deps, authorization, personal ? "user" : "workspace");
     const minted = await mintEnrollToken(
       { db, settings },
       {

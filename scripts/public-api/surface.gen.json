@@ -20754,6 +20754,7 @@
         "$": "object",
         "$.activeEpoch": "integer!",
         "$.activeSandboxId": "string! null",
+        "$.canConnectOwnMachine": "boolean?",
         "$.machines": "array!",
         "$.machines[]": "ref(MachineView)",
         "$.sessionMachineAccess": "ref(SessionMachineAccess)? null"
@@ -22253,6 +22254,7 @@
         "$.limits.adminsSeePrivateSchedulesLocked": "boolean!",
         "$.limits.defaultVisibilityLocked": "boolean!",
         "$.limits.onlyMeAllowed": "boolean!",
+        "$.membersConnectOwnMachines": "boolean!",
         "$.organizationId": "string!",
         "$.personalWorkspaces": "boolean!",
         "$.updatedAt": "string! null"
@@ -29944,6 +29946,7 @@
         "$": "object",
         "$.adminsSeePrivateSchedules": "boolean?",
         "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.membersConnectOwnMachines": "boolean?",
         "$.personalWorkspaces": "boolean?"
       }
     },

@@ -16,6 +16,10 @@
 // acting as a user) carry their own permission ceiling, so they keep needing
 // enrollments:manage: a read-only delegation never becomes a machine write.
 // Keys, services and agents acting as themselves are refused as before.
+//
+// On top of that, an organization's owners and admins can turn off "Members
+// connect their own machines". Then only they connect new Only me machines;
+// see ownMachineConnectRefusal.
 
 import type { Permission, ResourceAuthorityScope } from "@opengeni/contracts";
 import {
@@ -25,6 +29,11 @@ import {
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
+import {
+  getOwnMachineConnectPolicy,
+  type Database,
+  type OwnMachineConnectPolicy,
+} from "@opengeni/db";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
@@ -148,4 +157,72 @@ export function requireMachineAudienceAuthority(authorization: AccessGrantAuthor
       message: MACHINE_AUDIENCE_REFUSAL,
     });
   }
+}
+
+const OWN_MACHINES_ADMINS_ONLY =
+  "Your organization lets only its owners and admins connect their own machines.";
+
+/** Why a member can't connect a machine of their own here. */
+export const OWN_MACHINE_REFUSALS = {
+  /** An Only me machine, from a shared workspace: a workspace machine is the way left. */
+  shared: `${OWN_MACHINES_ADMINS_ONLY} A workspace admin can connect a machine for the whole workspace.`,
+  /** Any machine in a Personal workspace, which is only ever its owner's. */
+  personal: OWN_MACHINES_ADMINS_ONLY,
+} as const;
+
+/**
+ * Why this caller may not connect a new machine of their own because the
+ * organization turned "Members connect their own machines" off, or null.
+ *
+ * A machine of one's own is an Only me machine anywhere, or any machine in a
+ * Personal workspace (its This workspace is still only its owner). The
+ * organization's owners and admins always can. Workspace permissions don't
+ * lift it: a Personal workspace's owner manages machines there, and an Only
+ * me machine follows its owner into every workspace of the organization.
+ * Shared workspace and organization machines keep their own rules, and
+ * changing or removing a machine already connected is never refused here.
+ */
+export function ownMachineConnectRefusal(
+  authorization: AccessGrantAuthorization,
+  scope: ResourceAuthorityScope,
+  policy: OwnMachineConnectPolicy,
+): string | null {
+  if (policy.membersConnectOwnMachines || scope === "organization") return null;
+  if (scope === "workspace" && !policy.personalWorkspace) return null;
+  const role = authorization.accountGrant?.role;
+  if (role === "owner" || role === "admin") return null;
+  return policy.personalWorkspace ? OWN_MACHINE_REFUSALS.personal : OWN_MACHINE_REFUSALS.shared;
+}
+
+/** Refuse with a clear 403 when the organization keeps own machines to its admins. */
+export async function requireOwnMachineConnectAllowed(
+  deps: { db: Database },
+  authorization: AccessGrantAuthorization,
+  scope: ResourceAuthorityScope,
+): Promise<void> {
+  if (scope === "organization") return;
+  const policy = await getOwnMachineConnectPolicy(deps.db, {
+    accountId: authorization.grant.accountId,
+    workspaceId: authorization.grant.workspaceId,
+  });
+  const refusal = ownMachineConnectRefusal(authorization, scope, policy);
+  if (refusal) throw new HTTPException(403, { message: refusal });
+}
+
+/**
+ * Whether the organization lets this caller connect a new machine of their
+ * own here: the connect dialog's hint, so a member isn't sent to set up a
+ * machine that would be refused. The connect routes still decide.
+ */
+export async function canConnectOwnMachine(
+  deps: { db: Database },
+  authorization: AccessGrantAuthorization,
+): Promise<boolean> {
+  const role = authorization.accountGrant?.role;
+  if (role === "owner" || role === "admin") return true;
+  const policy = await getOwnMachineConnectPolicy(deps.db, {
+    accountId: authorization.grant.accountId,
+    workspaceId: authorization.grant.workspaceId,
+  });
+  return ownMachineConnectRefusal(authorization, "user", policy) === null;
 }

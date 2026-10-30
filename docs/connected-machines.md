@@ -1364,6 +1364,26 @@ removal, command policy, screen control, macOS privacy panes and agent updates.
 `list_scoped_enrollments` returns an Only me machine only to its owner, so a
 teammate reaches only their own. Refusals are plain sentences.
 
+An organization's owners and admins can also turn off **Members connect their
+own machines** (Organization settings > Security & data > Machines;
+`membersConnectOwnMachines` on `/v1/organizations/:organizationId/privacy-settings`,
+column `organization_privacy_preferences.members_connect_own_machines`,
+migration 1148; on by default). Off, only the organization's owners and admins
+connect a new machine of their own: an Only me machine anywhere, or any machine
+in a Personal workspace, whose This workspace is still only its owner.
+Workspace permissions don't lift it, since a Personal workspace's owner manages
+machines there and an Only me machine follows its owner into every workspace.
+Approving a pairing code and minting a connect command check it before anything
+is created (`requireOwnMachineConnectAllowed`); declining a code never does.
+Shared-workspace and organization machines keep the rule above. It is
+acquisition policy only: machines already connected keep working and stay
+their owners' to change or remove, and a command minted before the change
+works until it expires (an hour). Connecting such a machine again is a new
+connection. `GET /v1/workspaces/:workspaceId/machines` reports
+`canConnectOwnMachine` for a person, so the connect dialog disables Only me
+(and This workspace in a Personal workspace), skips the desktop app's
+this-computer path, and mints nothing when nothing is left.
+
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
 release requires it, runs `opengeni-agent connect` for that deployment, and leaves

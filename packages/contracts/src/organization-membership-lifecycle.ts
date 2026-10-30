@@ -156,6 +156,13 @@ export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
 export const OrganizationPrivacySettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
     organizationId: primitives.uuid,
+    /**
+     * Whether members can connect machines of their own (Only me machines).
+     * Off: only owners and admins can connect new ones; machines already
+     * connected keep working. Workspace and organization machines keep their
+     * own rules.
+     */
+    membersConnectOwnMachines: z.boolean(),
     /** Who can see new chats and schedules unless the person picks otherwise. */
     defaultVisibility: z.enum(["private", "workspace"]),
     /** Whether people have their own Personal workspace to see and work in. */
@@ -178,6 +185,7 @@ export type OrganizationPrivacySettings = z.infer<typeof OrganizationPrivacySett
 export const UpdateOrganizationPrivacySettingsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      membersConnectOwnMachines: z.boolean().optional(),
       defaultVisibility: z.enum(["private", "workspace"]).optional(),
       adminsSeePrivateSchedules: primitives.optionalBoolean,
       personalWorkspaces: z.boolean().optional(),
@@ -185,6 +193,7 @@ export const UpdateOrganizationPrivacySettingsRequest = /* @__PURE__ */ defineSc
     .strict()
     .refine(
       (value) =>
+        value.membersConnectOwnMachines !== undefined ||
         value.defaultVisibility !== undefined ||
         value.adminsSeePrivateSchedules !== undefined ||
         value.personalWorkspaces !== undefined,

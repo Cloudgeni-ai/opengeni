@@ -50,6 +50,7 @@ export type OrganizationAdminResource =
   | "privacy"
   | "inference-residency"
   | "agent-admin-access"
+  | "own-machines"
   | "members"
   | "admin-invitations"
   | "incoming-invitations"

@@ -6,6 +6,7 @@ import {
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
   listSelfOrganizationMemberships,
+  updateOrganizationPrivacyPreferences,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -569,5 +570,110 @@ describe("a Member connects and changes their own Only me machine", () => {
         403,
       ),
     ).toContain("You don't have access to this workspace's machines.");
+  }, 180_000);
+});
+
+describe("an organization that keeps own machines to its owners and admins", () => {
+  const ADMINS_ONLY =
+    "Your organization lets only its owners and admins connect their own machines.";
+
+  async function personalWorkspaceOf(accountId: string, subject: string): Promise<string> {
+    const [row] = await shared!.admin<Array<{ id: string }>>`
+      select personal_workspace_id as id from organization_memberships
+      where account_id = ${accountId} and subject_id = ${subject}`;
+    return row!.id;
+  }
+
+  test("members are refused new own machines; what's connected stays theirs; owners still can", async () => {
+    if (!shared || !client || !app) return;
+    const team = await teamWithMachines();
+    const base = `/v1/workspaces/${team.workspaceId}/enrollments`;
+    const switchTo = (on: boolean) =>
+      updateOrganizationPrivacyPreferences(client!.db, {
+        organizationId: team.accountId,
+        actorSubjectId: team.owner.subject,
+        membersConnectOwnMachines: on,
+      });
+    const canConnectOwn = async (cookie: string, workspaceId: string) => {
+      const listed = await call(cookie, "GET", `/v1/workspaces/${workspaceId}/machines`);
+      expect(listed.status).toBe(200);
+      return ((await listed.json()) as { canConnectOwnMachine?: boolean }).canConnectOwnMachine;
+    };
+    expect(await canConnectOwn(team.member.cookie, team.workspaceId)).toBe(true);
+
+    await switchTo(false);
+    expect(await canConnectOwn(team.member.cookie, team.workspaceId)).toBe(false);
+
+    // A connect command for an Only me machine is refused, pointing at the way left.
+    const refusedMint = await refusal(
+      await call(team.member.cookie, "POST", `${base}/token`, { scope: "user" }),
+      403,
+    );
+    expect(refusedMint).toContain(ADMINS_ONLY);
+    expect(refusedMint).toContain(
+      "A workspace admin can connect a machine for the whole workspace.",
+    );
+
+    // So is approving a pairing code as Only me; declining one always works.
+    const pairing = await startPairing(team.workspaceId, "member-box");
+    expect(
+      await refusal(
+        await call(team.member.cookie, "POST", `${base}/device/approve`, {
+          userCode: pairing.userCode,
+          scope: "user",
+        }),
+        403,
+      ),
+    ).toContain(ADMINS_ONLY);
+    const denied = await call(team.member.cookie, "POST", `${base}/device/deny`, {
+      userCode: pairing.userCode,
+    });
+    expect(denied.status).toBe(200);
+
+    // In their Personal workspace every machine is their own, This workspace too.
+    const memberPersonal = await personalWorkspaceOf(team.accountId, team.member.subject);
+    expect(await canConnectOwn(team.member.cookie, memberPersonal)).toBe(false);
+    for (const scope of ["user", "workspace"] as const) {
+      const text = await refusal(
+        await call(
+          team.member.cookie,
+          "POST",
+          `/v1/workspaces/${memberPersonal}/enrollments/token`,
+          {
+            scope,
+          },
+        ),
+        403,
+      );
+      expect(text, scope).toContain(ADMINS_ONLY);
+      expect(text, scope).not.toContain("workspace admin");
+    }
+
+    // A machine already connected keeps working and stays its owner's to remove.
+    const removed = await call(
+      team.colleague.cookie,
+      "POST",
+      `${base}/${team.colleagueMachine.enrollmentId}/revoke`,
+      {},
+    );
+    expect(removed.status).toBe(200);
+    expect((await enrollmentRow(team.colleagueMachine.enrollmentId)).status).toBe("revoked");
+
+    // The organization's owner still connects their own.
+    const ownerPersonal = await personalWorkspaceOf(team.accountId, team.owner.subject);
+    expect(await canConnectOwn(team.owner.cookie, ownerPersonal)).toBe(true);
+    const ownerMint = await call(
+      team.owner.cookie,
+      "POST",
+      `/v1/workspaces/${ownerPersonal}/enrollments/token`,
+      { scope: "user" },
+    );
+    expect(ownerMint.status).toBe(201);
+
+    // On again, members connect their own as before.
+    await switchTo(true);
+    expect(await canConnectOwn(team.member.cookie, team.workspaceId)).toBe(true);
+    const minted = await call(team.member.cookie, "POST", `${base}/token`, { scope: "user" });
+    expect(minted.status).toBe(201);
   }, 180_000);
 });
