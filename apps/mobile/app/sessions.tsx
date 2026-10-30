@@ -22,7 +22,7 @@ import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
 import { rankChatSearch, workspacesToSearch } from "@/chat-search";
 import { useServerChatSearch } from "@/use-server-chat-search";
-import { cachedLists, rememberLists } from "@/session-list-cache";
+import { cachedLists, rememberLists, subscribeLists } from "@/session-list-cache";
 import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
@@ -85,6 +85,15 @@ function Sessions() {
     setLists(cached.sessions ?? EMPTY_SESSION_LISTS);
     setProjects(cached.projects ?? []);
     setLoaded(cached.sessions !== undefined);
+    if (!workspaceId) return;
+    // A chat open above this screen keeps its row here current, so coming back
+    // shows the list already in order instead of reordering under a tap.
+    return subscribeLists(workspaceId, (next) => {
+      if (next.sessions) {
+        setLists(next.sessions);
+        setLoaded(true);
+      }
+    });
   }, [workspaceId]);
 
   useFocusEffect(

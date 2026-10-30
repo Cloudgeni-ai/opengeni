@@ -29,8 +29,10 @@ import {
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
   scheduledOccurrencePayloadUtf8Bytes,
+  scheduledTaskRunUnattendedSetting,
   stableJson,
   TurnExecutionPolicyV1,
+  withSessionUnattendedMetadata,
   type McpConnectionAccountSelection,
   type ScheduledTask,
   type ScheduledTaskDegradedAccount,
@@ -159,6 +161,19 @@ import type {
 import type { Database } from "@opengeni/db";
 import type { CreateSessionMcpServerInput } from "@opengeni/db";
 import type { ScheduledTaskAgentConfig } from "@opengeni/contracts";
+
+/**
+ * The unattended setting for a chat this task starts: nobody answers during a
+ * scheduled or event-triggered run unless the task says otherwise.
+ * Creating the chat with an unattended setting also freezes that it started
+ * unattended, so its instructions and tools say so from the first turn and
+ * never change; the setting alone can later change, and only call-time
+ * behaviour follows it.
+ */
+function unattendedSettingFor(config: ScheduledTask["agentConfig"]) {
+  const unattendedSetting = scheduledTaskRunUnattendedSetting(config);
+  return unattendedSetting ? { unattendedSetting } : {};
+}
 
 type ScheduledTemporalActivityIdentity = {
   namespace: string;
@@ -1629,6 +1644,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 accountId: task.accountId,
                 workspaceId: task.workspaceId,
                 initialMessage: task.agentConfig.prompt,
+                // No person answers during a run this task starts, unless it says so.
+                ...unattendedSettingFor(task.agentConfig),
                 resources: task.agentConfig.resources,
                 bundledSkillIds: task.agentConfig.bundledSkillIds,
                 tools: taskTools,
@@ -2845,6 +2862,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
       initialMessage: task.agentConfig.prompt,
+      // The same rule as admission, from the same accepted task snapshot.
+      ...unattendedSettingFor(task.agentConfig),
       resources: task.agentConfig.resources,
       bundledSkillIds: task.agentConfig.bundledSkillIds,
       tools: input.acceptedExecution.resolvedTools,
@@ -3055,7 +3074,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.sandboxGroupId !== session.id ||
       session.channelId !== null ||
       session.codexCompactionMode !== generatedBinding.codexCompactionMode ||
-      stableJson(session.metadata) !== stableJson(expectedMetadata) ||
+      // Session reads project the frozen `started_unattended` column into the
+      // reserved unattended key; the scheduler never writes that key itself.
+      stableJson(withSessionUnattendedMetadata(session.metadata, false)) !==
+        stableJson(expectedMetadata) ||
       session.createdBy.kind !== "service" ||
       session.createdBy.subjectId !== "scheduler" ||
       stableJson(session.createdByContext) !==

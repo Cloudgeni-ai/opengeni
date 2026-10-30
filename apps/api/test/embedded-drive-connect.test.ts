@@ -18,7 +18,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import { createApp } from "../src/app";
 import {
-  OFFICIAL_GMAIL_MCP_SCOPES,
+  OFFICIAL_GMAIL_MCP_BASE_SCOPES,
   OFFICIAL_DRIVE_MCP_SCOPES,
   OFFICIAL_DRIVE_MCP_URL,
 } from "../src/integrations/oauth-profiles";
@@ -276,7 +276,9 @@ test("Drive callback requires an authenticated read and binds one exact personal
     );
     expect(authorize.searchParams.get("scope")?.split(" ").sort()).toEqual(
       [
-        ...(providerId === "google-drive" ? OFFICIAL_DRIVE_MCP_SCOPES : OFFICIAL_GMAIL_MCP_SCOPES),
+        ...(providerId === "google-drive"
+          ? OFFICIAL_DRIVE_MCP_SCOPES
+          : OFFICIAL_GMAIL_MCP_BASE_SCOPES),
       ].sort(),
     );
     expect(authorize.searchParams.get("access_type")).toBe("offline");

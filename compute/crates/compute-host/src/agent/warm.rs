@@ -57,6 +57,7 @@ impl Warm {
             boot_args: images.boot_args.clone(),
             networked: host.network.is_some(),
             memory: format!("{:?}", engine.memory_profile()),
+            runtime: engine.runtime().to_owned(),
             ready_port,
             hashes: Hashes::load(&templates_dir(root)),
         });

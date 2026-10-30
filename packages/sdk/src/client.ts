@@ -643,6 +643,7 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -2355,6 +2356,23 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/retention`,
+      request,
+    );
+  }
+
+  /**
+   * Turn a chat's unattended mode on or off ("work without me"). Applies from
+   * the next turn and is an explicit choice: a person's later message does not
+   * change it. Fails with 409 SESSION_ARCHIVED_READ_ONLY once archived.
+   */
+  async updateSessionUnattended(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionUnattendedRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/unattended`,
       request,
     );
   }
@@ -6905,6 +6923,8 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
@@ -6920,6 +6940,7 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
       mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },

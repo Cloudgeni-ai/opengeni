@@ -261,3 +261,54 @@ test("Storage keeps a chat active only where the deployment archives idle chats"
     container.remove();
   }
 });
+
+test("the chat's Work without me switch shows its setting and saves it", async () => {
+  const saved: unknown[] = [];
+  const client = context.client as unknown as Record<string, unknown>;
+  const original = client.updateSessionUnattended;
+  (context as unknown as Record<string, unknown>).setSession = () => undefined;
+  client.updateSessionUnattended = async (
+    _workspaceId: string,
+    _sessionId: string,
+    request: { unattended: boolean },
+  ) => {
+    saved.push(request);
+    return session({ unattended: request.unattended } as Partial<Session>);
+  };
+  try {
+    for (const [unattended, checked] of [
+      [true, "true"],
+      [false, "false"],
+      [undefined, null],
+    ] as const) {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <AgentConfigurationPanel
+              session={session({ unattended } as Partial<Session>)}
+              onReloadSession={async () => {}}
+            />,
+          ),
+        );
+        await settle();
+        const row = container.querySelector("[data-unattended-setting]");
+        // An older server sends no setting: no switch.
+        const toggle = row?.querySelector<HTMLButtonElement>('[role="switch"]') ?? null;
+        expect(toggle?.getAttribute("aria-checked") ?? null).toBe(checked);
+        if (!toggle) continue;
+        expect(row?.textContent).toContain("Work without me");
+        await act(async () => toggle.click());
+        await settle();
+        expect(saved.at(-1)).toEqual({ unattended: !unattended });
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    }
+  } finally {
+    client.updateSessionUnattended = original;
+  }
+});

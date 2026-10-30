@@ -1594,6 +1594,7 @@ export type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   SessionRetention,
   UpdateSessionPinRequest,
   UpdateSessionRequest,

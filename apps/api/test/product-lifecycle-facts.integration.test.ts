@@ -251,8 +251,8 @@ describe("product lifecycle facts from managed auth", () => {
     const accountId = crypto.randomUUID();
     const email = `social-lifecycle-${accountId}@example.test`;
     google.getUserInfo = async () => ({
-      user: { id: accountId, name: "Provider Human", email, emailVerified: true },
-      data: {},
+      user: { name: "Provider Human", email, emailVerified: true },
+      data: { sub: accountId },
     });
     const start = await app.request("/v1/auth/sign-in/social", {
       method: "POST",
