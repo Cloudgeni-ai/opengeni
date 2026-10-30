@@ -21,6 +21,7 @@ let clientAddress = 10;
 const PASSWORD = "sign-in-password-123";
 const KEPT = `kept-${crypto.randomUUID()}@example.test`;
 const REMOVED = `removed-${crypto.randomUUID()}@example.test`;
+const UNVERIFIED = `unverified-${crypto.randomUUID()}@example.test`;
 const SOCIAL_ID = crypto.randomUUID();
 const REMOVED_SOCIAL = `removed-social-${SOCIAL_ID}@example.test`;
 
@@ -132,8 +133,8 @@ describe("sign-in restricted to allowed emails", () => {
   // deployment then drops two of them, as a staging list edit did.
   beforeAll(async () => {
     if (!shared || !client) return;
-    const open = await harness([KEPT, REMOVED, REMOVED_SOCIAL]);
-    for (const email of [KEPT, REMOVED]) {
+    const open = await harness([KEPT, REMOVED, UNVERIFIED, REMOVED_SOCIAL]);
+    for (const email of [KEPT, REMOVED, UNVERIFIED]) {
       const created = await open.app.request("/v1/auth/sign-up/email", {
         method: "POST",
         headers: requestHeaders(),
@@ -187,6 +188,31 @@ describe("sign-in restricted to allowed emails", () => {
     const wrong = await h.signIn(KEPT, "wrong-password-123");
     expect(wrong.status).toBe(401);
     expect(((await wrong.json()) as { code?: string }).code).toBe("INVALID_EMAIL_OR_PASSWORD");
+  }, 120_000);
+
+  test("a listed address typed in another case or with spaces still reaches the password check", async () => {
+    if (!shared || !client) return;
+    const h = await harness([KEPT]);
+    const upper = await h.signIn(KEPT.toUpperCase(), PASSWORD);
+    expect(upper.status).toBe(200);
+    expect(setsSessionCookie(upper)).toBe(true);
+    const wrong = await h.signIn(KEPT.toUpperCase(), "wrong-password-123");
+    expect(wrong.status).toBe(401);
+    expect(((await wrong.json()) as { code?: string }).code).toBe("INVALID_EMAIL_OR_PASSWORD");
+    const spaced = await h.signIn(`  ${KEPT}  `, PASSWORD);
+    expect(((await spaced.json()) as { code?: string }).code).not.toBe(
+      MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
+    );
+  }, 120_000);
+
+  test("a listed account whose email isn't verified keeps the plain refusal, not the allowlist code", async () => {
+    if (!shared || !client) return;
+    await shared.admin`update auth_users set email_verified = false where email = ${UNVERIFIED}`;
+    const h = await harness([KEPT, UNVERIFIED]);
+    const refused = await h.signIn(UNVERIFIED, PASSWORD);
+    expect(refused.status).toBe(401);
+    expect(setsSessionCookie(refused)).toBe(false);
+    expect(((await refused.json()) as { code?: string }).code).toBe("FAILED_TO_CREATE_SESSION");
   }, 120_000);
 
   test("Google sign-in for an unlisted existing account redirects with sign_in_email_not_allowed", async () => {
