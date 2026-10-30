@@ -4,7 +4,7 @@
 // drawn by the app's stylesheet (`html[data-desktop]::before`), as are the
 // rules that lift a row into it (`[data-window-bar-row] > [data-titlebar]`).
 import { ChevronsLeftIcon, ChevronsRightIcon, PanelLeftIcon } from "lucide-react";
-import { useState, type ReactNode, type RefObject } from "react";
+import { useMemo, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "../../ui/button";
@@ -165,9 +165,11 @@ export function WindowBarPageTitle({
   fallbackTitle?: ReactNode;
   children: ReactNode;
 }) {
-  const [claims, setClaims] = useState<readonly { id: string; title: ReactNode }[]>([]);
+  // In the order the headers mounted (the page's order); a header keeps its
+  // place while its title is briefly empty.
+  const [claims, setClaims] = useState<readonly { id: string; title: string | null }[]>([]);
   const [registry] = useState(() => ({
-    set(id: string, title: ReactNode) {
+    set(id: string, title: string | null) {
       setClaims((current) =>
         current.some((claim) => claim.id === id)
           ? current.map((claim) => (claim.id === id ? { id, title } : claim))
@@ -178,12 +180,15 @@ export function WindowBarPageTitle({
       setClaims((current) => current.filter((claim) => claim.id !== id));
     },
   }));
-  const owner = claims[0];
+  const owner = claims.find((claim) => claim.title);
   const title = owner ? owner.title : fallbackTitle;
+  const ownerId = owner?.id ?? null;
+  const value = useMemo(
+    () => (enabled ? { ...registry, owner: ownerId } : null),
+    [enabled, ownerId, registry],
+  );
   return (
-    <PageHeaderWindowBarContext.Provider
-      value={enabled ? { ...registry, owner: owner?.id ?? null } : null}
-    >
+    <PageHeaderWindowBarContext.Provider value={value}>
       {enabled && title != null && title !== "" ? <WindowBarTitle>{title}</WindowBarTitle> : null}
       {children}
     </PageHeaderWindowBarContext.Provider>

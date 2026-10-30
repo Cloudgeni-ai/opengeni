@@ -238,11 +238,15 @@ describe("the desktop window bar", () => {
     // window points from the left and the page's title line from the
     // canvas's left edge (never before 120), both centred on the traffic
     // lights, in a bar of the same height, with the title shown once. Here
-    // the settings shell and a content page, with the current shell and one
-    // that doesn't report its bar (0.1.33 and older), open and collapsed.
+    // the settings shell (also without the app's rail, as personal settings),
+    // a list page, a form page and a detail page, with the current shell and
+    // one that doesn't report its bar (0.1.33 and older), open and collapsed.
     const views = [
       { view: "", title: "General" },
+      { view: "&apprail=none", title: "General" },
       { view: "&view=content", title: "Automations" },
+      { view: "&view=content&page=form", title: "New automation" },
+      { view: "&view=content&page=detail", title: "Nightly report" },
     ];
     const shells = [
       { bar: "44", lights: MAC_TRAFFIC_LIGHT_POSITION },
@@ -302,5 +306,5 @@ describe("the desktop window bar", () => {
         await page.close();
       }
     }
-  }, 180_000);
+  }, 420_000);
 });

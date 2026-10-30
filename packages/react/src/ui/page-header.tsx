@@ -47,11 +47,24 @@ const PageHeaderStyleContext = createContext<PageHeaderStyle>({});
  * title isn't shown twice. Provided by the shells (`useWindowBarRow`).
  */
 export const PageHeaderWindowBarContext = createContext<{
-  set(id: string, title: string): void;
+  /** A header's title, or null while it has none to show; keeps its place. */
+  set(id: string, title: string | null): void;
   release(id: string): void;
   /** The header whose title the bar shows. */
   owner: string | null;
 } | null>(null);
+
+/**
+ * Headers inside an overlay (a dialog or sheet) never take the window bar:
+ * the overlays' content wraps its children in this.
+ */
+export function WindowBarTitleBoundary({ children }: { children: ReactNode }) {
+  return (
+    <PageHeaderWindowBarContext.Provider value={null}>
+      {children}
+    </PageHeaderWindowBarContext.Provider>
+  );
+}
 
 export function useWindowBarTitle(title: ReactNode): boolean {
   const windowBar = useContext(PageHeaderWindowBarContext);
@@ -60,10 +73,8 @@ export function useWindowBarTitle(title: ReactNode): boolean {
   const set = windowBar?.set;
   const release = windowBar?.release;
   useIsomorphicLayoutEffect(() => {
-    if (!set || !release) return;
-    if (text) set(id, text);
-    else release(id);
-  }, [id, release, set, text]);
+    set?.(id, text || null);
+  }, [id, set, text]);
   useIsomorphicLayoutEffect(() => () => release?.(id), [id, release]);
   return windowBar?.owner === id;
 }

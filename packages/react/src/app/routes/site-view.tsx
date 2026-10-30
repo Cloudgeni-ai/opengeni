@@ -78,6 +78,7 @@ import { useRecordSiteOpened } from "../lib/site-opened";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
+import { useWindowBarTitle } from "../../ui/page-header";
 
 // Loaded when someone opens it, from the Artifacts route that already holds
 // the publish form and the Site's management (a separate lazy entry would
@@ -188,6 +189,9 @@ export function SiteViewRoute({
   useRecordSiteOpened(client, workspaceId, siteId);
   const live = useSiteLiveVersion(client, workspaceId, siteId);
   const artifact = live.detail?.artifact;
+  // In the macOS app the Site's name is the window bar's title, as a page's
+  // is, instead of in its toolbar.
+  const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null);
   // The publish form, open for this Site; another Site starts without it.
   const siteKey = `${workspaceId}/${siteId}`;
   const [publishingFor, setPublishingFor] = useState<string | null>(null);
@@ -294,6 +298,7 @@ export function SiteViewRoute({
               siteLocation={page ?? "/"}
               onSiteLocationChange={onSiteLocationChange}
               toolbarStart={backControl}
+              showTitle={!titleInWindowBar}
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={

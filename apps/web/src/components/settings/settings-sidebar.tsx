@@ -449,10 +449,14 @@ export function SettingsShell({
   const railProps = { label, back, home, scope, sections, activeId };
   // In the macOS app the window bar is the same as on every other page: the
   // sidebar toggle beside the traffic lights (it hides the settings rail, with
-  // the app's one sidebar state) and the page's title as the bar's row.
+  // the app's one sidebar state, or its own where settings has no app rail,
+  // as personal settings doesn't) and the page's title as the bar's row.
   const rail = useOptionalRail();
-  const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !narrow && rail != null;
-  const railHidden = toggleInWindowBar && rail.collapsed;
+  const [ownCollapsed, setOwnCollapsed] = useState(false);
+  const collapsed = rail ? rail.collapsed : ownCollapsed;
+  const toggleCollapsed = rail ? rail.toggleCollapsed : () => setOwnCollapsed((value) => !value);
+  const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !narrow;
+  const railHidden = toggleInWindowBar && collapsed;
   const canvasRef = useRef<HTMLElement | null>(null);
   const titleInWindowBar = windowBarRowActive({ platform: desktopPlatform, mobile: narrow });
   const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
@@ -540,11 +544,7 @@ export function SettingsShell({
       {toggleInWindowBar ? (
         <WindowBarControls>
           <TooltipProvider>
-            <SidebarToggleButton
-              collapsed={rail.collapsed}
-              onToggle={rail.toggleCollapsed}
-              inWindowBar
-            />
+            <SidebarToggleButton collapsed={collapsed} onToggle={toggleCollapsed} inWindowBar />
           </TooltipProvider>
         </WindowBarControls>
       ) : null}

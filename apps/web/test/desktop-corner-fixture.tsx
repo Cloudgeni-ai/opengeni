@@ -1,6 +1,7 @@
 // The top-left corner of desktop layouts as the app draws them. By default the
 // production SettingsShell and workspace picker, with sample sections;
-// `?view=content` a content page (ContentPage and PageHeader) beside the real
+// `?view=content` a content page (ContentPage and PageHeader, or `?page=` a
+// form or detail page) beside the real
 // rail, inside a canvas wired to the window bar as SessionShell wires it.
 // `?platform=` picks the desktop platform (or `browser`), `?theme=light` the
 // light theme; `?bar=` and `?zoom=` are the macOS shell's report (see the html).
@@ -34,6 +35,8 @@ import {
 } from "lucide-react";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader } from "@opengeni/react/ui/page-header";
+import { DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   useWindowBarRow,
@@ -56,6 +59,9 @@ const platform = params.get("platform") ?? "macos";
 if (platform !== "browser") document.documentElement.dataset.desktop = platform;
 applyDesktopWindowBar(document.documentElement, desktopBridge);
 const theme = params.get("theme") === "light" ? "light" : "dark";
+// `?page=form` or `?page=detail`: the content view's page is a form page or a
+// detail page instead of a list page.
+const pageKind = params.get("page");
 document.documentElement.classList.toggle("dark", theme === "dark");
 document.documentElement.dataset.ogTheme = theme;
 
@@ -143,17 +149,27 @@ function ContentPreview() {
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
         <WindowBarPageTitle enabled={titleInWindowBar}>
-          <ContentPage width="standard" className="pt-6">
-            <PageHeader
-              title="Automations"
-              description="Scheduled and triggered work for this workspace."
-            />
-            {Array.from({ length: 30 }, (_, index) => (
-              <p key={index} className="mt-4 text-sm text-fg-muted">
-                Automation {index + 1} · Real content page components · Sample workspace data
-              </p>
-            ))}
-          </ContentPage>
+          {pageKind === "form" ? (
+            <FormPage title="New automation" submitLabel="Create" onSubmit={() => {}}>
+              <p className="text-sm text-fg-muted">Real form page components</p>
+            </FormPage>
+          ) : (
+            <ContentPage width="standard" className="pt-6">
+              {pageKind === "detail" ? (
+                <DetailPageHeader title="Nightly report" meta={["Automation", "Daily"]} />
+              ) : (
+                <PageHeader
+                  title="Automations"
+                  description="Scheduled and triggered work for this workspace."
+                />
+              )}
+              {Array.from({ length: 30 }, (_, index) => (
+                <p key={index} className="mt-4 text-sm text-fg-muted">
+                  Automation {index + 1} · Real content page components · Sample workspace data
+                </p>
+              ))}
+            </ContentPage>
+          )}
         </WindowBarPageTitle>
       </div>
     </div>

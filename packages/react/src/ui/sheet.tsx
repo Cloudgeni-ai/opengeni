@@ -3,6 +3,7 @@ import { XIcon } from "lucide-react";
 import { Dialog as SheetPrimitive } from "radix-ui";
 
 import { SectionFrameReset } from "./section-variant";
+import { WindowBarTitleBoundary } from "./page-header";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
 
@@ -78,7 +79,9 @@ const SheetContent = /* @__PURE__ */ React.forwardRef<
         ref={ref}
         {...props}
       >
-        <SectionFrameReset>{children}</SectionFrameReset>
+        <SectionFrameReset>
+          <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
+        </SectionFrameReset>
         {showCloseButton && (
           <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-secondary">
             <XIcon className="size-4" />
