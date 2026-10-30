@@ -284,11 +284,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           models: configuredModels(settings)
             .filter((model) => model.id.startsWith(modelPrefix(connection)))
             .map(({ id, label }) => ({ id, label })),
-          personalWorkspacesSupported:
-            connection.workspaceId === null &&
-            (connection.kind === "codex" ||
-              connection.kind === "supergrok" ||
-              connection.kind === "claude_subscription"),
+          // Every organization account, subscription or API key, can serve
+          // Personal workspaces; a workspace's own account serves only it.
+          personalWorkspacesSupported: connection.workspaceId === null,
           ...(organizationCore
             ? {
                 ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
