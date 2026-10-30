@@ -79,10 +79,11 @@ export interface IntegrationDefinition {
 export interface IntegrationFacetDefinition {
   readonly facetKey: string;
   /**
-   * Integrations give agents tools; they no longer offer Knowledge sources.
-   * Stored `knowledge_source` facet rows stay readable in the database layer.
+   * `knowledge_source` is retired: integrations give agents tools and no core
+   * definition publishes it. It stays in the type only so stored facets and
+   * existing published-type consumers keep compiling; configuring one returns 410.
    */
-  readonly kind: "inbound_trigger" | "delivery_destination" | "identity_link";
+  readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
 }
