@@ -13,12 +13,13 @@ import { SessionSkills } from "./session-skills";
 export { SessionSkills } from "./session-skills";
 import { ConnectionResponse } from "./connection-response";
 export { ConnectionResponse } from "./connection-response";
-import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "./first-party-mcp-tools";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS as DEFAULT_FIRST_PARTY_MCP_TOOLS_LEAF } from "./first-party-mcp-tools";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
 } from "./api-contract";
-export { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "./first-party-mcp-tools";
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] =
+  DEFAULT_FIRST_PARTY_MCP_TOOLS_LEAF;
 export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./api-contract";
 export * from "./session-target";
 export * from "./turn-serving-policy";

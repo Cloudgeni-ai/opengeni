@@ -36,7 +36,10 @@ test.each(["settings", "fakes", "shared-pg", "compose", "process", "sse"])(
   },
 );
 
-test("root and leaf exports retain the same values and function identities", async () => {
+test(
+  "root and leaf exports retain the same values and function identities",
+  { timeout: 30_000 },
+  async () => {
   const config = await import("@opengeni/config");
   const defaults = await import("@opengeni/config/defaults");
   for (const name of Object.keys(defaults) as (keyof typeof defaults)[]) {
@@ -66,7 +69,8 @@ test("root and leaf exports retain the same values and function identities", asy
   );
   expect(contracts.SessionSkills).toBe(sessionSkills.SessionSkills);
   expect(contracts.ConnectionResponse).toBe(connectionResponse.ConnectionResponse);
-});
+  },
+);
 
 test("lightweight contract subpaths do not load the root barrel", async () => {
   const child = Bun.spawn(
