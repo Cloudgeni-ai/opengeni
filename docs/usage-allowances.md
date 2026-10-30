@@ -242,25 +242,24 @@ Setting an allowance never onboards or restores a member.
 
 | Rule | Meaning |
 | --- | --- |
-| `{ share: 0.25 }` | Member ceiling scales with the current workspace pool |
+| `{ share: 0.25 }` | Member ceiling scales with the period's workspace pool |
 | `{ credits: 20_000_000 }` | Fixed $20 member ceiling |
 | `null` | Remove the override and use `memberDefault` |
 | Default `"none"` | No separate member ceiling; the workspace ceiling still applies |
 | Default `"equal_share"` | Equal shares for eligible current human members |
 | Default `{ share }` or `{ credits }` | That rule for each member without an override |
 
-The share base is the **current pool: included credits plus remaining
-unexpired grants**. It is not a reserved allocation or the total amount ever
-granted. A grant can expand share-based ceilings; consumption and expiry can
-change them. A fixed-credit member ceiling does not grow automatically on
+The share base is the **period's pool, the workspace ceiling: included
+credits plus grants consumed in the selected period plus remaining unexpired
+grants**. Usage counts the whole period, so its ceiling does too: spending a
+grant credit keeps it in both the usage and the ceiling instead of shrinking
+every member's share. A share-based member ceiling is therefore
+`floor(workspace.limit * share)`, and an equal share is
+`floor(workspace.limit / eligible members)`. It stays steady through the
+period. A grant raises it, grant expiry lowers it, and a new period starts it
+again from what is left. It is not a reserved allocation or the total amount
+ever granted. A fixed-credit member ceiling does not grow automatically on
 top-up.
-
-The workspace meter reconstructs its ceiling as included credits plus grants
-consumed in the selected period plus remaining unexpired grants. Already
-consumed grant credits therefore stay counted in the workspace's usage/limit
-instead of shrinking both sides of the meter. The member share base excludes
-those consumed grants. These are intentionally different formulas; do not
-derive a member ceiling by multiplying `workspace.limit`.
 
 Shares above `1` and sums above `1` are valid. A share of `1.5` is a member
 ceiling, not permission to spend beyond the workspace ceiling. The workspace
@@ -366,7 +365,8 @@ in earliest-expiry order (nonexpiring grants last). Only the portion actually
 covered by a grant reduces its balance; overshoot is still recorded as usage.
 Unused unexpired grants are not renewed or erased at a monthly reset.
 
-Only unconsumed, unexpired grant capacity contributes to the current pool.
+Unexpired grant capacity counts toward the period's pool, together with grant
+credits already consumed in the period. Expired capacity does not count.
 Share-based rules follow that pool; fixed-credit rules need a separate
 versioned adjustment if the product intends to raise them too.
 Show an updated usage read rather than adding the grant amount to a cached
