@@ -175,6 +175,7 @@ import {
   OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
   rejectsStartModeField,
+  sessionUsageLimitConfirmed,
   sessionUsageLimitNotConfirmed,
   sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
@@ -1516,7 +1517,7 @@ export class OpenGeniClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
       request,
     );
-    if (committed.limitMicros !== request.limitMicros) {
+    if (!sessionUsageLimitConfirmed(request, committed)) {
       throw sessionUsageLimitNotConfirmed(sessionId);
     }
     return committed;
