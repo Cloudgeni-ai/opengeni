@@ -5,7 +5,7 @@ import type {
   BillingPlanBalance,
   PromotionalCreditBalance,
 } from "@opengeni/contracts";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
 import { ambientBillingOrigin } from "./credit-debit-attribution";
 import { rawRows, withAccountRls } from "./database";
@@ -54,6 +54,15 @@ type ReceiptTotals = Pick<PaidCreditTotals, "paidInflows" | "unpaidInflows"> & {
   paidPart: string;
   feesThisMonth: string;
   markFloor: string | null;
+  lastAt: string | null;
+};
+
+/** The latest receipt: when it was written and the running totals it carries. */
+type LatestReceipt = {
+  at: string;
+  atMicros: string;
+  chain: PaidCreditChain;
+  unpaid: string | null;
 };
 
 /**
@@ -62,7 +71,7 @@ type ReceiptTotals = Pick<PaidCreditTotals, "paidInflows" | "unpaidInflows"> & {
  * receipt carries this month's fees on.
  */
 function paidCreditTotals(
-  latest: { atMicros: string; chain: PaidCreditChain; unpaid: string | null } | null,
+  latest: LatestReceipt | null,
   after: ReceiptTotals | null,
   month: string | null,
 ): { totals: PaidCreditTotals; feesThisMonth: number } {
@@ -95,6 +104,8 @@ function paidCreditTotals(
       paidInflowBefore: chain.paidInflow,
       paidInflows,
       unpaidInflows: after?.unpaidInflows ?? null,
+      // Rows after the latest receipt are later than it by construction.
+      receiptRowsThrough: after?.lastAt ?? latest?.at ?? null,
     },
   };
 }
@@ -163,7 +174,7 @@ export async function readBillingBalance(
       enforcement: boolean;
       apiSpent: string;
       receipts: ReceiptTotals | null;
-      latest: { atMicros: string; chain: PaidCreditChain; unpaid: string | null } | null;
+      latest: LatestReceipt | null;
       month: string;
     }>(
       tx,
@@ -185,7 +196,7 @@ export async function readBillingBalance(
         select date_trunc('month', coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp()) at time zone 'UTC') as utc
       ), latest as (
         -- The latest receipt and the running totals it carries (paid-credit.ts).
-        select entry.created_at, ${atMicrosSql}::text as "atMicros",
+        select entry.created_at, entry.created_at::text as at, ${atMicrosSql}::text as "atMicros",
           entry.metadata->'paidCreditTotals' as chain,
           (entry.metadata->>'unpaidCreditsAfterMicros')::text as unpaid
         from ${schema.creditLedgerEntries} entry
@@ -196,7 +207,7 @@ export async function readBillingBalance(
         -- Rows that can carry a receipt written after it (normally none):
         -- fees' unfunded shares, fee debt repaid, this month's fees, paid
         -- parts, marks, and paid and unpaid inflows.
-        select
+        select max(entry.created_at)::text as "lastAt",
           coalesce(sum((entry.metadata->>'unfundedMicros')::bigint)
             filter (where entry.type = ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as unfunded,
           coalesce(sum(${feeDebtRepaidSql}), 0)::text as repaid,
@@ -226,7 +237,7 @@ export async function readBillingBalance(
         (select balance from totals) as balance,
         (select "apiSpent" from totals) as "apiSpent",
         (select to_jsonb(receipts) from receipts) as receipts,
-        (select jsonb_build_object('atMicros', "atMicros", 'chain', chain, 'unpaid', unpaid) from latest) as latest,
+        (select jsonb_build_object('at', at, 'atMicros', "atMicros", 'chain', chain, 'unpaid', unpaid) from latest) as latest,
         (select to_char(utc, 'YYYY-MM') from fee_month) as month,
         coalesce((select jsonb_agg(jsonb_build_object(
           'grantId', g.id,
@@ -422,16 +433,42 @@ export async function paidCreditReceipt(
     sourceType?: string | null | undefined;
     sourceId?: string | null | undefined;
   },
-): Promise<Record<string, unknown>> {
+): Promise<{ metadata: Record<string, unknown>; createdAt: SQL }> {
+  const plain = { metadata: {}, createdAt: sql`${input.settledAt}::timestamptz` };
   // Scoped grants are promotional credit outside general credit.
-  if (input.eligibleModelIds) return {};
+  if (input.eligibleModelIds) return plain;
   const paidInflow =
     input.amountMicros > 0 && (PAID_INFLOW_TYPES as readonly string[]).includes(input.type);
   const reversal =
     input.amountMicros < 0 && (PAID_REVERSAL_TYPES as readonly string[]).includes(input.type);
   const unpaid = input.amountMicros > 0 && !NEVER_UNPAID_TYPES.includes(input.type);
-  if (!paidInflow && !reversal && !unpaid) return {};
+  if (!paidInflow && !reversal && !unpaid) return plain;
   const { paid } = await readBillingBalance(tx, input.accountId, undefined, input.settledAt, true);
+  return {
+    metadata: await receiptMetadata(tx, input, paid, paidInflow, reversal),
+    createdAt: receiptCreatedAt(input.settledAt, paid),
+  };
+}
+
+/**
+ * When to stamp a receipt row: the settlement time, but strictly after every
+ * row that can carry a receipt. Running totals are read from the latest
+ * receipt, so a database clock that steps back (a failover to a host slightly
+ * behind) must never stamp a receipt before an earlier one.
+ */
+export function receiptCreatedAt(settledAt: string, paid: PaidCreditState): SQL {
+  return paid.receiptRowsThrough === null
+    ? sql`${settledAt}::timestamptz`
+    : sql`greatest(${settledAt}::timestamptz, ${paid.receiptRowsThrough}::timestamptz + interval '1 microsecond')`;
+}
+
+async function receiptMetadata(
+  tx: Database,
+  input: Parameters<typeof paidCreditReceipt>[1],
+  paid: PaidCreditState,
+  paidInflow: boolean,
+  reversal: boolean,
+): Promise<Record<string, unknown>> {
   if (paidInflow) {
     const part =
       input.type === "credit_topup"

@@ -1497,10 +1497,10 @@ async function refundVideoGenerationCredits(
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
-        ...receipt,
+        ...receipt.metadata,
       },
       occurredAt: now,
-      createdAt: sql`${settledAt}::timestamptz`,
+      createdAt: receipt.createdAt,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });
