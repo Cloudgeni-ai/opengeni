@@ -10,11 +10,13 @@ import {
   applyCreditDebitAfterUse,
   applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
+  completeOrganizationUserSetup,
   completeSelfServiceOrganizationSetup,
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUser,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  ensureOrganizationUserSetupIntent,
   expirePlanCreditPeriod,
   freePlanCreditEligible,
   getBillingBalance,
@@ -1102,6 +1104,75 @@ for (const posture of ["production", "restricted"] as const) {
     } finally {
       await fresh.close();
     }
+  }, 180_000);
+
+  test(`organization user setup joins its organization when another organization refuses the binding (${posture} owner)`, async () => {
+    if (!client || !shared) return;
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
+    const inviting = await account();
+    const refusing = await account();
+    const email = `setup-${crypto.randomUUID()}@example.test`;
+    const inviteFrom = (from: { accountId: string; subject: string }) =>
+      createOrganizationInvitation(client!.db, {
+        organizationId: from.accountId,
+        actorSubjectId: from.subject,
+        operationId: crypto.randomUUID(),
+        targetSubjectId: null,
+        targetEmail: email,
+        role: "member",
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      });
+    const invitation = await inviteFrom(inviting);
+    const refused = await inviteFrom(refusing);
+    const hex = () => crypto.randomUUID().replaceAll("-", "");
+    const tokenDigest = hex() + hex();
+    await ensureOrganizationUserSetupIntent(client.db, {
+      organizationId: inviting.accountId,
+      actorSubjectId: inviting.subject,
+      invitationId: invitation.id,
+      tokenDigest,
+      expiresAt: invitation.expiresAt,
+    });
+    const suffix = hex();
+    const schema = `"${shared.schema.replaceAll('"', '""')}"`;
+    await shared.admin.unsafe(`
+      CREATE FUNCTION ${schema}.refuse_setup_${suffix}() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF NEW.account_id = '${refusing.accountId}' AND NEW.target_subject_id IS NOT NULL THEN
+          RAISE EXCEPTION 'injected binding refusal' USING ERRCODE = 'P0S01';
+        END IF;
+        RETURN NEW;
+      END $f$;
+      CREATE TRIGGER refuse_setup_${suffix} BEFORE UPDATE ON ${schema}.organization_membership_invitations
+        FOR EACH ROW EXECUTE FUNCTION ${schema}.refuse_setup_${suffix}();`);
+    const authUserId = crypto.randomUUID();
+    try {
+      const result = await run(() =>
+        completeOrganizationUserSetup(client!.db, {
+          tokenDigest,
+          operationId: crypto.randomUUID(),
+          requestFingerprint: hex() + hex(),
+          authUserId,
+          name: "Setup recipient",
+          passwordHash: "x".repeat(64),
+        }),
+      );
+      expect(result).toMatchObject({ status: "complete" });
+    } finally {
+      await shared.admin.unsafe(`
+        DROP TRIGGER refuse_setup_${suffix} ON ${schema}.organization_membership_invitations;
+        DROP FUNCTION ${schema}.refuse_setup_${suffix}();`);
+    }
+    const memberships = await shared.admin<Array<{ account_id: string; status: string }>>`
+      select account_id::text, status from organization_memberships
+      where subject_id = ${`user:${authUserId}`}`;
+    expect(memberships).toEqual([{ account_id: inviting.accountId, status: "active" }]);
+    const [left] = await shared.admin<
+      Array<{ target_subject_id: string | null; status: string }>
+    >`select target_subject_id, status from organization_membership_invitations
+      where id = ${refused.id}`;
+    expect(left).toEqual({ target_subject_id: null, status: "pending" });
   }, 180_000);
 
   // The seat a binding keeps is only the one its invitation already held.
