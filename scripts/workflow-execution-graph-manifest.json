@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "fd25682158c883800e4f7c72ff2533ef253bcc125473934659384ffaa92807a0"
+      "sha256": "0219ab5cf3ea2a1f3beb78c2ab674c4231fe774d71316f59a711b8531327987c"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -1076,8 +1076,8 @@
     {
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "kvm",
-      "step": "Collect the conformance logs and results",
-      "sha256": "2e66cee0781d1130b081db7a1de0e5b3ee5fa32cf6c2fe5a05904a0cfcca3d1a"
+      "step": "Collect the gate's logs and results",
+      "sha256": "3025a8bc30fb64bc45c0d25716e6ee2d6c37e4735550ce2ec39d30286fbef03d"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
