@@ -17,7 +17,12 @@ import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
-import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
+import {
+  enqueueCapabilitySetupContinuation,
+  getConnectionMetadata,
+  getProviderConnectionHomeWorkspace,
+  latestConnectionAuthNotice,
+} from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
@@ -143,6 +148,7 @@ import {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   SetSessionUsageLimitRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
@@ -188,6 +194,7 @@ import { streamTokenDegraded } from "@opengeni/config";
 import {
   recordAuditEvent,
   acceptSessionApprovalDecision,
+  SessionApprovalAnswerError,
   acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
@@ -398,6 +405,7 @@ import {
   updateSessionSkills,
   updateSessionProfile,
   setSessionRetention,
+  setSessionUnattended,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -2818,6 +2826,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
+  // "Work without me": turn a chat's unattended mode on or off from its next
+  // turn. An explicit choice that a person's later message does not change.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/unattended", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = await parseRequestJson(c, UpdateSessionUnattendedRequest);
+    const { result, relatedSessionAccess } = await setSessionUnattended(
+      deps,
+      grant,
+      sessionId,
+      payload.unattended,
+    );
+    if (result.status === "not_found") {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (result.status === "archived") {
+      return c.json(
+        {
+          code: "SESSION_ARCHIVED_READ_ONLY",
+          message: "This session is archived, so whether it runs unattended can no longer change.",
+        },
+        409,
+      );
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccess,
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
   // Per-task usage limit. Reads follow session read access; a child
   // returns its root's shared state. Writes are compare-and-set on the ROOT
   // by a person in the app or the host's server key only, never an agent
@@ -2992,6 +3036,62 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // the agent once per card so it continues the request that needed it,
   // unless the person already wrote since the card or the capability is not
   // usable in this chat yet. Every skip is a normal 200 outcome.
+  /**
+   * What a continuation for a reconnected account names, or null while the
+   * account is not active with the access its latest card asked for.
+   */
+  async function reconnectedAccountContinuationTarget(
+    workspaceId: string,
+    sessionId: string,
+    connectionId: string,
+    grant: { subjectId: string; accountId: string },
+  ): Promise<
+    | { capabilityId: string; capabilityName: string; toolsVerified: false; connectionId: string }
+    | "no_card"
+    | null
+  > {
+    const card = await latestConnectionAuthNotice(db, { workspaceId, sessionId, connectionId });
+    if (!card) return "no_card";
+    // A personal account may live in the workspace it was first added in.
+    const home =
+      (await getProviderConnectionHomeWorkspace(
+        db,
+        workspaceId,
+        connectionId,
+        grant.subjectId,
+      ).catch(() => null)) ?? workspaceId;
+    const connection = await getConnectionMetadata(db, home, connectionId, grant.subjectId);
+    if (!connection || connection.status !== "active") return null;
+    const asked = Array.isArray(card.payload.scopes)
+      ? card.payload.scopes.filter((scope): scope is string => typeof scope === "string")
+      : [];
+    if (
+      card.payload.reason === "insufficient_scope" &&
+      !asked.every((scope) => connection.grantedScopes.includes(scope))
+    )
+      return null;
+    const serverId =
+      typeof card.payload.canonicalServerId === "string"
+        ? card.payload.canonicalServerId
+        : typeof card.payload.serverId === "string"
+          ? card.payload.serverId
+          : connection.providerDomain;
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId,
+      settings,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+    }).catch(() => null);
+    const item = catalog?.items.find((entry) => entry.tools.some((tool) => tool.id === serverId));
+    return {
+      capabilityId: item?.id ?? serverId,
+      capabilityName: item?.name ?? connection.providerDomain,
+      toolsVerified: false,
+      connectionId,
+    };
+  }
+
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
     async (c) => {
@@ -3023,47 +3123,81 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
-      // A reviewed integration's card stands for the person's own connected
-      // instances of it, which the workspace catalog does not list.
-      const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
-      // A plugin's card stands for its installation in this workspace.
-      const plugin = payload.capabilityId.startsWith(PLUGIN_CAPABILITY_ID_PREFIX);
-      const [item, withPolicy] = await Promise.all([
-        integration
-          ? integrationDefinitionSetupItem(
-              db,
-              settings,
-              workspaceId,
-              grant.subjectId,
-              payload.capabilityId,
-            )
-          : plugin
-            ? marketplacePluginCapabilityItem(db, workspaceId, payload.capabilityId)
-            : buildCapabilityCatalog({
+      let target: {
+        capabilityId: string;
+        capabilityName: string;
+        toolsVerified: boolean;
+        connectionId?: string;
+      };
+      if ("connectionId" in payload) {
+        // A connected account's own card: the person reconnected it or gave it
+        // more access. Continue once the account is active and holds what the
+        // card asked for; otherwise the next tool call would only stop again.
+        const ready = await reconnectedAccountContinuationTarget(
+          workspaceId,
+          sessionId,
+          payload.connectionId,
+          grant,
+        );
+        if (!ready) {
+          return c.json({
+            outcome: "not_needed",
+            reason: "not_ready",
+          } satisfies ContinueAfterCapabilitySetupResponse);
+        }
+        if (ready === "no_card") {
+          return c.json({
+            outcome: "not_needed",
+            reason: "no_card",
+          } satisfies ContinueAfterCapabilitySetupResponse);
+        }
+        target = ready;
+      } else {
+        // A reviewed integration's card stands for the person's own connected
+        // instances of it, which the workspace catalog does not list.
+        const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+        // A plugin's card stands for its installation in this workspace.
+        const plugin = payload.capabilityId.startsWith(PLUGIN_CAPABILITY_ID_PREFIX);
+        const [item, withPolicy] = await Promise.all([
+          integration
+            ? integrationDefinitionSetupItem(
                 db,
-                workspaceId,
                 settings,
-                subjectId: grant.subjectId,
-                accountId: grant.accountId,
-              }).then((catalog) =>
-                catalog.items.find((entry) => entry.id === payload.capabilityId),
-              ),
-        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
-      ]);
-      const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
-      if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
-        return c.json({
-          outcome: "not_needed",
-          reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
-        } satisfies ContinueAfterCapabilitySetupResponse);
+                workspaceId,
+                grant.subjectId,
+                payload.capabilityId,
+              )
+            : plugin
+              ? marketplacePluginCapabilityItem(db, workspaceId, payload.capabilityId)
+              : buildCapabilityCatalog({
+                  db,
+                  workspaceId,
+                  settings,
+                  subjectId: grant.subjectId,
+                  accountId: grant.accountId,
+                }).then((catalog) =>
+                  catalog.items.find((entry) => entry.id === payload.capabilityId),
+                ),
+          withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+        ]);
+        const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
+        if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
+          return c.json({
+            outcome: "not_needed",
+            reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
+          } satisfies ContinueAfterCapabilitySetupResponse);
+        }
+        target = {
+          capabilityId: item.id,
+          capabilityName: item.name,
+          toolsVerified: readiness === "ready",
+        };
       }
       const result = await enqueueCapabilitySetupContinuation(db, {
         accountId: grant.accountId,
         workspaceId,
         sessionId,
-        capabilityId: item.id,
-        capabilityName: item.name,
-        toolsVerified: readiness === "ready",
+        ...target,
         requesterSubjectId: grant.subjectId,
       });
       if (result.outcome === "not_needed") {
@@ -4441,6 +4575,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
         throw error;
@@ -5827,6 +5964,8 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  // Changes what the agent may ask and wait for, like its tools.
+  if (suffix === "/unattended" && verb === "PUT") return "session.tool_policy.write";
   // Task usage limit: read with the session; change as a control write
   // (the route additionally admits only a person or the host server key).
   if (suffix === "/usage-limit") {

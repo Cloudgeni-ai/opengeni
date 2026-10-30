@@ -132,9 +132,8 @@ export type IncludedOnboardingModel = {
  *
  * The person here just created the organization, so a subscription (Codex,
  * SuperGrok) connects for everyone in it, and reaches their Personal
- * workspace through the organization. API keys stay in the Personal
- * workspace: the organization's keys serve shared workspaces only, so an
- * organization key would not pay for the next chat.
+ * workspace through the organization. An API key entered here connects to
+ * the Personal workspace, so it pays for the next chat right away.
  */
 export function ModelAccessOnboardingPanel({
   client,

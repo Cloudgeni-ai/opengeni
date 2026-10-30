@@ -11,9 +11,10 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  * composition, including goal-completion, child-answer delivery and durable
  * Codemode approval guidance and the secrets overhaul's removal of the retired
  * variable_set_list / variableSetIds wording, and proceeding past blocked
- * routine, reversible steps, and the Skill index reading Skills by name.
- * Reviewed instruction changes update their locks; Modular composition must
- * never change legacy bytes as a side effect.
+ * routine, reversible steps, and the Skill index reading Skills by name;
+ * `unattended` pins the unattended-session CORE paragraph, which no other case
+ * carries. Reviewed instruction changes update their locks; Modular
+ * composition must never change legacy bytes as a side effect.
  */
 const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> = {
   default: {
@@ -51,6 +52,11 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
   selfhosted_with_bindings: {
     chars: 34832,
     sha256: "19991757ee6d07bb83b372cd4452c7f42e723f655e01a908ba0eca6a9bd690c1",
+    layers: "operational_contract,persona_and_core",
+  },
+  unattended: {
+    chars: 35370,
+    sha256: "e1b4de94278a9bd63ada5e45a9ec1a946d5cc17b59be75039133511a05a8362d",
     layers: "operational_contract,persona_and_core",
   },
 };

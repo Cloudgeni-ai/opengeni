@@ -21,6 +21,11 @@ import {
 } from "./tool-action-review";
 import { DecisionActions } from "./decision-card";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { McpElicitationRequest } from "./mcp-elicitation-request";
+import type {
+  McpElicitationAnswer,
+  McpElicitationContent,
+} from "@opengeni/contracts/mcp-elicitation-model";
 
 export type ApprovalSurfaceMessages = {
   title: string;
@@ -46,7 +51,11 @@ export const defaultApprovalSurfaceMessages = (t: OpenGeniText): ApprovalSurface
 });
 export type ApprovalSurfaceProps = {
   approvals: PendingApproval[];
-  onApprove: (approval: PendingApproval) => void | Promise<void>;
+  /**
+   * `answer` is present when the approval answers its MCP server's questions
+   * (`approval.elicitation`); send it with the decision.
+   */
+  onApprove: (approval: PendingApproval, answer?: McpElicitationAnswer) => void | Promise<void>;
   onReject: (approval: PendingApproval) => void | Promise<void>;
   responding?: boolean | undefined;
   error?: string | Error | null | undefined;
@@ -107,13 +116,21 @@ export function ApprovalSurface({
     approvals.findIndex((approval) => approval.id === selectedId),
   );
   const selected = approvals[selectedIndex]!;
-  const decide = async (approval: PendingApproval, decision: "approve" | "reject") => {
+  const decide = async (
+    approval: PendingApproval,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) => {
     if (responding || pendingRef.current) return;
     pendingRef.current = approval.id;
     setPending({ id: approval.id, decision });
     setDecisionError(null);
     try {
-      await (decision === "approve" ? onApprove(approval) : onReject(approval));
+      await (decision === "approve"
+        ? answer
+          ? onApprove(approval, answer)
+          : onApprove(approval)
+        : onReject(approval));
     } catch (cause) {
       if (pendingRef.current === approval.id) {
         pendingRef.current = null;
@@ -181,6 +198,14 @@ export function ApprovalSurface({
             submitting={pending?.id === approval.id ? pending.decision : null}
             disabled={Boolean(responding || pending)}
             onApprove={() => void decide(approval, "approve")}
+            onAnswer={(content) =>
+              approval.elicitation
+                ? void decide(approval, "approve", {
+                    content,
+                    elicitationRound: approval.elicitation.round,
+                  })
+                : undefined
+            }
             onReject={() => void decide(approval, "reject")}
           />
         ))}
@@ -201,6 +226,7 @@ function ApprovalRequest({
   messages,
   custom,
   onViewDetails,
+  onAnswer,
   ...actions
 }: {
   approval: PendingApproval;
@@ -212,20 +238,24 @@ function ApprovalRequest({
   submitting: "approve" | "reject" | null;
   disabled: boolean;
   onApprove: () => void;
+  onAnswer: (content: McpElicitationContent) => void;
   onReject: () => void;
 }) {
   const t = useOpenGeniText();
   const [retry, setRetry] = useState(0);
+  // A server's question is answered from the approval itself; there is no
+  // saved review of a call that has already started.
+  const reviewLoader = approval.elicitation ? undefined : loadReview;
   // Event projection recreates the same approval on unrelated timeline updates.
   // Keep one request for equal facts, but never reuse it across changed facts,
   // an explicit retry, or a loader change (the host's client/access boundary).
-  const requestRef = useRef({ approval, loadReview, retry });
+  const requestRef = useRef({ approval, loadReview: reviewLoader, retry });
   if (
-    requestRef.current.loadReview !== loadReview ||
+    requestRef.current.loadReview !== reviewLoader ||
     requestRef.current.retry !== retry ||
     !dequal(requestRef.current.approval, approval)
   ) {
-    requestRef.current = { approval, loadReview, retry };
+    requestRef.current = { approval, loadReview: reviewLoader, retry };
   }
   const request = requestRef.current;
   const [result, setResult] = useState<{
@@ -289,7 +319,7 @@ function ApprovalRequest({
     }),
     [stableApproval],
   );
-  if (loadReview && !loaded && !failed && !legacy)
+  if (reviewLoader && !loaded && !failed && !legacy)
     return (
       <ToolReviewFrame
         tone="waiting"
@@ -404,6 +434,35 @@ function ApprovalRequest({
           });
         }}
       />
+    );
+  if (stableApproval.elicitation)
+    return (
+      <div data-approval-id={approval.id} data-review-origin="pending">
+        {custom}
+        <McpElicitationRequest
+          // A new question on the same call starts a fresh answer.
+          key={`${stableApproval.elicitation.round}:${JSON.stringify(stableApproval.elicitation)}`}
+          elicitation={stableApproval.elicitation}
+          title={fallback.title}
+          subtitle={fallback.accountLabel}
+          submitting={actions.submitting}
+          disabled={actions.disabled}
+          onAnswer={onAnswer}
+          onDecline={actions.onReject}
+          details={
+            fallback.detailsAvailable ? (
+              <button
+                type="button"
+                className="inline-flex min-h-8 items-center rounded-og-sm text-og-sm text-og-fg-muted underline decoration-og-border-strong underline-offset-4 hover:text-og-fg hover:decoration-current [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                data-review-path=""
+                onClick={() => setDetailPath("")}
+              >
+                {t("toolActionReview.details")}
+              </button>
+            ) : null
+          }
+        />
+      </div>
     );
   return (
     <div data-approval-id={approval.id} data-review-origin="pending">

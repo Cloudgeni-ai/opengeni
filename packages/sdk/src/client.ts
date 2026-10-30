@@ -3,7 +3,11 @@ import {
   recordObservedSessionSequence,
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
-import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  McpElicitationContent,
+} from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import {
   currentMessageTimeZone,
@@ -171,6 +175,7 @@ import {
   OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
   rejectsStartModeField,
+  sessionUsageLimitConfirmed,
   sessionUsageLimitNotConfirmed,
   sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
@@ -638,6 +643,7 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -1512,7 +1518,7 @@ export class OpenGeniClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
       request,
     );
-    if (committed.limitMicros !== request.limitMicros) {
+    if (!sessionUsageLimitConfirmed(request, committed)) {
       throw sessionUsageLimitNotConfirmed(sessionId);
     }
     return committed;
@@ -2349,6 +2355,23 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/retention`,
+      request,
+    );
+  }
+
+  /**
+   * Turn a chat's unattended mode on or off ("work without me"). Applies from
+   * the next turn and is an explicit choice: a person's later message does not
+   * change it. Fails with 409 SESSION_ARCHIVED_READ_ONLY once archived.
+   */
+  async updateSessionUnattended(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionUnattendedRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/unattended`,
       request,
     );
   }
@@ -3226,6 +3249,10 @@ export class OpenGeniClient {
       approvalId: string;
       decision: "approve" | "reject";
       message?: string;
+      /** Answers to the approval's `elicitation` forms; only with `approve`. */
+      content?: McpElicitationContent;
+      /** The `elicitation.round` this answers; required to approve one. */
+      elicitationRound?: number;
       clientEventId?: string;
     },
   ): Promise<SessionEvent> {
@@ -6895,6 +6922,8 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
@@ -6910,6 +6939,7 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
       mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },

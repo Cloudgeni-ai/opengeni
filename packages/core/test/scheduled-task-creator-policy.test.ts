@@ -202,6 +202,7 @@ describe("scheduled task frozen setup restriction", () => {
           ),
         );
         track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+        track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
         track(
           spyOn(db, "ensureExternalIdentity").mockResolvedValue({
             id: "77777777-7777-4777-8777-777777777777",

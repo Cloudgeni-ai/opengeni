@@ -201,6 +201,8 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
+  UNATTENDED_PERSON_REFUSAL_TEXT,
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
@@ -272,6 +274,16 @@ import {
 } from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  MCP_INPUT_PENDING_RESULT,
+  awaitingMcpInput,
+  isMcpInputRequiredResult,
+  mcpInputRequiredOption,
+  nextMcpInputRequiredStep,
+  resumedMcpInputAnswer,
+  type McpInputExchange,
+  type McpInputRequiredOption,
+} from "./mcp-input-requests";
 import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
@@ -417,6 +429,7 @@ import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptExperiments,
   type AgentPromptResources,
@@ -435,6 +448,7 @@ export {
   identityFromLegacyTemplate,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
   type AgentPromptExperiments,
@@ -788,6 +802,7 @@ export type ComputerToolMode = "function-image" | "disabled" | "function-text";
 // stays importable by the API without the agent loop.
 export * from "./sandbox";
 export * from "./interaction-tools";
+export * from "./mcp-input-requests";
 export {
   boundModelToolOutputsFilterForSettings,
   callModelInputFilterForSettings,
@@ -2182,6 +2197,12 @@ export type ConnectorActionToolCall = {
   approvalMode?: "session_mcp" | "connector_write";
   defaultDecision?: "allow" | "ask";
   actionName?: string;
+  /**
+   * This execution only tells the provider that the person declined the
+   * question it asked mid-call (MCP elicitation); the ledger admits it once
+   * after that rejection.
+   */
+  deliversDecline?: true;
 };
 
 export type ConnectorActionPolicyPreparation =
@@ -2218,7 +2239,11 @@ export type ConnectorActionPolicyHooks = {
   begin: (call: ConnectorActionToolCall) => Promise<ConnectorActionExecutionAdmission>;
   complete: (input: {
     requestId: string;
-    outcome: "completed" | "not_executed" | "uncertain";
+    /**
+     * `input_required`: the provider stopped before finishing to ask the
+     * person (MCP elicitation); the request waits for their answer again.
+     */
+    outcome: "completed" | "not_executed" | "uncertain" | "input_required";
   }) => Promise<void>;
 };
 
@@ -2251,6 +2276,8 @@ type ModelToolInvocation = {
   operationId: string;
   approvalConfirmed: boolean;
   preparation?: ConnectorActionPolicyPreparation;
+  /** Present when this call may ask the person through its MCP server. */
+  mcpInput?: McpInputExchange;
 };
 
 const modelToolInvocation = new AsyncLocalStorage<ModelToolInvocation>();
@@ -2278,6 +2305,20 @@ export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
+  /**
+   * The session is unattended (frozen at create): no person will see or answer
+   * a question until the task ends. Both compositions say so, and the
+   * human-input tool is not attached. Omitted or false keeps today's bytes.
+   */
+  unattended?: boolean;
+  /**
+   * No person answers during this attempt (the chat's current setting, which
+   * can change after it starts). Only call-time behaviour follows it: a call
+   * that needs approval, a question and a hand-off to a person are refused
+   * with a tool result instead of waiting. The instructions and tools follow
+   * `unattended`, so earlier requests' text never changes.
+   */
+  unattendedNow?: boolean;
   /**
    * Secret facts for this attempt. `referencesEnabled` is true when the host
    * resolves `{{secret:…}}` references (the secrets prompt module renders
@@ -2609,6 +2650,12 @@ export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
 
+/** Session-level facts the legacy CORE renders. Omitted keeps today's bytes. */
+export type CoreInstructionsSession = {
+  /** No person will see or answer a question until the task ends. */
+  unattended?: boolean | undefined;
+};
+
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
  * line (which names the opengeni__goal_* tools and is what keeps a long-running
@@ -2624,6 +2671,7 @@ export function coreInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
   experiments?: AgentPromptExperiments,
+  session?: CoreInstructionsSession,
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
@@ -2633,6 +2681,9 @@ export function coreInstructions(
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
     ...(rig ? rigInstructions(rig) : []),
+    // Unattended sessions (frozen at create): inside the non-bypassable CORE
+    // for the same reason. Absent for interactive sessions.
+    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE] : []),
   ];
 }
 
@@ -2649,8 +2700,9 @@ export function composeAgentInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
   experiments?: AgentPromptExperiments,
+  session?: CoreInstructionsSession,
 ): string {
-  const core = coreInstructions(workspaceEnvironment, rig, experiments).join(" ");
+  const core = coreInstructions(workspaceEnvironment, rig, experiments, session).join(" ");
   if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
     return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
   }
@@ -2725,6 +2777,7 @@ export function agentPromptResourcesFor(
     | "workspaceEnvironment"
     | "rig"
     | "secrets"
+    | "unattended"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2744,6 +2797,7 @@ export function agentPromptResourcesFor(
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
+    ...(options.unattended ? { unattended: true } : {}),
   };
 }
 
@@ -2771,11 +2825,15 @@ function inspectModularAgentInstructions(
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
   });
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
-    capabilities: config.capabilities,
+    // An unattended session gets no human-input tool, so no clause offers it.
+    capabilities: resources.unattended
+      ? { ...config.capabilities, humanInput: false }
+      : config.capabilities,
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
-    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    resources,
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
       : {}),
@@ -2811,16 +2869,19 @@ export function inspectPersistentAgentInstructions(
       options.workspaceEnvironment,
       options.rig,
       agentPromptExperimentsFor(settings).experiments,
+      options.unattended ? { unattended: true } : undefined,
     ),
     settings,
   );
   if (settings.experimentSystemPromptCacheSplit) {
     // The deployment persona with no workspace environment or sandbox
-    // environment is shared by every session; a workspace persona is not.
+    // environment is shared by every interactive session; a workspace
+    // persona is not.
     recordStableSystemPromptPrefix(
       personaTemplate === settings.agentInstructionsTemplate &&
         !options.workspaceEnvironment &&
-        !options.rig
+        !options.rig &&
+        !options.unattended
         ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
         : OPENGENI_OPERATIONAL_INSTRUCTIONS,
     );
@@ -3243,7 +3304,8 @@ export function buildOpenGeniAgent(
     webSearch:
       (options.hostedWebSearch ?? settings.webSearchEnabled) &&
       sideFeatureRouteRunnable(settings, "web_search.hosted"),
-    humanInput: options.humanInputEnabled !== false,
+    // Nobody answers in an unattended session, so a question would only park it.
+    humanInput: options.humanInputEnabled !== false && options.unattended !== true,
   });
   const hostedWebSearch = toolFamilies.webSearch;
   const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
@@ -3348,6 +3410,13 @@ export function buildOpenGeniAgent(
           {
             name: "validate_human_input_request",
             run: async ({ toolCall }) => {
+              // Switched to work without a person after the chat started: the
+              // tool stays (its list never changes) but nobody would answer.
+              if (options.unattendedNow) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  UNATTENDED_PERSON_REFUSAL_TEXT,
+                );
+              }
               let input: unknown;
               try {
                 input = JSON.parse(toolCall.arguments);
@@ -3519,9 +3588,16 @@ export function buildOpenGeniAgent(
     installInteractionInterventionPolicy(
       agent as unknown as ApprovalCapableAgent,
       options.approvedToolCallId,
+      options.unattendedNow === true,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+    if (options.unattendedNow) {
+      installUnattendedApprovalRefusal(
+        agent as unknown as ApprovalCapableAgent,
+        options.approvedToolCallId,
+      );
+    }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     // Last, so it masks exactly what every other wrapper hands to the model.
     if (options.secretValueMemory) {
@@ -3661,9 +3737,16 @@ export function buildOpenGeniAgent(
   installInteractionInterventionPolicy(
     agent as unknown as ApprovalCapableAgent,
     options.approvedToolCallId,
+    options.unattendedNow === true,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
+  if (options.unattendedNow) {
+    installUnattendedApprovalRefusal(
+      agent as unknown as ApprovalCapableAgent,
+      options.approvedToolCallId,
+    );
+  }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   // Last, so it masks exactly what every other wrapper hands to the model.
   if (options.secretValueMemory) {
@@ -3829,6 +3912,8 @@ export function sessionMcpApprovalConnectionId(serverId: string, url: string): s
 type McpApprovalPolicy = {
   prefix: string;
   serverId: string;
+  /** How a person knows this server, e.g. in "Linear asks". */
+  label: string;
   requireApproval: boolean | ReadonlySet<string>;
   connectorBacked: boolean;
   reviewKind: "generic" | "gmail";
@@ -4036,6 +4121,74 @@ export function toolPreflightFailureOutput(error: unknown): {
   };
 }
 
+/** Model-facing result for a call refused because nobody can approve it. */
+export function unattendedApprovalRefusalOutput(): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  return { isError: true, content: [{ type: "text", text: UNATTENDED_APPROVAL_REFUSAL_TEXT }] };
+}
+
+/**
+ * In an unattended session nobody answers an approval, so a call that would
+ * wait for one is refused at once instead: the SDK is told no approval is
+ * needed and the matching `invoke` returns the refusal without running any
+ * inner wrapper, so nothing executes and nothing is approved. Policy is read
+ * exactly as configured; only the wait is replaced. An already approved call
+ * (`approvedToolCallId`) keeps its normal path.
+ *
+ * Installed before preflight containment, which wraps it like any other
+ * Opengeni approval hook (so a throwing policy check stays contained), and
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installUnattendedApprovalRefusal(
+  agent: ApprovalCapableAgent,
+  approvedToolCallId?: string,
+): void {
+  const refused = new Set<string>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof needsApproval>[0],
+            parsedInput: Parameters<typeof needsApproval>[1],
+            callId: Parameters<typeof needsApproval>[2],
+          ) => {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (!callId || callId === approvedToolCallId) return required;
+            if (!required) {
+              refused.delete(callId);
+              return false;
+            }
+            refused.add(callId);
+            return false;
+          },
+        ),
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && refused.delete(callId)) {
+            return unattendedApprovalRefusalOutput() as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installUnattendedApprovalRefusal(cloned, approvedToolCallId);
+      return cloned;
+    };
+  }
+}
+
 /**
  * Contain every error thrown while the model SDK asks a tool whether it needs
  * approval. The SDK treats a throwing `needsApproval` as a fatal
@@ -4138,6 +4291,7 @@ function installMcpApprovalPolicy(
         inputSchema: unknown;
         title?: string;
         accountLabel?: string | undefined;
+        connector?: string;
         recommendsApproval: boolean;
         readReview: ToolReviewReader;
       }
@@ -4160,6 +4314,7 @@ function installMcpApprovalPolicy(
           recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
+          ...(display?.connector ? { connector: display.connector } : {}),
           ...(accountLabel ? { accountLabel } : {}),
         });
       }
@@ -4217,6 +4372,31 @@ function installMcpApprovalPolicy(
           defaultDecision: recommendsApproval ? "ask" : "allow",
         };
       };
+      // A third-party server may ask the person mid-call (MCP elicitation)
+      // only where a durable approval can carry the question across a pause.
+      const invokeAnswering = async (
+        invocation: Omit<ModelToolInvocation, "mcpInput">,
+        execute: () => Promise<string>,
+      ): Promise<string> => {
+        if (!connectorActionPolicy || attemptToolSource(policy.serverId) !== "mcp") {
+          return await runWithModelToolInvocation(invocation, execute);
+        }
+        const answered = resumedMcpInputAnswer(invocation.operationId);
+        const mcpInput: McpInputExchange = {
+          server: identity?.connector ?? policy.label,
+          ...(answered ? { answered } : {}),
+        };
+        // The SDK pauses the call on this marker and keeps it on the approval.
+        // The stand-in result a question leaves behind never reaches the model.
+        const paused = () => awaitingMcpInput(mcpInput.requested!) as unknown as string;
+        try {
+          const output = await runWithModelToolInvocation({ ...invocation, mcpInput }, execute);
+          return mcpInput.requested ? paused() : output;
+        } catch (error) {
+          if (mcpInput.requested) return paused();
+          throw error;
+        }
+      };
       return {
         ...tool,
         needsApproval: opengeniApprovalHook(
@@ -4271,7 +4451,7 @@ function installMcpApprovalPolicy(
                 ? ({ managed: true, decision: "ask" } as const)
                 : undefined);
             preparations.delete(callId);
-            return await runWithModelToolInvocation(
+            return await invokeAnswering(
               {
                 modelName: tool.name,
                 operationId: callId,
@@ -4289,7 +4469,7 @@ function installMcpApprovalPolicy(
               ? ({ managed: true, decision: "ask" } as const)
               : undefined);
           preparations.delete(callId);
-          return await runWithModelToolInvocation(
+          return await invokeAnswering(
             {
               modelName: tool.name,
               operationId: callId,
@@ -4468,6 +4648,7 @@ export function interactionRequestArgumentsProblem(serialized: string): string |
 function installInteractionInterventionPolicy(
   agent: ApprovalCapableAgent,
   approvedToolCallId?: string,
+  unattendedNow = false,
 ): void {
   const approvalRequiredCallIds = new Set<string>();
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -4490,6 +4671,13 @@ function installInteractionInterventionPolicy(
           defineToolInputGuardrail({
             name: "validate_interaction_request_human",
             run: async ({ toolCall }) => {
+              // Switched to work without a person after the chat started:
+              // nobody would act, so the hand-off is refused, not awaited.
+              if (unattendedNow) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  UNATTENDED_PERSON_REFUSAL_TEXT,
+                );
+              }
               const problem = interactionRequestArgumentsProblem(toolCall.arguments);
               return problem
                 ? ToolGuardrailFunctionOutputFactory.rejectContent(problem)
@@ -4531,7 +4719,7 @@ function installInteractionInterventionPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installInteractionInterventionPolicy(cloned, approvedToolCallId);
+      installInteractionInterventionPolicy(cloned, approvedToolCallId, unattendedNow);
       return cloned;
     };
   }
@@ -4575,6 +4763,7 @@ function applyMcpApprovalPolicy(
       return {
         prefix: prefixedMcpToolName(server.id, ""),
         serverId: server.id,
+        label: server.name ?? server.id,
         requireApproval:
           server.requireApproval === true
             ? true
@@ -6702,6 +6891,9 @@ function connectorActionGatewayLifecycle(input: {
       }
       const modelInvocation =
         call.caller.kind === "model" ? activeModelToolInvocation(input.modelName) : null;
+      // Telling the server the person declined its question runs the call once
+      // more under that rejection; the ledger admits exactly that delivery.
+      const deliversDecline = modelInvocation?.mcpInput?.answered?.action === "decline";
       let connectorCall: ConnectorActionToolCall;
       try {
         connectorCall = input.call(
@@ -6716,6 +6908,7 @@ function connectorActionGatewayLifecycle(input: {
           { cause: error },
         );
       }
+      if (deliversDecline) connectorCall = { ...connectorCall, deliversDecline: true };
       const preparation =
         modelInvocation?.preparation ??
         (call.caller.kind === "codemode" &&
@@ -6737,7 +6930,8 @@ function connectorActionGatewayLifecycle(input: {
         preparation.managed &&
         preparation.decision === "ask" &&
         modelInvocation?.approvalConfirmed !== true &&
-        preparation.approvalStatus !== "approved"
+        preparation.approvalStatus !== "approved" &&
+        !deliversDecline
       ) {
         if (
           call.caller.kind === "codemode" &&
@@ -6769,6 +6963,10 @@ function connectorActionGatewayLifecycle(input: {
         },
         complete: async (settlement) => {
           if (!requestId) return;
+          if (modelInvocation?.mcpInput?.requested) {
+            await input.connectorActionPolicy!.complete({ requestId, outcome: "input_required" });
+            return;
+          }
           if (settlement.outcome === "failed") {
             await input.connectorActionPolicy!.complete({
               requestId,
@@ -6954,6 +7152,12 @@ async function prepareToolGatewayDefinitionsFromServers(
                 content: [{ type: "text", text: error.message }],
               };
             }
+            const recovery = configuredMcpOperationRecovery(server, toolName);
+            // A recoverable operation must finish in one exchange, so it never asks.
+            const mcpInput =
+              context.caller.kind === "model" && !recovery
+                ? activeModelToolInvocation(tool.name)?.mcpInput
+                : undefined;
             const execute = async () =>
               await server.executeCatalogTool(
                 toolName,
@@ -6965,9 +7169,9 @@ async function prepareToolGatewayDefinitionsFromServers(
                   ...(context.transportMeta?.targetedCall === true
                     ? { propagateInvocationErrors: true }
                     : {}),
+                  ...(mcpInput ? { mcpInput } : {}),
                 },
               );
-            const recovery = configuredMcpOperationRecovery(server, toolName);
             if (!recovery) return await execute();
             if (!recovery.supported || !["model", "codemode"].includes(context.caller.kind)) {
               throw new Error(
@@ -9561,6 +9765,12 @@ export class PrefixedMcpServer implements MCPServer {
        * exact result, so a large read must never fail before that seam.
        */
       maxResultBytes?: number;
+      /**
+       * The model call's exchange with the server: declares form elicitation,
+       * sends a resumed call's answers, and records a new question, which
+       * ends this execution with a stand-in result while the person answers.
+       */
+      mcpInput?: McpInputExchange;
     },
   ): Promise<AttemptToolResultValue> {
     if (!this.isAllowed(unprefixed)) {
@@ -9572,6 +9782,10 @@ export class PrefixedMcpServer implements MCPServer {
     // Nested prefix wrappers are a projection seam around one physical
     // tools/call. The innermost wrapper owns the single metric observation.
     const recordsPhysicalCall = !(this.inner instanceof PrefixedMcpServer);
+    const { mcpInput: requestedExchange, ...innerOptions } = options ?? {};
+    // Only the physical call can carry the exchange's protocol fields.
+    const exchange =
+      recordsPhysicalCall && this.inner.callToolResult ? requestedExchange : undefined;
     const startedAt = recordsPhysicalCall ? performance.now() : 0;
     let metricRecorded = false;
     const recordOutcome = (outcome: McpToolCallOutcome): void => {
@@ -9606,10 +9820,29 @@ export class PrefixedMcpServer implements MCPServer {
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
-        const projected = this.inner.callToolResult
-          ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
-          : mcpContentAsResult(await this.inner.callTool(unprefixed, callArgs, meta, options));
-        return projected;
+        if (!exchange) {
+          return this.inner.callToolResult
+            ? await this.inner.callToolResult(unprefixed, callArgs, meta, innerOptions)
+            : mcpContentAsResult(
+                await this.inner.callTool(unprefixed, callArgs, meta, innerOptions),
+              );
+        }
+        let inputRequired: McpInputRequiredOption = mcpInputRequiredOption(exchange);
+        for (let stateRetries = 0; ; stateRetries += 1) {
+          const projected = await this.inner.callToolResult!(unprefixed, callArgs, meta, {
+            ...innerOptions,
+            inputRequired,
+          });
+          if (!isMcpInputRequiredResult(projected)) return projected;
+          const step = nextMcpInputRequiredStep(exchange, projected, stateRetries);
+          if (step.kind === "retry") {
+            inputRequired = step.option;
+            continue;
+          }
+          if (step.kind === "fail") return step.result;
+          exchange.requested = step.request;
+          return MCP_INPUT_PENDING_RESULT;
+        }
       };
       const projectedOutput =
         this.refreshOwnedCommand && (unprefixed === "command_read" || unprefixed === "command_wait")
@@ -9655,7 +9888,9 @@ export class PrefixedMcpServer implements MCPServer {
         options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
         "MCP tool result",
       );
-      recordOutcome(result.isError === true ? "provider_declared_error" : "success");
+      recordOutcome(
+        result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
+      );
       if (unprefixed === "wait_for_input" && result.isError !== true) {
         completeWait?.(true);
       }

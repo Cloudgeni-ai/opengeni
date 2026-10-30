@@ -96,8 +96,8 @@ async function harness() {
     app,
     googleUser: (user: { id: string; email: string }) => {
       google.getUserInfo = async () => ({
-        user: { id: user.id, name: "Provider Human", email: user.email, emailVerified: true },
-        data: {},
+        user: { name: "Provider Human", email: user.email, emailVerified: true },
+        data: { sub: user.id },
       });
     },
   };

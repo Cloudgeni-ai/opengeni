@@ -564,7 +564,8 @@ export async function getOrganizationModelProviderExecutionConnectionId(
 /**
  * The decrypted key (or Azure OpenAI's Microsoft Entra ID sign-in) and
  * non-secret endpoint of an active organization connection, read under the
- * workspace's RLS scope (personal workspaces never see API-key provider rows).
+ * workspace's RLS scope (the connection's access policy decides which of the
+ * organization's shared and Personal workspaces see it).
  * Null when there is no active connection or no encryption key; callers then
  * fail closed and never fall back to deployment credentials.
  */
