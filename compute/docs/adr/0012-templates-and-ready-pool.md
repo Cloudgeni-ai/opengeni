@@ -62,9 +62,11 @@ sandboxes created at once all pay it at the same time.
   room the core says no wake wants, so a fill and a wake never take the
   same memory. A fill also leaves room in the budget, above its buffer,
   for creates to claim every ready clone kept, itself included, each at
-  its whole shape less what it holds: a fill never takes the room a claim
-  of one kept already needs, so overlapping creates each claim one, and a
-  pool keeps no more clones than creates could claim. When a wake, the
+  what a create of its shape asking for the default guarantees books: all
+  its memory less what it holds, and the default processor request. A
+  fill never takes the room such a claim of one kept already needs, so
+  overlapping creates each claim one, and a pool keeps no more clones than
+  creates could claim. When a wake, the
   buffer or memory pressure needs room, the core ends ready clones first,
   oldest first. They fill a few at a time and stop when sandbox users run
   out. Status shows their count and resident memory per shape.

@@ -403,10 +403,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// What creates claiming every ready sandbox kept, filled or filling,
-    /// would book beyond what each books now: a claim books its whole
-    /// shape at most, as each was filled guaranteed it (see
-    /// [`HostAgent::claim`]). One filling books its shape's processor time
-    /// already, and one filled none.
+    /// would book beyond what each books now, each claimed by a create of
+    /// its shape asking for the default guarantees (see
+    /// [`HostAgent::claim`]): all its memory, less what it holds, and the
+    /// default processor request. One filling books more processor time
+    /// than that already, its whole shape, and one filled none. A create
+    /// asking for more processor time than the default can find a fill's
+    /// in its way until that fill is ready, as any create the processor
+    /// budget cannot take is refused.
     fn unclaimed(&self) -> Claims {
         let idle = self
             .ready
@@ -427,7 +431,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .saturating_add(shape.bytes().saturating_sub(held)),
                     cpu: sum
                         .cpu
-                        .saturating_add(if filling { 0 } else { shape.cpu_millis() }),
+                        .saturating_add(if filling { 0 } else { shape.claim_cpu_millis() }),
                 }
             })
     }

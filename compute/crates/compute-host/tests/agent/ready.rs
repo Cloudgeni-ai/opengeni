@@ -505,6 +505,45 @@ async fn a_fill_never_takes_the_room_a_claim_of_a_kept_ready_sandbox_needs() {
     lab.assert_clean();
 }
 
+/// The processor room a fill keeps for claims is what creates asking for
+/// the default request book, not the whole shape a fill books while it
+/// comes up: on a host that guarantees one and a half processors, a pool of
+/// three one-processor sandboxes fills, and three creates claim all three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claims_keep_the_default_processor_request_free_not_the_whole_shape() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        policy,
+        keeping(3),
+    )
+    .await;
+    wait_filled(&lab, 3).await;
+    let boots = lab.world.boots.load(Ordering::Relaxed);
+    for n in 1..=3 {
+        assert_eq!(create(&lab, id(n)).await, Reply::Done);
+    }
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        boots,
+        "every create claimed a ready sandbox"
+    );
+    for n in 1..=3 {
+        assert!(matches!(lab.wake(id(n)).await, Reply::Woken { .. }));
+    }
+    let reserved = lab.status().await.cpu.unwrap().reserved;
+    assert!(
+        (300..=1300).contains(&reserved),
+        "three claims at the default request, and at most one refill: {reserved}"
+    );
+    lab.assert_clean();
+}
+
 /// A fill that finishes while a held sandbox waits for its room is ended
 /// for it: the core may ask for that the moment the fill is ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
