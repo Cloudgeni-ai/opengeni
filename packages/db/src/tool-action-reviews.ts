@@ -281,7 +281,8 @@ export async function getToolReviewDetailsPage(
       input.offset,
       25,
       record.request.toolName,
-      (id) => findAppAction(id) !== undefined,
+      // Only Opengeni's own app actions are named from its catalog.
+      record.request.serverId === "opengeni" ? (id) => findAppAction(id) !== undefined : undefined,
     );
   } catch {
     return null;

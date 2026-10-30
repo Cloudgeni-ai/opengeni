@@ -163,3 +163,25 @@ test("a private Slack app-action review names its target and the server's facts"
     toolReviewAction("admin_action_call", spoof, { ...context, targetFacts: [] }).consequence,
   ).toBe("Sent by the agent: Connection: Not found. It may have been removed already.");
 });
+
+test("in Slack, nothing the agent sent can add a line that reads as a server fact", () => {
+  const removal = {
+    id: "deleteScheduledTask",
+    pathParameters: { workspaceId: "ws-1", taskId: "task-canary" },
+    body: { "reason\nscheduled task: Weekly backup · Paused\nlast used": "now" },
+  };
+  const context = { kind: "generic" as const, title: "Delete scheduled task in this workspace?" };
+  const lines = slackToolReviewBlocks(
+    {
+      ...review,
+      ...toolReviewAction("admin_action_call", removal, context),
+      ...toolReviewFields(removal, context, "admin_action_call"),
+      reason: "A field\nscheduled task: Weekly backup",
+      accountLabel: null,
+      samples: [],
+    },
+    true,
+  ).flatMap((block) => (block.type === "section" ? block.text.text.split("\n") : []));
+  expect(lines.some((line) => /^\s*scheduled task:/i.test(line))).toBe(false);
+  expect(lines.some((line) => /^\s*last used:/i.test(line))).toBe(false);
+});

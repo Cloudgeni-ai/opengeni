@@ -13,7 +13,7 @@ import {
   type Database,
 } from "./database";
 import { connectionSubjectVisibility } from "./connection-metadata";
-import { getRig } from "./index";
+import { getManagedUserProfilesByIds, getRig } from "./index";
 import { listOrganizationMcpConnections } from "./mcp-oauth";
 import {
   getOrganizationInvitationForAdministration,
@@ -50,7 +50,7 @@ export async function resolveAppActionTargets(
   },
   args: unknown,
 ): Promise<AppActionTargets> {
-  const call = appActionCallPathIds(args);
+  const call = appActionCallPathIds(args, scope.workspaceId);
   const subjectId = scope.subjectId;
   if (!call || !subjectId) return {};
   const segments = call.entry.path.split("/");
@@ -806,13 +806,20 @@ const workspaceMemberLookup: Lookup = async (where) => {
       .limit(1);
     return found ?? null;
   });
-  return row
-    ? {
-        kind: "member",
-        name: row.label?.trim() || "A member without a name",
-        facts: facts(["Role", roleName(row.role)], ["Member since", targetDay(row.createdAt)]),
-      }
-    : missing("member");
+  if (!row) return missing("member");
+  // Named as the members list names them: their profile, then the saved label.
+  const [profile] = where.id.startsWith("user:")
+    ? await getManagedUserProfilesByIds(where.db, [where.id.slice("user:".length)])
+    : [];
+  return {
+    kind: "member",
+    name:
+      profile?.name?.trim() ||
+      profile?.email?.trim() ||
+      row.label?.trim() ||
+      "A member without a name",
+    facts: facts(["Role", roleName(row.role)], ["Member since", targetDay(row.createdAt)]),
+  };
 };
 
 /** The chat's own organization, read through its member routines as the person the chat acts for. */
@@ -841,7 +848,8 @@ const organizationMemberLookup = organizationRoutine(
   "member",
   async (db, { organizationId, actorSubjectId, id }) =>
     (await listOrganizationMembers(db, { organizationId, actorSubjectId })).find(
-      (member) => member.id === id,
+      // Ids are UUIDs, matched as the route's SQL matches them: in any case.
+      (member) => member.id.toLowerCase() === id.toLowerCase(),
     ),
   (row) => ({
     kind: "member",
@@ -1317,8 +1325,10 @@ const subscriptionAccountLookup: Lookup = async (where) => {
 const githubInstallationLookup: Lookup = async (where) => {
   const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "github:use");
   // As the route reads it: digits, as a number ("0042" is installation 42).
-  if (!/^[0-9]{1,15}$/.test(where.id)) return missing("GitHub installation");
+  if (!/^[0-9]+$/.test(where.id)) return missing("GitHub installation");
   const installationId = Number(where.id);
+  // An id the route refuses names nothing.
+  if (!Number.isSafeInteger(installationId) || installationId <= 0) unresolved();
   const row = await asPersonIn(where, workspaceId, async (db) => {
     const [found] = await db
       .select({

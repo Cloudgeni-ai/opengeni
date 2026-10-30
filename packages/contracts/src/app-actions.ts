@@ -267,14 +267,30 @@ export function appActionTargetParameter(entry: ActionCatalogEntry): string | un
   return [...entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)].at(-1)?.[1];
 }
 
+/**
+ * The call's path parameters as the app sends them: a route under a
+ * workspace that the call leaves out runs in the chat's own workspace.
+ */
+function sentPathParameters(
+  entry: ActionCatalogEntry,
+  call: Record<string, unknown> | null,
+  chatWorkspaceId: string | undefined,
+): Record<string, unknown> | null {
+  const path = record(call?.pathParameters);
+  return chatWorkspaceId && entry.path.includes(":workspaceId") && !path?.workspaceId
+    ? { ...path, workspaceId: chatWorkspaceId }
+    : path;
+}
+
 /** The path parameters of an admin_action_call's action, with the values the call gave. */
 export function appActionCallPathIds(
   args: unknown,
+  chatWorkspaceId?: string,
 ): { entry: ActionCatalogEntry; ids: Record<string, string> } | undefined {
   const call = callArguments(args);
   const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
   if (!entry) return undefined;
-  const path = record(call?.pathParameters);
+  const path = sentPathParameters(entry, call, chatWorkspaceId);
   const ids: Record<string, string> = {};
   for (const [, name] of entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)) {
     const value = path?.[name!];
@@ -326,7 +342,7 @@ export function appActionTargetFacts(
   here: { workspaceId: string; sessionId: string },
   targets: AppActionTargets | undefined,
 ): Array<{ label: string; value: string }> {
-  const call = appActionCallPathIds(args);
+  const call = appActionCallPathIds(args, here.workspaceId);
   if (!call || !targets) return [];
   const parameter = appActionTargetParameter(call.entry);
   // What the question already says isn't said again.
@@ -378,7 +394,7 @@ export function appActionConfirmationTitle(
   const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
   if (!entry) return "Make this change in the app?";
   const body = record(call?.body);
-  const path = record(call?.pathParameters);
+  const path = sentPathParameters(entry, call, here.workspaceId);
   const targetName = (parameter: string) => plainName(targets?.[parameter]?.name);
   const named = (parameter: string, kind: string, otherwise: string) => {
     const label = targets?.[parameter] ? targetLabel(targets[parameter]!) : undefined;

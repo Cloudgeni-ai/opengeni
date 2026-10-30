@@ -848,6 +848,12 @@ const APP_ACTION_CODED_FIELDS: Readonly<
   },
 };
 
+/** A sent key as a one-line label: the agent's text can't start another line. */
+const sentLabel = (key: string) =>
+  toolReviewFieldLabel(key)
+    .replace(/[\s\p{Cc}\u2028\u2029]+/gu, " ")
+    .trim();
+
 /**
  * One short readable line of an app action's key values, for example
  * "Email: anna@example.com · Role: admin", taken from its body and query.
@@ -863,7 +869,7 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
   const visit = (key: string, value: unknown, depth: number) => {
     if (parts.length >= 4 || APP_ACTION_UNREADABLE_KEY.test(key)) return;
     if (secretFieldName(key)) {
-      parts.push(`${toolReviewFieldLabel(key)}: [Protected value]`);
+      parts.push(`${sentLabel(key)}: [Protected value]`);
       return;
     }
     const coded = Object.hasOwn(APP_ACTION_CODED_FIELDS, key)
@@ -890,7 +896,7 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
         ? shown(value)
         : "";
     const line = text.replace(/\s+/g, " ").trim();
-    if (line) parts.push(`${toolReviewFieldLabel(key)}: ${bound(line, 80)}`);
+    if (line) parts.push(`${sentLabel(key)}: ${bound(line, 80)}`);
   };
   for (const source of [args.body, args.query]) {
     if (source && typeof source === "object" && !Array.isArray(source))
@@ -1119,7 +1125,9 @@ export function toolReviewDetails(
       all.push({
         label: "Action",
         value: bound(
-          /^[a-z][A-Za-z0-9]*$/.test(action) ? toolReviewFieldLabel(action) : action,
+          /^[a-z][A-Za-z0-9]*$/.test(action.trim())
+            ? toolReviewFieldLabel(action.trim())
+            : action.trim().replace(/\s+/g, " "),
           4000,
         ),
         truncated: false,

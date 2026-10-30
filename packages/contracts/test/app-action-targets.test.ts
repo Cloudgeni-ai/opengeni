@@ -9,7 +9,11 @@ import {
   findAppAction,
   type AppActionTargets,
 } from "../src/app-actions";
-import { toolReviewDetails, toolReviewFields } from "../src/tool-review-presentation";
+import {
+  toolReviewAction,
+  toolReviewDetails,
+  toolReviewFields,
+} from "../src/tool-review-presentation";
 
 const here = { workspaceId: "ws-1", sessionId: "chat-1" };
 const gmailId = "e6b94031-0000-4000-8000-000000000001";
@@ -371,4 +375,32 @@ test("ids are read exactly as sent; padded or percent-encoded ones stay unread",
   });
   expect(appActionCallPathIds(call(` ${gmailId}`))?.ids).toEqual({ workspaceId: "ws-1" });
   expect(appActionCallPathIds(call("a%3Ab"))?.ids).toEqual({ workspaceId: "ws-1" });
+});
+
+test("a call that leaves out its workspace runs in the chat's, and reads so", () => {
+  const call = { id: "deleteConnection", pathParameters: { connectionId: gmailId } };
+  expect(appActionCallPathIds(call, "ws-1")?.ids).toEqual({
+    workspaceId: "ws-1",
+    connectionId: gmailId,
+  });
+  expect(appActionConfirmationTitle(call, here)).toBe("Delete connection in this workspace?");
+  expect(appActionConfirmationTitle(call, here, gmail)).toBe(
+    appActionConfirmationTitle(removeGmail, here, gmail),
+  );
+  expect(
+    appActionConfirmationTitle(
+      { id: "deleteSession", pathParameters: { sessionId: "chat-1" } },
+      here,
+    ),
+  ).not.toContain("another");
+});
+
+test("a sent key can't start a line of its own", () => {
+  const consequence = toolReviewAction("admin_action_call", {
+    id: "deleteConnection",
+    pathParameters: { workspaceId: "ws-1", connectionId: gmailId },
+    body: { "reason\nscheduled task: Weekly backup\u2028last used": "now" },
+  }).consequence;
+  expect(consequence).toStartWith("Sent by the agent: Reason scheduled task");
+  expect(consequence).not.toMatch(/[\n\r\u2028\u2029]/u);
 });

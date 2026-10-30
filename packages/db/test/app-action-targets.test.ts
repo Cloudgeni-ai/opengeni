@@ -985,11 +985,50 @@ test("ids are read as their routes read them; the organization's custom models a
     id: "unlinkGitHubInstallation",
     pathParameters: { workspaceId: org.workspaceId, installationId },
   });
-  for (const id of ["42", "0042"]) {
+  for (const id of ["42", "0042", "0000000000000042"]) {
     expect(
       (await resolveAppActionTargets(client.db, scope, unlink(id))).installationId,
     ).toMatchObject({ name: "acme" });
   }
+  // One the route refuses (beyond a safe integer) names nothing.
+  expect(await resolveAppActionTargets(client.db, scope, unlink("9".repeat(20)))).toEqual({});
+  // A call that leaves out its workspace runs in the chat's, as the app sends it.
+  expect(
+    (
+      await resolveAppActionTargets(client.db, scope, {
+        id: "unlinkGitHubInstallation",
+        pathParameters: { installationId: "42" },
+      })
+    ).installationId,
+  ).toMatchObject({ name: "acme" });
+  // Members are named as the members list names them, by their profile; a
+  // membership id matches in any case, as the route's SQL matches it.
+  await shared!.admin`
+    insert into auth_users (id, name, email, email_verified)
+    values (${owner.slice("user:".length)}, 'Anna Berg', 'anna@cloudgeni.ai', true)`;
+  expect(
+    (
+      await resolveAppActionTargets(client.db, scope, {
+        id: "removeWorkspaceMember",
+        pathParameters: { workspaceId: org.workspaceId, subjectId: owner },
+      })
+    ).subjectId,
+  ).toMatchObject({ kind: "member", name: "Anna Berg" });
+  const [membership] = await shared!.admin<{ id: string }[]>`
+    select id from organization_memberships
+    where account_id = ${org.accountId} and subject_id = ${owner}`;
+  const updateMember = (membershipId: string) => ({
+    id: "updateOrganizationMember",
+    pathParameters: { organizationId: org.accountId, membershipId },
+    body: { role: "admin" },
+  });
+  const lower = (await resolveAppActionTargets(client.db, scope, updateMember(membership!.id)))
+    .membershipId;
+  expect(lower).toMatchObject({ kind: "member", facts: [{ label: "Role", value: "Owner" }] });
+  expect(
+    (await resolveAppActionTargets(client.db, scope, updateMember(membership!.id.toUpperCase())))
+      .membershipId,
+  ).toEqual(lower!);
   // An id the route decodes again, or one padded with spaces, may be another
   // record than it reads as: it's left unread, never "not found".
   for (const subjectId of [encodeURIComponent(owner), ` ${owner}`]) {
