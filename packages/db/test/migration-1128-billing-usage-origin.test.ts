@@ -48,18 +48,21 @@ beforeAll(async () => {
     if (requireRealDatabase) throw new Error("PostgreSQL fixture is unavailable");
     return;
   }
-  // A database that already ran every other shipped migration, main's 1115
-  // included, then upgrades to the release that adds ours.
+  // A database that already ran every shipped migration before ours, main's
+  // 1115 included, then upgrades to the release that adds ours (and any later
+  // migration that builds on it).
   directory = await mkdtemp(join(tmpdir(), "og-migration-1128-"));
   const files = (await readdir(SHIPPED)).filter((file) => file.endsWith(".sql")).sort();
   ours = files.find((file) => file.endsWith("_billing_usage_origin.sql")) ?? "";
   if (!ours) throw new Error("the billing-origin migration is missing");
   for (const file of files) {
-    if (file !== ours) await symlink(join(SHIPPED, file), join(directory, file));
+    if (file < ours) await symlink(join(SHIPPED, file), join(directory, file));
   }
   await migrate(owned.ownerUrl, undefined, { migrationsDirectory: directory });
   beforeOurs = await definitions();
-  await symlink(join(SHIPPED, ours), join(directory, ours));
+  for (const file of files) {
+    if (file >= ours) await symlink(join(SHIPPED, file), join(directory, file));
+  }
   await migrate(owned.ownerUrl, undefined, { migrationsDirectory: directory });
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
   const appUrl = new URL(owned.ownerUrl);
