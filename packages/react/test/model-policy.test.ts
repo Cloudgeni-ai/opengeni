@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { ClientModelResidencyV1 } from "@opengeni/contracts";
+import {
+  DirectModelProvider,
+  directModelProviderOfProviderId,
+  type ClientModelResidencyV1,
+} from "@opengeni/contracts";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
@@ -301,6 +305,22 @@ describe("model-policy", () => {
     );
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(englishText, deploymentModel)).toBe("Free in this deployment");
+  });
+
+  test("bills every kind of workspace direct model connection to the workspace", () => {
+    const providerIds = [
+      "workspace-openai-c1",
+      "workspace-azure-openai-c2",
+      "workspace-compatible-c3",
+    ];
+    // The picker inlines these prefixes; every direct provider kind must be covered.
+    expect(providerIds.map((id) => directModelProviderOfProviderId(id)).sort()).toEqual(
+      [...DirectModelProvider.options].sort(),
+    );
+    for (const provider of providerIds) {
+      const model = catalogModel({ id: `${provider}/some-model`, label: "Some model", provider });
+      expect(billingClassForModel(model)).toBe("byok");
+    }
   });
 
   test("keeps workspace and organization Opper billing separate from deployment Opper", () => {
