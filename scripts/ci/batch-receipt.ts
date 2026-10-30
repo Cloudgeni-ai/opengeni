@@ -196,19 +196,48 @@ export async function findFinalSha(
   return null;
 }
 
+/** Waits between attempts of a read that hit a transient failure. */
+export const RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+
+/**
+ * One read, retried after a network error, a timeout, a 5xx or a 429 so a
+ * passing GitHub blip does not cost a batch its receipt. Each attempt gets a
+ * fresh timeout. The last attempt's response or error is returned or thrown,
+ * so persistent failures still read as unreadable evidence.
+ */
+export async function retryingFetch(
+  fetcher: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt >= RETRY_DELAYS_MS.length;
+    try {
+      const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (last || (response.status < 500 && response.status !== 429)) return response;
+      await response.body?.cancel();
+    } catch (error) {
+      if (last) throw error;
+    }
+    await sleep(RETRY_DELAYS_MS[attempt]!);
+  }
+}
+
 /** GitHub reads with complete pagination; any gap throws. */
 export function githubReads(
   repository: string,
   token: string,
   fetcher: typeof fetch = fetch,
+  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
 ): Reads {
   const api = `https://api.github.com/repos/${repository}`;
   const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
+  const read = (url: string, init: RequestInit, timeoutMs: number) =>
+    retryingFetch(fetcher, url, init, timeoutMs, sleep);
   const get = async (path: string): Promise<Row> => {
-    const response = await fetcher(`${api}/${path}`, {
-      headers,
-      signal: AbortSignal.timeout(30_000),
-    });
+    const response = await read(`${api}/${path}`, { headers }, 30_000);
     if (!response.ok) throw new Error(`GitHub ${response.status} for ${path}`);
     return (await response.json()) as Row;
   };
@@ -250,14 +279,14 @@ export function githubReads(
       );
       if (artifacts.length !== 1) return null;
       // The archive URL redirects to signed storage, which must not get the token.
-      const redirect = await fetcher(artifacts[0]!.archive_download_url, {
-        headers,
-        redirect: "manual",
-        signal: AbortSignal.timeout(30_000),
-      });
+      const redirect = await read(
+        artifacts[0]!.archive_download_url,
+        { headers, redirect: "manual" },
+        30_000,
+      );
       const location = redirect.headers.get("location");
       if (redirect.status !== 302 || !location) return null;
-      const archive = await fetcher(location, { signal: AbortSignal.timeout(60_000) });
+      const archive = await read(location, {}, 60_000);
       if (!archive.ok) return null;
       const directory = mkdtempSync(join(tmpdir(), "batch-receipt-"));
       try {

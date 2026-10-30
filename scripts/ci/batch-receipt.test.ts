@@ -8,6 +8,7 @@ import {
   githubReads,
   outputs,
   REQUIRED_BATCH_JOBS,
+  RETRY_DELAYS_MS,
   type LocalPush,
   type Reads,
 } from "./batch-receipt";
@@ -309,9 +310,48 @@ describe("githubReads", () => {
     expect(await githubReads(REPO, "t", fetcher).mainCommitWithTree(sha(0x42))).toBeNull();
   });
 
-  test("an API error throws, which the entry point turns into a full run", async () => {
-    const fetcher = (async () => response({ message: "nope" }, 502)) as unknown as typeof fetch;
-    await expect(githubReads(REPO, "t", fetcher).runs(`batch/${ID}`)).rejects.toThrow("GitHub 502");
+  test("an API error that persists through the retries throws, which the entry point turns into a full run", async () => {
+    let calls = 0;
+    const slept: number[] = [];
+    const fetcher = (async () => {
+      calls++;
+      return response({ message: "nope" }, 502);
+    }) as unknown as typeof fetch;
+    const reads = githubReads(REPO, "t", fetcher, async (ms) => void slept.push(ms));
+    await expect(reads.runs(`batch/${ID}`)).rejects.toThrow("GitHub 502");
+    expect(calls).toBe(RETRY_DELAYS_MS.length + 1);
+    expect(slept).toEqual(RETRY_DELAYS_MS);
+  });
+
+  test("transient 5xx, 429 and network errors are retried with a fresh timeout each time", async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const failures: (() => Response)[] = [
+      () => response({ message: "bad gateway" }, 502),
+      () => {
+        throw new TypeError("socket closed");
+      },
+      () => response({ message: "slow down" }, 429),
+    ];
+    const fetcher = (async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal);
+      const fail = failures.shift();
+      return fail ? fail() : response([{ sha: sha(0xc2), commit: { tree: { sha: TREES[2] } } }]);
+    }) as unknown as typeof fetch;
+    const reads = githubReads(REPO, "t", fetcher, async () => {});
+    expect(await reads.mainCommitWithTree(TREES[2]!)).toBe(sha(0xc2));
+    expect(signals).toHaveLength(4);
+    expect(new Set(signals).size).toBe(4);
+  });
+
+  test("a client error is not retried", async () => {
+    let calls = 0;
+    const fetcher = (async () => {
+      calls++;
+      return response({ message: "not found" }, 404);
+    }) as unknown as typeof fetch;
+    const reads = githubReads(REPO, "t", fetcher, async () => {});
+    await expect(reads.commit(sha(0x1))).rejects.toThrow("GitHub 404");
+    expect(calls).toBe(1);
   });
 
   test("a missing, duplicated, foreign or expired impact plan reads as no plan", async () => {
@@ -363,7 +403,7 @@ describe("githubReads", () => {
         });
       return new Response(null, { status: 500 });
     }) as unknown as typeof fetch;
-    expect(await githubReads(REPO, "t", fetcher).planMode(900, TIP)).toBeNull();
+    expect(await githubReads(REPO, "t", fetcher, async () => {}).planMode(900, TIP)).toBeNull();
     expect(calls.find((call) => call.url === "https://storage.example/zip")?.auth).toBeNull();
     expect(calls.find((call) => call.url === "https://api.github.com/archive")?.auth).toBe(
       "Bearer t",
@@ -372,7 +412,9 @@ describe("githubReads", () => {
 
   test("an unreachable listing throws, which the entry point turns into a full run", async () => {
     const fetcher = (async () => response({ message: "nope" }, 503)) as unknown as typeof fetch;
-    await expect(githubReads(REPO, "t", fetcher).jobs(900)).rejects.toThrow("GitHub 503");
+    await expect(githubReads(REPO, "t", fetcher, async () => {}).jobs(900)).rejects.toThrow(
+      "GitHub 503",
+    );
   });
 });
 
