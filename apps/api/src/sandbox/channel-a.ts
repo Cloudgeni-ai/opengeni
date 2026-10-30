@@ -20,13 +20,11 @@
 import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
-  hasGitHubRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -734,10 +732,7 @@ async function withChannelAOperation<T>(
       : settings;
   const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
-    );
+    applyGitAuthPointerEnvironment(environment);
   }
 
   const runEstablished = async (

@@ -1,6 +1,7 @@
 import {
   applyGitAuthPointerEnvironment,
   codemodeWorkspaceUrl,
+  collectGitIdentityEnvironment,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -32,6 +33,7 @@ export type ConnectionScope = {
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 export type GitTokenExpiries = Partial<Record<GitCredentialProvider, string>>;
+export type GitCommitIdentity = { name: string; email: string };
 export type GitCredentialBindingSeed = {
   credentialBindingId: string;
   provider: GitCredentialProvider;
@@ -39,6 +41,14 @@ export type GitCredentialBindingSeed = {
   transport?: GitCredentialTransport;
   expiresAt?: string;
   providerBindingCount?: number;
+  /**
+   * Commit identity for the repositories behind this binding. The repository
+   * clone hook writes it into each repository's local Git config, so one
+   * session can commit as the GitHub App bot in one repository and as the
+   * person's own GitHub account in another. Absent: the repository uses the
+   * box-wide default (a deployment-configured identity, when present).
+   */
+  identity?: GitCommitIdentity;
 };
 export type MintedRunGitCredentials = {
   bindings: GitCredentialBindingSeed[];
@@ -159,9 +169,11 @@ export async function sandboxEnvironmentForRun(
   // and returned separately as provider token seeds; the caller threads them
   // OFF-MANIFEST as clone-seed exec env vars so the clone hook writes stable token
   // files. The manifest carries only stable pointers (GIT_ASKPASS,
-  // GIT_TERMINAL_PROMPT, identity, OPENGENI_GIT_CREDENTIALS_DIR, and
+  // GIT_TERMINAL_PROMPT, OPENGENI_GIT_CREDENTIALS_DIR, and
   // OPENGENI_GIT_TOKEN_FILE), so token VALUES never ride the manifest and the SDK's
   // per-turn provided-session env delta stays empty even though tokens rotate.
+  // Per-repository commit identity rides each binding to the clone hook, which
+  // writes it into the repository's local Git config.
   // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias. The worker
   // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
@@ -205,10 +217,9 @@ export async function sandboxEnvironmentForRun(
     };
   }
   if (options.deferGitHubToken) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      await resolveRunGitIdentityWithSelections(settings, selections, options),
-    );
+    // Commit identity is per repository and travels with each minted binding
+    // to the clone hook, so the lazy path needs no identity lookup up front.
+    applyGitAuthPointerEnvironment(environment);
     return {
       environment,
       ...(codemodeToken
@@ -234,7 +245,7 @@ export async function sandboxEnvironmentForRun(
   // surface (viewer attach, channel-A) declares the IDENTICAL env when it
   // cold-creates the box for a repo-attached session — an attach-warmed box
   // missing these keys kills the next repo turn on the SDK's manifest-env guard.
-  applyGitAuthPointerEnvironment(environment, minted.identity);
+  applyGitAuthPointerEnvironment(environment);
   return {
     environment,
     ...(minted.gitTokens.github ? { gitToken: minted.gitTokens.github } : {}),
@@ -311,18 +322,6 @@ export async function mintRunGitToken(
   return (await mintRunGitTokens(settings, resources, options))?.github;
 }
 
-export async function resolveRunGitIdentity(
-  settings: Settings,
-  resources: ResourceRef[],
-  options: RunGitCredentialOptions = {},
-): Promise<{ name: string; email: string } | null> {
-  const selections = gitCredentialSelections(resources);
-  if (selections.length === 0) {
-    return null;
-  }
-  return await resolveRunGitIdentityWithSelections(settings, selections, options);
-}
-
 async function mintRunGitTokensWithIdentity(
   settings: Settings,
   selections: GitCredentialSelection[],
@@ -331,11 +330,10 @@ async function mintRunGitTokensWithIdentity(
   bindings: GitCredentialBindingSeed[];
   gitTokens: GitTokenSeeds;
   expiresAt: GitTokenExpiries;
-  identity: { name: string; email: string } | null;
 }> {
   const bindings: GitCredentialBindingSeed[] = [];
-  let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
+    let identity: GitCommitIdentity | null = null;
     let token: string | null = null;
     let transport: GitCredentialTransport | undefined;
     let tokenExpiresAt: string | undefined;
@@ -380,11 +378,7 @@ async function mintRunGitTokensWithIdentity(
       tokenExpiresAt = minted.expiresAt
         ? validatedGitCredentialExpiry(selection.provider, minted.expiresAt)
         : undefined;
-      if (minted.identity) {
-        identity = mergeGitIdentity(identity, minted.identity);
-      } else if (selection.provider === "github") {
-        identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
-      }
+      identity = repositoryCommitIdentity(settings, selection, minted.identity ?? null);
     } else if (selection.provider === "github" && selection.installationId > 0) {
       const minted = await createGitHubAppInstallationTokenWithExpiry(settings, {
         installationId: selection.installationId,
@@ -394,7 +388,7 @@ async function mintRunGitTokensWithIdentity(
       tokenExpiresAt = minted.expiresAt
         ? validatedGitCredentialExpiry("github", minted.expiresAt)
         : undefined;
-      identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
+      identity = repositoryCommitIdentity(settings, selection, null);
     }
     if (token) {
       bindings.push({
@@ -403,6 +397,7 @@ async function mintRunGitTokensWithIdentity(
         token,
         ...(transport ? { transport } : {}),
         ...(tokenExpiresAt ? { expiresAt: tokenExpiresAt } : {}),
+        ...(identity ? { identity } : {}),
       });
     }
   }
@@ -419,7 +414,7 @@ async function mintRunGitTokensWithIdentity(
     gitTokens[binding.provider] = binding.token;
     if (binding.expiresAt) expiresAt[binding.provider] = binding.expiresAt;
   }
-  return { bindings, gitTokens, expiresAt, identity };
+  return { bindings, gitTokens, expiresAt };
 }
 
 function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: string): string {
@@ -550,37 +545,6 @@ export function assertGitCredentialRenewalTransportUnchanged(
       `renewed ${initial.provider} credential changed Git HTTP broker routes for binding ${initial.credentialBindingId}`,
     );
   }
-}
-
-async function resolveRunGitIdentityWithSelections(
-  settings: Settings,
-  selections: GitCredentialSelection[],
-  options: RunGitCredentialOptions,
-): Promise<{ name: string; email: string } | null> {
-  let identity: { name: string; email: string } | null = null;
-  for (const selection of selections) {
-    const gitCredentials = credentialsForSelection(options, selection);
-    assertPersonalGitHubConsumerAvailable(selection, gitCredentials, options.scope);
-    if (gitCredentials && options.scope) {
-      const request = gitCredentialsRequestForSelection(
-        options.scope,
-        requireGitCredentialAuthority(options),
-        selection,
-        "identity",
-      );
-      const resolved: GitCredentials = await gitCredentials(request);
-      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
-      assertGitCredentialBindingEcho(selection, request, resolved);
-      if (resolved.identity) {
-        identity = mergeGitIdentity(identity, resolved.identity);
-      } else if (selection.provider === "github") {
-        identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
-      }
-    } else if (selection.provider === "github" && selection.installationId > 0) {
-      identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
-    }
-  }
-  return identity;
 }
 
 type GitCredentialSelection = {
@@ -829,19 +793,38 @@ function assertPersonalGitHubConsumerAvailable(
   }
 }
 
-function mergeGitIdentity(
-  current: { name: string; email: string } | null,
-  candidate: { name: string; email: string } | null,
-): { name: string; email: string } | null {
-  if (!candidate) return current;
-  if (
-    current &&
-    (current.name !== candidate.name ||
-      current.email.toLowerCase() !== candidate.email.toLowerCase())
-  ) {
-    throw new Error("repository resources require different Git commit identities");
+/**
+ * The commit identity one binding's repositories use.
+ *
+ * - A personal GitHub repository commits as the person: the identity the
+ *   personal Git broker returns (`<id>+<login>@users.noreply.github.com`). A
+ *   deployment-configured identity never overrides it; that is the point of
+ *   working through the person's own account.
+ * - A GitHub App (or host-brokered) repository keeps today's precedence: a
+ *   deployment-configured identity (OPENGENI_GIT_*) wins and is applied
+ *   box-wide from the manifest env, so no per-repository identity is written;
+ *   otherwise the host-provided identity, else the GitHub App bot identity.
+ */
+export function repositoryCommitIdentity(
+  settings: Settings,
+  selection: Pick<GitCredentialSelection, "provider" | "personalGitHub">,
+  providedIdentity: GitCommitIdentity | null,
+): GitCommitIdentity | null {
+  const usable = (identity: GitCommitIdentity | null | undefined): GitCommitIdentity | null =>
+    identity && identity.name.trim() && identity.email.trim()
+      ? { name: identity.name.trim(), email: identity.email.trim() }
+      : null;
+  if (selection.personalGitHub) {
+    return usable(providedIdentity);
   }
-  return current ?? candidate;
+  const deployment = collectGitIdentityEnvironment(settings);
+  if (deployment.GIT_AUTHOR_NAME || deployment.GIT_AUTHOR_EMAIL) {
+    return null;
+  }
+  return (
+    usable(providedIdentity) ??
+    (selection.provider === "github" ? usable(githubAppBotIdentity(settings)) : null)
+  );
 }
 
 function normalizedGitHost(uri: string): string {
