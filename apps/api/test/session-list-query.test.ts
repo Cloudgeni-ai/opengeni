@@ -63,6 +63,28 @@ describe("session list sorting and archive query", () => {
     expect(() => sessionListQuery({ mineOnly: "true" }, false)).toThrow();
   });
 
+  test("selects at most 200 session ids as a page filter", () => {
+    const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    expect(
+      sessionListQuery({ sessionIds: `${id(1)},${id(2)},${id(1)}`, search: "fix" }),
+    ).toMatchObject({ sessionIds: [id(1), id(2)], search: "fix", hasPageFilters: true });
+    expect(sessionListQuery({ sessionIds: id(1).toUpperCase() }).sessionIds).toEqual([id(1)]);
+    expect(
+      sessionListQuery({ sessionIds: Array.from({ length: 200 }, (_, n) => id(n)).join(",") })
+        .sessionIds,
+    ).toHaveLength(200);
+    expect(sessionListQuery({}).sessionIds).toBeUndefined();
+    for (const query of [
+      { sessionIds: "" },
+      { sessionIds: `${id(1)},` },
+      { sessionIds: "not-a-session" },
+      { sessionIds: Array.from({ length: 201 }, (_, n) => id(n)).join(",") },
+      { sessionIds: id(1), pinsOnly: "true" },
+    ])
+      expect(() => sessionListQuery(query)).toThrow();
+    expect(() => sessionListQuery({ sessionIds: id(1) }, false)).toThrow();
+  });
+
   test("accepts each sorting/archive mode and retains legacy defaults", () => {
     for (const sortBy of ["name", "createdAt", "updatedAt"]) {
       for (const archiveStatus of ["active", "archived", "all"]) {
