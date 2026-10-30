@@ -608,12 +608,14 @@ async function startMcpOAuthWithinDeadline(
   const resource = discovery.resource;
   const verifier = randomPkceVerifier();
   // A profile's exact scope override wins outright: the reviewed connector
-  // never lets a caller widen the capability contract.
+  // never lets a caller widen the capability contract. An incremental profile
+  // adds access only when reconnecting an existing account.
   const authorizeScopes = chooseProfileAuthorizeScopes(profile, {
     requested: context.payload.requestedScopes,
     challenged: discovery.challenge.scope,
     supported: discovery.prm.scopesSupported,
     authorizationServerScopesSupported: stringArray(discovery.as.raw.scopes_supported),
+    ...(existing ? { reconnectGrantedScopes: existing.grantedScopes } : {}),
   });
   const client = await deadline.run("client_registration", (signal) =>
     registerOAuthClient(
@@ -3285,6 +3287,7 @@ export function chooseMcpAuthorizeScopes(input: {
   challenged: string[] | undefined;
   supported: string[];
   authorizationServerScopesSupported?: string[];
+  reconnectGrantedScopes?: readonly string[];
 }): string[] {
   const profile = builtInOAuthProfileFor({ mcpUrl: input.mcpUrl }) ?? DEFAULT_OAUTH_PROFILE;
   return chooseProfileAuthorizeScopes(profile, input);
@@ -3297,13 +3300,35 @@ function chooseProfileAuthorizeScopes(
     challenged: string[] | undefined;
     supported: string[];
     authorizationServerScopesSupported?: string[];
+    /** The existing account's grants; present only when reconnecting it. */
+    reconnectGrantedScopes?: readonly string[];
   },
 ): string[] {
   // Reviewed profiles keep their exact scope contract. A generic long-running
   // connector also needs the AS-advertised refresh grant: the MCP resource's
   // challenge often advertises only its resource permission (e.g. mcp:use).
-  if (profile.requestedScopes) return [...profile.requestedScopes];
-  const scopes = chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
+  if (profile.requestedScopes) {
+    const incremental = profile.incrementalScopes;
+    if (!incremental || !input.reconnectGrantedScopes) return [...profile.requestedScopes];
+    // Keep what the account already holds and add what the reconnect asked
+    // for, both bounded by the reviewed list; a first connection never widens.
+    const wanted = new Set([...input.reconnectGrantedScopes, ...(input.requested ?? [])]);
+    return uniqueStrings([
+      ...profile.requestedScopes,
+      ...incremental.filter((scope) => wanted.has(scope)),
+    ]);
+  }
+  // Reconnecting with more access (step-up) keeps what the account already
+  // holds: asking for only the new scope would narrow the account's grant.
+  const stepUp = input.reconnectGrantedScopes && input.requested?.length;
+  const scopes = stepUp
+    ? uniqueStrings([
+        ...(input.reconnectGrantedScopes?.length
+          ? input.reconnectGrantedScopes
+          : chooseAuthorizeScopes(undefined, input.challenged, input.supported)),
+        ...(input.requested ?? []),
+      ])
+    : chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
   return input.authorizationServerScopesSupported?.includes("offline_access")
     ? uniqueStrings([...scopes, "offline_access"])
     : scopes;

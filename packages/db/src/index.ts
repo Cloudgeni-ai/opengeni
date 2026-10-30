@@ -88435,6 +88435,11 @@ export type EnqueueCapabilitySetupContinuationInput = {
   workspaceId: string;
   sessionId: string;
   capabilityId: string;
+  /**
+   * The card is a connected account's own notice (expired access, more access
+   * a tool needs) rather than a capability card: find it by this connection.
+   */
+  connectionId?: string;
   /** The live catalog's name for the capability, shown to the agent. */
   capabilityName: string;
   /**
@@ -88488,19 +88493,7 @@ export async function enqueueCapabilitySetupContinuation(
 ): Promise<EnqueueCapabilitySetupContinuationResult> {
   const read = await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
     const tx = scoped as unknown as Database;
-    const [card] = await tx
-      .select({ id: schema.sessionEvents.id, sequence: schema.sessionEvents.sequence })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, input.workspaceId),
-          eq(schema.sessionEvents.sessionId, input.sessionId),
-          eq(schema.sessionEvents.type, "tool.auth_needed"),
-          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
-        ),
-      )
-      .orderBy(desc(schema.sessionEvents.sequence))
-      .limit(1);
+    const [card] = await latestAuthCardTx(tx, input);
     if (!card) return { kind: "skip", reason: "no_card" } as const;
     const [existing] = await tx
       .select()
@@ -88661,6 +88654,58 @@ export async function enqueueCapabilitySetupContinuation(
     }
     throw error;
   }
+}
+
+/** The latest card the continuation answers: a capability card, or an account's own. */
+async function latestAuthCardTx(
+  tx: Database,
+  input: Pick<
+    EnqueueCapabilitySetupContinuationInput,
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+  >,
+): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  return await tx
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "tool.auth_needed"),
+        input.connectionId
+          ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
+          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1);
+}
+
+/**
+ * The latest auth notice this chat showed for one connected account, so the
+ * caller can check the account now has what the notice asked for before it
+ * continues the request. Null when the chat showed none.
+ */
+export async function latestConnectionAuthNotice(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; connectionId: string },
+): Promise<{ id: string; payload: Record<string, unknown> } | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const [card] = await latestAuthCardTx(scoped as unknown as Database, {
+      ...input,
+      capabilityId: "",
+    });
+    if (!card) return null;
+    const payload =
+      card.payload && typeof card.payload === "object" && !Array.isArray(card.payload)
+        ? (card.payload as Record<string, unknown>)
+        : {};
+    return { id: card.id, payload };
+  });
 }
 
 async function userMessageAfterSequenceTx(

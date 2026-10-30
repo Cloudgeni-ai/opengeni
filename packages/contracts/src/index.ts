@@ -8690,13 +8690,25 @@ export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPol
  * server finds the latest card for this capability, checks the capability is
  * now usable in the chat and that the person has not written since, and then
  * wakes the agent once so it continues the request that needed it.
+ *
+ * `connectionId` instead names a connected account's own card (expired access,
+ * or more access a tool needs) that the person just reconnected or allowed:
+ * the server finds the latest card for that account and checks the account is
+ * active with the access the card asked for.
  */
 export const ContinueAfterCapabilitySetupRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      capabilityId: z.string().trim().min(1).max(512),
-    })
-    .strict(),
+  z.union([
+    z
+      .object({
+        capabilityId: z.string().trim().min(1).max(512),
+      })
+      .strict(),
+    z
+      .object({
+        connectionId: z.string().trim().min(1).max(512),
+      })
+      .strict(),
+  ]),
 );
 export type ContinueAfterCapabilitySetupRequest = z.infer<
   typeof ContinueAfterCapabilitySetupRequest

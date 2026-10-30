@@ -10,6 +10,7 @@ import {
   ConnectOperationRequest,
   ConnectProvider,
   ConnectAccount,
+  connectProviderAcceptsRequestedScopes,
   preparedMcpHeaders,
 } from "@opengeni/contracts/connect";
 import {
@@ -1264,7 +1265,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
               requestUrl: c.req.url,
               payload: {
-                requestedScopes: [],
+                requestedScopes: attempt.requestedScopes ? [...attempt.requestedScopes] : [],
                 mcpUrl: values.mcpUrl,
                 ownership: attempt.ownership,
                 returnUrl: stored.returnUrl,
@@ -1534,6 +1535,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       input.ownership !== "personal"
     )
       throw new HTTPException(422, { message: "Google connections must be personal-owned" });
+    // Additional access is asked for only by reconnecting an OAuth MCP account;
+    // the OAuth start bounds it by the reviewed connector's permission list.
+    if (input.requestedScopes && !connectProviderAcceptsRequestedScopes(input.providerId))
+      throw new HTTPException(422, {
+        message: "This connector cannot ask for additional access when reconnecting",
+      });
     let target: URL;
     try {
       target = new URL(input.returnUrl);
@@ -1947,6 +1954,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               integrationInstalled: false,
               completionRequirement: input.mcpSetup ? "integration" : "connection",
               ...(input.mcpSetup ? { mcpSetup: input.mcpSetup } : {}),
+              ...(input.requestedScopes ? { requestedScopes: [...input.requestedScopes] } : {}),
               ...(existing
                 ? {
                     account: {
