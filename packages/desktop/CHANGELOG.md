@@ -1,5 +1,60 @@
 # @opengeni/desktop
 
+## 6.0.2
+
+### Minor Changes
+
+- 1271da5: Cancel throws a dictation away. Cancel, Escape and the phone's cancel now delete the dictation under way, while it records or while it is being transcribed, so no composer offers it again. Before, speech longer than a few seconds was kept and the composer offered it later. A dictation an earlier page left only stops being retried when cancelled, and dictations that fail are still kept and offered as before.
+
+  The desktop app keeps a cancelled dictation's speech in Recent dictations, marked "Cancelled, not transcribed", to play or transcribe again there; the retry shortcut transcribes it and types it. `useVoiceInput` gives `onAudio` the cancelled copy with `cancelled: true`, the `cancelled` desktop dictation report carries its `audio`, and history entries have `cancelled: true` until they are transcribed again.
+
+  `useVoiceInput` has a new `setAside()` for interruptions other than the person's Cancel, such as live voice taking over or another chat opening: capture stops and the speech stays saved to insert later, as `cancel()` did before. The composer's cancel button reads "Discard dictation".
+
+### Patch Changes
+
+- f0708a1: The desktop app has a thin bar across the top of the window for the window controls: the macOS traffic lights (and the wider badge macOS shows while the window is shared or recorded) and the Windows caption buttons. The page starts below it, so nothing is drawn under the controls in any layout, and the collapsed rail stays narrow.
+
+  - `@opengeni/desktop`: the macOS traffic lights are centred in the 44px bar, and the Windows caption buttons are 44px tall.
+  - `@opengeni/react`: the session rail keeps its brand row on every platform. Layers that fill the window (a full-window Site or panel, the image viewer, side sheets) carry `data-window-layer`, so a host can start them below its own window bar. `windowControlsInPage` is deprecated.
+
+- b130649: Desktop dictation: the first shortcut now hears the app's language even when the app only learns it after sign-in. `createDesktopDictation` reads its settings each time instead of once at startup, and its `language` option can be a function, so until the person saves a choice the first shortcut follows the language the app reports. Before, an app that started before sign-in kept the computer's language, so a Norwegian account on an English Mac dictated in English.
+- 4b1a292: The dictation pill's clock now stops when the pill goes away. After a dictation was cancelled or finished, the hidden pill kept its recording clock ticking four times a second until the next dictation, which kept the app waking up for nothing. Hiding the pill now empties it as well.
+- 6f096c8: On macOS, dictation from anywhere now types the text every time. The app pastes the text with Command-V, and the helper used to press and release the keys in the same instant and quit straight away, which macOS sometimes dropped: on a real Mac about one dictation in five was transcribed and kept in Recent dictations but never typed. The helper now holds the keys for a moment, as a person would, and waits briefly before it quits; twenty pastes in a row all landed.
+- e669e43: Turning on computer use in a workspace that uses a connection made in another workspace now reconnects it when the server stopped accepting its sign-in, as it already did for a connection made in the same workspace. While that workspace still lists the computer, it is connected again there, since the server keeps one live connection of a personal computer, and every workspace that used it keeps using it. A computer removed where it was made is never put back there, and one the person can no longer set up there is set up in this workspace instead. The menu bar now says the computer needs reconnecting, with **Reconnect This Computer…**, instead of "connecting…" forever. `ThisComputer.summary()` gains `needsReconnect`.
+- Updated dependencies [d7fb082]
+- Updated dependencies [44ba53b]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [1ea8bd6]
+- Updated dependencies [f2e1953]
+- Updated dependencies [12b773f]
+- Updated dependencies [1271da5]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [60c6c56]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [e669e43]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+  - @opengeni/agent-host@6.0.0
+  - @opengeni/sdk@6.0.0
+
 ## 5.5.1
 
 ### Minor Changes

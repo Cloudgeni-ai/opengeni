@@ -1,5 +1,181 @@
 # @opengeni/worker-bundle
 
+## 6.0.2
+
+### Patch Changes
+
+- 073127d: A session parked in `wait_for_input` now resumes as soon as its background command's result is settled, instead of on the wake dispatcher's next 10-second sweep. Terminal background-command settlement returns the wake it commits. Its callers signal the session workflow after commit, concurrently and for at most 5 seconds: a Connected Machine's pushed completion, in-turn, API and reaper retained-process settlement, the selfhosted reaper, and lost or contained sandbox boxes. The dispatcher still delivers any wake a caller could not signal. Local Temporal (`docker compose` and the native dev stack) now serves each task queue from one partition, so queued turns start in the order they were queued. Start an existing local stack with no queued work, or reset its Temporal state, so no backlog is left in the removed partitions.
+- 765e264: Compress the managed Codemode client transfer to reduce cold sandbox setup traffic while preserving the exact release digest, installed files, warm verification, and plain staging fallback.
+- 36fd213: A dictation's text no longer waits for the worker to store its prepared audio. That copy was only ever used for meeting playback and re-runs, and a dictation is deleted soon after, so writing it put a slow or busy object store between the person and their text. The worker now builds the dictation's audio from its uploaded chunks and transcribes it straight away. Meetings still store their prepared audio as before.
+- f249828: Allow operators to configure a registry model's hosted-search context size. Omitted settings preserve the existing SDK default and execution identity. Explicit changes are bound to the model definition so accepted turns cannot silently switch search settings.
+- cebc433: Question cards offer "Let the agent decide". On every ordinary question (never a secret, a Skill review or a secret approval; tool approvals stay human-only) one secondary action replaces Skip and settles the request as `{ outcome: "skipped", agentDecides: true }`, accepted even when the request does not allow an ordinary skip. The agent's tool result carries a note to make its own best choice and say in one sentence what it chose, and the settled card reads "You let the agent decide". On a sub-session's question shown in a parent chat, the action instead sends the parent's own agent a message naming the exact request; the card says "Your agent is deciding" and stays answerable, and the message shows what the agent decided once the sub-session's request settles. `HumanInputForm` takes `onLetAgentDecide` and `agentDeciding`, `HumanInputSurface` forwards them, and `humanInputAgentMayDecide` tells which requests qualify.
+
+  A sub-session's blocking question now also wakes a parent whose goal is completed (the goal is not reopened), so the parent agent can answer it before the person has to. Before, such a parent kept the notice unread and the person was the only one asked. Agents are told to answer a child's question from their task context before the person has to, and to do the agent work it asks for (such as starting a reviewer) and then answer. The `request_human_input` description tells a sub-session to message its parent agent, rather than ask the person, when what it needs is agent work.
+
+- 0854386: Deliver file attachments to local sandboxes through verified downloads so adding files to an existing conversation does not fail with a live mount error.
+- 37538aa: Meetings get their notes written automatically. When a meeting's transcript is ready, Opengeni starts one chat for the meeting's owner (Only me for an Only me meeting, a workspace chat for a shared one) that writes the notes: an overview, topics, decisions and action items, with speakers and people linked as `speaker:` and `person:` mentions. The chat can only read that one meeting and save its notes, and nobody can widen it later. It runs on the workspace's shared Codex or Claude subscription accounts like other background work, and doesn't start when no subscription account can serve it, so it never spends credits or an API key. It never writes over saved notes and steps aside when the owner has their own automation for ready transcripts. Admins can turn it off with "Write notes after each meeting" in the meeting settings (`settings.recordings.autoSummary: false`). `meeting_read` now gives each speaker's label, and the "Meeting notes" template asks for the same format.
+- 6e33a98: A meeting recorded with computer or tab audio now tells apart the people in the room with the person recording. Before, its microphone was never diarized and every word on it was named after the owner, so someone sitting next to them disappeared into the owner's speaker. Now every track is diarized. One voice on the microphone is still the owner. With several, the owner's voice is the one matching their remembered voice when the workspace recognizes voices, else the one that spoke the most, and the others become `Speaker 1`, `Speaker 2`…. Echo removal runs first, so the call's echo never counts as the owner. The owner's voice vector is now kept under `track-N` too. Diarized labels are numbered across the whole recording (`speaker_0`, `speaker_1`, …) instead of per track with a `t1_` prefix, so two tracks no longer both show a "Speaker 1". `RecordingTrackPlan` now has `recorderLabel` instead of `fixedLabel` and `diarize`, `RecordingTrackWords` has `recorder` instead of `fixedLabel`, and `withRecorderVoice` (core) plus `memberVoiceprints`, `voiceMatchingVoiceprints` and the `KnownVoice` type (db) are new exports. Re-run a transcript to apply this to an earlier meeting.
+- d9df3db: The built-in meeting notes no longer step aside when the meeting's owner has an automation on `recording.transcript.ready`. That check was a guess: it ignored the automation's filters and could not tell whether the automation writes notes at all, so an automation that only posted somewhere else still stopped the notes. The notes now start whenever the workspace's switch is on and the meeting has none. Nothing is overwritten: the built-in notes and the "Meeting notes" template both save only the first notes. `meetingSummaryCandidate` no longer takes `eventTriggersEnabled`, and its `own_automation` reason is gone.
+- 8b727bf: An image whose declared type does not match its bytes, such as a JPEG screenshot that a chat app or MCP tool labels `image/png`, no longer fails the turn on Claude models. The model image sizer used to require the declared type to match the bytes and threw otherwise, and because the image stays in the chat's history, every later turn failed the same way until someone edited the stored label. The sizer now identifies PNG, JPEG, WebP and GIF from the bytes and labels the image with its real format; anything else (SVG, HEIC, damaged data) is still refused before any decoder runs. On the Claude transport, a mislabeled image that needs no resizing is sent with its real type and no resize note. Stored attachments under the wrong type keep exactly the projection they always had, so earlier requests stay byte-identical.
+- f74d748: Work the owner starts in their own Personal workspace (their chats and scheduled tasks) can now remove that workspace's Skills, as it can already save and edit them. Removal follows the chat's Skills mode: Automatic removes, Review first leaves a deletion proposal for the owner, Off refuses. In shared workspaces a private chat still removes only the person's own Skills, another person's personal Skill stays out of reach, and an agent removal that names a scope is refused. When a removal is refused, the agent now points to the Skills page for workspace Skills and the person's own Skills.
+- 0e2b0af: A recording whose container header is split across its first chunks is now transcribed instead of failing as unreadable audio. Chromium sometimes hands out the first byte of a WebM recording on its own, before any audio has arrived, and the rest of the header in the next chunk; the worker required the whole header in the first chunk, so such a dictation or meeting failed with `invalid_audio`. A chunk too short to tell whether a header starts there is now held and judged together with the chunks after it, both at the start of a track and at a later capture session.
+- 21856c5: An agent can now ask a person to act on a browser tab or computer target it has just observed without passing the target's internal generation values. `interaction_request_human` with `operation: "request"` no longer requires `expectedControllerGeneration`, `expectedTargetGeneration` or `expectedDocumentGeneration`.
+
+  When the turn pauses, every request without an `authRunId` reads its target as it is then. Generations left out are taken from that reading; generations given must equal it, or the request is refused. If the target cannot be read, a request that gives all three is recorded as given, and one that leaves any out is refused. A request with an `authRunId` takes and checks its generations against that auth run instead. In every case the controller generation is checked against the live browser or computer session.
+
+  A call that cannot be recorded (the session or tab is gone or has changed, a given generation does not match, the target is unreadable, the auth run does not match, another open request already asks a person to act on the same target, including one opened at the same moment, or an `operation: "wait"` for an intervention that is not open or not this turn's) no longer fails the turn. Nothing is written for it, and the call's result says in plain words why and what to do next: observe again and ask again, leave the expected generation fields out, or wait for the request `browser_auth` returned. Each refused call gets its own result. A pause resumes on one answer at a time, so when several calls of one step are refused, the turn resumes on the first refusal and the next is refused when the turn pauses again. Refused requests are not counted as opened in the intervention metric.
+
+- 3c0113c: Models a deployment lists under the same name now say what differs, so a person
+  never sees two choices they can't tell apart. When two routes of a model share a
+  name in the same picker group, a route whose residency record names its
+  processing geography gets it in brackets ("GPT-6.1 Sol" and "GPT-6.1 Sol (EU)");
+  twins in the same place get their connection's name instead ("Sonnet 4.6 (Your
+  OpenRouter)"). Models with a unique name, and organization and workspace copies
+  of one model, keep their plain name. The picker search, the trigger and the
+  Models settings view use the same names, and `list_models` shows the agent the
+  same name for such twins. The SDK's `ClientModel` type now includes the
+  `residency` record the server already sends; `@opengeni/sdk/model-picker-order`
+  exports `modelLabelDistinctions` and `@opengeni/react/model-policy` exports
+  `withDistinctLabels` for hosts that build their own picker rows. EU
+  status still comes only from residency records, never a name.
+- fb41dfd: Known secret values are masked before they are stored or shown to the model. Each agent attempt remembers the values its secret references resolve to, the credentials Opengeni injects (Codemode bearer, git and broker tokens, host run credentials, MCP header values) and, best effort, the hosted vault values the session tree used before. Tool results, tool-call arguments, model input, context compaction, model-context snapshots and stored conversation text (events, history, messages, goals, notes, run state) replace a known value, and its JSON-escaped, percent-encoded and base64 forms, with the reference that resolved it. Values shorter than 8 characters are left alone, and masking never fails a tool call or a turn. The pure matchers (`SecretValueMemory`, `compileSecretValueMasks`, `maskSecretValues`, `maskSecretValuesInText`) are exported from `@opengeni/contracts`.
+- 31e07a6: Secret-shaped strings in tool output are masked. High-precision detectors find URL passwords (any scheme), connection-string passwords, Azure account keys, shared access keys and SAS signatures, PEM private keys and well-known token formats (GitHub, OpenAI, Anthropic, Slack, Stripe, npm, GitLab, Google, 1Password, Opengeni bearers, JWTs), and replace only the secret part. Each value is captured into the root session's Task vault under a stable keyed-HMAC item name and replaced by its reference, so the agent can keep using it without seeing it; when capture is not possible a `[masked <kind>]` marker is written and the tool call still succeeds. The detectors (`detectSecretShapes`, `maskSecretShapes`, `maskSecretShapesInText`, `collectSecretShapes`) are exported from `@opengeni/contracts`.
+- 35387c2: Turning video on from a chat asks the person once. Where each change waits for a confirmation card, the video tools tell the agent to run the turn-on action instead of asking first, and the card reads "Let every chat in this workspace make videos? A 5-second 480p clip costs … in Opengeni credits." with "Paid with: Opengeni credits" underneath, instead of "Update video generation policy in this workspace?" and the raw funding code. Full-access chats still ask in the chat first, since nothing else would.
+
+  A video whose start the provider refuses now says which side refused and that nothing was charged: the service's own video account ("Video isn't working on this service right now … Trying again won't help until the service is fixed."), the workspace's own gateway or SuperGrok account (a workspace admin can fix it in Settings), or the description itself ("Rewording it may help."). Other failures of credit-paid videos add "Nothing was charged.", since their credits are always refunded.
+
+- Updated dependencies [907e806]
+- Updated dependencies [f252d90]
+- Updated dependencies [205b05a]
+- Updated dependencies [e1ebd25]
+- Updated dependencies [b1cffc3]
+- Updated dependencies [83ed5c0]
+- Updated dependencies [073127d]
+- Updated dependencies [44ba53b]
+- Updated dependencies [9a450e3]
+- Updated dependencies [202e3fd]
+- Updated dependencies [c7e16f0]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [d8a1b83]
+- Updated dependencies [4d88263]
+- Updated dependencies [765e264]
+- Updated dependencies [f2e1953]
+- Updated dependencies [df7dd0d]
+- Updated dependencies [3ef97dc]
+- Updated dependencies [12b773f]
+- Updated dependencies [050ca2f]
+- Updated dependencies [86c3295]
+- Updated dependencies [7f627c9]
+- Updated dependencies [1271da5]
+- Updated dependencies [3742a21]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [7bb4ea9]
+- Updated dependencies [d25f0d4]
+- Updated dependencies [9abe3cc]
+- Updated dependencies [089abc5]
+- Updated dependencies [09972b5]
+- Updated dependencies [8b06d0a]
+- Updated dependencies [54f07b1]
+- Updated dependencies [f249828]
+- Updated dependencies [7b98d86]
+- Updated dependencies [cebc433]
+- Updated dependencies [ac9aeba]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [37538aa]
+- Updated dependencies [6e33a98]
+- Updated dependencies [bd7200d]
+- Updated dependencies [d9df3db]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [755adaf]
+- Updated dependencies [a02dca4]
+- Updated dependencies [8b727bf]
+- Updated dependencies [a1a060b]
+- Updated dependencies [7c481a8]
+- Updated dependencies [b5e61c5]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [a2d28b5]
+- Updated dependencies [3b411ff]
+- Updated dependencies [840d3fc]
+- Updated dependencies [d166d88]
+- Updated dependencies [047bf8c]
+- Updated dependencies [f74d748]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6833d1b]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [bdac9fc]
+- Updated dependencies [a133a9d]
+- Updated dependencies [accee33]
+- Updated dependencies [399757b]
+- Updated dependencies [676426c]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [ce001ee]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [46f1de4]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [fd80817]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [4246602]
+- Updated dependencies [c47b489]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [e4f699c]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [ac2e841]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [c21b3f6]
+- Updated dependencies [05a3728]
+- Updated dependencies [067d06b]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [af0437b]
+- Updated dependencies [149a15c]
+  - @opengeni/runtime@6.0.0
+  - @opengeni/contracts@6.0.0
+  - @opengeni/db@6.0.0
+  - @opengeni/core@6.0.0
+  - @opengeni/sdk@6.0.0
+  - @opengeni/subscriptions@6.0.0
+  - @opengeni/codemode@6.0.0
+  - @opengeni/config@6.0.0
+  - @opengeni/decisions@6.0.0
+  - @opengeni/observability@6.0.0
+  - @opengeni/documents@6.0.0
+  - @opengeni/capabilities@6.0.0
+  - @opengeni/tool-gateway@6.0.0
+  - @opengeni/storage@6.0.0
+  - @opengeni/vaults@6.0.0
+  - @opengeni/vaults-bitwarden@6.0.0
+  - @opengeni/vaults-protonpass@6.0.0
+  - @opengeni/codex@6.0.0
+  - @opengeni/events@6.0.0
+  - @opengeni/github@6.0.0
+  - @opengeni/interaction@6.0.0
+  - @opengeni/vaults-keeper@6.0.0
+  - @opengeni/vaults-onepassword@6.0.0
+  - @opengeni/jev@6.0.0
+  - @opengeni/agent-proto@6.0.0
+  - @opengeni/network@6.0.0
+  - @opengeni/xai-subscription@6.0.0
+
 ## 5.5.1
 
 ### Minor Changes
