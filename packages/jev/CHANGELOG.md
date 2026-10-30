@@ -1,5 +1,13 @@
 # @opengeni/jev
 
+## 6.0.2
+
+### Patch Changes
+
+- Updated dependencies [86c3295]
+- Updated dependencies [7148073]
+  - @opengeni/decisions@6.0.0
+
 ## 5.5.1
 
 ### Patch Changes
