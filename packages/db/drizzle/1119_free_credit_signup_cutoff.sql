@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Free monthly credit signup cutoff (OPE-929). Additive and inert until an
+-- Free monthly credit signup cutoff. Additive and inert until an
 -- owner sets a cutoff: with no revision (or a NULL cutoff) Free eligibility
 -- and the Free enrollment sweep are unchanged. With a cutoff, a NEW Free
 -- period also requires the signup receipt's owner (auth_users row named by the

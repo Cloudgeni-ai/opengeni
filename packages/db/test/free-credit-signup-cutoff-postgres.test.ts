@@ -72,7 +72,7 @@ async function revision() {
 
 async function setCutoff(notBefore: Date | null, expected?: number) {
   const [row] = await shared!.admin`select opengeni_private.set_free_credit_signup_cutoff(
-    ${notBefore}::timestamptz, 'operator:test', 'OPE-929 cutoff test', ${expected ?? (await revision())}::bigint) as result`;
+    ${notBefore}::timestamptz, 'operator:test', 'signup cutoff test', ${expected ?? (await revision())}::bigint) as result`;
   return row!.result as { revision: number; notBefore: string | null; previousRevision: number };
 }
 
@@ -237,7 +237,7 @@ test("the setter is owner-only, revision-fenced and audited; runtime roles canno
     await sqlState(
       () =>
         shared!
-          .admin`select opengeni_private.set_free_credit_signup_cutoff(now(), 'operator:test', 'OPE-929 cutoff test', null)`,
+          .admin`select opengeni_private.set_free_credit_signup_cutoff(now(), 'operator:test', 'signup cutoff test', null)`,
     ),
   ).toBe("22023");
   expect(
@@ -276,7 +276,7 @@ test("the setter is owner-only, revision-fenced and audited; runtime roles canno
   );
   expect(history.at(-1)).toMatchObject({
     operator: "operator:test",
-    reason: "OPE-929 cutoff test",
+    reason: "signup cutoff test",
   });
   await setCutoff(null, current + 1);
 
