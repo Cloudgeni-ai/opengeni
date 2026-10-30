@@ -3,9 +3,12 @@ import { normalizePermission, type Permission } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   allWorkspacePermissions,
+  appendSessionEventsWithLockedSessionUpdate,
   bootstrapWorkspace,
   createDb,
+  createSession,
   ensureManagedAccessForUser,
+  getSession,
   managedPersonalWorkspacePermissions,
   type DbClient,
 } from "../src";
@@ -56,6 +59,62 @@ for (const [name, permissions] of [
 }
 
 describe.skipIf(!realDatabase)("persisted default grants", () => {
+  test("new chat settings and explicit edits are canonical without rewriting existing rows on read", async () => {
+    const subjectId = `chat-canonical:${crypto.randomUUID()}`;
+    const access = await bootstrapWorkspace(client!.db, {
+      accountExternalSource: "canonical-chat-test",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Canonical chat",
+      workspaceExternalSource: "canonical-chat-test",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Canonical chat",
+      subjectId,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const legacy: Permission[] = ["variable-sets:read", "secrets:list", "environments:use"];
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    };
+    const session = await createSession(client!.db, { ...input, firstPartyMcpPermissions: legacy });
+    expect(session.firstPartyMcpPermissions).toEqual(["secrets:list", "secrets:use"]);
+    expect(legacy).toEqual(["variable-sets:read", "secrets:list", "environments:use"]);
+    // Reading a previous binary's stored state must not rewrite durable data.
+    await shared!
+      .admin`update sessions set first_party_mcp_permissions = ${shared!.admin.json(legacy)}
+      where id = ${session.id}`;
+    expect(
+      (await getSession(client!.db, grant.workspaceId!, session.id))?.firstPartyMcpPermissions,
+    ).toEqual(legacy);
+    const [stored] = await shared!
+      .admin`select first_party_mcp_permissions from sessions where id = ${session.id}`;
+    expect(stored!.first_party_mcp_permissions).toEqual(legacy);
+    await appendSessionEventsWithLockedSessionUpdate(
+      client!.db,
+      grant.workspaceId!,
+      session.id,
+      () => ({
+        events: [{ type: "session.agent.updated", payload: {} }],
+        update: { firstPartyMcpPermissions: legacy },
+      }),
+      { activity: "semantic" },
+    );
+    expect(
+      (await getSession(client!.db, grant.workspaceId!, session.id))?.firstPartyMcpPermissions,
+    ).toEqual(["secrets:list", "secrets:use"]);
+    const empty = await createSession(client!.db, { ...input, firstPartyMcpPermissions: [] });
+    expect(empty.firstPartyMcpPermissions).toEqual([]);
+    const defaults = await createSession(client!.db, input);
+    expect(defaults.firstPartyMcpPermissions).toBeNull();
+  }, 180_000);
+
   test("bootstrap stores the canonical defaults without rewriting caller-supplied authority", async () => {
     const subjectId = `bootstrap:${crypto.randomUUID()}`;
     const input = {

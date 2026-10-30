@@ -1,11 +1,11 @@
 import {
   OrganizationAccessPolicy,
-  normalizePermission,
   Permission,
   ToolGatewayIdentity,
   type AccessGrant,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { rawRows, type Database, withRlsContext, withWorkspaceSubjectRls } from "./database";
 import {
   CONNECTION_DISCONNECTED_AUDIT_ACTION,
@@ -712,13 +712,7 @@ function mapClient(row: ClientRow): McpOAuthClient {
  * Existing token and accepted-execution records retain their original bytes.
  */
 function canonicalMcpOAuthPermissions(value: unknown): Permission[] {
-  return [
-    ...new Set(
-      Permission.array()
-        .parse(value)
-        .map((permission) => normalizePermission(permission) as Permission),
-    ),
-  ];
+  return canonicalSecretPermissions(Permission.array().parse(value));
 }
 
 function mapGrant(row: GrantRow): McpOAuthGrantSnapshot {

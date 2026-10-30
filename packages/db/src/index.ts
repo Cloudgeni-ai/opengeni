@@ -1033,6 +1033,7 @@ import {
 } from "@opengeni/config";
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
@@ -19311,7 +19312,9 @@ export async function createScheduledTask(
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
           subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
-          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
+          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions
+            ? canonicalSecretPermissions(input.creatorPolicy.firstPartyMcpPermissions)
+            : null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
@@ -19647,9 +19650,9 @@ export async function updateScheduledTask(
         ...(input.creatorFirstPartyPolicy
           ? {
               creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
-              creatorFirstPartyMcpPermissions: [
-                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
-              ],
+              creatorFirstPartyMcpPermissions: canonicalSecretPermissions(
+                input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ),
             }
           : {}),
         ...(input.refreshPersonalResourceAuthority ||
@@ -31416,7 +31419,9 @@ async function createSessionInTransaction(
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId,
-        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions
+          ? canonicalSecretPermissions(input.firstPartyMcpPermissions)
+          : null,
         firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
         initialMcpAccountBindings: acceptedMcpAccountBindings,
@@ -92222,7 +92227,11 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
             ...(update.firstPartyMcpPermissions !== undefined
-              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              ? {
+                  firstPartyMcpPermissions: canonicalSecretPermissions(
+                    update.firstPartyMcpPermissions,
+                  ),
+                }
               : {}),
             ...(update.sandboxBackend !== undefined
               ? { sandboxBackend: update.sandboxBackend }
