@@ -13232,18 +13232,28 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
  * an unmanaged repository - passes straight through.
  *
  * The wrapper resolves the real git by walking PATH with shell builtins only
- * (a stripped PATH may lack readlink or cat). It skips itself and every
- * wrapper already on this exec chain (`test -ef`, so symlinks count), and
- * records itself in OPENGENI_GIT_WRAPPERS_SEEN before exec, so a chain of
- * wrapper copies always reaches the real git or fails; it never loops. Only
- * repository selecting global options (`-C`, `--git-dir`, `--work-tree`) are
- * replayed for the identity lookup.
+ * (a stripped PATH may lack readlink or cat). It skips itself and every git it
+ * already chose on this exec chain (`test -ef`, so symlinks count): before
+ * exec it records itself and its choice in OPENGENI_GIT_WRAPPERS_SEEN, keyed
+ * to its process id. Another git shim on PATH that execs back into the
+ * wrapper (same process) therefore moves on to the next git on PATH. A new
+ * process - a hook or alias that runs git - starts a fresh chain, so it still
+ * finds the real git. A shim that forks back into the wrapper instead of
+ * exec'ing stops after OPENGENI_GIT_WRAPPER_HOPS hops with an error, rather
+ * than spinning. Only repository selecting global options (`-C`,
+ * `--git-dir`, `--work-tree`) are replayed for the identity lookup.
  */
 export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "#!/bin/sh",
   "# Opengeni git wrapper: per-repository commit identity.",
+  '[ "${OPENGENI_GIT_WRAPPER_PID:-}" = "$$" ] || OPENGENI_GIT_WRAPPERS_SEEN=',
+  "OPENGENI_GIT_WRAPPER_HOPS=$((${OPENGENI_GIT_WRAPPER_HOPS:-0} + 1))",
+  'if [ "$OPENGENI_GIT_WRAPPER_HOPS" -gt 32 ]; then',
+  "  printf '%s\\n' 'git: Opengeni git wrapper loop on PATH' >&2",
+  "  exit 125",
+  "fi",
   'OPENGENI_GIT_WRAPPERS_SEEN="${OPENGENI_GIT_WRAPPERS_SEEN:+$OPENGENI_GIT_WRAPPERS_SEEN:}$0"',
-  "export OPENGENI_GIT_WRAPPERS_SEEN",
+  "export OPENGENI_GIT_WRAPPER_HOPS",
   "is_seen_git_wrapper() {",
   "  for seen_wrapper in $OPENGENI_GIT_WRAPPERS_SEEN; do",
   '    [ -n "$seen_wrapper" ] && [ "$1" -ef "$seen_wrapper" ] && return 0',
@@ -13293,6 +13303,9 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "    fi",
   "  fi",
   "fi",
+  'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
+  "OPENGENI_GIT_WRAPPER_PID=$$",
+  "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
   'exec "$real_git" "$@"',
 ].join("\n");
 
@@ -13373,36 +13386,68 @@ export function repositoryIdentityCommandLines(
     '  identity_top="$(command git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1',
     '  [ "$identity_top" = "$(cd "$1" && pwd -P)" ]',
     "}",
+    // Managed means Opengeni wrote the current values and recorded them.
+    // A value someone changed since (the person or the agent, on purpose) is
+    // theirs: the marker is dropped and the repository is left alone.
+    // identity_config <repository dir, or empty for global> <config args...>
+    "identity_config() {",
+    '  identity_dir="$1"',
+    "  shift",
+    '  if [ -n "$identity_dir" ]; then',
+    '    command git -C "$identity_dir" config --local "$@"',
+    "  else",
+    '    command git config --global "$@"',
+    "  fi",
+    "}",
+    "identity_value() {",
+    '  identity_config "$1" --get "$2" 2>/dev/null || true',
+    "}",
+    "managed_identity_current() {",
+    '  [ "$(identity_value "$1" opengeni.managedidentity)" = true ] &&',
+    '    [ "$(identity_value "$1" user.name)" = "$(identity_value "$1" opengeni.managedname)" ] &&',
+    '    [ "$(identity_value "$1" user.email)" = "$(identity_value "$1" opengeni.managedemail)" ]',
+    "}",
+    "forget_managed_identity() {",
+    "  for managed_key in opengeni.managedidentity opengeni.managedname opengeni.managedemail; do",
+    '    identity_config "$1" --unset-all "$managed_key" >/dev/null 2>&1 || true',
+    "  done",
+    "}",
+    // apply_managed_identity <repository dir, or empty for global> <name> <email>
+    "apply_managed_identity() {",
+    '  if [ "$(identity_value "$1" opengeni.managedidentity)" = true ]; then',
+    '    if ! managed_identity_current "$1"; then',
+    '      forget_managed_identity "$1"',
+    "      return 0",
+    "    fi",
+    '  elif [ -n "$(identity_value "$1" user.email)" ]; then',
+    "    return 0",
+    "  fi",
+    '  identity_config "$1" user.name "$2"',
+    '  identity_config "$1" user.email "$3"',
+    '  identity_config "$1" opengeni.managedName "$2"',
+    '  identity_config "$1" opengeni.managedEmail "$3"',
+    '  identity_config "$1" opengeni.managedIdentity true',
+    "}",
+    "remove_managed_identity() {",
+    '  [ "$(identity_value "$1" opengeni.managedidentity)" = true ] || return 0',
+    '  if managed_identity_current "$1"; then',
+    '    identity_config "$1" --unset-all user.name >/dev/null 2>&1 || true',
+    '    identity_config "$1" --unset-all user.email >/dev/null 2>&1 || true',
+    "  fi",
+    '  forget_managed_identity "$1"',
+    "}",
     "configure_repository_identity() {",
     '  repository_identity_root "$1" || return 0',
-    '  existing_email="$(command git -C "$1" config --local --get user.email 2>/dev/null || true)"',
-    '  existing_managed="$(command git -C "$1" config --local --get opengeni.managedidentity 2>/dev/null || true)"',
-    '  if [ -n "$existing_email" ] && [ "$existing_managed" != true ]; then return 0; fi',
-    '  command git -C "$1" config --local user.name "$2"',
-    '  command git -C "$1" config --local user.email "$3"',
-    '  command git -C "$1" config --local opengeni.managedIdentity true',
+    '  apply_managed_identity "$1" "$2" "$3"',
     "}",
     "clear_repository_identity() {",
     '  repository_identity_root "$1" || return 0',
-    '  [ "$(command git -C "$1" config --local --get opengeni.managedidentity 2>/dev/null || true)" = true ] || return 0',
-    '  command git -C "$1" config --local --unset-all user.name >/dev/null 2>&1 || true',
-    '  command git -C "$1" config --local --unset-all user.email >/dev/null 2>&1 || true',
-    '  command git -C "$1" config --local --unset-all opengeni.managedidentity >/dev/null 2>&1 || true',
-    "}",
-    "configure_default_identity() {",
-    '  existing_email="$(command git config --global --get user.email 2>/dev/null || true)"',
-    '  existing_managed="$(command git config --global --get opengeni.managedidentity 2>/dev/null || true)"',
-    '  if [ -n "$existing_email" ] && [ "$existing_managed" != true ]; then return 0; fi',
-    '  command git config --global user.name "$1"',
-    '  command git config --global user.email "$2"',
-    "  command git config --global opengeni.managedIdentity true",
+    '  remove_managed_identity "$1"',
     "}",
     ...calls,
-    ...(defaultIdentity
-      ? [
-          `configure_default_identity ${shellQuote(defaultIdentity.name)} ${shellQuote(defaultIdentity.email)} || true`,
-        ]
-      : []),
+    defaultIdentity
+      ? `apply_managed_identity '' ${shellQuote(defaultIdentity.name)} ${shellQuote(defaultIdentity.email)} || true`
+      : "remove_managed_identity '' || true",
   ];
 }
 
@@ -14089,7 +14134,7 @@ export function repositoryCloneCommand(
     '  ensure_git_ifs="$IFS"',
     "  IFS=:",
     "  for ensure_git_dir in $PATH; do",
-    '    if [ -n "$ensure_git_dir" ] && [ "$ensure_git_dir" != "$ensure_git_wrapper_dir" ] && [ -f "$ensure_git_dir/git" ] && [ -x "$ensure_git_dir/git" ]; then',
+    '    if [ -n "$ensure_git_dir" ] && [ -f "$ensure_git_dir/git" ] && [ -x "$ensure_git_dir/git" ] && ! [ "$ensure_git_dir/git" -ef "$ensure_git_wrapper_dir/git" ]; then',
     '      IFS="$ensure_git_ifs"',
     "      return 0",
     "    fi",

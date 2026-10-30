@@ -421,14 +421,13 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
   const personalLogin = personalActive
     ? githubLoginLabel(props.personalGitHubStatus?.connection?.metadata.githubLogin)
     : null;
-  const rowGroups = repositoryPickerRowGroups(props.groups, personalRepositories).flatMap(
-    (group) => {
-      const rows = group.rows.filter((row) => matchesSearch(row.fullName));
-      return rows.length > 0 ? [{ ...group, rows }] : [];
-    },
-  );
+  const allRowGroups = repositoryPickerRowGroups(props.groups, personalRepositories);
+  const rowGroups = allRowGroups.flatMap((group) => {
+    const rows = group.rows.filter((row) => matchesSearch(row.fullName));
+    return rows.length > 0 ? [{ ...group, rows }] : [];
+  });
   // Nothing to pick yet: the ways to get repositories are the main content.
-  const accessInline = rowGroups.length === 0 && !props.repoBusy && !loadFailed;
+  const accessInline = allRowGroups.length === 0 && !props.repoBusy && !loadFailed;
   const allowedPersonalCount = (props.personalGitHubRepositories ?? []).filter(
     (repository) => repository.selectedAccess !== null,
   ).length;
@@ -554,7 +553,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             // First load only: rows that hold the menu's size. A refresh with
             // repositories already listed updates them in place.
             <ComposerMenuRowsSkeleton rows={4} label="Loading repositories" />
-          ) : rowGroups.length === 0 && !(personalActive && props.personalGitHubBusy) ? (
+          ) : allRowGroups.length === 0 && !(personalActive && props.personalGitHubBusy) ? (
             emptyNote
           ) : null}
 
@@ -847,9 +846,11 @@ function RepositoryPickerRowView(props: {
       ? "personal"
       : appLocked || appSelected
         ? "app"
-        : canUsePersonal
-          ? defaultRepositoryIdentity(row)
-          : "app";
+        : !app
+          ? "personal"
+          : canUsePersonal
+            ? defaultRepositoryIdentity(row)
+            : "app";
   const ref =
     actingAs === "personal" && personal
       ? (picker.selectedPersonalGitHubRepoRefs?.[personal.repositoryId] ?? personal.defaultBranch)

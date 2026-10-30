@@ -186,14 +186,29 @@ describe("sandbox git credentials", () => {
         personalIdentity,
       ),
     ).toEqual(personalIdentity);
-    // The deployment identity is box-wide (manifest env); no per-repo value.
+    // App repositories get the deployment identity in their own config, so
+    // they never depend on what a box's pinned env carries.
     expect(
       repositoryCommitIdentity(
         deploymentSettings,
         { provider: "github", personalGitHub: false },
         null,
       ),
-    ).toBeNull();
+    ).toEqual({ name: "Deploy Bot", email: "deploy@example.com" });
+    // A partial deployment identity keeps its half and fills the other.
+    expect(
+      repositoryCommitIdentity(
+        testSettings({
+          sandboxBackend: "docker",
+          gitAuthorName: undefined,
+          gitAuthorEmail: "deploy@example.com",
+          githubAppId: "12345",
+          githubAppSlug: "opengeni-test",
+        }),
+        { provider: "github", personalGitHub: false },
+        null,
+      ),
+    ).toEqual({ name: "opengeni-test[bot]", email: "deploy@example.com" });
     const appSettings = testSettings({
       sandboxBackend: "docker",
       gitAuthorName: undefined,

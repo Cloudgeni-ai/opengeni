@@ -801,9 +801,11 @@ function assertPersonalGitHubConsumerAvailable(
  *   deployment-configured identity never overrides it; that is the point of
  *   working through the person's own account.
  * - A GitHub App (or host-brokered) repository keeps today's precedence: a
- *   deployment-configured identity (OPENGENI_GIT_*) wins and is applied
- *   box-wide from the manifest env, so no per-repository identity is written;
- *   otherwise the host-provided identity, else the GitHub App bot identity.
+ *   deployment-configured identity (OPENGENI_GIT_*) wins, otherwise the
+ *   host-provided identity, else the GitHub App bot identity. A partial
+ *   deployment identity fills its missing half from that fallback. It is always
+ *   written into the repository's own config, so the repository does not
+ *   depend on what the box's pinned env happens to carry.
  */
 export function repositoryCommitIdentity(
   settings: Settings,
@@ -817,14 +819,17 @@ export function repositoryCommitIdentity(
   if (selection.personalGitHub) {
     return usable(providedIdentity);
   }
+  const fallback =
+    usable(providedIdentity) ??
+    (selection.provider === "github" ? usable(githubAppBotIdentity(settings)) : null);
   const deployment = collectGitIdentityEnvironment(settings);
   if (deployment.GIT_AUTHOR_NAME || deployment.GIT_AUTHOR_EMAIL) {
-    return null;
+    return usable({
+      name: deployment.GIT_AUTHOR_NAME ?? fallback?.name ?? "",
+      email: deployment.GIT_AUTHOR_EMAIL ?? fallback?.email ?? "",
+    });
   }
-  return (
-    usable(providedIdentity) ??
-    (selection.provider === "github" ? usable(githubAppBotIdentity(settings)) : null)
-  );
+  return fallback;
 }
 
 function normalizedGitHost(uri: string): string {

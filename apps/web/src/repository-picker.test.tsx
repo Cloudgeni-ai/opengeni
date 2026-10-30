@@ -755,6 +755,49 @@ describe("repositories from several GitHub accounts and your GitHub", () => {
     await second.unmount();
   });
 
+  test("a search with no match keeps the list's own empty state and footer", async () => {
+    const { props: picker } = props({
+      status: "unbound",
+      repositories: [],
+      groups: [],
+      personalGitHubRepositories: [personalOnly],
+      onTogglePersonalGitHubRepo: undefined,
+    });
+    const rendered = await renderComponent(
+      createElement(RepositoryContextMenuBody, {
+        ...picker,
+        // More than five rows show the search box.
+        personalGitHubRepositories: Array.from({ length: 6 }, (_, index) =>
+          personalRepository(String(800 + index), `octocat/repo-${index}`),
+        ),
+      }),
+    );
+    // Without a personal toggle, personal rows cannot be switched on.
+    expect(switchFor(rendered.container, "Select octocat/repo-0")?.disabled).toBe(true);
+    const search = rendered.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search repositories"]',
+    )!;
+    await actRun(() => search.focus());
+    await actRun(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(search) as HTMLInputElement,
+        "value",
+      )!.set!;
+      setValue.call(search, "nothing-matches");
+      // React may have loaded before the DOM was registered, so it can be
+      // watching key events instead of input events for value changes.
+      for (const type of ["input", "keyup"])
+        search.dispatchEvent(new Event(type, { bubbles: true }));
+    });
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("No repositories match your search.");
+    expect(text).not.toContain("No repositories connected");
+    // The access entries stay behind the footer instead of jumping inline.
+    expect(text).toContain("GitHub access");
+    expect(text).not.toContain("Your GitHub");
+    await rendered.unmount();
+  });
+
   test("GitHub access lists your GitHub and the Opengeni app", async () => {
     const { props: picker, calls } = props({
       githubAppOpen: true,
