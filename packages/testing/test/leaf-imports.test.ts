@@ -55,4 +55,36 @@ test("root and leaf exports retain the same values and function identities", asy
   expect(events.requireSessionEventDurableFanoutCapability).toBe(
     durable.requireSessionEventDurableFanoutCapability,
   );
+  const apiContract = await import("@opengeni/contracts/api-contract");
+  const firstPartyTools = await import("@opengeni/contracts/first-party-mcp-tools");
+  const sessionSkills = await import("@opengeni/contracts/session-skills");
+  const connectionResponse = await import("@opengeni/contracts/connection-response");
+  expect(contracts.OPENGENI_API_CONTRACT_HEADER).toBe(apiContract.OPENGENI_API_CONTRACT_HEADER);
+  expect(contracts.OPENGENI_API_CONTRACT_REVISION).toBe(apiContract.OPENGENI_API_CONTRACT_REVISION);
+  expect(contracts.DEFAULT_FIRST_PARTY_MCP_TOOLS).toEqual(
+    firstPartyTools.DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  );
+  expect(contracts.SessionSkills).toBe(sessionSkills.SessionSkills);
+  expect(contracts.ConnectionResponse).toBe(connectionResponse.ConnectionResponse);
+});
+
+test("lightweight contract subpaths do not load the root barrel", async () => {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "-e",
+      `await import("@opengeni/contracts/api-contract"); await import("@opengeni/contracts/first-party-mcp-tools"); await import("@opengeni/contracts/session-skills"); await import("@opengeni/contracts/connection-response"); console.log(JSON.stringify(Object.keys(require.cache)));`,
+    ],
+    { cwd: root, stdout: "pipe", stderr: "pipe" },
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  const modules = (JSON.parse(stdout) as string[]).map((path) => path.replaceAll("\\", "/"));
+  expect(modules.some((path) => path.endsWith("/packages/contracts/src/index.ts"))).toBe(false);
 });
