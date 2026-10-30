@@ -5,9 +5,11 @@ import {
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
 import { managedCookieHuman, requireSubscriptionScopeMutation } from "./subscription-pool-access";
-import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 export { managedCookieHuman } from "./subscription-pool-access";
-import { requireOrganizationCodexHuman } from "./codex";
+import {
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 import {
   connectSubscriptionCoreXaiConnection,
   getSubscriptionCoreXaiOrganizationProjection,
@@ -200,9 +202,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   // relays the short code, and the person still approves at xAI themselves.
   const organizationActor = async (c: Context, mutation = false) => {
     requireEnabled(deps);
-    if (mutation) requireSameOriginBrowserMutation(c, deps);
+    if (mutation) requireOrganizationSubscriptionMutationOrigin(c, deps);
     const organizationId = c.req.param("organizationId")!;
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     return { organizationId, actorSubjectId: human.subjectId };
   };
   app.post(`${organizationPath}/connect/start`, async (c) => {

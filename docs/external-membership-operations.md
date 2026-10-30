@@ -44,6 +44,10 @@ percent-encoded JSON object:
 external-members request body (1 or more permission names). It is accepted only
 in plain `external` mode; `linked_native` with a `membership` is a `400`.
 
+The browser session proxy (`createSessionProxyHandler`) states it the same way:
+when `resolve` returns `membership`, every forwarded request runs as
+`asUser(user, { source, membership })`.
+
 At request entry, for each shared workspace of the key's organization that the
 request authorizes, the user's grant there becomes exactly the stated set before
 the request is authorized:
@@ -89,13 +93,14 @@ external member from a workspace (the keyed revoke below, the key's
 `removeWorkspaceMember`, or a workspace administrator removing them in the
 product) stamps a per-member marker in `external_workspace_member_revocations`
 with the next value of a global sequence, even when no membership was left to
-remove. A stating
-request reads the sequence's current value when it authenticates. The revoke and
+remove. Every plain external request, with or without a statement, reads the
+sequence's current value when it authenticates. The revoke and
 the read both run under the organization membership fence, so the read strictly
 orders the request against every revoke. When the request later applies its
-statement under the same fence, a marker above its watermark means the revoke
-happened after the request authenticated: the statement is dropped, nothing is
-written, and the request runs on whatever grant remains (none after a revoke). A
+statement, or admits a missing member on first use, under the same fence, a
+marker above its watermark means the revoke happened after the request
+authenticated: nothing is created or changed, and the request runs on whatever
+grant remains (none after a revoke). A
 request that authenticates after the revoke is a new statement and admits the
 user again, so the app must stop stating a removed user. We chose a monotonic
 marker over a re-check after the lock because absence alone cannot tell "never a

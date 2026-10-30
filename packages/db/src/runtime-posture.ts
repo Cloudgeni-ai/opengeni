@@ -53,8 +53,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the running commands a returning runner did not answer for (0984), the
  * control worker's content-free queued-turn hold summary (0988), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
- * the EU-only inference setting and its history (1060) and the secret history
- * scrub's reader and cell writer (1091). Each is
+ * the EU-only inference setting and its history (1060), the secret history
+ * scrub's reader and cell writer (1091) and the subscription
+ * account-administrator grant (1103), which records a request's verified
+ * account:admin proof for one transaction. Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -73,6 +75,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
+  "grant_subscription_account_administrator(jsonb)",
 ] as const;
 
 /**
@@ -91,7 +94,10 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off. 1091 withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
- * only they reach as pending.
+ * only they reach as pending. 1103 withholds the subscription
+ * account-administrator grant; until it is granted, only organization
+ * membership administrators administer the organization's subscription
+ * accounts.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -99,27 +105,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
+  "grant_subscription_account_administrator(jsonb)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
-
-/**
- * Target-schema runtime capabilities whose EXECUTE is withheld for one
- * release, for the same reason as DEFERRED_RUNTIME_PRIVATE_ROUTINES: until a
- * binary that knows them is the previous release, readiness accepts each with
- * or without runtime EXECUTE (never PUBLIC). 0998 withholds the passkey
- * mutation; until a later migration grants it, passkeys stay off.
- */
-export const DEFERRED_RUNTIME_TARGET_ROUTINES = [
-  "mutate_managed_passkey(text, text, jsonb)",
-] as const;
-
-/**
- * Non-RLS tables whose runtime DML is withheld for the same reason: the
- * previous release rejects DML on an unknown non-RLS table. Each is known here
- * with no required privileges; readiness accepts either no direct DML or
- * exactly SELECT, INSERT, UPDATE and DELETE (never a partial grant). 0998
- * withholds the passkey credentials table.
- */
-export const RUNTIME_DEFERRED_FULL_DML_TABLES = ["auth_passkeys"] as const;
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
@@ -182,6 +169,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "mcp_operations",
     "session_history_items_repair_audit",
   ],
+  "grant_subscription_account_administrator(jsonb)": ["organization_memberships"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -424,6 +412,8 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 1103: the administration writer context the disconnect writer calls.
+  "subscription_core_administration_context(text, uuid, uuid, text)",
   // Migration 0871: the usage-history capture triggers and the appender they
   // run as their owner (triggers fire without the writing role holding EXECUTE).
   "capture_usage_reading()",
@@ -1505,6 +1495,15 @@ export const SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES = [
   "subscription_scheduled_run_personal_entries(uuid, uuid, uuid)",
 ] as const;
 
+/**
+ * Migration 1103: the administration writer context in
+ * opengeni_subscription_internal (the writer context without the person-only
+ * subject rule). Only the owner-run disconnect writer calls it.
+ */
+export const SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES = [
+  "subscription_core_administration_context(text, uuid, uuid, text)",
+] as const;
+
 export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
@@ -1554,6 +1553,7 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
   ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+  ...SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -2255,6 +2255,7 @@ export const FORCE_RLS_TABLES = [
   "vaults",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_uploads",
   "workspace_artifact_versions",
@@ -2333,6 +2334,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   "audit_events",
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
@@ -2720,6 +2722,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
+  // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
+  "workspace_activity_events",
   "workspace_artifact_events",
   "workspace_artifact_versions",
   "workspace_instruction_policy_activation_events",
@@ -2979,8 +2983,6 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
-const DEFERRED_TARGET_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_TARGET_ROUTINES);
-const DEFERRED_FULL_DML_TABLE_NAMES = new Set<string>(RUNTIME_DEFERRED_FULL_DML_TABLES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -4005,6 +4007,13 @@ export function evaluateRuntimeDatabasePosture(
       )
         ? SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES
         : []),
+      // 1103 creates the account-administrator grant and the administration
+      // context together.
+      ...(posture.privateRoutines.some((routine) =>
+        routine.name.startsWith("grant_subscription_account_administrator("),
+      )
+        ? SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES
+        : []),
     ];
     for (const signature of required) {
       const matches = posture.subscriptionOwnerRoutines.filter(
@@ -4128,27 +4137,6 @@ export function evaluateRuntimeDatabasePosture(
     if (toleratedUnknownTables.has(table.name)) {
       // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
-    }
-    if (!options.tablePrivileges && DEFERRED_FULL_DML_TABLE_NAMES.has(table.name)) {
-      // Withheld runtime DML (see RUNTIME_DEFERRED_FULL_DML_TABLES): none or all four.
-      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
-      const tableGranted = new Set(
-        FULL_DML_PRIVILEGES.filter(
-          (privilege) => privileges.find(([name]) => name === privilege)?.[1] === true,
-        ),
-      );
-      // has_any_column_privilege is also true for a table-level grant, so only
-      // column privileges the table grant doesn't cover are column-only.
-      const columnOnly = (table.columnPrivileges ?? []).filter(
-        (privilege) => !tableGranted.has(privilege as (typeof FULL_DML_PRIVILEGES)[number]),
-      );
-      if (
-        (tableGranted.size > 0 && tableGranted.size < FULL_DML_PRIVILEGES.length) ||
-        columnOnly.length > 0
-      ) {
-        const partial = [...new Set([...tableGranted, ...columnOnly])];
-        violations.push(`table ${table.name} grants partial runtime DML: ${partial.join(", ")}`);
-      }
     }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
@@ -4820,7 +4808,7 @@ export function evaluateRuntimeDatabasePosture(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
       );
     }
-    if (!routine.execute && !DEFERRED_TARGET_ROUTINE_NAMES.has(routine.name)) {
+    if (!routine.execute) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
     const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
