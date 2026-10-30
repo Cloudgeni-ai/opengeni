@@ -37,7 +37,7 @@ export const recordingTrackKindValues = ["audio", "video"] as const;
 // Migration 0945. "browser": an agent's browser recording, kept out of meeting lists.
 // Migration 0962. "dictation": speech recorded to type it; private and short-lived.
 export const recordingPurposeValues = ["meeting", "browser", "dictation"] as const;
-// Migration 1119. Where a recording's title came from; see RecordingTitleSource.
+// Migration 1128. Where a recording's title came from; see RecordingTitleSource.
 export const recordingTitleSourceValues = [
   "person",
   "calendar",
@@ -87,7 +87,7 @@ export const recordings = pgTable(
       .notNull()
       .default("user_private"),
     title: text("title").notNull(),
-    // Migration 1119. Rows from before it are "person": nothing replaces their titles.
+    // Migration 1128. Rows from before it are "person": nothing replaces their titles.
     titleSource: text("title_source", { enum: recordingTitleSourceValues })
       .notNull()
       .default("person"),

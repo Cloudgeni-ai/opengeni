@@ -80,7 +80,7 @@ weaker source, in this order:
    UTC`, and the React pages show it as the viewer's local "Meeting, 30 Oct,
    13:51".
 
-Rows from before `titleSource` existed (migration 1119) are `person`, so
+Rows from before `titleSource` existed (migration 1128) are `person`, so
 nothing renames them. Meeting window and browser tab titles are not read:
 on macOS that needs the Screen Recording or Accessibility permission, which
 the recorder otherwise never asks for, and most call apps' titles don't name
