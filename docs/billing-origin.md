@@ -369,6 +369,17 @@ cap adds own-key fee debt still owed). The previous release never writes
 are plain row metadata; rows the previous release writes during the rollout
 are read conservatively (see Paid credit).
 
+Two accepted residuals if the database clock steps back:
+
+- **During the rollout only:** a row the previous release writes after a
+  receipt stamped ahead of the clock sorts before that receipt and is never
+  folded into paid credit. An old-release promotional grant can then count as
+  paid, and an old-release top-up can be missed until reconciled. A full fix
+  would need an insertion marker the previous release does not write.
+- **Plan usage:** receipts written during the skew are stamped in the future
+  (after the latest receipt), so `plan_period_usage` can undercount for the
+  length of the skew, milliseconds in practice.
+
 Migration 1109 builds `credit_ledger_receipt_rows_idx` concurrently (a
 non-unique partial index, so it may land after traffic returns). Reads are
 correct without it; until it exists the read finds the latest receipt through
