@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+The Skill index lists every installed Skill. Its last header sentence changes
+from "Use the id when names are ambiguous." to "Read a Skill by its name; an
+entry shows an id only when several Skills share that name, and then you read
+it by that id." Entries drop their id unless two Skills share a name, and the
+32 KB / 128-entry cut that silently dropped the Skills sorting last is
+replaced by a 96 KB bound that shortens only the longest descriptions. The
+index is delivered as a context item that replaces earlier indexes, so an
+existing session receives the new index as one appended item and nothing an
+earlier request sent changes. The legacy lock for a prompt with an empty
+Skill index grows by 85 characters for the new header sentence.
+
 A voice handoff answers in the user's language. When a person ends a realtime
 voice session, the remaining transcript reaches the agent as a message whose
 `<input>` is a fixed English note about the handoff. That note gains one last
