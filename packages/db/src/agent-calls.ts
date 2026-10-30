@@ -1,5 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import { agentCallRoutinesGranted } from "./native-push";
 import { agentCalls } from "./schema";
 
 // Agents calling people (1107, docs/design/agent-calls.md). A call rings the
@@ -76,11 +77,15 @@ export type PlaceAgentCallResult =
   | { placed: true; call: AgentCallRow }
   | { placed: false; refusal: AgentCallRefusal };
 
-/** How many of a person's phones an agent may ring (for their own agents, or a teammate's). */
+/**
+ * How many of a person's phones an agent may ring (for their own agents, or a
+ * teammate's). None until the agent call routines are granted.
+ */
 export async function countAgentCallDevices(
   db: Database,
   input: { calleeSubjectId: string; member: boolean },
 ): Promise<number> {
+  if (!(await agentCallRoutinesGranted(db))) return 0;
   const [row] = await rawRows<{ devices: number }>(
     db,
     sql`select opengeni_private.agent_call_device_count_v1(

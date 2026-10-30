@@ -13,7 +13,11 @@ import {
   synchronizeCanonicalHumanLoginBindings,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 
 import { finishAgentCall } from "../src/agent-calls";
@@ -35,6 +39,8 @@ beforeAll(async () => {
     if (requireRealDatabase) throw new Error("PostgreSQL test database unavailable");
     return;
   }
+  // 1107 withholds the call routines for one release; run as once granted.
+  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
 

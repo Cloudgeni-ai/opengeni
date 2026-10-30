@@ -3955,7 +3955,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's and 1091's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4011,10 +4011,17 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "session_attempt_tool_catalogs",
     "session_system_updates",
     "task_note_write_capabilities",
+    "auth_sessions",
+    "agent_calls",
   ];
+  // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
+  const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
+    posture.privateTables.push(
+      ...definerPrivateTables.map((name) => ({ ...eventTable(name, false), policyCount: 0 })),
+    );
     posture.privateRoutines = posture.privateRoutines.filter(
       (entry) =>
         !(runtimePosture.RUNTIME_DEFINER_ROUTINES as readonly string[]).includes(entry.name),
@@ -4065,6 +4072,12 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4072,6 +4085,12 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4127,11 +4146,24 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "ring_agent_call_v1(uuid, boolean)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
       expect(eventViolations(posture)).toEqual([`runtime definer ${name} is missing or ambiguous`]);
     }
+    // A definer named after private tables is required only once they exist.
+    const beforeOutbox = eventPosture(false);
+    beforeOutbox.privateTables = beforeOutbox.privateTables.filter(
+      (table) => table.name !== "native_push_deliveries",
+    );
+    beforeOutbox.privateRoutines = beforeOutbox.privateRoutines.filter(
+      (entry) =>
+        entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
+        entry.name !== "ring_agent_call_v1(uuid, boolean)",
+    );
+    expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);
     beforeRecordings.tables = beforeRecordings.tables.filter(
       (table) => table.name !== "recordings",

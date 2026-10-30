@@ -281,19 +281,11 @@ BEGIN
   END LOOP;
 END $agent_call_search_paths$;
 
-DO $agent_call_function_grants$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.native_push_device_v2(text),
-      opengeni_private.register_native_push_device_v2(text,text,text,text,text,text[],text),
-      opengeni_private.agent_call_device_count_v1(text,boolean),
-      opengeni_private.agent_call_ringing_v1(text),
-      opengeni_private.ring_agent_call_v1(uuid,boolean),
-      opengeni_private.claim_native_push_deliveries_v2(uuid,integer,integer)
-      TO opengeni_app;
-  END IF;
-END $agent_call_function_grants$;
+-- Runtime EXECUTE on these six is withheld for one release
+-- (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): the previous release
+-- rejects a runtime grant on a definer it does not know. Until a later
+-- migration grants them, native push keeps its v1 functions and no phone
+-- takes agent calls.
 
 ALTER TABLE workspace_webhooks DROP CONSTRAINT workspace_webhooks_event_types_chk;
 ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk CHECK (
