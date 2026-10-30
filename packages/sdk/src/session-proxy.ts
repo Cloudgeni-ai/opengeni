@@ -1073,9 +1073,12 @@ export function createSessionProxyHandler(
               modelSelection,
             );
             if (modelSelection) return await forward(message);
-            // Save requires explicit policy fields. Use this actor's durable draft,
-            // not browser choices. The API's expectedRevision fence rejects races.
+            // Use this actor's durable draft, not browser choices. A draft that
+            // follows the chat's settings is saved without them so it keeps
+            // following; an older API (no such flag) requires them. The API's
+            // expectedRevision fence rejects races.
             const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+            if (draft.policyFollowsSession) return await forward(message);
             return await forward({
               ...message,
               model: draft.model,

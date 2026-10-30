@@ -9281,6 +9281,13 @@ export const composerDrafts = pgTable(
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
+    /**
+     * True while the person has not picked a model in this composer: reads
+     * then return the chat's current settings, so a change made elsewhere
+     * (for example by the agent) is what the next Send uses. The three
+     * columns above keep the settings the draft was last saved with.
+     */
+    policyFollowsSession: boolean("policy_follows_session").notNull().default(true),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
