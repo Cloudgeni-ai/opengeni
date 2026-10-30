@@ -59,6 +59,8 @@ interface Context {
   randomId: () => string;
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
+  /** PRs this pass ejected: their departure is the batcher's doing, not their author's. */
+  ejected: Set<number>;
 }
 
 function context(gh: GitHub, options: PassOptions): Context {
@@ -69,6 +71,7 @@ function context(gh: GitHub, options: PassOptions): Context {
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
     autoMerge: new Map(),
+    ejected: new Set(),
   };
 }
 
@@ -143,6 +146,7 @@ async function observe(ctx: Context): Promise<Observation> {
 
 async function eject(ctx: Context, number: number, reason: string) {
   ctx.log(`Ejecting #${number}: ${reason}`);
+  ctx.ejected.add(number);
   await ctx.gh.comment(
     number,
     `Removed from the merge queue because ${reason}\n\nFix it, then add the \`${QUEUE_LABEL}\` label again.`,
@@ -156,7 +160,8 @@ async function abandon(ctx: Context, batch: Batch, reason: string, changed?: num
   ctx.log(`Abandoning ${batch.branch}: ${reason}`);
   for (const ci of batch.runs) if (ci.status !== "completed") await ctx.gh.cancelRun(ci.id);
   await ctx.gh.deleteBranch(batch.branch);
-  if (changed !== undefined) await tellChanged(ctx, batch.manifest, reason, changed);
+  if (changed !== undefined && !ctx.ejected.has(changed))
+    await tellChanged(ctx, batch.manifest, reason, changed);
 }
 
 /** Show whoever changed a member what that cost. Best effort: never fails the pass. */

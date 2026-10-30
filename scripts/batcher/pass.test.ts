@@ -22,6 +22,7 @@ interface FakePull {
   labels: string[];
   green: boolean;
   merged?: string;
+  conflicting?: boolean;
 }
 
 /**
@@ -82,7 +83,7 @@ class FakeGitHub implements GitHub {
         headRef: p.title === "Version" ? "changeset-release/main" : `branch-${p.number}`,
         sameRepository: true,
         draft: false,
-        mergeable: "MERGEABLE" as const,
+        mergeable: p.conflicting ? ("CONFLICTING" as const) : ("MERGEABLE" as const),
         labels: p.labels,
         labeledAt: NOW - 3_600_000 + p.number,
         autoMergeAt: null,
@@ -463,6 +464,19 @@ describe("the in-batch label", () => {
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
     expect(gh.marked()).toEqual([]);
+  });
+
+  test("a member the batcher ejects itself gets no comment blaming it", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    gh.pulls.get(2)!.conflicting = true;
+    await run(gh, options());
+    expect(gh.comments.map((c) => c.number)).toEqual([2]);
+    expect(gh.comments[0]!.body).toContain("Removed from the merge queue because it conflicts");
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.marked()).toEqual([1]);
   });
 
   test("label failures never stop batching", async () => {
