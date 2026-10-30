@@ -9,7 +9,7 @@ use compute_core::{
     Action, BalloonRequest, DiskSpace, Durability, Failure, Input, Level, Notice, OpId, Outcome,
     ShrinkRequest, State, Step,
 };
-use compute_engine::{CancellationToken, Engine, VmSpec};
+use compute_engine::{CancellationToken, Engine, LastWords, VmSpec};
 use tokio::time::{Instant, sleep};
 
 use crate::layout::{Paths, vm_spec};
@@ -23,7 +23,9 @@ use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
 use crate::store::Store;
 
 use super::observe::Why;
-use super::{Event, HostAgent, HostError, Leftover, Reply, Running, Slot, TEARDOWN_RETRY, Woke};
+use super::{
+    End, Event, Exit, HostAgent, HostError, Leftover, Reply, Running, Slot, TEARDOWN_RETRY, Woke,
+};
 
 /// How long a guest that took the connection may take to say whether
 /// commands still run before its sandbox sleeps anyway. It has as long to
@@ -34,6 +36,10 @@ const ASK_LIMIT: Duration = Duration::from_secs(1);
 /// How long a guest has to answer a shrink on a host without a memory
 /// rule that says (one whose policy never asks for shrinks).
 const SHRINK_LIMIT: Duration = Duration::from_secs(15);
+
+/// How long the teardown of a lost VM waits to read what its logs last
+/// said before it ends the VM anyway (see [`HostAgent::reap`]).
+const LAST_WORDS_WAIT: Duration = Duration::from_secs(2);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
@@ -81,7 +87,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.input(Input::Busy { sandbox: id.0 });
                 }
             }
-            Event::Exited { id, incarnation } => self.exited(id, incarnation),
+            Event::Exited(exit) => self.exited(exit.id, exit.incarnation, exit.end),
             Event::Checked(done) => self.checked(done),
             Event::Asked {
                 id,
@@ -441,7 +447,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Alarm::EndedForMemory,
             "VM ended for host memory: its guest could not be shrunk",
         );
-        self.lost_vm(id, incarnation);
+        self.lost_vm(id, incarnation, End::ForMemory);
     }
 
     /// Asks the guest of `id`'s running VM to give `bytes` back through its
@@ -735,6 +741,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             After::NoVm => None,
         };
         let mut reap = None;
+        let mut lost = None;
         let mut destroy = false;
         let mut finished_step = None;
         if let Some(slot) = self.slots.get_mut(&id.0) {
@@ -755,7 +762,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // A process that already ended on its own only needs its
                 // resources released. One that lost its memory was ended by
                 // the step before it reported.
-                Some(live) if slot.dead == Some(live.incarnation) => {
+                Some(live) if slot.dead.is_some_and(|(dead, _)| dead == live.incarnation) => {
+                    lost = slot.dead.map(|(_, end)| end);
                     slot.incarnation = None;
                     slot.dead = None;
                     reap = Some(live);
@@ -786,7 +794,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             reap = fresh;
         }
         if let Some(live) = reap {
-            self.reap(id, live);
+            self.reap(id, live, lost);
         }
         // Decided together, so the activity counts before the core picks
         // the next step.
@@ -829,14 +837,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let memory_lost = memory.failed();
         tokio::spawn(async move {
             let lost = memory_lost;
-            tokio::select! {
-                () = exited => {}
+            let end = tokio::select! {
+                () = exited => End::Exited,
                 // Its memory can no longer be served: the next page fault
                 // would wait forever, so it counts as dead.
-                () = lost => {}
-            }
+                () = lost => End::MemoryLost,
+            };
             if !deliberate.load(Ordering::Acquire) {
-                let _ = events.send(Event::Exited { id, incarnation });
+                let _ = events.send(Event::Exited(Exit {
+                    id,
+                    incarnation,
+                    end,
+                }));
             }
         });
         Live {
@@ -849,8 +861,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Ends a dead VM process and releases what it held, in the
     /// background. Nothing new starts for the sandbox until that is done, so
-    /// the teardown never touches a newer VM's jail.
-    pub(super) fn reap(&mut self, id: Id, live: Live<E::Vm>) {
+    /// the teardown never touches a newer VM's jail. A VM that was `lost`
+    /// first has its logs' last words kept, as a `compute.vm.lost` event:
+    /// its sandbox, and the logs with it, may be removed once it is gone.
+    pub(super) fn reap(&mut self, id: Id, live: Live<E::Vm>, lost: Option<End>) {
         live.stopping.store(true, Ordering::Release);
         *self.tearing_down.entry(id.0).or_default() += 1;
         let spec = match self.slots.get(&id.0) {
@@ -861,6 +875,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .map(|record| vm_spec(&record, &Paths::of(&self.root, &record), &self.images)),
         };
         let engine = Arc::clone(&self.engine);
+        let words = lost.map(|end| (end, engine.last_words(&live.vm)));
+        let observer = self.observer.clone();
         // Keeps the state root locked until the teardown ends, so a
         // successor agent cannot start beside it.
         let records = Arc::clone(&self.records);
@@ -868,6 +884,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         self.teardowns.spawn(async move {
             let _records = records;
+            if let Some((end, words)) = words {
+                // Bounded: a VM ended for host memory frees it only once
+                // stopped, and a pressed host may be slow to read.
+                let words = tokio::time::timeout(LAST_WORDS_WAIT, words)
+                    .await
+                    .unwrap_or_else(|_| LastWords {
+                        guest: format!("(its logs were not read within {LAST_WORDS_WAIT:?})"),
+                        ..LastWords::default()
+                    });
+                observer.emit(lost_event(id, end, words));
+            }
             live.memory.ending();
             let mut result = engine.stop(live.vm).await;
             let mut delay = Duration::from_millis(100);
@@ -916,8 +943,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    pub(super) fn exited(&mut self, id: Id, incarnation: u64) {
-        if self.ready_exited(id, incarnation) {
+    pub(super) fn exited(&mut self, id: Id, incarnation: u64, end: End) {
+        if self.ready_exited(id, incarnation, end) {
             return;
         }
         // A claimed ready sandbox's VM was watched under its host name.
@@ -928,13 +955,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if slot.incarnation != Some(incarnation) {
             return;
         }
-        tracing::warn!(%id, "VM process ended on its own; running programs are lost");
-        self.lost_vm(id, incarnation);
+        if end == End::MemoryLost {
+            tracing::warn!(
+                %id,
+                "VM's memory can no longer be served; ending it, and running programs are lost"
+            );
+        } else {
+            tracing::warn!(%id, "VM process ended on its own; running programs are lost");
+        }
+        self.lost_vm(id, incarnation, end);
     }
 
     /// Ends VM process `incarnation` of `id`, which is lost (it ended on its
-    /// own, or its guest stopped), and tells the core.
-    pub(super) fn lost_vm(&mut self, id: Id, incarnation: u64) {
+    /// own, or its guest stopped), as `end` says, and tells the core.
+    pub(super) fn lost_vm(&mut self, id: Id, incarnation: u64, end: End) {
         let Some(slot) = self.slots.get_mut(&id.0) else {
             return;
         };
@@ -942,10 +976,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         slot.asked = Some(Why::plain(Cause::Recovery));
         if let Some(live) = slot.vm.take() {
             slot.incarnation = None;
-            self.reap(id, live);
+            self.reap(id, live, Some(end));
         } else {
             // A step holds it and will hand it back.
-            slot.dead = Some(incarnation);
+            slot.dead = Some((incarnation, end));
         }
         self.input(Input::Lost { sandbox: id.0 });
     }
@@ -1050,6 +1084,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let event = alarm_event(what).with("compute.sandbox.id", id.to_string());
         self.observer.alarm(alarm, event);
     }
+}
+
+/// The event that keeps what a lost VM's logs last said (see
+/// [`HostAgent::reap`]): how it was lost, and its guest's, VMM's and
+/// pager's last lines.
+fn lost_event(id: Id, end: End, words: LastWords) -> crate::observe::Event {
+    crate::observe::Event::new("compute.vm.lost", crate::observe::Severity::Warn)
+        .with("compute.sandbox.id", id.to_string())
+        .with("compute.vm.end", end.name())
+        .with("compute.vm.guest_said", words.guest)
+        .with("compute.vm.vmm_said", words.vmm)
+        .with("compute.vm.pager_said", words.pager)
 }
 
 /// Counts how the step `running` of `id` ended in its kind's `stats`, and

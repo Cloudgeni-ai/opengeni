@@ -8758,6 +8758,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
+    /** 1108: the machine the calling code ran on, when it was not the session's
+     *  active sandbox (a `run_on` exec). Paths in the call resolve there. */
+    callerExecutionSandboxId: uuid("caller_execution_sandbox_id"),
     state: text("state", {
       enum: [
         "queued",
@@ -15348,6 +15351,50 @@ export const feedbackSubmissions = pgTable(
       table.sessionId,
       table.createdAt,
       table.id,
+    ),
+  }),
+);
+
+/**
+ * An agent ringing a person's phones (1107): one row per call, from ringing
+ * to its outcome. Answering opens the chat's voice call.
+ */
+export const agentCalls = pgTable(
+  "agent_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    calleeSubjectId: text("callee_subject_id").notNull(),
+    callerSubjectId: text("caller_subject_id"),
+    callerLabel: text("caller_label"),
+    reason: text("reason").notNull(),
+    state: text("state").notNull().default("ringing"),
+    devices: integer("devices").notNull().default(0),
+    ringUntil: timestamp("ring_until", { withTimezone: true }).notNull(),
+    answeredBy: text("answered_by"),
+    realtimeId: uuid("realtime_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (table) => ({
+    session: index("agent_calls_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt.desc(),
+    ),
+    ringingCallee: index("agent_calls_ringing_callee_idx")
+      .on(table.calleeSubjectId)
+      .where(sql`${table.state} = 'ringing'`),
+    ringingDeadline: index("agent_calls_ringing_deadline_idx")
+      .on(table.ringUntil)
+      .where(sql`${table.state} = 'ringing'`),
+    stateCheck: check(
+      "agent_calls_state_chk",
+      sql`${table.state} in ('ringing', 'answered', 'declined', 'missed', 'cancelled')`,
     ),
   }),
 );

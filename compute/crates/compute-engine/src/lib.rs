@@ -79,6 +79,20 @@ pub enum Readable {
     Unknown,
 }
 
+/// What a VM's logs last said, for an operator to tell why it was lost
+/// (see [`Engine::last_words`]). Each part is its last few lines, oldest
+/// first, and empty when there was nothing to read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LastWords {
+    /// What its guest last wrote on its console, such as a kernel panic.
+    pub guest: String,
+    /// What its VMM last wrote, other than its answers to the host's
+    /// requests: why it stopped, or its panic.
+    pub vmm: String,
+    /// What the pager serving its memory last wrote, if one did.
+    pub pager: String,
+}
+
 /// What the host needs from a VM program.
 ///
 /// Every method that can fail reports an [`ErrorKind`] saying what the
@@ -344,6 +358,18 @@ pub trait Engine: Send + Sync + 'static {
         std::future::ready(Ok(false))
     }
 
+    /// What `vm`'s logs last said, for an operator to tell why it was lost:
+    /// its process ended on its own, its memory could no longer be served,
+    /// or its guest stopped answering. Read before the VM is torn down,
+    /// which may remove its logs with its sandbox. The future reads the
+    /// ends of a few files off the caller's thread and does not borrow the
+    /// VM; what it cannot read it says so in place of the lines. Engines
+    /// that keep no logs say nothing.
+    fn last_words(&self, vm: &Self::Vm) -> impl Future<Output = LastWords> + Send + 'static {
+        let _ = vm;
+        std::future::ready(LastWords::default())
+    }
+
     /// Gives the VM new guarantees, as [`VmSpec::memory_request_mib`] and
     /// [`VmSpec::cpu_weight`] give a new one: its processor share at once,
     /// its memory protection from its next resume, which is when a VM gets
@@ -406,6 +432,16 @@ pub trait Engine: Send + Sync + 'static {
             "bound_memory",
             "this engine cannot bound a VM's memory",
         ))
+    }
+
+    /// Whether the engine is still bringing `vm` down toward the high of
+    /// the latest [`Engine::bound_memory`]: the kernel is at work on it and
+    /// has not shown that it can take no more. A VM whose pages the kernel
+    /// must first age may come down only after many seconds. `false` for
+    /// an engine that applies a bound at once or cannot bound a VM.
+    fn bringing_down(&self, vm: &Self::Vm) -> bool {
+        let _ = vm;
+        false
     }
 
     /// Tells the guest of `vm`, started from `spec`, how long each of its
