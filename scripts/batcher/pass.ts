@@ -136,8 +136,9 @@ async function observe(ctx: Context): Promise<Observation> {
     const queuedAt = Math.min(
       ...[pull.labeledAt, pull.autoMergeAt].filter((t): t is number => t !== null),
     );
-    // A Version PR is regenerated, never merged with main, so a Git conflict
-    // holds it like any other overlap (below) instead of ejecting it.
+    // A Version PR is regenerated, never merged with main. A Git conflict
+    // means main changed a file it also changes, so the overlap check below
+    // holds it for a regenerate instead of ejecting it.
     let conflict = pull.mergeable === "CONFLICTING" && !version ? CONFLICTING : null;
     let headAt: number | undefined;
     if (version) {
@@ -184,7 +185,7 @@ async function observe(ctx: Context): Promise<Observation> {
     if (version && conflict === null) {
       const overlaps = await versionOverlaps(gh, mainSha, pull.headSha, pull.number);
       if (overlaps === null) conflict = VERSION_UNCHECKABLE;
-      else behind = overlaps || pull.mergeable === "CONFLICTING";
+      else behind = overlaps;
     }
     pulls.push({
       number: pull.number,
@@ -500,9 +501,16 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
   try {
     for (const pull of members) {
       // Main moved since this pass observed it; the next pass holds for it.
-      if (pull.version && (await versionOverlaps(gh, base, pull.headSha, pull.number)) !== false) {
-        ctx.log(`Not building Version PR #${pull.number}: main changed files it also changes`);
-        continue;
+      if (pull.version) {
+        const overlaps = await versionOverlaps(gh, base, pull.headSha, pull.number);
+        if (overlaps !== false) {
+          ctx.log(
+            overlaps
+              ? `Not building Version PR #${pull.number}: main changed files it also changes`
+              : `Not building Version PR #${pull.number}: it cannot be compared with main`,
+          );
+          continue;
+        }
       }
       const result = await gh.mergeInto(
         scratch,

@@ -530,16 +530,39 @@ describe("a batcher pass", () => {
     expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
     expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
 
-    // Then GitHub marks it conflicting: still held, and asked once to regenerate.
-    gh.pulls.get(5)!.mergeable = "CONFLICTING";
-    await run(gh, options());
+    // Each later pass skips it again; it is never ejected.
     await run(gh, options());
     expect(await gh.mainSha()).toBe(frozen);
+    expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments).toEqual([]);
+  });
+
+  test("a Version PR GitHub marks conflicting is held for a regenerate, never ejected", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: ["packages/sdk/package.json"] });
+    await run(gh, options());
+    const inFlight = gh.batch();
+    // A real conflict: both change the same file.
+    gh.addPull(5, {
+      title: "Version",
+      files: ["packages/sdk/package.json"],
+      mergeable: "CONFLICTING",
+    });
+    gh.conflicts.push([gh.pulls.get(5)!.head, gh.pulls.get(1)!.head]);
+    gh.finishCi(inFlight.sha, "success");
+    await run(gh, options());
+    await run(gh, options());
+    const frozen = await gh.mainSha();
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
     expect(gh.pulls.get(5)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments).toEqual([
       { number: 5, body: expect.stringContaining("Run the Open Version PR workflow") },
     ]);
     expect(gh.comments[0]!.body).not.toContain("Merge main into the branch");
+    await run(gh, options());
+    expect(await gh.mainSha()).toBe(frozen);
+    expect(gh.comments).toHaveLength(1);
   });
 
   test("a cancelled PR CI run holds a Version PR until the hour is up, then it leaves", async () => {
@@ -589,7 +612,7 @@ describe("a batcher pass", () => {
     expect(gh.comments).toEqual([]);
   });
 
-  test("a bisection waits behind a Version PR and resumes after it lands", async () => {
+  test("a Version PR built in the same pass as a bisection carries its remaining half", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
     gh.addPull(2);

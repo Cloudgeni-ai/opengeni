@@ -41,7 +41,7 @@ A Version PR leaves the queue with a comment, so a broken release never blocks
 other work, when its PR CI fails or times out on its current head, or when no
 PR CI run has passed or is running on that head an hour after it was queued
 or pushed (a cancelled run counts as none: rerun it). A bisection in progress
-waits behind the hold and continues after the Version PR lands.
+may be dropped during a hold; its PRs are simply batched again afterwards.
 
 While a Version PR holds the queue, nothing else lands, including a lone
 control-plane fix. To land a fix first, remove `queue-ready` from the Version
