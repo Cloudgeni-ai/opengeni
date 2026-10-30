@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "45437f11b02037ddf66427fd3d67d4d9fdb5351e283963fc1a9fefa035b0cb2f"
+      "sha256": "267b58035b4fedd6314c43d67d1bf55e4188b35257c896d32e2f74fc8567db1b"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -981,7 +981,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "fbab7e8a5fdaf68c2d4f93db3459471d662614f035a05c751b7dceecba760600"
+      "sha256": "483d2bbf44d5824ac9d50ca1d2d2835c70ee89eea116097eff8fa90511e8fba7"
     },
     {
       "workflow": ".github/workflows/ci.yml",

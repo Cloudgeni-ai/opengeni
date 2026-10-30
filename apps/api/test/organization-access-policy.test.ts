@@ -533,6 +533,7 @@ describe("organization key policy API and canonical access", () => {
       ),
     );
     track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+    track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
     track(
       spyOn(db, "lockActiveExternalOrganizationKeyAuthority").mockResolvedValue({
         permissions: ["workspace:read", "members:manage"],

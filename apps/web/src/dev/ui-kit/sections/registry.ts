@@ -105,6 +105,7 @@ export const SECTION_KEYS = [
   "secret-values",
   "secret-ask-card",
   "secret-approval",
+  "mcp-question",
   "cadence-picker",
   // People
   "access-list",
@@ -754,6 +755,14 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Say what a waiting approval does and where it runs, in the inbox and in notifications.",
     usedOn: "Inbox on web, desktop and phone; phone and desktop notifications",
     load: () => import("./inbox-approvals"),
+  },
+  {
+    key: "mcp-question",
+    group: "Chat",
+    title: "MCP server question",
+    purpose: "Answer a question an MCP server asks in the middle of a tool call.",
+    usedOn: "Chat approvals",
+    load: () => import("./mcp-question"),
   },
   {
     key: "cadence-picker",

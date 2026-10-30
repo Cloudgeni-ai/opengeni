@@ -24,6 +24,7 @@ import {
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
   SessionMemoryScope,
+  SessionSkills,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
@@ -55,6 +56,7 @@ import {
   scheduledTaskRunTools,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
+  withSameRequestSessionMcpServerTools,
   swapActiveSandbox,
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
@@ -105,6 +107,7 @@ import {
   materializeScheduledTaskReusableSessionFromRun,
   listInstalledApiIntegrationServerIdsForDelegations,
   isWorkspaceAgentActivityPaused,
+  scheduledTaskPreviousRunSessionBusy,
   markScheduledTaskRunFailedIfQueued,
   markScheduledTaskRunSkippedIfQueued,
   recordUsageEvent,
@@ -154,6 +157,8 @@ import type {
   WakeSessionWorkflowSignal,
 } from "./types";
 import type { Database } from "@opengeni/db";
+import type { CreateSessionMcpServerInput } from "@opengeni/db";
+import type { ScheduledTaskAgentConfig } from "@opengeni/contracts";
 
 type ScheduledTemporalActivityIdentity = {
   namespace: string;
@@ -1324,6 +1329,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         input,
         creatorPolicy?.credentialRestriction,
       );
+      // Servers the task attaches to its chat are selected by that attach,
+      // as on session create.
+      if (generatedTarget && task.agentConfig.mcpServers?.length) {
+        taskTools = withSameRequestSessionMcpServerTools(
+          taskTools,
+          task.agentConfig.mcpServers.map((server) => ({ id: server.id, eager: server.eager })),
+        );
+      }
       const deferredEvents: Array<{
         sessionId: string;
         events: Awaited<ReturnType<typeof appendSessionEvents>>;
@@ -1560,6 +1573,30 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 run: { ...run, status: "skipped" as const, error: "scheduled_workspace_paused" },
               };
             }
+            // `skip` on a new chat per run: an occurrence that finds the
+            // previous run's chat still working is skipped, like a busy chat.
+            if (
+              !run.sessionId &&
+              task.runMode === "new_session_per_run" &&
+              task.overlapPolicy === "skip" &&
+              (await scheduledTaskPreviousRunSessionBusy(dispatchDb, {
+                workspaceId: task.workspaceId,
+                taskId: task.id,
+                runId: run.id,
+              }))
+            ) {
+              await markScheduledTaskRunSkippedIfQueued(dispatchDb, {
+                workspaceId: task.workspaceId,
+                runId: run.id,
+                sessionId: null,
+                error: "scheduled_session_not_idle",
+              });
+              return {
+                kind: "blocked" as const,
+                result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
+                run: { ...run, status: "skipped" as const, error: "scheduled_session_not_idle" },
+              };
+            }
             // RIG BINDING (M3): resolve the task's rig to its CURRENTLY-ACTIVE
             // version at FIRE time (not task-create time) and freeze that version
             // onto the new session — a task always runs the rig's latest active
@@ -1602,7 +1639,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 ...(resolvedAgentInstructions !== undefined
                   ? { instructions: resolvedAgentInstructions }
                   : {}),
-                ...creatorSessionPolicy,
+                ...scheduledGeneratedChatSettings(task.agentConfig, creatorSessionPolicy),
                 ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
                 task.visibility === "private"
                   ? {
@@ -2765,6 +2802,22 @@ async function recoverBoundScheduledTaskDispatch(input: {
     session = await requireSession(input.db, task.workspaceId, input.run.sessionId);
     // Preserve the reusable chat's Slack routing.
     if (!generatedSession) assertReusableSessionBindingMatches(session, task);
+  } else if (
+    task.runMode === "new_session_per_run" &&
+    task.overlapPolicy === "skip" &&
+    (await scheduledTaskPreviousRunSessionBusy(input.db, {
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      runId: input.run.id,
+    }))
+  ) {
+    await markScheduledTaskRunSkippedIfQueued(input.db, {
+      workspaceId: task.workspaceId,
+      runId: input.run.id,
+      sessionId: null,
+      error: "scheduled_session_not_idle",
+    });
+    return { action: "blocked", reason: "scheduled_run_terminal" };
   } else if (generatedSession) {
     const rig = input.acceptedExecution.resolvedRig;
     if (rig) {
@@ -2807,7 +2860,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
       ...(input.acceptedExecution.resolvedAgentInstructions !== undefined
         ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
         : {}),
-      ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ...scheduledGeneratedChatSettings(
+        task.agentConfig,
+        scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ),
       ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
       ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
       task.visibility === "private"
@@ -2975,13 +3031,20 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.initialMessage !== task.agentConfig.prompt ||
       session.instructions !== (input.acceptedExecution.resolvedAgentInstructions ?? null) ||
       session.policyRole !== null ||
-      stableJson(session.skills) !== "[]" ||
+      stableJson(session.skills) !== stableJson(task.agentConfig.skills ?? []) ||
       stableJson(session.toolPolicy) !==
         stableJson(
           generatedBinding.toolPolicy ?? { mode: "explicit", inheritedFromSessionId: null },
         ) ||
       session.toolPolicyVersion !== 1 ||
-      session.mcpServers.length !== 0 ||
+      stableJson(
+        session.mcpServers
+          .map((server) => [server.id, server.url, server.headerNames.length])
+          .sort(),
+      ) !==
+        stableJson(
+          (task.agentConfig.mcpServers ?? []).map((server) => [server.id, server.url, 0]).sort(),
+        ) ||
       session.parentSessionId !== null ||
       session.rootSessionId !== session.id ||
       session.nestedAgentDepth !== 0 ||
@@ -3345,6 +3408,64 @@ function scheduledCreatorSessionPolicyInput(
       ? { scopeSubjectId: policy.scopeSubjectId }
       : {}),
     ...(memoryScope.success ? { memoryScope: memoryScope.data } : {}),
+  };
+}
+
+/**
+ * Session-create settings of a chat the task starts: its creator session
+ * policy, narrowed by the chat settings the task names. Agent reach and
+ * Memory keep the narrower of the two, so a task never widens what its
+ * creating chat had. Attached servers carry no static headers.
+ */
+export function scheduledGeneratedChatSettings(
+  agentConfig: ScheduledTaskAgentConfig,
+  creatorPolicy: ReturnType<typeof scheduledCreatorSessionPolicyInput>,
+): ReturnType<typeof scheduledCreatorSessionPolicyInput> & {
+  mcpServers?: CreateSessionMcpServerInput[];
+  skills?: ReturnType<typeof SessionSkills.parse>;
+} {
+  const narrower = <Value extends string>(
+    order: readonly Value[],
+    left: Value | undefined,
+    right: Value | undefined,
+  ): Value | undefined =>
+    left === undefined
+      ? right
+      : right === undefined
+        ? left
+        : order.indexOf(left) <= order.indexOf(right)
+          ? left
+          : right;
+  const agentAccess = narrower(
+    ["session", "user", "workspace"] as const,
+    creatorPolicy.agentAccess,
+    agentConfig.agentAccess,
+  );
+  const memoryScope = narrower(
+    ["off", "workspace", "user"] as const,
+    creatorPolicy.memoryScope,
+    agentConfig.memoryScope,
+  );
+  return {
+    ...creatorPolicy,
+    ...(agentAccess !== undefined ? { agentAccess } : {}),
+    ...(memoryScope !== undefined ? { memoryScope } : {}),
+    ...(agentConfig.mcpServers?.length
+      ? {
+          mcpServers: agentConfig.mcpServers.map((server) => ({
+            id: server.id,
+            name: server.name ?? null,
+            url: server.url,
+            allowedTools: server.allowedTools ?? null,
+            timeoutMs: server.timeoutMs ?? null,
+            cacheToolsList: server.cacheToolsList ?? false,
+            requireApproval: server.requireApproval ?? null,
+            connectionRef: server.connectionRef ?? null,
+            headersEncrypted: {},
+          })),
+        }
+      : {}),
+    ...(agentConfig.skills?.length ? { skills: SessionSkills.parse(agentConfig.skills) } : {}),
   };
 }
 

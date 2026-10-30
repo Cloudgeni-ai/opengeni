@@ -8980,6 +8980,9 @@ export const connectorActionRequests = pgTable(
       withTimezone: true,
     }),
     outcome: text("outcome"),
+    // 1114: times the provider stopped this call to ask the person (MCP
+    // elicitation). Each round has its own decision and single execution.
+    inputRound: integer("input_round").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -9281,6 +9284,13 @@ export const composerDrafts = pgTable(
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
+    /**
+     * True while the person has not picked a model in this composer: reads
+     * then return the chat's current settings, so a change made elsewhere
+     * (for example by the agent) is what the next Send uses. The three
+     * columns above keep the settings the draft was last saved with.
+     */
+    policyFollowsSession: boolean("policy_follows_session").notNull().default(true),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10441,6 +10451,8 @@ export const sessionPendingToolCalls = pgTable(
     eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
+    /** Private state of an MCP server question that paused this call; never in events. */
+    mcpInputRequest: jsonb("mcp_input_request").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -12669,6 +12681,10 @@ export const scheduledTasks = pgTable(
       scopeSubjectId: string | null;
       memoryScope: string | null;
     }>(),
+    // Opt-in at creation (migration 1100): only the frozen creator principal
+    // may change, run, resume or delete the task; agent attempts never may.
+    // Mutation authority, not execution configuration: excluded from the digest.
+    creatorLocked: boolean("creator_locked").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

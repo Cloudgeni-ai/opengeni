@@ -11,7 +11,9 @@
 #   base.ext4               guest root filesystem with node, git, python, a
 #                           small exec agent listening on vsock port 52 and
 #                           the guest services below
-#   swapfile                backing swap so zswap can be measured
+#   swapfile                backing swap so zswap can be measured (made and
+#                           turned on by host-boot.sh, which a rebooted host
+#                           runs again)
 #
 # Firecracker, the kernel and the root filesystem it starts from are the
 # pins in ../deploy/host/pins.env (or a pins.env beside this script, for a
@@ -25,9 +27,7 @@ pins="$here/../deploy/host/pins.env"
 source "$pins"
 LAB_DIR="${LAB_DIR:-/lab}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-6G}"
-# Empty: as large as the host's memory, but never more than a quarter of the
-# space free where it goes, so the lab's disk keeps room for sandboxes and
-# builds (a fixed 256G once filled a 300G disk).
+# Empty: host-boot.sh sizes the swap file from the host's memory and disk.
 SWAP_SIZE="${SWAP_SIZE:-}"
 NODE_MAJOR="${NODE_MAJOR:-24}"
 ARCH="$(uname -m)"
@@ -368,26 +368,6 @@ if [ ! -f base.ext4 ]; then
   sudo rm -rf rootfs
 fi
 
-log "swap and zswap"
-if ! swapon --show=NAME --noheadings | grep "$LAB_DIR/swapfile" >/dev/null; then
-  if [ ! -f swapfile ]; then
-    if [ -z "$SWAP_SIZE" ]; then
-      memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
-      free_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
-      quarter_kib=$((free_kib / 4))
-      SWAP_SIZE="$(( memory_kib < quarter_kib ? memory_kib : quarter_kib ))K"
-    fi
-    log "swap file of $SWAP_SIZE"
-    sudo fallocate -l "$SWAP_SIZE" swapfile
-    sudo chmod 600 swapfile
-    sudo mkswap -q swapfile
-  fi
-  sudo swapon swapfile
-fi
-echo 1 | sudo tee /sys/module/zswap/parameters/enabled >/dev/null
-echo zstd | sudo tee /sys/module/zswap/parameters/compressor >/dev/null || true
-echo 40 | sudo tee /sys/module/zswap/parameters/max_pool_percent >/dev/null
-# Keep the experiments' own memory decisions explicit: no transparent huge pages.
-echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null
+LAB_DIR="$LAB_DIR" SWAP_SIZE="$SWAP_SIZE" bash "$here/host-boot.sh"
 
 log "ready: $(./bin/firecracker --version | head -1), kernel $(head -1 ci-artifacts.txt | xargs basename)"

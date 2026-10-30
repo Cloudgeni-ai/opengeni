@@ -487,6 +487,13 @@ const externalActorContexts = new WeakMap<
      */
     firstUseMembership: boolean;
     /**
+     * The revocation sequence read under the organization membership fence
+     * when this request authenticated (plain external mode only). A removal
+     * stamped above it happened after the request authenticated, so neither
+     * first use nor a stated membership may re-create the member.
+     */
+    revocationWatermark: string | null;
+    /**
      * The membership the app stated on this request (plain external mode
      * only), with the revocation watermark read under the organization
      * membership fence when the request authenticated. See
@@ -1214,6 +1221,7 @@ async function provisionExternalMemberOnFirstUse(
   if (
     !external.firstUseMembership ||
     external.linked ||
+    external.revocationWatermark === null ||
     // A request that would 403 on its own permission anyway creates nothing.
     (permission !== undefined && !EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.includes(permission)) ||
     context.subjectId !== external.identity.subjectId ||
@@ -1233,7 +1241,7 @@ async function provisionExternalMemberOnFirstUse(
   )
     return false;
   try {
-    await ensureExternalWorkspaceMemberOnFirstUse(
+    const outcome = await ensureExternalWorkspaceMemberOnFirstUse(
       deps.db,
       {
         organizationId: external.identity.accountId,
@@ -1244,9 +1252,11 @@ async function provisionExternalMemberOnFirstUse(
         subjectId: external.identity.subjectId,
         identity: { source: external.identity.source, externalId: external.identity.externalId },
         permissions: EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
+        revocationWatermark: external.revocationWatermark,
       },
     );
-    return true;
+    // Removed after this request authenticated: the removal wins.
+    return outcome !== "superseded";
   } catch (error) {
     // A changed/revoked key, narrowed policy or workspace scope keeps the
     // ordinary denial. Anything else is an infrastructure failure.
@@ -2075,6 +2085,9 @@ async function apiKeyAccessContext(
       selection.mode === "external" && selection.membership
         ? [...new Set(selection.membership.permissions)].sort()
         : null;
+    // Plain external requests may admit the user (first use or a stated
+    // membership), so they order themselves against every removal.
+    const admits = selection.mode === "external" && !service;
     let identity: ExternalIdentity;
     let revocationWatermark: string | null = null;
     try {
@@ -2094,9 +2107,7 @@ async function apiKeyAccessContext(
           // watermark happened after this request authenticated.
           return {
             identity: ensured,
-            revocationWatermark: statedPermissions
-              ? await readExternalWorkspaceRevocationWatermark(tx)
-              : null,
+            revocationWatermark: admits ? await readExternalWorkspaceRevocationWatermark(tx) : null,
           };
         },
       ));
@@ -2138,6 +2149,7 @@ async function apiKeyAccessContext(
       permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
       firstUseMembership: selection.mode !== "linked_native" && !linked && !service,
+      revocationWatermark,
       ...(statedPermissions && revocationWatermark !== null && !service
         ? {
             statedMembership: {

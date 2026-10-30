@@ -23,6 +23,7 @@
     "./fakes": "./src/fakes.ts",
     "./mcp": "./src/mcp.ts",
     "./screenshot": "./src/screenshot.ts",
+    "./mcp-elicitation-server": "./src/mcp-elicitation-server.ts",
     "./mcp-events-server": "./src/mcp-events-server.ts"
   },
   "scripts": {

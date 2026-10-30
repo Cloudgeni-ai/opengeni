@@ -97,6 +97,8 @@ permission, workspace in scope), the keyed-grant prepare/record functions
 receipt plus key-attributed lifecycle event), insert-on-conflict-do-nothing,
 plain external mode only, never for `opengeni-sdk:user-isolation:*`
 workspaces or a requested permission outside the defaults.
+First use also returns `superseded`, creating nothing, when a removal left a
+revocation marker above the watermark the request read when it authenticated.
 A stated membership (`membership` in the external-actor header) replaces
 first use at request entry: `applyStatedMembership` compares the grant the
 request already read, and only when it differs calls
