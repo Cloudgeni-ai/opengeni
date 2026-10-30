@@ -125,6 +125,15 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS`, `OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT`,
 `OPENGENI_WEB_SEARCH_ENABLED`.
 
+Responses requests to Azure OpenAI and the OpenAI platform (built-in, or a
+workspace or organization key) send `store: false`, so the provider keeps no
+response objects: Opengeni sends the whole history with each request, with
+provider item ids stripped and reasoning round-tripped encrypted. A request is
+left alone when it chose `store`, chains `previous_response_id` or a
+`conversation`, or still carries provider item ids
+(`OPENGENI_OPENAI_PROVIDER_ITEM_IDS=preserve`). OpenAI-compatible servers and
+gateways keep their own contracts.
+
 **Keyless Azure OpenAI, without a console connection.** Set
 `OPENGENI_AZURE_OPENAI_AUTH_MODE` on the API and workers:
 
