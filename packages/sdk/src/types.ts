@@ -7395,6 +7395,14 @@ export type ComposerDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the draft has no model choice of its own: `model`,
+   * `reasoningEffort` and `latencyMode` are then the chat's current settings
+   * and follow every later change to them (for example by the agent). Send a
+   * model with this draft only after the person picks one. Absent from
+   * servers that predate it, which means false.
+   */
+  policyFollowsSession?: boolean | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -7735,8 +7743,24 @@ export type DeleteSessionQueueItemRequest = {
 
 export type SaveComposerDraftRequest = Omit<
   ComposerDraft,
-  "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
-> & { expectedRevision: number };
+  | "revision"
+  | "sourceTurnId"
+  | "sourceTurnVersion"
+  | "updatedAt"
+  | "policyFollowsSession"
+  | "model"
+  | "reasoningEffort"
+  | "latencyMode"
+> & {
+  expectedRevision: number;
+  /**
+   * The person's pick in the composer. Omit all three to keep (or return)
+   * the draft to the chat's own settings, so it follows later changes.
+   */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
+};
 
 export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
   expectedDraftRevision: number;

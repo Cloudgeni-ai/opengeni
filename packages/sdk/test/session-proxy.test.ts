@@ -483,6 +483,38 @@ describe("createSessionProxyHandler", () => {
     ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });
   });
 
+  test("forwards the resolved membership statement through asUser", async () => {
+    const { upstream, browser } = setup({
+      resolve: () => ({
+        workspaceId: WORKSPACE_ID,
+        user: "u_42",
+        source: "northwind",
+        membership: { permissions: ["workspace:read", "sessions:read", "sessions:read"] },
+      }),
+    });
+    await browser.getSession(WORKSPACE_ID, SESSION_ID);
+    const [request] = upstream.requests;
+    expect(
+      JSON.parse(decodeURIComponent(request!.headers.get("x-opengeni-external-actor")!)),
+    ).toEqual({
+      mode: "external",
+      identity: { externalId: "u_42", source: "northwind" },
+      membership: { permissions: ["workspace:read", "sessions:read"] },
+    });
+  });
+
+  test("an invalid resolved membership fails before any upstream request", async () => {
+    const { upstream, browser } = setup({
+      resolve: () => ({
+        workspaceId: WORKSPACE_ID,
+        user: "u_42",
+        membership: { permissions: [] },
+      }),
+    });
+    await expect(browser.getSession(WORKSPACE_ID, SESSION_ID)).rejects.toThrow();
+    expect(upstream.requests).toHaveLength(0);
+  });
+
   test("session creation is server-controlled; the browser cannot smuggle configuration", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({

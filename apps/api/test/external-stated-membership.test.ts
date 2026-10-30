@@ -484,6 +484,34 @@ describe("stated membership", () => {
     expect(await stored(org.workspace.id, subjectId)).toBeNull();
   });
 
+  test("a request without a statement in flight during a revoke does not re-create the member", async () => {
+    const org = await organization();
+    const externalId = crypto.randomUUID();
+    expect((await org.request(externalId, CHAT)).status).toBe(200);
+    const subjectId = (await org.identity(externalId)).subjectId;
+    let authenticated!: () => void;
+    let release!: () => void;
+    const seen = new Promise<void>((resolve) => (authenticated = resolve));
+    inflight.set("unstated", {
+      authenticated,
+      release: new Promise<void>((resolve) => (release = resolve)),
+    });
+    // No membership field: this request would admit the user on first use.
+    const pending = org.request(
+      externalId,
+      undefined,
+      `/test/inflight/${org.workspace.id}/unstated`,
+    );
+    await seen;
+    expect((await org.revoke(externalId)).removed).toBe(true);
+    release();
+    expect((await pending).status).toBe(403);
+    expect(await stored(org.workspace.id, subjectId)).toBeNull();
+    // A request that authenticates after the revoke admits the user again.
+    expect((await org.request(externalId, undefined)).status).toBe(200);
+    expect(await stored(org.workspace.id, subjectId)).not.toBeNull();
+  });
+
   test("the database refuses a statement older than a revoke", async () => {
     const org = await organization();
     const externalId = crypto.randomUUID();
