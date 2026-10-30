@@ -626,9 +626,12 @@ export function buildConnectionTokenResolver(
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
+      // Reviewed bridges gate each tool on the provider's actual OAuth grants.
       ...(cred.providerDomain.toLowerCase() === "slack.com"
         ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }
-        : {}),
+        : cred.kind === "oauth2"
+          ? { grantedScopes: [...cred.grantedScopes] }
+          : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
     };

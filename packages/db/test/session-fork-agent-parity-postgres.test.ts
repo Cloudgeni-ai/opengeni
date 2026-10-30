@@ -51,6 +51,9 @@ const COPIED = [
   "sandbox_os",
   "channel_id",
   "keep_live",
+  "unattended_setting",
+  // Kept as recorded; a fork reads as attended regardless (see the session read).
+  "started_unattended",
   "rig_id",
   "rig_version_id",
   "initial_xai_provider_account_authority_snapshot",
@@ -163,6 +166,12 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   codex_last_credential_id: { why: "its own measurements", expected: fresh(null) },
   last_input_tokens: { why: "its own measurements", expected: fresh(null) },
   compact_requested: { why: "its own measurements", expected: fresh(false) },
+  // The fork routines start from the source row and clear only the request;
+  // its label is inert without one (migration 1102), so it may ride along.
+  compact_request_trigger: {
+    why: "a label read only while compact_requested is true",
+    expected: ({ source }) => source.compact_request_trigger,
+  },
   direct_control_state: { why: "its own controls", expected: fresh("active") },
   direct_pause_revision: { why: "its own controls", expected: fresh(null) },
   subtree_run_override_revision: { why: "its own controls", expected: fresh(null) },

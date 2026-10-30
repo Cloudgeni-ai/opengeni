@@ -509,6 +509,7 @@ describe("allowance authorization matrix", () => {
     const externalSubject = "external_user:55555555-5555-4555-8555-555555555555";
     const auth = organizationKey(["account:read", "workspace:admin", "api_keys:manage"]);
     track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+    track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
     track(
       spyOn(db, "ensureExternalIdentity").mockResolvedValue({
         id: "55555555-5555-4555-8555-555555555555",

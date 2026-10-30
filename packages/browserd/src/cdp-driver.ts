@@ -68,9 +68,11 @@ import {
   CdpAccessibilityTreeTooLargeError,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
+  withPageAccessibilityFacts,
   type CdpAccessibilityEntry,
   type CdpAccessibilitySnapshot,
   type CdpAxNode,
+  type PageAccessibilityFacts,
 } from "./cdp-accessibility";
 import {
   CdpCommandTimeoutError,
@@ -1110,6 +1112,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * started stops being waited for; null before one started. */
   private readonly restoredTargets = new Map<string, number | null>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
+  /**
+   * What a tab's ended debugger attachment knew of its document, kept until
+   * the tab is attached again. Another extension adding a frame (a password
+   * manager's inline menu) ends the attachment without changing the page;
+   * when the new attachment finds the same document, it keeps the old
+   * authority, so an observation made just before still holds.
+   */
+  private readonly endedAttachments = new Map<
+    string,
+    {
+      authorityGeneration: string;
+      /** The authority minted when the attachment ended; a later end replaces it. */
+      replacedBy: string;
+      loaderId: string;
+      frameId: string;
+      accessibility: CdpAccessibilitySnapshot | null;
+      accessibilityBounded: boolean;
+      /** The ended attachment's drawn document; the same document has still drawn. */
+      inputDrawnDocument?: string;
+    }
+  >();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
   private selectedTargetId: string | null = null;
@@ -1817,6 +1840,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.firstSeenAt.clear();
     this.attachingSessions.clear();
     this.targetPhysicalGenerations.clear();
+    this.endedAttachments.clear();
     this.forgetAutoAttachments();
     this.ownedDownloads.clear();
     const connection = this.connection;
@@ -1870,6 +1894,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.firstSeenAt.clear();
     this.attachingSessions.clear();
     this.targetPhysicalGenerations.clear();
+    this.endedAttachments.clear();
     this.forgetAutoAttachments();
     this.ownedDownloads.clear();
     this.connection?.close();
@@ -3385,9 +3410,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               this.attachingSessions.get(targetId) !== sessionId)
           )
             return;
-          // A new attachment must invalidate old controls even when the tab,
-          // loader and frame ids are unchanged. Other tabs keep their authority.
-          this.targetPhysicalGenerations.set(targetId, randomUUID());
+          // Commands and controls of the ended attachment never reach a new
+          // one, even when the tab, loader and frame ids are unchanged. Other
+          // tabs keep their authority. A new attachment that finds the same
+          // document takes the ended one's authority back (attachTarget).
+          const replaced = this.targetPhysicalGeneration(targetId);
+          const replacedBy = randomUUID();
+          const ended = this.states.get(targetId);
+          const earlier = this.endedAttachments.get(targetId);
+          if (ended?.sessionId === sessionId) {
+            this.endedAttachments.set(targetId, {
+              authorityGeneration: ended.authorityGeneration,
+              replacedBy,
+              loaderId: ended.frame.loaderId,
+              frameId: ended.frame.id,
+              accessibility: ended.accessibility,
+              accessibilityBounded: ended.accessibilityBounded,
+              ...(ended.inputDrawnDocument !== undefined
+                ? { inputDrawnDocument: ended.inputDrawnDocument }
+                : {}),
+            });
+          } else if (earlier?.replacedBy === replaced) {
+            // An attachment that ended before it was ready knew nothing new.
+            this.endedAttachments.set(targetId, { ...earlier, replacedBy });
+          } else {
+            this.endedAttachments.delete(targetId);
+          }
+          this.targetPhysicalGenerations.set(targetId, replacedBy);
           this.attachingSessions.delete(targetId);
           this.removeState(targetId, true);
         }),
@@ -3746,6 +3795,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.attaching.clear();
     this.attachingSessions.clear();
     this.targetPhysicalGenerations.clear();
+    this.endedAttachments.clear();
     this.forgetAutoAttachments();
     this.selectedTargetId = null;
     this.userAgentMetadataPromise = null;
@@ -4072,6 +4122,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.crashedTargets.delete(info.targetId);
     this.unansweredTabs.delete(info.targetId);
+    // The same document as when the tab's last attachment ended keeps that
+    // attachment's authority: its target, document and frame generations and
+    // element references.
+    const ended = this.endedAttachments.get(info.targetId);
+    this.endedAttachments.delete(info.targetId);
+    const resumed =
+      ended?.replacedBy === authorityGeneration &&
+      ended.loaderId === frame.loaderId &&
+      ended.frameId === frame.id
+        ? ended
+        : null;
+    const stateAuthority = resumed?.authorityGeneration ?? authorityGeneration;
     // A reopened tab whose page this attachment started shows it once it
     // has loaded, as a tab Chrome restored itself does.
     const startedRestoredLoad = typeof this.restoredTargets.get(info.targetId) === "number";
@@ -4079,7 +4141,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
-      authorityGeneration,
+      authorityGeneration: stateAuthority,
       actionEffectCount: 0,
       ...(startedRestoredLoad ? { startedRestoredPage: true as const } : {}),
       unsettledHitTargetGuards: [],
@@ -4087,13 +4149,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frame,
       documentGeneration: documentGeneration(
         this.controllerGeneration,
-        authorityGeneration,
+        stateAuthority,
         info.targetId,
         frame.loaderId,
       ),
       frameGeneration: frameGeneration(
         this.controllerGeneration,
-        authorityGeneration,
+        stateAuthority,
         info.targetId,
         frame.id,
       ),
@@ -4102,11 +4164,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       mainFrameCommits: 0,
       documentCommits: 0,
       inputFence: null,
-      accessibility: null,
+      // Element references of a resumed document resolve as before; the next
+      // full read still rebuilds the snapshot.
+      accessibility: resumed?.accessibility ?? null,
       accessibilityRebuiltAt: 0,
       accessibilityNodeCount: null,
       accessibilityRebuildDue: true,
-      accessibilityBounded: false,
+      accessibilityBounded: resumed?.accessibilityBounded ?? false,
+      // A resumed document keeps its generation, and a document that drew
+      // once still draws: input to it needs no new capture, which another
+      // extension's frame in the page could refuse.
+      ...(resumed?.inputDrawnDocument !== undefined
+        ? { inputDrawnDocument: resumed.inputDrawnDocument }
+        : {}),
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,
@@ -4217,6 +4287,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         sessionId,
       ),
     );
+    if (resumed) this.targetPhysicalGenerations.set(info.targetId, stateAuthority);
     this.states.set(info.targetId, state);
     if (this.engine === "chromium") {
       try {
@@ -5498,6 +5569,161 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return result.result?.value === true;
   }
 
+  /**
+   * The tab's accessibility nodes with what a person sees put right (see
+   * PAGE_FACTS_EXPRESSION), in every frame they come from, the page's own and
+   * each cross-origin frame's through its session: content a frame hides
+   * with aria-hidden while a person can see and press it, such as an open
+   * menu whose markup was never updated, joins the tree with the role and
+   * name the page gives it, so the outline lists it and locators find it.
+   * Every read looks at each frame: Chromium can leave a hidden subtree out
+   * of its tree altogether (an aria-hidden container whose content arrived
+   * later), so the tree cannot tell when there is nothing to reveal. Best
+   * effort: a frame that cannot be read this way keeps the tree Chromium
+   * gave.
+   */
+  private async withPageFacts(
+    state: TargetState,
+    nodes: CdpAxNode[],
+    pageFrames: readonly MainFrame[],
+  ): Promise<CdpAxNode[]> {
+    if (this.engine === "lightpanda") return nodes;
+    const read = new Set<string>();
+    for (const node of nodes) if (typeof node.frameId === "string") read.add(node.frameId);
+    const frames = [
+      ...pageFrames.map((frame) => ({ sessionId: state.sessionId, frameId: frame.id })),
+      ...[...state.oopifs.values()].flatMap((oopif) =>
+        [...oopif.frameIds].map((frameId) => ({ sessionId: oopif.sessionId, frameId })),
+      ),
+    ].filter((frame) => read.has(frame.frameId));
+    let result = nodes;
+    for (let offset = 0; offset < frames.length; offset += ACCESSIBILITY_FRAME_CONCURRENCY) {
+      const batch = frames.slice(offset, offset + ACCESSIBILITY_FRAME_CONCURRENCY);
+      const facts = await Promise.all(
+        batch.map((frame) => this.pageFacts(frame.sessionId, frame.frameId)),
+      );
+      for (const [index, found] of facts.entries())
+        if (found) result = withPageAccessibilityFacts(result, batch[index]!.frameId, found);
+    }
+    return result;
+  }
+
+  /** One frame's page facts, read in its session; null when it has none or
+   * cannot be read. */
+  private async pageFacts(
+    sessionId: string,
+    frameId: string,
+  ): Promise<PageAccessibilityFacts | null> {
+    const connection = await this.ensureConnection();
+    const objectGroup = `opengeni-page-facts-${this.createId()}`;
+    try {
+      const world = await connection.send<{ executionContextId?: unknown }>(
+        "Page.createIsolatedWorld",
+        { frameId, worldName: "opengeni-dom-read" },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return null;
+      const evaluated = await connection.send<{ result?: unknown; exceptionDetails?: unknown }>(
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          expression: PAGE_FACTS_EXPRESSION,
+          objectGroup,
+          returnByValue: false,
+        },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (
+        evaluated.exceptionDetails ||
+        !isRecord(evaluated.result) ||
+        typeof evaluated.result.objectId !== "string"
+      )
+        return null;
+      const properties = await connection.send<{ result?: unknown }>(
+        "Runtime.getProperties",
+        { objectId: evaluated.result.objectId, ownProperties: true },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (!Array.isArray(properties.result)) return null;
+      const byIndex = new Map<number, Record<string, unknown>>();
+      for (const property of properties.result) {
+        if (!isRecord(property) || !isRecord(property.value)) continue;
+        const index = Number(property.name);
+        if (Number.isSafeInteger(index) && index >= 0) byIndex.set(index, property.value);
+      }
+      const encoded = byIndex.get(0)?.value;
+      if (typeof encoded !== "string") return null;
+      const parsed: unknown = JSON.parse(encoded);
+      if (!isRecord(parsed) || !Array.isArray(parsed.revealed)) return null;
+      const backendIds = new Map<number, number>();
+      await Promise.all(
+        [...byIndex.keys()]
+          .filter((index) => index > 0)
+          .map(async (index) => {
+            const objectId = byIndex.get(index)?.objectId;
+            if (typeof objectId !== "string") return;
+            const described = await connection
+              .send<{ node?: unknown }>(
+                "DOM.describeNode",
+                { objectId },
+                { sessionId, timeoutMs: 2_000 },
+              )
+              .catch(() => null);
+            const backendNodeId = isRecord(described?.node) ? described.node.backendNodeId : null;
+            if (typeof backendNodeId === "number") backendIds.set(index - 1, backendNodeId);
+          }),
+      );
+      const backendOf = (index: unknown): number | null =>
+        typeof index === "number" ? (backendIds.get(index) ?? null) : null;
+      const roots = new Map<number, number[]>();
+      for (const root of Array.isArray(parsed.roots) ? parsed.roots : []) {
+        if (!Array.isArray(root) || typeof root[0] !== "number" || !Array.isArray(root[1]))
+          continue;
+        roots.set(
+          root[0],
+          root[1].flatMap((index: unknown) => {
+            const backendNodeId = backendOf(index);
+            return backendNodeId === null ? [] : [backendNodeId];
+          }),
+        );
+      }
+      const revealed = parsed.revealed.map((fact: unknown, factIndex: number) => {
+        if (!Array.isArray(fact) || fact.length !== 5) return null;
+        const [index, role, name, states, parent] = fact;
+        const backendNodeId = backendOf(index);
+        if (
+          backendNodeId === null ||
+          typeof role !== "string" ||
+          typeof name !== "string" ||
+          typeof parent !== "number"
+        )
+          return null;
+        return {
+          backendNodeId,
+          role: role.slice(0, 64),
+          name,
+          properties: (Array.isArray(states) ? states : []).flatMap((entry: unknown) =>
+            Array.isArray(entry) && typeof entry[0] === "string"
+              ? [{ name: entry[0], value: { value: entry[1] } }]
+              : [],
+          ),
+          parent,
+          ancestors: roots.get(factIndex) ?? [],
+        };
+      });
+      return { revealed };
+    } catch (error) {
+      // The page navigated or went away while it was read; the tree stays.
+      if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
+        throw error;
+      return null;
+    } finally {
+      void connection
+        .send("Runtime.releaseObjectGroup", { objectGroup }, { sessionId })
+        .catch(() => undefined);
+    }
+  }
+
   /** The main frame's visible scrolling panels, by backend node, with the
    * directions each can still scroll ("down", "up,down"). The outline marks
    * them so an agent can scroll the panel that holds the content, not the
@@ -5640,6 +5866,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
       }
+      nodes = await this.withPageFacts(state, nodes, before);
       let accessibility: CdpAccessibilitySnapshot;
       try {
         accessibility = normalizeCdpAccessibilityTree({
@@ -8127,7 +8354,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (await this.relatedNode(state, backendDOMNodeId, POINTER_LABEL_FUNCTION, [])) ??
         backendDOMNodeId;
     }
-    const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
+    // A decoration that takes no pointer input over a control that does (a
+    // chevron icon drawn on its combobox) is pressed where it shows, as a
+    // person presses it: the click reaches that control, which the hit guard
+    // then expects. A control is never a decoration: one that takes no
+    // pointer input keeps its refusal. Only a decoration already in view is
+    // pressed this way, so nothing scrolls before it is known to have such a
+    // control.
+    let point: { x: number; y: number } | null = null;
+    if (
+      backendDOMNodeId !== null &&
+      (await this.callOnNode(state, backendDOMNodeId, TAKES_NO_POINTER_FUNCTION, []).catch(
+        () => false,
+      )) === true
+    ) {
+      const pressed = await this.relatedNode(
+        state,
+        backendDOMNodeId,
+        DECORATION_PRESS_FUNCTION,
+        [],
+      );
+      if (pressed !== null) {
+        point = await this.actionPoint(state, backendDOMNodeId, false, frameId);
+        backendDOMNodeId = pressed;
+      }
+    }
+    point ??= await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
     const hidden = await this.hiddenWithoutFocusEmulation(state);
@@ -8406,8 +8658,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Scroll offsets of the window, visual viewport and every composed
-   * ancestor of a top-level-frame node, read in an isolated world so page
-   * scripts cannot fake them. Null means unknown: treat any scroll as an effect. */
+   * ancestor of a node, and for a node in a child frame the same around the
+   * `<iframe>` element in each document holding that frame up to the page
+   * (bringing the node into view can scroll any of them), read in isolated
+   * worlds so page scripts cannot fake them. Null means unknown: treat any
+   * scroll as an effect. */
   private async scrollPositions(
     state: TargetState,
     backendDOMNodeId: number,
@@ -8422,7 +8677,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         [],
         { isolatedFrameId: frameId },
       );
-      return typeof positions === "string" ? positions : null;
+      if (typeof positions !== "string") return null;
+      if (!state.nodeRoute && frameId === state.frame.id) return positions;
+      const holding = await this.framesHolding(state, frameId);
+      if (holding === null) return null;
+      const connection = await this.ensureConnection();
+      const all = [positions];
+      for (let index = 1; index < holding.length; index += 1) {
+        const frame = holding[index - 1]!;
+        const parent = holding[index]!;
+        const send = <T>(method: string, params: Record<string, unknown>) =>
+          connection.send<T>(method, params, { sessionId: parent.sessionId, timeoutMs: 2_000 });
+        const owner = await send<{ backendNodeId?: unknown }>("DOM.getFrameOwner", {
+          frameId: frame.frameId,
+        });
+        const world = await send<{ executionContextId?: unknown }>("Page.createIsolatedWorld", {
+          frameId: parent.frameId,
+          worldName: "opengeni-dom-read",
+        });
+        if (
+          typeof owner.backendNodeId !== "number" ||
+          !Number.isSafeInteger(world.executionContextId)
+        )
+          return null;
+        const resolved = await send<{ object?: unknown }>("DOM.resolveNode", {
+          backendNodeId: owner.backendNodeId,
+          executionContextId: world.executionContextId,
+        });
+        if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") return null;
+        const objectId = resolved.object.objectId;
+        try {
+          const read = await send<{ result?: unknown }>("Runtime.callFunctionOn", {
+            objectId,
+            functionDeclaration: SCROLL_POSITIONS_FUNCTION,
+            returnByValue: true,
+          });
+          if (!isRecord(read.result) || typeof read.result.value !== "string") return null;
+          all.push(read.result.value);
+        } finally {
+          void send("Runtime.releaseObject", { objectId }).catch(() => undefined);
+        }
+      }
+      return all.join("|");
     } catch {
       return null;
     }
@@ -8447,8 +8743,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
-    // Where scroll offsets cannot be read (a child frame), whether the
-    // target moved tells whether anything scrolled.
+    // Where scroll offsets cannot be read (a frame chain that cannot be
+    // walked), whether the target moved tells whether anything scrolled.
     const boxBefore =
       scrollBefore === null
         ? await this.centerPoint(state, backendDOMNodeId).catch(() => null)
@@ -8500,7 +8796,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       const revealed =
         visible ?? (await this.revealByHover(state, backendDOMNodeId, frameId, point));
-      if (!revealed) {
+      if (!revealed || "unreactedSince" in revealed) {
+        // A target that shows but, even after the hover, turns the pointer
+        // off for itself and all it holds (often a control disabled by a
+        // class) gets that refusal, not one naming what its click falls
+        // through to. It stays definite when the page did not react to the
+        // hover's move: then nothing reached anything that acts on input.
+        if (
+          (await this.callOnNode(
+            state,
+            backendDOMNodeId,
+            TAKES_NO_POINTER_FUNCTION,
+            [],
+            frameId === undefined || this.engine === "lightpanda"
+              ? {}
+              : { isolatedFrameId: frameId },
+          ).catch(() => false)) === true
+        ) {
+          if (revealed) state.actionEffectCount = revealed.unreactedSince;
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            POINTER_EVENTS_NONE_REFUSAL,
+            true,
+          );
+        }
         const cover = await this.coveringElement(state, backendDOMNodeId);
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -8701,7 +9020,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ).catch(() => null);
     switch (reason) {
       case "pointer-events":
-        return "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control";
+        return POINTER_EVENTS_NONE_REFUSAL;
       case "outside":
         return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
       case "clipped":
@@ -8744,15 +9063,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * until the pointer is over their row or card (CSS :hover). The hit test
    * then lands on the target's own ancestor. A person moves the pointer onto
    * the spot first, so do the same and test again. The move is real input, so
-   * a refusal after it is an unknown outcome. Returns the action point, or
-   * null when the target is not hover-revealed or stays unreachable.
+   * a refusal after it is an unknown outcome. Returns the action point; null
+   * when the target is not hover-revealed; or, when it stays unreachable,
+   * null, or `unreactedSince`, the effect count from before the move, when
+   * the page provably did not react to it (see watchPageReaction).
    */
   private async revealByHover(
     state: TargetState,
     backendDOMNodeId: number,
     frameId: string | undefined,
     point: { x: number; y: number },
-  ): Promise<{ x: number; y: number } | null> {
+  ): Promise<{ x: number; y: number } | { unreactedSince: number } | null> {
     if (frameId === undefined) return null;
     const transparent = await this.callOnNode(
       state,
@@ -8762,13 +9083,189 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       { isolatedFrameId: frameId },
     ).catch(() => false);
     if (transparent !== true) return null;
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: point.x,
-      y: point.y,
-    });
-    if (!(await this.hitsAtCenter(state, backendDOMNodeId))) return null;
-    return await this.centerPoint(state, backendDOMNodeId);
+    const watch = await this.watchPageReaction(state);
+    const effectsBeforeMove = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+      });
+      if (await this.hitsAtCenter(state, backendDOMNodeId))
+        return await this.centerPoint(state, backendDOMNodeId);
+      return watch && (await watch.unchanged()) ? { unreactedSince: effectsBeforeMove } : null;
+    } finally {
+      watch?.release();
+    }
+  }
+
+  /**
+   * Watches, from just before a pointer move, the document of every frame in
+   * the tab, each in the session that renders it: besides the target's frame,
+   * the move reaches the frames holding it, as the pointer passes into them,
+   * and whichever frame the pointer leaves. After it, `unchanged` watches
+   * each until PAGE_REACTION_WINDOW_MS after the move (and two drawn frames)
+   * and tells whether nothing changed in any (no element, attribute or text,
+   * no focus or address change), so the page did not act on the move; it
+   * answers as soon as one changes. Hover styling alone changes none of
+   * these. Null where it cannot watch them all.
+   */
+  private async watchPageReaction(
+    state: TargetState,
+  ): Promise<{ unchanged: () => Promise<boolean>; release: () => void } | null> {
+    if (this.engine === "lightpanda") return null;
+    const connection = await this.ensureConnection();
+    const watches: Array<{ sessionId: string; objectId: string }> = [];
+    const call = (
+      watch: (typeof watches)[number],
+      functionDeclaration: string,
+      args: Array<{ value: unknown }> = [],
+    ) =>
+      connection.send<{ result?: unknown }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: watch.objectId,
+          functionDeclaration,
+          arguments: args,
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        { sessionId: watch.sessionId, timeoutMs: 2_000 },
+      );
+    const release = () => {
+      for (const watch of watches.splice(0))
+        void call(watch, PAGE_REACTION_STOP_FUNCTION)
+          .catch(() => undefined)
+          .finally(() =>
+            connection
+              .send(
+                "Runtime.releaseObject",
+                { objectId: watch.objectId },
+                {
+                  sessionId: watch.sessionId,
+                },
+              )
+              .catch(() => undefined),
+          );
+    };
+    try {
+      const frames = await this.tabFrames(state);
+      const started = await Promise.allSettled(
+        frames.map(async (frame) => {
+          const world = await connection.send<{ executionContextId?: unknown }>(
+            "Page.createIsolatedWorld",
+            { frameId: frame.frameId, worldName: "opengeni-dom-read" },
+            { sessionId: frame.sessionId, timeoutMs: 2_000 },
+          );
+          if (!Number.isSafeInteger(world.executionContextId)) return false;
+          const evaluated = await connection.send<{ result?: unknown; exceptionDetails?: unknown }>(
+            "Runtime.evaluate",
+            {
+              contextId: world.executionContextId,
+              expression: PAGE_REACTION_WATCH_EXPRESSION,
+              returnByValue: false,
+            },
+            { sessionId: frame.sessionId, timeoutMs: 2_000 },
+          );
+          if (
+            evaluated.exceptionDetails ||
+            !isRecord(evaluated.result) ||
+            typeof evaluated.result.objectId !== "string"
+          )
+            return false;
+          watches.push({ sessionId: frame.sessionId, objectId: evaluated.result.objectId });
+          return true;
+        }),
+      );
+      const failure = started.find((result) => result.status === "rejected");
+      if (failure) throw failure.reason;
+      if (started.some((result) => result.status === "fulfilled" && !result.value)) {
+        release();
+        return null;
+      }
+      return {
+        // Unchanged only when every document stayed unchanged; the first one
+        // that changed answers at once.
+        unchanged: () =>
+          new Promise<boolean>((resolve) => {
+            let pending = watches.length;
+            if (pending === 0) resolve(false);
+            for (const watch of watches)
+              void call(watch, PAGE_REACTION_READ_FUNCTION, [{ value: PAGE_REACTION_WINDOW_MS }])
+                .catch(() => null)
+                .then((read) => {
+                  if (!isRecord(read?.result) || read.result.value !== true) resolve(false);
+                  else if (--pending === 0) resolve(true);
+                });
+          }),
+        release,
+      };
+    } catch (error) {
+      release();
+      if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
+        throw error;
+      return null;
+    }
+  }
+
+  /** Every frame in the tab, each with the session that renders it: the
+   * page's own frames and each cross-origin frame's. */
+  private async tabFrames(
+    state: TargetState,
+  ): Promise<Array<{ sessionId: string; frameId: string }>> {
+    const sessions = [...state.oopifs.values()].map((oopif) => oopif.sessionId);
+    const trees = await Promise.all(
+      [state.sessionId, ...sessions].map(async (sessionId) => ({
+        sessionId,
+        frames: flattenFrameTree(await this.frameTree(sessionId, 2_000)),
+      })),
+    );
+    // A cross-origin frame is listed by the session that renders it.
+    const rendered = new Set(
+      trees.slice(1).flatMap((tree) => tree.frames.map((frame) => frame.id)),
+    );
+    return trees.flatMap((tree, index) =>
+      tree.frames
+        .filter((frame) => index > 0 || !rendered.has(frame.id))
+        .map((frame) => ({ sessionId: tree.sessionId, frameId: frame.id })),
+    );
+  }
+
+  /** The frame and every frame holding it up to the page, innermost first,
+   * each with the session that renders it; null when that chain cannot be
+   * read. */
+  private async framesHolding(
+    state: TargetState,
+    frameId: string,
+  ): Promise<Array<{ sessionId: string; frameId: string }> | null> {
+    const connection = await this.ensureConnection();
+    const frames: Array<{ sessionId: string; frameId: string }> = [];
+    let oopif = this.oopifForFrame(state, frameId);
+    let current = frameId;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const sessionId = oopif?.sessionId ?? state.sessionId;
+      const response = await connection.send<{ frameTree?: unknown }>(
+        "Page.getFrameTree",
+        {},
+        { sessionId, timeoutMs: 2_000 },
+      );
+      const path = framePath(response.frameTree, current);
+      if (path === null) return null;
+      for (const id of path.frames) frames.push({ sessionId, frameId: id });
+      if (!oopif) return frames;
+      // A cross-origin frame's root names the frame that holds it, which
+      // the session that owns its <iframe> element renders.
+      if (path.parentId === null) return null;
+      const parentSessionId: string = oopif.parentSessionId;
+      current = path.parentId;
+      oopif =
+        parentSessionId === state.sessionId
+          ? null
+          : ([...state.oopifs.values()].find((other) => other.sessionId === parentSessionId) ??
+            null);
+      if (parentSessionId !== state.sessionId && oopif === null) return null;
+    }
+    return null;
   }
 
   /**
@@ -10930,6 +11427,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
       this.targetViewports.delete(targetId);
+      this.endedAttachments.delete(targetId);
       this.restoredTargets.delete(targetId);
     }
   }
@@ -10945,6 +11443,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const forget = () => {
       if (this.states.get(state.targetId) !== state) return;
       this.targetPhysicalGenerations.set(state.targetId, randomUUID());
+      // A crashed page is never the same document again.
+      this.endedAttachments.delete(state.targetId);
       this.removeState(state.targetId, true);
     };
     void this.ensureConnection()
@@ -11195,7 +11695,11 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
   for (const entry of entries) {
     if (entry.backendDOMNodeId !== null) byBackend.set(entry.backendDOMNodeId, entry);
   }
-  return byBackend.size === 1 ? [...byBackend.values()][0]! : null;
+  if (byBackend.size === 1) return [...byBackend.values()][0]!;
+  // Content revealed from behind aria-hidden can repeat what the page also
+  // exposes (a carousel's copied slides): the exposed element is the one meant.
+  const exposed = [...byBackend.values()].filter((entry) => entry.revealed !== true);
+  return exposed.length === 1 && exposed.length < byBackend.size ? exposed[0]! : null;
 }
 
 function sameAccessibleName(name: string | null, requested: string): boolean {
@@ -11729,10 +12233,10 @@ export const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
   requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
-// A child frame's scroll can also move its parent documents, which this frame
-// cannot read, so only top-level frames report positions.
+// The positions around one document's node. A child frame's scroll can also
+// move the documents holding it, which scrollPositions reads around each
+// frame's <iframe> element in turn.
 const SCROLL_POSITIONS_FUNCTION = `function() {
-  if (window !== window.top) return null;
   const start = this instanceof Element ? this : this.parentElement;
   if (!(start instanceof Element)) return null;
   const viewport = window.visualViewport;
@@ -13013,6 +13517,333 @@ const SCROLL_PANELS_EXPRESSION = `(() => {
   return [kept.map((entry) => entry[2]).join("|"), ...kept.map((entry) => entry[1])];
 })()`;
 
+const POINTER_EVENTS_NONE_REFUSAL =
+  "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control";
+
+/** Elements a person presses as one control. Used to tell what a click on a
+ * decoration reaches, and whether content hidden with aria-hidden holds
+ * anything to press. */
+const PRESSABLE_CONTROL_SELECTOR =
+  'a[href], area[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [role=button], [role=link], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=tab], [role=option], [role=combobox], [role=textbox], [role=searchbox], [role=slider], [role=spinbutton], [role=treeitem]';
+
+// takesNoPointer: an element that shows but sets pointer-events: none on
+// itself and on all it holds, so a person's click there falls through to
+// whatever is beneath. Set on itself, not inherited from a container (a
+// modal library turning the pointer off behind its menu), which is shut out
+// instead. A decoration is such an element that is not itself a control (a
+// chevron icon drawn over a field): a control that takes no pointer input
+// is usually disabled by a class, and stays a control.
+// pointerOffRoot: the outermost of an element and its ancestors whose
+// pointer is off, unbroken (the chevron an icon is drawn in), which is
+// what takesNoPointer and pressedInstead judge. A control anywhere from
+// the element up to it stays a control, never a decoration.
+// pressedInstead: for a decoration, what a click at its middle reaches, when
+// that is an enabled control that holds the decoration or sits beside it in
+// the same small wrapper (its parent or grandparent); else null. Run with
+// the element in view.
+const DECORATION_HELPER = `
+  const pressableSelector = ${JSON.stringify(PRESSABLE_CONTROL_SELECTOR)};
+  const flatParentOf = (node) => {
+    const next = node.assignedSlot ?? node.parentNode ?? null;
+    return next instanceof ShadowRoot ? next.host : next;
+  };
+  const holdsNode = (ancestor, node) => {
+    for (let current = node; current; current = flatParentOf(current)) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  };
+  const disabledControl = (element) =>
+    element.matches(":disabled") || element.closest('[aria-disabled="true"]') !== null;
+  const shows = (element) =>
+    typeof element.checkVisibility !== "function" ||
+    element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  const takesNoPointer = (element) => {
+    const view = element.ownerDocument.defaultView || window;
+    if (view.getComputedStyle(element).pointerEvents !== "none") return false;
+    const parent = flatParentOf(element);
+    if (parent instanceof Element && view.getComputedStyle(parent).pointerEvents === "none") return false;
+    if (!shows(element)) return false;
+    const inside = element.querySelectorAll("*");
+    if (inside.length > 200) return false;
+    for (const node of inside) if (view.getComputedStyle(node).pointerEvents !== "none") return false;
+    return true;
+  };
+  const pointerOffRoot = (element) => {
+    const view = element.ownerDocument.defaultView || window;
+    let root = element;
+    for (let depth = 0; depth < 16; depth += 1) {
+      const parent = flatParentOf(root);
+      if (!(parent instanceof Element) || view.getComputedStyle(parent).pointerEvents !== "none") break;
+      root = parent;
+    }
+    return root;
+  };
+  const hitAt = (doc, x, y) => {
+    let hit = doc.elementFromPoint(x, y);
+    for (let depth = 0; depth < 32 && hit && hit.shadowRoot; depth += 1) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
+  };
+  // The middle of the part of an element inside the window, or null.
+  const middleInView = (element) => {
+    const view = element.ownerDocument.defaultView || window;
+    const box = element.getBoundingClientRect();
+    const left = Math.max(box.left, 0);
+    const top = Math.max(box.top, 0);
+    const right = Math.min(box.right, view.innerWidth);
+    const bottom = Math.min(box.bottom, view.innerHeight);
+    return right - left >= 1 && bottom - top >= 1 ? [(left + right) / 2, (top + bottom) / 2] : null;
+  };
+  const pressedInstead = (target) => {
+    const element = pointerOffRoot(target);
+    for (let node = target; node instanceof Element; node = flatParentOf(node)) {
+      if (node.matches(pressableSelector)) return null;
+      if (node === element) break;
+    }
+    // Where it is, first: a box is cheaper to read than styles.
+    const middle = middleInView(element);
+    if (!middle || !takesNoPointer(element)) return null;
+    const hit = hitAt(element.ownerDocument, middle[0], middle[1]);
+    if (!hit || holdsNode(element, hit)) return null;
+    let control = null;
+    for (let node = hit; node instanceof Element; node = flatParentOf(node)) {
+      if (node.matches(pressableSelector)) {
+        control = node;
+        break;
+      }
+    }
+    if (!control || holdsNode(element, control) || disabledControl(control)) return null;
+    let related = holdsNode(control, element);
+    for (let node = flatParentOf(element), depth = 0; !related && node instanceof Element && depth < 2; node = flatParentOf(node), depth += 1) {
+      related = holdsNode(node, control);
+    }
+    return related ? control : null;
+  };`;
+
+/** Whether the target, with the pointer-off run it is drawn in, shows but
+ * takes no pointer input, nor does anything inside it (see
+ * DECORATION_HELPER). */
+const TAKES_NO_POINTER_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  ${DECORATION_HELPER}
+  return takesNoPointer(pointerOffRoot(element));
+}`;
+
+/** The control a click on this decoration reaches, or null. */
+const DECORATION_PRESS_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  ${DECORATION_HELPER}
+  return pressedInstead(element);
+}`;
+
+/** How long after the hover's move the page is watched for a reaction
+ * before a refusal counts as definite: long enough for a menu or row that
+ * waits for the pointer to rest (commonly 100 to 300 ms). */
+const PAGE_REACTION_WINDOW_MS = 500;
+
+/** Starts watching a frame's document for any change (see
+ * watchPageReaction). Runs in an isolated world and returns the watch, which
+ * stays there, out of the page's reach. */
+const PAGE_REACTION_WATCH_EXPRESSION = `(() => {
+  const watch = { changed: false, started: performance.now(), wake: null };
+  const observer = new MutationObserver(() => { watch.changed = true; watch.wake?.(); });
+  observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  const focus = document.activeElement;
+  const address = document.location.href;
+  watch.observer = observer;
+  watch.unchanged = () => !watch.changed && observer.takeRecords().length === 0 && document.activeElement === focus && document.location.href === address;
+  return watch;
+})()`;
+
+/** Whether nothing changed since the watch started: read once the page has
+ * drawn two frames (at most 100 ms) and the watch has lasted `windowMs`, so
+ * a page that acts on the hover a moment later (a menu that waits for the
+ * pointer to rest) is seen acting; false as soon as anything changes. */
+const PAGE_REACTION_READ_FUNCTION = `async function(windowMs) {
+  await new Promise((resolve) => {
+    setTimeout(resolve, 100);
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+  const remaining = this.started + windowMs - performance.now();
+  if (remaining > 0 && this.unchanged())
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, remaining);
+      this.wake = () => { clearTimeout(timer); resolve(); };
+    });
+  return this.unchanged();
+}`;
+
+const PAGE_REACTION_STOP_FUNCTION = `function() {
+  this.observer.disconnect();
+}`;
+
+/** Most nodes of aria-hidden content one read adds to the tree. */
+const REVEALED_HIDDEN_MAX_NODES = 400;
+
+/**
+ * What a frame's accessibility tree leaves out or misstates about what a
+ * person sees, in its document and that document's open shadow roots. Content
+ * hidden with aria-hidden that shows and holds a control a person can press
+ * at its middle (an open menu whose markup still says hidden): its visible
+ * elements and text come back with a role, name and states read from the
+ * page, the way Chromium computes them without aria-hidden for common
+ * elements. Returns [JSON facts, ...nodes]: facts.revealed lists [node
+ * index, role, name, states, parent's index in revealed or -1], and
+ * facts.roots [index in revealed of a hidden root, node indexes of its
+ * nearest ancestors]; null when there is nothing to reveal, so most frames
+ * cost no further reads.
+ */
+const PAGE_FACTS_EXPRESSION = `(() => {
+  ${DECORATION_HELPER}
+  const nodes = [];
+  const facts = { revealed: [] };
+  const scopes = [document];
+  let visited = 0;
+  for (let index = 0; index < scopes.length; index += 1) {
+    const walker = document.createTreeWalker(scopes[index], 1);
+    for (let element = walker.nextNode(); element && visited < ${SCROLL_PANELS_MAX_ELEMENTS}; element = walker.nextNode()) {
+      visited += 1;
+      if (element.shadowRoot) scopes.push(element.shadowRoot);
+    }
+  }
+  const all = (selector) => scopes.flatMap((scope) => Array.from(scope.querySelectorAll(selector)));
+  const clean = (value) => String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, 1000);
+  const hiddenByAria = (element) => String(element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true";
+  const insideHidden = (element) => {
+    for (let node = flatParentOf(element); node instanceof Element; node = flatParentOf(node)) {
+      if (hiddenByAria(node)) return true;
+    }
+    return false;
+  };
+  const pressableAtMiddle = (element) => {
+    if (!shows(element)) return false;
+    const middle = middleInView(element);
+    if (!middle) return false;
+    const hit = hitAt(element.ownerDocument, middle[0], middle[1]);
+    return Boolean(hit && holdsNode(element, hit));
+  };
+  // A box wholly outside the window, which a person cannot see. A box with
+  // no area (a container whose content is positioned on its own) does not
+  // count.
+  const outsideView = (element) => {
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && !middleInView(element);
+  };
+  // Where the pointer cursor starts: a control the page draws without a
+  // control role or element. Not inside a real control, whose own icons
+  // and labels these would otherwise be.
+  const pointerStart = (element) => {
+    const parent = flatParentOf(element);
+    if (getComputedStyle(element).cursor !== "pointer") return false;
+    if (parent instanceof Element && getComputedStyle(parent).cursor === "pointer") return false;
+    for (let node = parent; node instanceof Element; node = flatParentOf(node)) {
+      if (node.matches(pressableSelector)) return false;
+    }
+    return true;
+  };
+  const shown = (root) => {
+    const controls = [...(root.matches(pressableSelector) ? [root] : []), ...root.querySelectorAll(pressableSelector)];
+    if (controls.slice(0, 50).some(pressableAtMiddle)) return true;
+    const elements = [root, ...root.querySelectorAll("*")].slice(0, 200);
+    return elements.some((element) => pointerStart(element) && pressableAtMiddle(element));
+  };
+  const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button", image: "button" };
+  const roleOf = (element) => {
+    const explicit = String(element.getAttribute("role") || "").trim().split(/\\s+/)[0].toLowerCase();
+    if (explicit) return explicit === "presentation" ? "none" : explicit;
+    const tag = element.localName;
+    if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
+    if (tag === "button" || tag === "summary") return "button";
+    if (tag === "input") return inputRoles[String(element.type || "text").toLowerCase()] ?? "textbox";
+    if (tag === "select") return element.multiple || element.size > 1 ? "listbox" : "combobox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "li") return "listitem";
+    if (tag === "ul" || tag === "ol" || tag === "menu") return "list";
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    if (tag === "nav") return "navigation";
+    if (tag === "img") return element.getAttribute("alt") === "" ? "none" : "image";
+    if (tag === "p") return "paragraph";
+    if (tag === "hr") return "separator";
+    return "generic";
+  };
+  const fromContent = new Set(["button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "tab", "treeitem", "heading", "checkbox", "radio", "switch", "cell", "gridcell", "columnheader", "rowheader", "tooltip"]);
+  const nameOf = (element, role) => {
+    const label = clean(element.getAttribute("aria-label"));
+    if (label) return label;
+    const ids = String(element.getAttribute("aria-labelledby") || "").trim();
+    if (ids) {
+      const root = element.getRootNode();
+      const text = clean(ids.split(/\\s+/).map((id) => (typeof root.getElementById === "function" ? root.getElementById(id) : null)?.textContent ?? "").join(" "));
+      if (text) return text;
+    }
+    const tag = element.localName;
+    if (tag === "img" || (tag === "input" && element.type === "image")) {
+      const alt = clean(element.getAttribute("alt"));
+      if (alt) return alt;
+    }
+    if (tag === "input" && ["button", "submit", "reset"].includes(element.type)) return clean(element.value);
+    if (fromContent.has(role)) {
+      const text = clean(element.innerText ?? element.textContent);
+      if (text) return text;
+    }
+    return clean(element.getAttribute("title")) || (["textbox", "searchbox", "combobox"].includes(role) ? clean(element.getAttribute("placeholder")) : "");
+  };
+  const statesOf = (element, role) => {
+    const states = [];
+    if (element.matches(pressableSelector) || element.tabIndex >= 0) states.push(["focusable", true]);
+    if (disabledControl(element)) states.push(["disabled", true]);
+    const expanded = element.getAttribute("aria-expanded");
+    if (expanded === "true" || expanded === "false") states.push(["expanded", expanded === "true"]);
+    const checked = element.getAttribute("aria-checked");
+    if (checked === "true" || checked === "false" || checked === "mixed") states.push(["checked", checked]);
+    else if (element.localName === "input" && (element.type === "checkbox" || element.type === "radio")) states.push(["checked", element.checked ? "true" : "false"]);
+    const level = role === "heading" ? Number(element.getAttribute("aria-level") || element.localName.slice(1)) : NaN;
+    if (Number.isSafeInteger(level) && level > 0) states.push(["level", level]);
+    return states;
+  };
+  const add = (node, role, name, states, parent) => {
+    facts.revealed.push([nodes.push(node) - 1, role, name, states, parent]);
+    return facts.revealed.length - 1;
+  };
+  const collect = (node, parent) => {
+    if (facts.revealed.length >= ${REVEALED_HIDDEN_MAX_NODES}) return;
+    if (node.nodeType === 3) {
+      const text = clean(node.data);
+      if (text && node.parentElement && shows(node.parentElement)) add(node, "StaticText", text, [], parent);
+      return;
+    }
+    if (!(node instanceof Element) || !shows(node)) return;
+    const role = roleOf(node);
+    const index = add(node, role, nameOf(node, role), statesOf(node, role), parent);
+    const children = node.shadowRoot
+      ? node.shadowRoot.childNodes
+      : node.localName === "slot"
+        ? node.assignedNodes({ flatten: true })
+        : node.childNodes;
+    for (const child of children) collect(child, index);
+  };
+  // Each hidden root with its nearest ancestors, which tell where in the
+  // tree it goes when Chromium left out the root itself.
+  facts.roots = [];
+  for (const root of all('[aria-hidden]')) {
+    if (facts.revealed.length >= ${REVEALED_HIDDEN_MAX_NODES}) break;
+    if (!hiddenByAria(root) || outsideView(root) || insideHidden(root) || !shown(root)) continue;
+    const ancestors = [];
+    for (let node = flatParentOf(root); node instanceof Element && ancestors.length < 16; node = flatParentOf(node)) {
+      ancestors.push(nodes.push(node) - 1);
+    }
+    facts.roots.push([facts.revealed.length, ancestors]);
+    collect(root, -1);
+  }
+  return facts.revealed.length === 0 ? null : [JSON.stringify(facts), ...nodes];
+})()`;
+
 /** Why an element's text or value must not leave the page: it is, sits in, or
  * (as a container) holds a password, one-time code, payment, hidden or
  * explicitly private field. With a range, only the descendants that range
@@ -13749,6 +14580,31 @@ function flattenFrameTree(root: PageFrameTree): MainFrame[] {
 
 function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
+}
+
+/** In a raw CDP frame tree, the frame ids from `frameId` up to the tree's
+ * root, and the id of the frame the root names as its parent (a
+ * cross-origin frame's, rendered by another session); null when the frame
+ * is not in the tree. */
+function framePath(
+  tree: unknown,
+  frameId: string,
+): { frames: string[]; parentId: string | null } | null {
+  if (!isRecord(tree) || !isRecord(tree.frame)) return null;
+  const rootParent = typeof tree.frame.parentId === "string" ? tree.frame.parentId : null;
+  const pending: Array<{ node: Record<string, unknown>; path: string[] }> = [
+    { node: tree, path: [] },
+  ];
+  for (let visited = 0; pending.length > 0 && visited < MAX_FRAME_TREES; visited += 1) {
+    const { node, path } = pending.pop()!;
+    if (!isRecord(node.frame) || typeof node.frame.id !== "string") continue;
+    const here = [node.frame.id, ...path];
+    if (node.frame.id === frameId) return { frames: here, parentId: rootParent };
+    if (Array.isArray(node.childFrames))
+      for (const child of node.childFrames)
+        if (isRecord(child)) pending.push({ node: child, path: here });
+  }
+  return null;
 }
 
 function isSelectorList(value: unknown): value is string[] {

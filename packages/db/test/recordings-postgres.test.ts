@@ -400,6 +400,24 @@ describe("recordings", () => {
       }),
     ).rejects.toBeInstanceOf(RecordingForbiddenError);
 
+    // Notes link the voices of the version they were written about.
+    const at = { ...recording.actor, recordingId: recording.recordingId };
+    const notesSession = crypto.randomUUID();
+    const written = await saveRecordingNote(db, {
+      ...at,
+      kind: "notes",
+      body: [
+        "[Recording owner](speaker:track-0) opened.",
+        `[Kari](speaker:speaker_0) and [Kari](person:${person.id}) said hello.`,
+        "[Ola Nordmann](speaker:speaker_1) left early.",
+        "[Someone](speaker:speaker_7) was never heard.",
+      ].join("\n"),
+      sessionId: notesSession,
+    });
+    expect(written.revision).toBe(1);
+    const notesNow = async () =>
+      (await listRecordingNotes(db, at)).find((note) => note.kind === "notes")!;
+
     // Version 2 on another model: the microphone owner's name carries over by
     // label, and Kari carries over to the new label that overlaps her speech.
     const version2 = await createRecordingTranscriptVersion(db, {
@@ -482,7 +500,29 @@ describe("recordings", () => {
     expect(first.version.isCurrent).toBe(false);
     expect(first.segments).toHaveLength(3);
 
-    // Switching back makes version 1 current again.
+    // The notes' links follow the voices into version 2: Kari's speech is now
+    // speaker_9. Ola's segment was moved to Kari, and speaker_7 was never
+    // heard, so neither has a voice to point at and both become plain text.
+    // Who wrote the notes and when stays; the revision moves on.
+    const relinked = await notesNow();
+    expect(relinked).toMatchObject({
+      revision: 2,
+      updatedAt: written.updatedAt,
+      updatedBy: { sessionId: notesSession },
+    });
+    expect(relinked.body).toBe(
+      [
+        "[Recording owner](speaker:track-0) opened.",
+        `[Kari](speaker:speaker_9) and [Kari](person:${person.id}) said hello.`,
+        "Ola Nordmann left early.",
+        "Someone was never heard.",
+      ].join("\n"),
+    );
+    await expect(
+      saveRecordingNote(db, { ...at, kind: "notes", body: "stale", expectedRevision: 1 }),
+    ).rejects.toMatchObject({ code: "notes_changed" });
+
+    // Switching back makes version 1 current again, and the links follow.
     const switched = await setCurrentRecordingTranscriptVersion(db, {
       ...recording.actor,
       recordingId: recording.recordingId,
@@ -494,6 +534,20 @@ describe("recordings", () => {
       recordingId: recording.recordingId,
     });
     expect(after.version.versionNumber).toBe(1);
+    const back = await notesNow();
+    expect(back.revision).toBe(3);
+    expect(back.body).toContain(`[Kari](speaker:speaker_0) and [Kari](person:${person.id})`);
+    const relinkEvents = await shared!.admin<{ data: Record<string, unknown> }[]>`
+      select data from recording_events
+      where recording_id = ${recording.recordingId} and type = 'recording.notes.updated'
+      order by occurred_at`;
+    expect(
+      relinkEvents.map(({ data }) => [data.noteKind, data.noteRevision, data.sessionId]),
+    ).toEqual([
+      ["notes", 1, notesSession],
+      ["notes", 2, null],
+      ["notes", 3, null],
+    ]);
   });
 
   test("beside computer audio the microphone is the person recording, until someone renames it", async () => {

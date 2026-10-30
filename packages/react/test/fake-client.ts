@@ -1,9 +1,30 @@
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
-import type { ComposerDraft, SessionGoal, SessionTurn } from "@opengeni/sdk";
+import type {
+  ComposerDraft,
+  SaveComposerDraftRequest,
+  SessionGoal,
+  SessionTurn,
+} from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/client";
 
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
+
+/**
+ * The policy a fake server stores for a draft save: the request's pick, or
+ * the current draft's settings when the save carries none (as the API does
+ * for a draft that follows the chat's settings).
+ */
+export function savedComposerPolicy(
+  current: Pick<ComposerDraft, "model" | "reasoningEffort" | "latencyMode">,
+  request: Pick<SaveComposerDraftRequest, "model" | "reasoningEffort" | "latencyMode">,
+): Pick<ComposerDraft, "model" | "reasoningEffort" | "latencyMode"> {
+  return {
+    model: request.model ?? current.model,
+    reasoningEffort: request.reasoningEffort ?? current.reasoningEffort,
+    latencyMode: request.latencyMode ?? current.latencyMode,
+  };
+}
 
 /**
  * Structural fake for `SessionClientLike`: implement only the methods the

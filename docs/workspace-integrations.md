@@ -160,8 +160,13 @@ Opengeni POSTs:
 }
 ```
 
-`purpose` is `provision`, `renewal`, or `test` (an administrator's Test
-connection; see [Test requests](#test-requests)). The provider answers with one of:
+`purpose` is `provision`, `renewal`, `test` (an administrator's Test
+connection; see [Test requests](#test-requests)), or `event_subscription`: a
+workspace MCP event source that listens to a server by URL needs headers for
+it. That request is not a run: the run ids are the nil UUID, the initiator is
+the service `event_subscription`, `mcpServers` holds the one server, and
+`eventSubscription: { sourceId, serverUrl }` names the source. Return `mcp`
+headers for that URL, or `not_applicable`. The provider answers with one of:
 
 ```json
 { "status": "ok",

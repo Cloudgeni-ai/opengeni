@@ -297,6 +297,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   notify_user: "humanInput",
   notification_withdraw: "humanInput",
   inbox_tidy: "humanInput",
+  // Ringing the person's phone for a live voice call.
+  call_user: "humanInput",
   command_wait: "sandbox",
   command_read: "sandbox",
 
@@ -831,6 +833,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "secrets",
   "admin",
   "attachments",
+  "unattended",
 ] as const;
 export const AgentPromptModuleId = /* @__PURE__ */ defineSchema(() =>
   z.enum(AGENT_PROMPT_MODULE_IDS),
@@ -855,6 +858,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
+  unattended: "Unattended session",
 };
 
 /** The prompt module each capability owns; capabilities absent here own none. */

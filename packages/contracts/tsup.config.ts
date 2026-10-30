@@ -80,6 +80,8 @@ export default defineConfig({
     "src/xai-provider-account-authority.ts",
     "src/event-triggers.ts",
     "src/automation-templates.ts",
+    "src/mcp-elicitation.ts",
+    "src/mcp-elicitation-model.ts",
   ],
   format: ["esm"],
   target: "es2022",

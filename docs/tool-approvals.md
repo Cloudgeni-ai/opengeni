@@ -16,6 +16,7 @@ missing access. There is no additional host, embedder or organization policy flo
 | Model MCP and Codemode | The same attempt environment and connector preparation/begin/completion lifecycle. Standalone adapters without the lifecycle retain their safe approval-required failure. |
 | Workspace HTTP gateway | The same decision resolver; existing one-use approval capability stays bound to exact caller, payload and authority. |
 | External MCP | Tools that might ask remain unavailable without a verified human approval round trip. No blanket approval token is synthesized. |
+| MCP server questions | A third-party MCP server may ask the person mid-call (MCP form elicitation); the question becomes an approval of the same call. See [MCP elicitation](mcp-elicitation.md). |
 | Human-input and learning settings | Separate product behavior. Requesting a person's answer and publishing learned instructions are not connector permission defaults. |
 
 Saved preferences activate when work next starts or resumes. A prepared action

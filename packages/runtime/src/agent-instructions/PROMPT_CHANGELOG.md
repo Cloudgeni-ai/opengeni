@@ -1,5 +1,45 @@
 # Modular prompt changelog
 
+Chats that start unattended through their setting say so from the first
+request, and nothing a chat started with changes later. A chat that a scheduled
+task or event trigger starts unattended (by default, or because the task says
+so) gets the same unattended paragraph and tool list as a session created with
+`unattended: true`; that it started unattended is frozen at create. The **Work
+without me** switch, and a person writing in an automation's chat, change only
+whether approvals and questions wait for a person, never the instructions or
+tools an earlier request already sent. So a chat switched to unattended after
+it started keeps `request_human_input` and `interaction_request_human`, and a
+call to either returns at once with the tool result "Not sent: this chat is now
+set to work without a person, so no one will answer until the task ends.
+Settle open choices with the most conventional option and continue. Do not take
+anything destructive, outside the workspace or needing authority you were not
+given; list it, with any step only a person can take, among the steps left for
+a person." (about 330 bytes, appended as that call's result like the approval
+refusal). When a turn's attendance differs from how the chat started, that
+turn's input (not the system prompt) carries an `[Opengeni attendance]` note:
+the unattended paragraph itself when the chat was switched to work without a
+person, or "A person is now present in this chat and will see and can answer
+questions, so the unattended-session guidance no longer applies. Follow the
+ordinary guidance on when to ask, asking in your reply." when a chat that
+started unattended has a person again (about 200 bytes). Its approvals then
+wait for that person. Interactive chats, and chats whose setting matches how
+they started, get no note and keep their bytes.
+
+Unattended sessions say so. A session created with `unattended: true` (no
+person will see or answer a question until the task ends) adds one paragraph,
+in the legacy CORE and as the last modular module (`unattended`, "# Unattended
+session"): asking, or waiting for human input, ends the work unanswered, so
+where any guidance says to ask, settle open choices with the most conventional
+option and finish the reversible work inside the workspace; never take or stand
+in for a step only a person can take, and leave it undone with anything
+destructive, outside the workspace or needing authority not given; end with
+the result, the assumptions made and the steps left for a person. Such a
+session is not given `request_human_input` or `interaction_request_human`, so
+the modular prompt also drops the clauses that offer them. A setup check of the
+general Autonomy principle alone still saw headless runs end with a question,
+because nothing told the model that no one would answer. Interactive sessions
+keep their bytes; the legacy lock adds an `unattended` case.
+
 A voice handoff answers in the user's language. When a person ends a realtime
 voice session, the remaining transcript reaches the agent as a message whose
 `<input>` is a fixed English note about the handoff. That note gains one last

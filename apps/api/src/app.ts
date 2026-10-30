@@ -13,6 +13,7 @@ import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-p
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerAgentCallRoutes } from "./routes/agent-calls";
 import { registerInboxRoutes } from "./routes/inbox";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
 import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
@@ -126,6 +127,7 @@ import {
   resolveSessionAdminAuthority,
   sessionStartedByPerson,
   rlsContextForWorkspace,
+  withSubscriptionAccountAdministrators,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -216,6 +218,7 @@ import {
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
   stampPersonalApiKeyRequest,
+  resolveAccountAdminAuthorizationStamp,
   verifiedDelegatedHumanAuthorizationForRequest,
   browserExtension,
 } from "@opengeni/core";
@@ -227,6 +230,7 @@ import {
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
+  findManagedAuthOAuthState,
 } from "./auth/managed-auth";
 import {
   adoptManagedAuthSession,
@@ -413,7 +417,6 @@ import {
 import {
   managedPasskeySignInOffered,
   managedPasskeySignUpOffered,
-  refreshManagedPasskeysOffered,
   registerManagedPasskeyRoutes,
 } from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
@@ -1153,6 +1156,17 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  // Subscription administration accepts the account administrators this
+  // request authenticated as (configured key, account-scoped key, signed
+  // delegation, organization admin). The database records the proof per
+  // transaction; nothing is resolved unless a subscription writer asks.
+  app.use("/v1/*", async (c, next) => {
+    await withSubscriptionAccountAdministrators(
+      (input) => resolveAccountAdminAuthorizationStamp(c, deps, input),
+      next,
+    );
+  });
+
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
@@ -1225,9 +1239,7 @@ export function createAppComposition(deps: AppDependencies): {
       let signupChallengeVerified = false;
       if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
         const state = new URL(c.req.url).searchParams.get("state");
-        const stored = state
-          ? await (await managedAuth.$context).internalAdapter.findVerificationValue(state)
-          : null;
+        const stored = state ? await findManagedAuthOAuthState(managedAuth, state) : null;
         if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
           signupChallengeVerified = oauthSignupChallengeVerified(
             stored.value,
@@ -1638,7 +1650,6 @@ export function createAppComposition(deps: AppDependencies): {
             },
           }
         : undefined;
-    await refreshManagedPasskeysOffered(deps);
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -1725,7 +1736,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(
-          deps,
+          deps.settings,
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
@@ -2507,6 +2518,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerAgentCallRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
@@ -2778,19 +2790,15 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(
-  deps: Pick<AppDependencies, "settings" | "db">,
-  newSignupsEnabled: boolean,
-) {
-  const settings = deps.settings;
+function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
-      passkeySignIn: managedPasskeySignInOffered(deps),
-      passkeySignUp: managedPasskeySignUpOffered(deps, newSignupsEnabled),
+      passkeySignIn: managedPasskeySignInOffered({ settings }),
+      passkeySignUp: managedPasskeySignUpOffered({ settings }, newSignupsEnabled),
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),

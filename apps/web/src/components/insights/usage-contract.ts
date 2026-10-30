@@ -8,8 +8,23 @@
  */
 import type { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 
-/** "custom" pairs with `from`/`to` (UTC days, `to` inclusive). */
-export type UsageRange = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "custom";
+/**
+ * "1h", "3h" and "24h" are rolling. "custom" pairs with `from`/`to`: UTC
+ * instants (`to` exclusive) or, in older links, UTC days (`to` inclusive).
+ */
+export type UsageRange =
+  | "1h"
+  | "3h"
+  | "24h"
+  | "today"
+  | "week"
+  | "month"
+  | "30d"
+  | "90d"
+  | "ytd"
+  | "custom";
+
+export type UsageBucket = "five_minutes" | "hour" | "day";
 
 export type UsageGroupBy =
   | "model"
@@ -138,7 +153,7 @@ export type UsageScope =
 
 export type UsageQuery = {
   range: UsageRange;
-  /** Custom range only: UTC days, `to` inclusive. */
+  /** Custom range only: UTC instants, or UTC days with `to` inclusive. */
   from?: string;
   to?: string;
   groupBy: UsageGroupBy;
@@ -152,7 +167,7 @@ export type UsageResponse = {
   windowEnd: string;
   priorWindowStart: string | null;
   priorWindowEnd: string | null;
-  bucket: "hour" | "day";
+  bucket: UsageBucket;
   generatedAt: string;
   dataThrough: string | null;
   totals: UsageMeasures;

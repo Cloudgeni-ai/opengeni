@@ -24,6 +24,7 @@ export {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkShowsPreview,
   readableWorkStatus,
@@ -32,6 +33,9 @@ export {
 export type { ActivityGroup, ReadableWorkOptions, TurnGroup } from "./timeline/work-presentation";
 export { timelineGroupContainsPresentedImage } from "./timeline/presented-image";
 export { mcpToolLeaf, toolDisplayName } from "./timeline/tool-display-name";
+export { commandStepTitle } from "./timeline/command-step";
+export { redactPayload, redactSignedUrls } from "./timeline/credential-redaction";
+export type { CredentialContext } from "./timeline/credential-redaction";
 export {
   connectorLogo,
   connectorLogoIndex,

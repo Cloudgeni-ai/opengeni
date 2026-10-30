@@ -19,9 +19,12 @@ import {
   createOrganizationApiKey,
   ensureExternalIdentity,
   ensureExternalWorkspaceMemberOnFirstUse,
+  lockExternalWorkspaceMembershipLifecycle,
   migrate,
   nestedPostgresSqlState,
   provisionRoles,
+  readExternalWorkspaceRevocationWatermark,
+  withAccountRls,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -178,6 +181,14 @@ async function subjectOf(accountId: string, externalId: string) {
     .subjectId;
 }
 
+/** The revocation watermark a request reads when it authenticates. */
+async function watermark(accountId: string): Promise<string> {
+  return await withAccountRls(db.db, accountId, async (tx) => {
+    await lockExternalWorkspaceMembershipLifecycle(tx, accountId);
+    return await readExternalWorkspaceRevocationWatermark(tx);
+  });
+}
+
 async function status(promise: Promise<unknown>): Promise<number> {
   try {
     await promise;
@@ -327,6 +338,7 @@ test("an identity suspended while its first request is in flight never gets a me
       subjectId: identity.subjectId,
       identity: { source: "product", externalId },
       permissions: [...CONVERSATION_PERMISSIONS],
+      revocationWatermark: await watermark(org.accountId),
     },
   ).then(
     () => null,
@@ -336,6 +348,53 @@ test("an identity suspended while its first request is in flight never gets a me
   expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
   expect(await status(client.getWorkspace(org.workspace.id))).toBe(403);
   expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
+}, 60_000);
+
+test("first use never re-creates a member removed after the request authenticated", async () => {
+  const org = await organization();
+  const { externalId, client } = org.user();
+  await client.getWorkspace(org.workspace.id);
+  const identity = await ensureExternalIdentity(db.db, {
+    accountId: org.accountId,
+    source: "product",
+    externalId,
+  });
+  // The request authenticated here, then the app removed the member.
+  const before = await watermark(org.accountId);
+  const removed = await org.service.cancelExternalWorkspaceMemberGrant(
+    org.accountId,
+    org.workspace.id,
+    identity.organizationMembershipId,
+    { operationId: crypto.randomUUID(), cancelGrantOperationId: crypto.randomUUID() },
+  );
+  expect(removed.removed).toBe(true);
+  const scope = {
+    organizationId: org.accountId,
+    workspaceId: org.workspace.id,
+    actorSubjectId: `api_key:${org.key.id}`,
+  };
+  const input = {
+    subjectId: identity.subjectId,
+    identity: { source: "product", externalId },
+    permissions: [...CONVERSATION_PERMISSIONS],
+  };
+  expect(
+    await ensureExternalWorkspaceMemberOnFirstUse(db.db, scope, {
+      ...input,
+      revocationWatermark: before,
+    }),
+  ).toBe("superseded");
+  expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
+  // A request that authenticates after the removal admits the user again.
+  const after = await watermark(org.accountId);
+  expect(BigInt(after)).toBeGreaterThan(BigInt(before));
+  expect(
+    await ensureExternalWorkspaceMemberOnFirstUse(db.db, scope, {
+      ...input,
+      revocationWatermark: after,
+    }),
+  ).toBe("created");
+  expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(1);
 }, 60_000);
 
 test("a request needing a permission outside the defaults creates nothing", async () => {

@@ -2,20 +2,20 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 // Pin the source we tested, including fixes newer than the published SDK.
-// A pin that changes a tool's schema also needs the macOS and Linux catalogs
+// A pin that changes a tool's schema also needs the affected platform catalogs
 // regenerated (scripts/generate-cua-desktop-tools.ts) and their byte and sha256
 // pins in scripts/check-public-repo-hygiene.ts updated: native calls are refused
 // when the worker's schema differs from the bundled one.
-export const cuaSourceRevision = "944b1b7f973f37be4237dd7054e0e54964da69f5";
+export const cuaSourceRevision = "67f4773671a9f20d12491c9c8584067951eee2b0";
 const repository = "https://github.com/Cloudgeni-ai/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {
   if (
-    !["darwin", "linux"].includes(process.platform) ||
+    !["darwin", "linux", "win32"].includes(process.platform) ||
     !["x64", "arm64"].includes(architecture) ||
-    (process.platform === "linux" && architecture !== process.arch)
+    (process.platform !== "darwin" && architecture !== process.arch)
   )
-    throw new Error("CUA worker packaging requires macOS x64/arm64 or native Linux");
+    throw new Error("CUA worker packaging requires macOS x64/arm64 or native Linux or Windows");
   const source = resolve(
     process.env.OPENGENI_CUA_SOURCE_DIR ??
       join(import.meta.dir, "../dist/cua-source", cuaSourceRevision),
@@ -35,7 +35,10 @@ export async function buildCuaWorker(architecture: string): Promise<string> {
     if ((await child.exited) !== 0) throw new Error(`CUA build failed: ${args[0]}`);
     return output.trim();
   };
-  if (!(await Bun.file(join(source, ".git/HEAD")).exists())) {
+  if (
+    !process.env.OPENGENI_CUA_SOURCE_DIR &&
+    !(await Bun.file(join(source, ".git/HEAD")).exists())
+  ) {
     await run(["git", "init"]);
     await run(["git", "remote", "add", "origin", repository]);
     await run([
@@ -71,7 +74,13 @@ export async function buildCuaWorker(architecture: string): Promise<string> {
     ],
     rust,
   );
-  const path = join(rust, "target", ...(cross ? [target] : []), "release/cua-driver");
+  const path = join(
+    rust,
+    "target",
+    ...(cross ? [target] : []),
+    "release",
+    process.platform === "win32" ? "cua-driver.exe" : "cua-driver",
+  );
   await readFile(path); // Require the complete executable before staging anything.
   return path;
 }

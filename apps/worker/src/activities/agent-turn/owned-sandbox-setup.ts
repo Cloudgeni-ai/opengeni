@@ -77,6 +77,7 @@ export async function runEagerOwnedSandboxSetup(
     provider: deps.turnExecutionPolicy.providerId,
     backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
     publish: eventing.publish,
+    publishInBackground: eventing.publishInBackground,
   });
   const ownedSandboxSetupStartedAt = performance.now();
   let ownedSandboxSetupOutcome: "completed" | "failed" = "completed";

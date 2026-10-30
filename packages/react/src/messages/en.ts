@@ -4,7 +4,10 @@
  */
 export const englishMessages = {
   "approvalSurface.actionsToReview": "Actions to review",
-  /** The button that answers an app action's question ("Invite … to your organization?"). */
+  /**
+   * The button that answers an app action's question ("Invite … to your organization?") or an
+   * MCP server's question that has nothing to fill in.
+   */
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",
@@ -12,6 +15,8 @@ export const englishMessages = {
   "approvalSurface.backToReview": "Back to review",
   /** Declines an app action's question without running it. */
   "approvalSurface.cancel": "Cancel",
+  /** The empty choice of an MCP server's drop-down question. */
+  "approvalSurface.choose": "Choose…",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
@@ -20,8 +25,15 @@ export const englishMessages = {
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
   "approvalSurface.ofLength": "of {length}",
+  /** Marks a field an MCP server's question does not require. */
+  "approvalSurface.optional": "Optional",
   "approvalSurface.previousAction": "Previous action",
   "approvalSurface.reviewTheActionBeforeIt": "Review the action before it runs.",
+  /** Answers an MCP server's question that has fields to fill in. */
+  "approvalSurface.sendAnswer": "Send answer",
+  "approvalSurface.sendingAnswer": "Sending answer…",
+  /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
+  "approvalSurface.serverAsks": "{server} asks",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":
@@ -329,6 +341,8 @@ export const englishMessages = {
   "automations.editor.includeOwn": "Also run for what {product} does",
   "automations.editor.includeOwnDescription":
     "Off by default, so the agent's own comments and messages don't start another run.",
+  "automations.editor.includeOwnWorkspaceDescription":
+    "Off by default, so what automations do, such as their chats finishing, doesn't start another run. Chains of automations stop after three.",
   "automations.editor.loadEventsFailed": "The events couldn't load.",
   "automations.editor.loadingSources": "Loading sources…",
   "automations.editor.mcpOneEventHint": "Each MCP server trigger listens to one event.",
@@ -477,6 +491,9 @@ export const englishMessages = {
   "automations.picker.choose": "Choose an event",
   "automations.picker.empty": "No matching events. Type the exact event type to use it.",
   "automations.picker.everyEventDescription": "Anything this source sends.",
+  "automations.picker.groupChats": "Chats",
+  "automations.picker.groupMeetings": "Meetings",
+  "automations.picker.groupUsage": "Usage",
   "automations.picker.loadFailed":
     "The list of events couldn't load ({reason}). You can still type an event type.",
   "automations.picker.loading": "Loading events…",
@@ -512,6 +529,8 @@ export const englishMessages = {
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",
+  "automations.run.error.chainLimit":
+    "Skipped so automations don't wake each other in a loop: its events came from a chain of automations that reached the limit.",
   "automations.run.error.chatBusy": "Skipped because the chat was still busy with earlier work.",
   "automations.run.error.chatWaitingForAccount":
     "Skipped because the chat is waiting for a model account. Pick another model in the chat.",
@@ -617,6 +636,12 @@ export const englishMessages = {
   "automations.statusReason.unavailable": "{source} can't receive events right now.",
   "automations.statusReason.withDetail": "{reason} It said: {detail}",
   "automations.summary.from": "From",
+  "automations.template.automationFailed.description":
+    "What went wrong when one of your automations' chats fails, sent to you.",
+  "automations.template.automationFailed.instructions":
+    "A chat one of my automations ran failed; the event's data.sessionId names it and data.error says how. Read the end of that chat with session_events and work out what went wrong. Then notify me with notify_user: say in two plain sentences what failed and what would fix it. Don't retry the work yourself.",
+  "automations.template.automationFailed.name": "When an automation fails",
+  "automations.template.automationFailed.when": "When a chat one of your automations ran fails",
   "automations.template.costCheck.description": "Flag unusual cloud spend from the last day.",
   "automations.template.costCheck.instructions":
     "Summarize yesterday's cloud spend by service and flag anything that is more than 20% above the weekly average.",
@@ -3034,11 +3059,17 @@ export const englishMessages = {
   "meetings.transcript.valueMatch": "{value}% match",
   "meetings.transcript.whoIsDisplayname": "Who is {displayName}?",
   "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
+  "messageTimeline.accessDraftAndSendEmail": "draft and send email",
+  "messageTimeline.accessJoin": " and ",
+  "messageTimeline.accessOrganizeMailbox": "organize your mailbox",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
+  "messageTimeline.agentCarriesOnAfterAllowing":
+    "After you allow it, the agent carries on where it stopped.",
   "messageTimeline.agentDecided": "Agent decided",
   "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
+  "messageTimeline.allowAccess": "Allow",
   "messageTimeline.answered": "Answered",
   "messageTimeline.answeredSummary": "Answered: {summary}",
   "messageTimeline.asked": "Asked",
@@ -3068,6 +3099,7 @@ export const englishMessages = {
   "messageTimeline.expired": "Expired",
   "messageTimeline.fromSource": "from {source}",
   "messageTimeline.generatedVideo": "Generated video",
+  "messageTimeline.giveProviderMoreAccess": "Give {provider} more access",
   "messageTimeline.goalCleared": "Goal cleared",
   "messageTimeline.goalCompleted": "Goal completed",
   "messageTimeline.goalHeld": "Goal held",
@@ -3078,6 +3110,8 @@ export const englishMessages = {
   "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
+  "messageTimeline.itNeedsPermissionTo":
+    "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
   "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
   "messageTimeline.jumpingToStart": "Jumping to start…",
@@ -3507,6 +3541,10 @@ export const englishMessages = {
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
+  /** Answers an MCP server's yes/no question from the inbox. */
+  "native.timeline.inbox.allow": "Allow",
+  "native.timeline.inbox.allowed": "Allowed",
+  "native.timeline.inbox.allowing": "Allowing…",
   "native.timeline.inbox.alreadyAnswered": "Already answered",
   "native.timeline.inbox.answer": "Answer",
   "native.timeline.inbox.answeredLabel": "Answered: {label}",
@@ -3545,6 +3583,8 @@ export const englishMessages = {
   "native.timeline.inbox.replies": "Replies",
   "native.timeline.inbox.reply": "Reply",
   "native.timeline.inbox.sending": "Sending…",
+  /** Who is asking, for an MCP server's question in the middle of a tool call, e.g. "Docs asks". */
+  "native.timeline.inbox.serverAsks": "{server} asks",
   "native.timeline.inbox.snooze": "Snooze",
   "native.timeline.inbox.snoozed": "Snoozed",
   "native.timeline.inbox.snoozeFor1Hour": "Snooze for 1 hour",
@@ -4949,6 +4989,97 @@ export const englishMessages = {
   "timeline.chip.failed": "failed",
   "timeline.chip.interrupted": "interrupted",
   "timeline.chip.lost": "lost",
+  /** A shell command in plain words (`command-step`); the command itself is in the row's body. */
+  "timeline.commandStep.checkChanges.done": "Checked changes",
+  "timeline.commandStep.checkChanges.running": "Checking changes",
+  "timeline.commandStep.convert.done": "Converted {name}",
+  "timeline.commandStep.convert.running": "Converting {name}",
+  "timeline.commandStep.convertFile.done": "Converted a file",
+  "timeline.commandStep.convertFile.running": "Converting a file",
+  "timeline.commandStep.copy.done": "Copied {name}",
+  "timeline.commandStep.copy.running": "Copying {name}",
+  "timeline.commandStep.copyFiles.done": "Copied files",
+  "timeline.commandStep.copyFiles.running": "Copying files",
+  "timeline.commandStep.createFile.done": "Created {name}",
+  "timeline.commandStep.createFile.running": "Creating {name}",
+  "timeline.commandStep.createFileUnnamed.done": "Created files",
+  "timeline.commandStep.createFileUnnamed.running": "Creating files",
+  "timeline.commandStep.createFolder.done": "Created the {name} folder",
+  "timeline.commandStep.createFolder.running": "Creating the {name} folder",
+  "timeline.commandStep.createFolderUnnamed.done": "Created folders",
+  "timeline.commandStep.createFolderUnnamed.running": "Creating folders",
+  "timeline.commandStep.delete.done": "Deleted {name}",
+  "timeline.commandStep.delete.running": "Deleting {name}",
+  "timeline.commandStep.deleteFiles.done": "Deleted files",
+  "timeline.commandStep.deleteFiles.running": "Deleting files",
+  "timeline.commandStep.download.done": "Downloaded {name}",
+  "timeline.commandStep.download.running": "Downloading {name}",
+  "timeline.commandStep.edit.done": "Edited {name}",
+  "timeline.commandStep.edit.running": "Editing {name}",
+  /** A request that only reads from a web address; `host` is the site, never the full link. */
+  "timeline.commandStep.fetch.done": "Got data from {host}",
+  "timeline.commandStep.fetch.running": "Getting data from {host}",
+  "timeline.commandStep.getChanges.done": "Got the latest changes",
+  "timeline.commandStep.getChanges.running": "Getting the latest changes",
+  "timeline.commandStep.install.done": "Installed {name}",
+  "timeline.commandStep.install.running": "Installing {name}",
+  "timeline.commandStep.installPackages.done": "Installed packages",
+  "timeline.commandStep.installPackages.running": "Installing packages",
+  "timeline.commandStep.list.done": "Looked through {name}",
+  "timeline.commandStep.list.running": "Looking through {name}",
+  "timeline.commandStep.browseFiles.done": "Looked through files",
+  "timeline.commandStep.browseFiles.running": "Looking through files",
+  "timeline.commandStep.move.done": "Moved {name}",
+  "timeline.commandStep.move.running": "Moving {name}",
+  "timeline.commandStep.moveFiles.done": "Moved files",
+  "timeline.commandStep.moveFiles.running": "Moving files",
+  "timeline.commandStep.pack.done": "Compressed {name}",
+  "timeline.commandStep.pack.running": "Compressing {name}",
+  "timeline.commandStep.packFiles.done": "Compressed files",
+  "timeline.commandStep.packFiles.running": "Compressing files",
+  "timeline.commandStep.queryDatabase.done": "Queried the database",
+  "timeline.commandStep.queryDatabase.running": "Querying the database",
+  "timeline.commandStep.read.done": "Read {name}",
+  "timeline.commandStep.read.running": "Reading {name}",
+  "timeline.commandStep.readFile.done": "Read a file",
+  "timeline.commandStep.readFile.running": "Reading a file",
+  "timeline.commandStep.readFiles.done_one": "Read {count} file",
+  "timeline.commandStep.readFiles.done_other": "Read {count} files",
+  "timeline.commandStep.readFiles.running_one": "Reading {count} file",
+  "timeline.commandStep.readFiles.running_other": "Reading {count} files",
+  "timeline.commandStep.reinstallPackages.done": "Reinstalled packages",
+  "timeline.commandStep.reinstallPackages.running": "Reinstalling packages",
+  /** Code fetched from the internet and run straight away (`curl … | sh`). */
+  "timeline.commandStep.runDownloadedCode.done": "Ran a downloaded script",
+  "timeline.commandStep.runDownloadedCode.running": "Running a downloaded script",
+  /** Inline code run by an interpreter; `language` is "Python", "JavaScript", "shell", … */
+  "timeline.commandStep.runCode.done": "Ran {language} code",
+  "timeline.commandStep.runCode.running": "Running {language} code",
+  "timeline.commandStep.runScript.done": "Ran {name}",
+  "timeline.commandStep.runScript.running": "Running {name}",
+  "timeline.commandStep.runTests.done": "Ran tests",
+  "timeline.commandStep.runTests.running": "Running tests",
+  "timeline.commandStep.saveChanges.done": "Saved changes",
+  "timeline.commandStep.saveChanges.running": "Saving changes",
+  "timeline.commandStep.search.done": "Searched for “{query}”",
+  "timeline.commandStep.search.running": "Searching for “{query}”",
+  "timeline.commandStep.searchFiles.done": "Searched files",
+  "timeline.commandStep.searchFiles.running": "Searching files",
+  /** A request that sends data to a web address; `host` is the site, never the full link. */
+  "timeline.commandStep.send.done": "Sent data to {host}",
+  "timeline.commandStep.send.running": "Sending data to {host}",
+  "timeline.commandStep.unpack.done": "Unpacked {name}",
+  "timeline.commandStep.unpack.running": "Unpacking {name}",
+  "timeline.commandStep.unpackFiles.done": "Unpacked files",
+  "timeline.commandStep.unpackFiles.running": "Unpacking files",
+  "timeline.commandStep.uploadChanges.done": "Uploaded changes",
+  "timeline.commandStep.uploadChanges.running": "Uploading changes",
+  "timeline.commandStep.useGitHub.done": "Used GitHub",
+  "timeline.commandStep.useGitHub.running": "Using GitHub",
+  "timeline.commandStep.write.done": "Wrote {name}",
+  "timeline.commandStep.write.running": "Writing {name}",
+  "timeline.commandStep.writeFile.done": "Wrote a file",
+  "timeline.commandStep.writeFile.running": "Writing a file",
   "timeline.compactionCopy.chatHistoryIsUnchangedIf":
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":
@@ -4957,6 +5088,7 @@ export const englishMessages = {
   "timeline.compactionCopy.checkpointWouldNotReduceMemory":
     "Checkpoint would not reduce memory size",
   "timeline.compactionCopy.compactionInterrupted": "Compaction interrupted",
+  "timeline.compactionCopy.compactionPostponed": "Compaction postponed",
   "timeline.compactionCopy.compactionWasNotNeededChat":
     "Compaction was not needed. Chat history is unchanged.",
   "timeline.compactionCopy.couldnTCompactConversationHistory":
@@ -4965,6 +5097,8 @@ export const englishMessages = {
   "timeline.compactionCopy.itWillRetryIfStill":
     "It will retry if still needed. Chat history is unchanged.",
   "timeline.compactionCopy.noActiveHistoryToCompact": "No active history to compact",
+  "timeline.compactionCopy.noSubscriptionCapacityRightNow":
+    "No subscription capacity right now. It runs with your next message if still needed.",
   "timeline.compactionCopy.parameter": "Parameter",
   "timeline.compactionCopy.requestId": "Request ID",
   "timeline.compactionCopy.requestItAgainToRetry":
@@ -5396,6 +5530,11 @@ export const englishMessages = {
   "timeline.toolPresentation.binaryOutputSuppressed": "(binary output suppressed)",
   "timeline.toolPresentation.blockedByYourPermissionSettings":
     "Blocked by your permission settings",
+  "timeline.toolPresentation.callUser.answered": "Answered",
+  "timeline.toolPresentation.callUser.cancelled": "Cancelled",
+  "timeline.toolPresentation.callUser.declined": "Declined",
+  "timeline.toolPresentation.callUser.missed": "No answer",
+  "timeline.toolPresentation.callUser.notPlaced": "Didn't ring",
   "timeline.toolPresentation.created": "Created",
   "timeline.toolPresentation.deleted": "Deleted",
   "timeline.toolPresentation.deletedPathbasename": "Deleted {pathBasename}",
@@ -5702,6 +5841,8 @@ export const englishMessages = {
   "timeline.toolStep.nameChat.running": "Naming the chat",
   "timeline.toolStep.noteProgress.done": "Noted progress",
   "timeline.toolStep.noteProgress.running": "Noting progress",
+  "timeline.toolStep.callYou.done": "Called you",
+  "timeline.toolStep.callYou.running": "Calling you",
   "timeline.toolStep.notify.done": "Notified you",
   "timeline.toolStep.notify.running": "Notifying you",
   "timeline.toolStep.openBrowser.done": "Opened the browser",

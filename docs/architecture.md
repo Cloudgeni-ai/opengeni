@@ -2336,6 +2336,17 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Computer cursor badges carry the source chat's display title and a bounded PNG
+of its existing sidebar avatar. The API resolves image access as the caller and
+sends pixels, never a signed storage URL, through the internal controller-create
+request (including recovery). Missing avatars fall back to initials or the name.
+Display metadata never replaces the private CUA session key. All desktop
+platforms use the same source-pinned supervised CUA worker; the published SDK
+provides only its local transport.
+Identity is captured when a controller opens or recovers. Avatar work has a
+750 ms cosmetic deadline and falls back to the name. GNOME keeps its existing
+single-cursor/no-hover behavior; avatars require helper v11 there.
+
 Connected-machine tool failures preserve the API's closed failure details and
 opaque request references at the model boundary. The MCP error renderer retains
 `outcomeUnknown` and discourages automatic action retries; uncertain execution
@@ -2354,9 +2365,13 @@ outside the action queue and preserves capture serialization. Lost targets,
 connections and repeated non-timeout capture failures still fail the subscription
 and reach the viewer through the stream's existing terminal error path.
 
-An attached tab's debugger disconnect invalidates only its cached target,
-document, frame and element authority. Read-only recovery can attach the same
-surviving tab with fresh fences; explicit cancellation and uncertain effects
+An attached tab's debugger disconnect ends only that attachment's commands and
+controls. Recovery can attach the same surviving tab again; when it still shows
+the same document (same main-frame frame and loader ids), it keeps its target,
+document, frame and element authority, so an observation made before the
+disconnect still holds, and otherwise it gets fresh fences. Another extension
+adding a frame (a password manager's inline menu) ends Chrome's debugging of a
+tab without changing its page. Explicit cancellation and uncertain effects
 require profile reconnection. Chrome and unrelated tabs remain intact, and
 mutations are never replayed. Partially dispatched input remains outcome unknown;
 queued input, DOM changes, navigation and emulation cannot cross into a replacement

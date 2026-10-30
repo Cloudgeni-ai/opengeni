@@ -1986,7 +1986,14 @@ context overflow instead of compacting from a whole-request approximation.
 Each authoritative terminal response replaces the durable count with its usable
 input count or null; an omitted count never leaves an older response active.
 Local media-aware estimates remain confined to compaction-request fitting and
-history-only replacement reporting. See
+history-only replacement reporting. When a person's own turn in a root session
+with no active goal or held `wait_for_input` completes with that durable count
+already at the limit, the worker requests the checkpoint immediately after
+settlement, labeled `proactive`; the same workflow claims it as the existing
+standalone `source="compaction"` maintenance execution instead of the next
+message waiting for it (`OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED`, default on).
+The session counts as running while it compacts, and a capacity deferral drops
+a `proactive` request rather than keeping it. See
 [`context-compaction.md`](context-compaction.md).
 
 Outside the explicit durable compaction transition, model-visible history is
@@ -5119,6 +5126,19 @@ operation's result. `startup_phase_delivery` measures that batch delivery, and
 `run_git_credential_mint` measures the full prefetched mint, distinct from the
 remaining wait in the visible `credential_mint` row. Shared rig claim/join time
 remains covered by the existing shared-preparation metric.
+
+These startup checkpoints and receipts are progress only: nothing reads them
+back before the first model request, so startup does not wait for their
+delivery. Each attempt writes its events through one ordered lane. A checkpoint
+or receipt starts its append at once, after every append the attempt already
+issued, and the preparation continues; every awaited append (the
+`agent.model.request` started audit among them) and the turn settlement start
+only after the checkpoints issued before them. The event log therefore keeps
+the order the work produced, and the audit still commits before the request
+leaves the worker. A checkpoint that cannot be delivered does not fail the
+turn; a fenced attempt is still refused by its next awaited append. Activity
+finalization waits for any checkpoint still in flight. `startup_phase_delivery`
+measures only the append itself, not time spent queued behind earlier appends.
 
 The managed client download is gzip-compressed under a `.json.gz` object key.
 Its identity remains the digest of the original release JSON, not the compressed

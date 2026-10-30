@@ -60,6 +60,8 @@ import {
   skillReviewHumanInput,
   type McpAccountRouteLabel,
   type ToolAuthNeededPayload,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
+  UNATTENDED_PERSON_REFUSAL_TEXT,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
@@ -1033,6 +1035,47 @@ describe("structured human-input runtime boundary", () => {
     const retryInput = JSON.stringify(model.requests[1]?.input);
     expect(retryInput).toContain("Tool execution failed. Error details are redacted.");
     expect(retryInput).toContain("human-call-invalid");
+  });
+
+  test("refuses a question once the chat is switched to work without a person", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            {
+              questions: [
+                {
+                  id: "choice",
+                  kind: "single_select",
+                  prompt: "Choose one",
+                  options: [{ id: "a", label: "A" }],
+                },
+              ],
+              allowSkip: false,
+            },
+            "human-call-unattended",
+          ),
+        ],
+      },
+      { outputText: "Chose the conventional option." },
+    ]);
+    // Started attended, so the tool stays in its list; only the call is refused.
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      unattendedNow: true,
+    });
+    expect(agent.tools.map((tool) => tool.name)).toContain(HUMAN_INPUT_TOOL_NAME);
+
+    const result = await runAgentStream(agent, "Ask me to choose", settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(result.interruptions).toHaveLength(0);
+    expect(result.finalOutput).toBe("Chose the conventional option.");
+    expect(JSON.stringify(model.requests[1]?.input)).toContain(UNATTENDED_PERSON_REFUSAL_TEXT);
   });
 
   test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
@@ -2832,7 +2875,7 @@ describe("runtime event normalization", () => {
         kind: "mfa",
         reason: "Approve the sign-in on your phone.",
       };
-      const runWith = async (argumentsJson: string) => {
+      const runWith = async (argumentsJson: string, unattendedNow = false) => {
         const requests: Array<{ input: unknown }> = [];
         const model: Model = {
           async getResponse(modelRequest) {
@@ -2871,6 +2914,7 @@ describe("runtime event normalization", () => {
         };
         const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
           mcpServers: [interactionServer],
+          ...(unattendedNow ? { unattendedNow: true } : {}),
         }) as unknown as { clone: (config: unknown) => Agent };
         const result = await runAgent(agent.clone({ model }), "hand the sign-in over", {
           toolExecution: { preApprovalInputGuardrails: true },
@@ -2895,6 +2939,18 @@ describe("runtime event normalization", () => {
       expect(serializeInteractionInterventionRequests(valid.result.interruptions)).toMatchObject([
         { toolCallId: "handoff-call", input: { ...request, expiresInSeconds: 1200 } },
       ]);
+
+      // Switched to work without a person after the chat started: the tool
+      // stays, but a valid hand-off is refused with a result, never awaited.
+      const unattended = await runWith(
+        JSON.stringify({ ...request, expiresInSeconds: 1200 }),
+        true,
+      );
+      expect(unattended.result.interruptions).toHaveLength(0);
+      expect(unattended.result.finalOutput).toBe("corrected");
+      expect(JSON.stringify(unattended.requests[1]!.input)).toContain(
+        UNATTENDED_PERSON_REFUSAL_TEXT,
+      );
     });
 
     test("describes invalid interaction arguments without echoing their values", () => {
@@ -3083,6 +3139,8 @@ describe("runtime event normalization", () => {
       sandboxBackend?: "none" | "modal";
       toolResultBytes?: number;
       spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+      unattended?: boolean;
+      unattendedNow?: boolean;
     }) {
       const mcp = startTestMcpServer({
         toolResultIsError: input.toolResultIsError,
@@ -3179,9 +3237,114 @@ describe("runtime event normalization", () => {
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
+        ...(input.unattended ? { unattended: true } : {}),
+        ...(input.unattendedNow ? { unattendedNow: true } : {}),
       });
       return { agent, calls, mcp, prepared, settings };
     }
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "an unattended session refuses a call that needs approval instead of waiting (%s)",
+      async (lazyToolTransport) => {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          lazyToolTransport,
+          unattendedNow: true,
+        });
+        try {
+          const model = new ScriptedModel([
+            {
+              output: [
+                scriptedFunctionCall("docs__search_documents", { query: "q" }, "unattended-call"),
+              ],
+            },
+            { outputText: "Left it for a person." },
+          ]);
+          const result = await runAgentStream(
+            // A clone of a clone keeps the refusal.
+            fixture.agent.clone({}).clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            // Drain the run.
+          }
+          await result.completed;
+          // No approval pause, nothing executed, nothing approved or begun.
+          expect(result.interruptions).toHaveLength(0);
+          expect(result.finalOutput).toBe("Left it for a person.");
+          expect(JSON.stringify(model.requests[1]?.input)).toContain(
+            UNATTENDED_APPROVAL_REFUSAL_TEXT,
+          );
+          expect(fixture.mcp.calls).toHaveLength(0);
+          expect(fixture.calls.filter((call) => !call.startsWith("prepare:"))).toEqual([]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
+    test("an unattended session runs calls its policy allows", async () => {
+      {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "allow",
+          unattended: true,
+          unattendedNow: true,
+        });
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          const required = await tool.needsApproval(new RunContext(), { query: "q" }, "call-1");
+          expect(required).toBe(false);
+          const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "q" }), {
+            toolCall: { callId: "call-1" },
+          } as any);
+          expect(JSON.stringify(output)).not.toContain(UNATTENDED_APPROVAL_REFUSAL_TEXT);
+          expect(fixture.mcp.calls).toHaveLength(1);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("an attended session still asks for approval", async () => {
+      const fixture = await connectorPolicyFixture({ connectorDecision: "ask" });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "q" }, "call-1")).toBe(true);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("a chat that started unattended asks for approval once a person is there", async () => {
+      // Its instructions and tools stay as they started; only the refusal
+      // follows the current setting, so the person present can approve.
+      const fixture = await connectorPolicyFixture({ connectorDecision: "ask", unattended: true });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "q" }, "call-1")).toBe(true);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
 
     test.each([undefined, "codex_native", "generic_dispatch"] as const)(
       "account-qualified connector Ask pauses before executing a model call (%s)",

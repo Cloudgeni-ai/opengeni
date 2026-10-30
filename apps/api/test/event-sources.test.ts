@@ -11,6 +11,7 @@ import {
   type SessionWorkflowClient,
 } from "@opengeni/core";
 import {
+  appendSessionEvents,
   bindAuthorizedGitHubInstallationRepositories,
   claimRecordingTranscriptVersion,
   completeRecordingTranscriptVersion,
@@ -44,7 +45,11 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { pumpDueEventSourceFeeds, pumpDueMcpEventSubscriptions } from "@opengeni/core";
+import {
+  addMcpEventSource,
+  pumpDueEventSourceFeeds,
+  pumpDueMcpEventSubscriptions,
+} from "@opengeni/core";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -1499,6 +1504,85 @@ describe("MCP event sources", () => {
     expect(twoTypes.status).toBe(422);
   });
 
+  test("a workspace source listens by URL, signed in by the credential provider", async () => {
+    const f = await mcpFixture();
+    const protectedServer = startFakeMcpEventsServer({
+      eventTypes: [TICKET_CREATED],
+      bearerToken: "listen-token",
+    });
+    fakes.push(protectedServer);
+    const serverUrl = "https://events.example/mcp";
+    // A person who is not an admin can't add one.
+    const asMember = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "mcp", serverId: "product-events", url: serverUrl }),
+    });
+    expect(asMember.status).toBe(403);
+
+    const provider = await f.app.request(`/v1/workspaces/${f.workspace.id}/credential-provider`, {
+      method: "PUT",
+      headers: f.service,
+      body: JSON.stringify({ url: "https://provider.example/credentials" }),
+    });
+    expect(provider.status).toBe(201);
+    const asked: Array<Record<string, any>> = [];
+    const network = {
+      // Any source's https URL reaches the local fake server.
+      fetch: async (url: string | URL, init?: RequestInit) =>
+        await fetch(String(url).replace(/^https:\/\/[^/]+\/mcp/, protectedServer.url), init),
+      providerFetch: (async (_url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        asked.push(body);
+        return Response.json({
+          status: "ok",
+          mcp: [
+            {
+              url: body.eventSubscription.serverUrl,
+              headers: { Authorization: "Bearer listen-token" },
+            },
+          ],
+        });
+      }) as never,
+    };
+    const add = async (url: string) =>
+      await addMcpEventSource({
+        db: db.db,
+        settings: f.settings,
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        createdBySubjectId: "service:product",
+        ownerSubjectId: null,
+        serverId: "product-events",
+        url,
+        ...network,
+      });
+    const source = await add(serverUrl);
+    expect(source).toMatchObject({
+      kind: "mcp",
+      ownerSubjectId: null,
+      visibility: "workspace",
+      mcpServerUrl: serverUrl,
+      connectionId: null,
+    });
+    expect(asked[0]).toMatchObject({
+      purpose: "event_subscription",
+      eventSubscription: { serverUrl },
+      mcpServers: [{ id: "product-events", url: serverUrl }],
+    });
+    // Adding it again returns the same source; another URL for the same id conflicts.
+    expect((await add(serverUrl)).id).toBe(source.id);
+    await expect(add("https://other.example/mcp")).rejects.toMatchObject({ status: 409 });
+
+    const listed = await f.json(
+      await f.app.request(`${f.sources}/${source.id}`, { headers: f.owner.headers }),
+    );
+    expect(listed.source ?? listed).toMatchObject({
+      visibility: "workspace",
+      mcp: { serverId: "product-events", connectionId: null, url: serverUrl },
+    });
+  });
+
   test("a server that offers events is ready to use: its first use adds the person's source", async () => {
     const f = await mcpFixture();
     const ready = async (headers: Record<string, string>) =>
@@ -2921,6 +3005,133 @@ describe("This workspace event sources", () => {
       field: "data.sessionId",
       description: "The chat whose agent saved them; null when a person did",
     });
+  });
+
+  /** A chat `person` starts through the API, and its first turn. */
+  async function chat(
+    f: Awaited<ReturnType<typeof workspaceFixture>>,
+    person: { headers: Record<string, string> },
+    title: string,
+    visibility: "private" | "workspace",
+  ) {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}/sessions`, {
+      method: "POST",
+      headers: person.headers,
+      body: JSON.stringify({ initialMessage: title, resources: [], tools: [], visibility }),
+    });
+    expect(response.status).toBe(202);
+    const sessionId = String((await f.json(response)).id);
+    const [turn] = await shared.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${sessionId} order by created_at limit 1`;
+    return { sessionId, turnId: turn!.id };
+  }
+
+  async function finish(
+    f: Awaited<ReturnType<typeof workspaceFixture>>,
+    target: { sessionId: string; turnId: string },
+    output: string,
+  ) {
+    await appendSessionEvents(db.db, f.workspace.id, target.sessionId, [
+      { type: "turn.completed", turnId: target.turnId, payload: { output } },
+    ]);
+  }
+
+  test("another chat finishing wakes an automation; another person's private chat never does", async () => {
+    const f = await workspaceFixture();
+    const { source } = await f.json(await f.createSource(f.owner.headers));
+    const automation = await f.json(
+      await f.createAutomation(f.owner.headers, {
+        triggers: [{ sourceId: source.id, eventTypes: ["turn.completed"] }],
+      }),
+    );
+    const types = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    const offered = types.eventTypes.map((entry: { type: string }) => entry.type);
+    expect(offered).toEqual(expect.arrayContaining(["turn.completed", "usage.exhausted"]));
+    expect(offered).not.toContain("session.status.changed");
+    // The first read only learns where "now" is.
+    await f.pump();
+
+    const research = await chat(f, f.owner, "Research", "private");
+    const theirs = await chat(f, f.other, "Their private chat", "private");
+    const team = await chat(f, f.other, "Team plan", "workspace");
+    await finish(f, research, "Found three sources.");
+    await finish(f, theirs, "Private answer");
+    await finish(f, team, "Plan ready");
+    await f.pump();
+
+    const stored = (await f.events(source.id, f.owner.headers)).filter(
+      (event) => event.type === "turn.completed",
+    );
+    expect(stored.map((event) => event.data.sessionId).sort()).toEqual(
+      [research.sessionId, team.sessionId].sort(),
+    );
+    expect(stored.find((event) => event.data.sessionId === research.sessionId)).toMatchObject({
+      subject: "New conversation",
+      summary: "Chat finished: New conversation",
+      url: `https://opengeni.example/workspaces/${f.workspace.id}/sessions/${research.sessionId}`,
+      actor: { kind: "person" },
+      data: {
+        sessionId: research.sessionId,
+        turnId: research.turnId,
+        startedByYou: true,
+        answerExcerpt: "Found three sources.",
+      },
+    });
+    expect(stored.find((event) => event.data.sessionId === team.sessionId)?.data.startedByYou).toBe(
+      false,
+    );
+    expect(stored.some((event) => event.data.sessionId === theirs.sessionId)).toBe(false);
+    expect(await f.queued(automation.id)).toBe(2);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
+  });
+
+  test("a chain of automations stops past three levels, with one skipped run on record", async () => {
+    const f = await workspaceFixture();
+    const { source } = await f.json(await f.createSource(f.owner.headers));
+    const automation = await f.json(
+      await f.createAutomation(f.owner.headers, {
+        triggers: [{ sourceId: source.id, eventTypes: ["turn.completed"], includeOwnEvents: true }],
+      }),
+    );
+    await f.pump();
+    const report = await chat(f, f.owner, "Nightly report", "private");
+    /** The fact a chat of an automation run at `depth` writes when it finishes. */
+    const finishedAtDepth = async (depth: number) => {
+      const id = crypto.randomUUID();
+      await shared.admin`insert into workspace_activity_events (workspace_id, id, account_id, type,
+          occurred_at, session_id, turn_id, subject_id, automation_id, automation_run_id,
+          chain_depth, data)
+        values (${f.workspace.id}, ${id}, ${f.workspace.accountId}, 'turn.completed', now(),
+          ${report.sessionId}, ${report.turnId}, ${f.owner.subjectId}, ${automation.id},
+          ${crypto.randomUUID()}, ${depth}, '{}'::jsonb)`;
+      return id;
+    };
+
+    // A third-level run's chat finishing would start a fourth level: nothing starts.
+    await finishedAtDepth(3);
+    await f.pump();
+    const [deep] = (await f.events(source.id, f.owner.headers)).filter(
+      (event) => event.type === "turn.completed",
+    );
+    expect(deep).toMatchObject({ actor: { kind: "opengeni" } });
+    const [depth] = await shared.admin<{ chain_depth: number }[]>`
+      select chain_depth from inbound_events where id = ${deep!.id}`;
+    expect(depth?.chain_depth).toBe(3);
+    expect(await f.queued(automation.id)).toBe(1);
+    await f.dispatch();
+    expect(f.started).toEqual([]);
+    const skipped = await shared.admin<{ status: string; error: string }[]>`
+      select status, error from scheduled_task_runs where task_id = ${automation.id}`;
+    expect([...skipped]).toEqual([{ status: "skipped", error: "chain_limit" }]);
+
+    // A second-level run's chat finishing still starts the third level.
+    await finishedAtDepth(2);
+    await f.pump();
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
   });
 });
 

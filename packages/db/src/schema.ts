@@ -106,6 +106,9 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
 
 const opengeniPrivateSchema = pgSchema("opengeni_private");
 
+/** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
+export type CompactRequestTrigger = "operator" | "proactive";
+
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
 export type ConnectorActionPolicySnapshotEntry = {
@@ -5260,6 +5263,16 @@ export const sessions = pgTable(
     importedArchiveNextOffset: integer("imported_archive_next_offset"),
     /** Never move this session's content to the idle-session archive. */
     keepLive: boolean("keep_live").notNull().default(false),
+    /** Changeable unattended setting (migration 1111); null defers to the create option. */
+    unattendedSetting: text("unattended_setting").$type<
+      "unattended" | "attended" | "unattended_by_default"
+    >(),
+    /**
+     * Set once at create when the setting starts the chat unattended
+     * (migration 1111); never updated, so the instructions and tools follow
+     * how the chat started. Null when it did not.
+     */
+    startedUnattended: boolean("started_unattended"),
     /** Idle-session archive lifecycle: null (live), archiving, or archived (read-only). */
     contentArchiveState: text("content_archive_state").$type<"archiving" | "archived">(),
     contentArchiveStartedAt: timestamp("content_archive_started_at", { withTimezone: true }),
@@ -5481,6 +5494,11 @@ export const sessions = pgTable(
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
+    // Who asked for the pending request (migration 1102): 'operator' for
+    // /compact, 'proactive' for the worker's idle checkpoint after a turn that
+    // reached the automatic threshold. NULL (older writers) reads as operator.
+    // Meaningful only while compactRequested is true.
+    compactRequestTrigger: text("compact_request_trigger").$type<CompactRequestTrigger>(),
     queueVersion: integer("queue_version").notNull().default(0),
     queueHeadPosition: bigint("queue_head_position", { mode: "number" }).notNull().default(0),
     queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),
@@ -8735,6 +8753,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
+    /** 1108: the machine the calling code ran on, when it was not the session's
+     *  active sandbox (a `run_on` exec). Paths in the call resolve there. */
+    callerExecutionSandboxId: uuid("caller_execution_sandbox_id"),
     state: text("state", {
       enum: [
         "queued",
@@ -8972,6 +8993,9 @@ export const connectorActionRequests = pgTable(
       withTimezone: true,
     }),
     outcome: text("outcome"),
+    // 1114: times the provider stopped this call to ask the person (MCP
+    // elicitation). Each round has its own decision and single execution.
+    inputRound: integer("input_round").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -9273,6 +9297,13 @@ export const composerDrafts = pgTable(
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
+    /**
+     * True while the person has not picked a model in this composer: reads
+     * then return the chat's current settings, so a change made elsewhere
+     * (for example by the agent) is what the next Send uses. The three
+     * columns above keep the settings the draft was last saved with.
+     */
+    policyFollowsSession: boolean("policy_follows_session").notNull().default(true),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10433,6 +10464,8 @@ export const sessionPendingToolCalls = pgTable(
     eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
+    /** Private state of an MCP server question that paused this call; never in events. */
+    mcpInputRequest: jsonb("mcp_input_request").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -12661,6 +12694,10 @@ export const scheduledTasks = pgTable(
       scopeSubjectId: string | null;
       memoryScope: string | null;
     }>(),
+    // Opt-in at creation (migration 1100): only the frozen creator principal
+    // may change, run, resume or delete the task; agent attempts never may.
+    // Mutation authority, not execution configuration: excluded from the digest.
+    creatorLocked: boolean("creator_locked").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -15302,6 +15339,50 @@ export const feedbackSubmissions = pgTable(
       table.sessionId,
       table.createdAt,
       table.id,
+    ),
+  }),
+);
+
+/**
+ * An agent ringing a person's phones (1107): one row per call, from ringing
+ * to its outcome. Answering opens the chat's voice call.
+ */
+export const agentCalls = pgTable(
+  "agent_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    calleeSubjectId: text("callee_subject_id").notNull(),
+    callerSubjectId: text("caller_subject_id"),
+    callerLabel: text("caller_label"),
+    reason: text("reason").notNull(),
+    state: text("state").notNull().default("ringing"),
+    devices: integer("devices").notNull().default(0),
+    ringUntil: timestamp("ring_until", { withTimezone: true }).notNull(),
+    answeredBy: text("answered_by"),
+    realtimeId: uuid("realtime_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (table) => ({
+    session: index("agent_calls_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt.desc(),
+    ),
+    ringingCallee: index("agent_calls_ringing_callee_idx")
+      .on(table.calleeSubjectId)
+      .where(sql`${table.state} = 'ringing'`),
+    ringingDeadline: index("agent_calls_ringing_deadline_idx")
+      .on(table.ringUntil)
+      .where(sql`${table.state} = 'ringing'`),
+    stateCheck: check(
+      "agent_calls_state_chk",
+      sql`${table.state} in ('ringing', 'answered', 'declined', 'missed', 'cancelled')`,
     ),
   }),
 );

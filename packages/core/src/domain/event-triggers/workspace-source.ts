@@ -1,5 +1,6 @@
 import {
   createEventSource,
+  listWorkspaceActivityEventsForSource,
   listWorkspaceRecordingEventsForSource,
   recordEventSourceFeedDelivery,
   type Database,
@@ -16,15 +17,18 @@ import { eventMatchesTrigger } from "./matching";
 import { McpEventSourceUnavailableError } from "./mcp-event-source-client";
 import { boundEvent } from "./normalize";
 import {
+  workspaceActivityEvent,
   workspaceDeliveryBody,
   workspaceRecordingEvent,
+  type WorkspaceActivityFact,
   type WorkspaceRecordingFact,
 } from "./workspace-events";
 
 /**
  * "This workspace": what happens in Opengeni itself, as one person may see
- * it. Its feed reads the workspace's recording events from the database as
- * the source's owner, every 15 seconds while an automation listens. Events
+ * it. Its feed reads the workspace's recording events and activity facts
+ * (chats finishing, failing, waiting; usage thresholds) from the database as
+ * the source's owner, every 15 seconds while an automation listens. Facts
  * are stamped when written, not when committed, so each read looks back 10
  * minutes and skips what the source already stored, but never before the
  * moment the feed started: the first read only learns where "now" is.
@@ -33,9 +37,9 @@ import {
 export const WORKSPACE_EVENT_SOURCE_NAME = "This workspace";
 
 const POLL_MS = 15_000;
-/** Longer than any transaction that writes a recording event takes to commit. */
+/** Longer than any transaction that writes a recording event or activity fact takes to commit. */
 const LOOK_BACK_MS = 10 * 60_000;
-/** Facts read per step; a larger backlog continues in the next step at once. */
+/** Facts read per step from each table; a larger backlog continues in the next step at once. */
 const FACTS_PER_READ = 100;
 
 /** The feed's position: when it started listening, and how far it has read. */
@@ -88,6 +92,11 @@ export async function createWorkspaceEventSource(input: {
   return source;
 }
 
+function chatUrl(publicBaseUrl: string | undefined, workspaceId: string, sessionId: string | null) {
+  if (!publicBaseUrl || !sessionId) return null;
+  return `${publicBaseUrl.replace(/\/+$/u, "")}/workspaces/${workspaceId}/sessions/${sessionId}`;
+}
+
 async function readWorkspaceFeed(
   context: EventSourceFeedReadContext,
 ): Promise<EventSourceFeedReadOutcome> {
@@ -96,7 +105,7 @@ async function readWorkspaceFeed(
   if (!owner) throw new McpEventSourceUnavailableError("unavailable", "This source has no owner");
   const later = new Date(now.getTime() + POLL_MS);
   const position = parseCursor(feed.cursor);
-  const read = await listWorkspaceRecordingEventsForSource(deps.db, {
+  const window = {
     workspaceId: source.workspaceId,
     sourceId: source.id,
     subjectId: owner,
@@ -105,14 +114,24 @@ async function readWorkspaceFeed(
       ? new Date(Math.max(position.from.getTime(), position.read.getTime() - LOOK_BACK_MS))
       : new Date(now.getTime() + 24 * 60 * 60_000),
     limit: FACTS_PER_READ,
-  });
-  const full = read.events.length === FACTS_PER_READ;
-  // A full page continues from its last event, so nothing past it is skipped.
+  };
+  const read = await listWorkspaceRecordingEventsForSource(deps.db, window);
+  const activityRead = await listWorkspaceActivityEventsForSource(deps.db, window);
+  const recordingsFull = read.events.length === FACTS_PER_READ;
+  const activityFull = activityRead.events.length === FACTS_PER_READ;
+  const full = recordingsFull || activityFull;
+  // A full page continues from its last fact, so nothing past it is skipped;
+  // the other table's facts after that point are read again and skipped as stored.
+  const reached = [
+    recordingsFull ? read.events.at(-1)!.occurredAt : null,
+    activityFull ? activityRead.events.at(-1)!.createdAt : null,
+  ].filter((stamp): stamp is Date => stamp !== null);
+  const readAt = read.readAt < activityRead.readAt ? read.readAt : activityRead.readAt;
   const cursor = cursorText({
-    from: position?.from ?? read.readAt,
-    read: full ? read.events.at(-1)!.occurredAt : read.readAt,
+    from: position?.from ?? readAt,
+    read: full ? new Date(Math.min(...reached.map((stamp) => stamp.getTime()))) : readAt,
   });
-  if (position === null || read.events.length === 0) {
+  if (position === null || read.events.length + activityRead.events.length === 0) {
     return { cursor, nextActionAt: later };
   }
   const facts: WorkspaceRecordingFact[] = read.events.map((event) => ({
@@ -124,7 +143,24 @@ async function readWorkspaceFeed(
     title: event.title,
     purpose: event.purpose,
   }));
-  const body = workspaceDeliveryBody(facts);
+  const activity: WorkspaceActivityFact[] = activityRead.events.map((event) => ({
+    id: event.id,
+    type: event.type,
+    occurredAt: event.occurredAt.toISOString(),
+    sessionId: event.sessionId,
+    turnId: event.turnId,
+    subjectId: event.subjectId,
+    automationId: event.automationId,
+    automationRunId: event.automationRunId,
+    chainDepth: event.chainDepth,
+    data: event.data,
+    chatTitle: event.chatTitle,
+    automationName: event.automationName,
+    subjectLabel: event.subjectLabel,
+    url: chatUrl(deps.settings.publicBaseUrl, source.workspaceId, event.sessionId),
+  }));
+  const body = workspaceDeliveryBody(facts, activity);
+  const ids = [...facts.map((fact) => fact.id), ...activity.map((fact) => fact.id)];
   const recorded = await recordEventSourceFeedDelivery(deps.db, {
     workspaceId: source.workspaceId,
     sourceId: source.id,
@@ -132,12 +168,15 @@ async function readWorkspaceFeed(
     delivery: {
       status: "accepted",
       reason: null,
-      dedupeKey: `workspace:${sha256Hex(new TextEncoder().encode(facts.map((fact) => fact.id).join(",")))}`,
+      dedupeKey: `workspace:${sha256Hex(new TextEncoder().encode(ids.join(",")))}`,
       body,
       bodyBytes: body.byteLength,
       bodySha256: sha256Hex(body),
       headers: {},
-      events: facts.map((fact) => boundEvent(workspaceRecordingEvent(fact, owner), now)),
+      events: [
+        ...facts.map((fact) => boundEvent(workspaceRecordingEvent(fact, owner), now)),
+        ...activity.map((fact) => boundEvent(workspaceActivityEvent(fact, owner), now)),
+      ],
       match: eventMatchesTrigger,
     },
   });

@@ -56,7 +56,7 @@ use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
 use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
-use crate::{CancellationToken, Completion, Engine, Found};
+use crate::{CancellationToken, Completion, Engine, Found, LastWords};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
 /// wake arriving mid-compression waits only a few milliseconds.
@@ -68,8 +68,11 @@ const JAILER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a VMM found by [`Engine::adopt`] may take to answer.
 const ADOPT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The search path the jailer runs with; it inherits nothing else.
-const JAILER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+/// The search path the jailer and the holders of a VM's files run with;
+/// they inherit nothing else. The system's own directories, then NixOS's
+/// system profile, which holds what those hold elsewhere: there `/bin` has
+/// only `sh`, and a holder's shell would find no `sleep`.
+const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
 
 /// Guest clock source that restore can correct.
 ///
@@ -375,7 +378,7 @@ impl Firecracker {
         command
             .args(&args)
             .env_clear()
-            .env("PATH", JAILER_PATH)
+            .env("PATH", SYSTEM_PATH)
             .stdin(Stdio::null())
             .stdout(console)
             .stderr(log);
@@ -478,6 +481,7 @@ impl Firecracker {
             compress_running: self.compress_running,
             runtime: recorded_runtime(jail),
             console: spec.logs.join(logs::CONSOLE_LOG),
+            logs: spec.logs.clone(),
         })
     }
 
@@ -656,6 +660,8 @@ pub struct FirecrackerVm {
     runtime: String,
     /// Its guest's serial console, written by this VM process alone.
     console: PathBuf,
+    /// Its logs: the console, the VMM's own log and its pager's.
+    logs: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -1082,7 +1088,7 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
         file: OwnedFd,
     ) -> impl Future<Output = Result<(), EngineError>> + Send {
-        holder::hold(vm.cgroup.clone(), JAILER_PATH, file)
+        holder::hold(vm.cgroup.clone(), SYSTEM_PATH, file)
     }
 
     fn held(
@@ -1177,6 +1183,10 @@ impl Engine for Firecracker {
         Ok(())
     }
 
+    fn bringing_down(&self, vm: &FirecrackerVm) -> bool {
+        vm.bounds.descending()
+    }
+
     fn set_memory_limit(&self, vm: &FirecrackerVm, bytes: Option<u64>) -> Result<(), EngineError> {
         vm.cgroup
             .set_memory_max(bytes)
@@ -1223,6 +1233,10 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         logs::halted(vm.console.clone(), vm.name.clone())
+    }
+
+    fn last_words(&self, vm: &FirecrackerVm) -> impl Future<Output = LastWords> + Send + 'static {
+        logs::last_words(vm.logs.clone(), vm.name.clone())
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {

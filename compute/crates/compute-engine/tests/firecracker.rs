@@ -476,8 +476,11 @@ async fn boot_pause_compress_snapshot_restore() {
         (-0.2..1.0).contains(&after_restore),
         "a timer due while saved fired {after_restore} s after restore"
     );
+    // /proc/uptime counts hundredths: its two readings can understate the
+    // time the timer slept by one, and the subtraction then lands a hair
+    // below it (-1.8e-15 for a timer that fired on time).
     assert!(
-        (0.0..0.5).contains(&late_by),
+        (-0.0101..0.5).contains(&late_by),
         "a timer due after the restore fired {late_by} s late"
     );
     assert_trimmed_space_returns(&uds, &spec.drives[0].path).await;

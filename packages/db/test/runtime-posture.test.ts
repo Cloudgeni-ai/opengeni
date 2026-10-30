@@ -592,6 +592,17 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
+      // 1103: created without runtime EXECUTE until its follow-up release.
+      {
+        name: "grant_subscription_account_administrator(jsonb)",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -832,12 +843,26 @@ describe("runtime database posture evaluator", () => {
         ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
         ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        // The fixture includes 1103's grant, so its administration context is required.
+        ...runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
         ...names,
       ].map(ownerRoutine);
       return posture;
     };
     // Before 0717 none is required; after it all four are, safely.
     expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
+    // 1103's administration context is required once its grant exists.
+    const withoutAdministration = withOwnerRoutines([]);
+    withoutAdministration.subscriptionOwnerRoutines =
+      withoutAdministration.subscriptionOwnerRoutines!.filter(
+        (routine) =>
+          !(
+            runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES as readonly string[]
+          ).includes(routine.name),
+      );
+    expect(evaluateRuntimeDatabasePosture(withoutAdministration, options)).toEqual([
+      "subscription owner implementation subscription_core_administration_context(text, uuid, uuid, text) is missing or unsafe",
+    ]);
     expect(
       evaluateRuntimeDatabasePosture(
         withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES),
@@ -1815,6 +1840,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1105 workspace activity facts: read and insert, FORCE RLS; written
+          // by invoker-rights triggers on chat events and usage notices.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1880,9 +1912,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 0998 managed-auth passkeys: one auth table without RLS whose
-          // runtime DML is withheld for a release (RUNTIME_DEFERRED_FULL_DML_TABLES).
-          (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
+          // 0998 managed-auth passkeys: one full-DML auth table without RLS,
+          // like the other managed-auth tables.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1060 EU-only inference: a runtime-read-only setting and its
           // history with no runtime privileges, both FORCE RLS.
           (tables === RUNTIME_READ_ONLY_TABLES || tables === RUNTIME_DML_TABLES ? 1 : 0) +
@@ -1899,6 +1935,12 @@ describe("runtime database posture evaluator", () => {
           // 1071 shared Site project placements: one full-DML FORCE-RLS table.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1107 agent calls: read, insert and update, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
@@ -1962,11 +2004,14 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
+        1 + // 0998 managed-auth passkeys: full-DML auth table without RLS.
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
         1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
-        1; // 1090 personal default machines: full-DML, FORCE-RLS.
+        1 + // 1090 personal default machines: full-DML, FORCE-RLS.
+        1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
+        1; // 1107 agent calls: read, insert and update, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -2071,7 +2116,6 @@ describe("runtime database posture evaluator", () => {
         tableCount +
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
-          1 + // 0998 managed-auth passkeys: runtime DML withheld for a release.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
@@ -3426,70 +3470,6 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
-  test("a deferred full-DML table accepts no runtime DML or all four, never a partial grant", () => {
-    expect(runtimePosture.RUNTIME_DEFERRED_FULL_DML_TABLES).toEqual(["auth_passkeys"]);
-    expect(NON_RLS_RUNTIME_TABLES).toContain("auth_passkeys");
-    expect(RUNTIME_FULL_DML_TABLES).not.toContain("auth_passkeys");
-    expect(RUNTIME_TABLE_PRIVILEGES.auth_passkeys).toBeUndefined();
-    const { tablePrivileges: _explicit, ...defaultContract } = options;
-    const deferredTable = (grants: Partial<RuntimeTablePosture>) => {
-      const posture = safePosture();
-      posture.tables.push({
-        ...posture.tables[0]!,
-        name: "auth_passkeys",
-        rlsEnabled: false,
-        rlsForced: false,
-        rlsActive: false,
-        policyCount: 0,
-        select: false,
-        insert: false,
-        update: false,
-        delete: false,
-        ...grants,
-      });
-      return evaluateRuntimeDatabasePosture(posture, defaultContract).filter((violation) =>
-        violation.includes("auth_passkeys"),
-      );
-    };
-    expect(deferredTable({})).toEqual([]);
-    expect(deferredTable({ select: true, insert: true, update: true, delete: true })).toEqual([]);
-    expect(deferredTable({ select: true })).toEqual([
-      "table auth_passkeys grants partial runtime DML: SELECT",
-    ]);
-    expect(deferredTable({ columnPrivileges: ["UPDATE"] })).toEqual([
-      "table auth_passkeys grants partial runtime DML: UPDATE",
-    ]);
-    expect(
-      deferredTable({ select: true, insert: true, update: true, delete: true, truncate: true }),
-    ).toEqual(["table auth_passkeys grants excess runtime privileges: TRUNCATE"]);
-  });
-
-  test("a deferred target-schema capability is accepted with or without runtime EXECUTE, never PUBLIC", () => {
-    expect(runtimePosture.DEFERRED_RUNTIME_TARGET_ROUTINES).toEqual([
-      "mutate_managed_passkey(text, text, jsonb)",
-    ]);
-    const name = "mutate_managed_passkey(text, text, jsonb)";
-    const violationsFor = (change: { execute?: boolean; publicExecute?: boolean }) => {
-      const posture = safePosture();
-      Object.assign(posture.targetRoutines.find((routine) => routine.name === name)!, change);
-      return evaluateRuntimeDatabasePosture(posture, options).filter((violation) =>
-        violation.includes(name),
-      );
-    };
-    expect(violationsFor({ execute: true })).toEqual([]);
-    expect(violationsFor({ execute: false })).toEqual([]);
-    expect(violationsFor({ execute: false, publicExecute: true })).toContain(
-      `PUBLIC has forbidden target-schema capability ${name}`,
-    );
-    // A capability that is not deferred still requires runtime EXECUTE.
-    const sibling = "mutate_managed_sign_in_method(text, text, jsonb)";
-    const posture = safePosture();
-    posture.targetRoutines.find((routine) => routine.name === sibling)!.execute = false;
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      `runtime role lacks target-schema capability ${sibling}`,
-    );
-  });
-
   test("accepts and enforces read-only, read-insert, and protected no-DML classes", () => {
     const posture = safePosture();
     posture.tables[0] = { ...posture.tables[0]!, update: false, delete: false };
@@ -3948,7 +3928,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's and 1091's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4004,10 +3984,17 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "session_attempt_tool_catalogs",
     "session_system_updates",
     "task_note_write_capabilities",
+    "auth_sessions",
+    "agent_calls",
   ];
+  // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
+  const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
+    posture.privateTables.push(
+      ...definerPrivateTables.map((name) => ({ ...eventTable(name, false), policyCount: 0 })),
+    );
     posture.privateRoutines = posture.privateRoutines.filter(
       (entry) =>
         !(runtimePosture.RUNTIME_DEFINER_ROUTINES as readonly string[]).includes(entry.name),
@@ -4032,7 +4019,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       /event_ingress_routes|runtime definer/.test(violation),
     );
 
-  test("every runtime definer is known, and runtime EXECUTE is required", () => {
+  test("every runtime definer is known, and runtime EXECUTE is required unless deferred", () => {
     const pinnedPaths = [
       'search_path="opengeni_tenant", opengeni_private, public',
       "search_path=pg_catalog, public, pg_temp",
@@ -4058,6 +4045,13 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "grant_subscription_account_administrator(jsonb)",
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4065,6 +4059,13 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "grant_subscription_account_administrator(jsonb)",
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4120,11 +4121,24 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "ring_agent_call_v1(uuid, boolean)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
       expect(eventViolations(posture)).toEqual([`runtime definer ${name} is missing or ambiguous`]);
     }
+    // A definer named after private tables is required only once they exist.
+    const beforeOutbox = eventPosture(false);
+    beforeOutbox.privateTables = beforeOutbox.privateTables.filter(
+      (table) => table.name !== "native_push_deliveries",
+    );
+    beforeOutbox.privateRoutines = beforeOutbox.privateRoutines.filter(
+      (entry) =>
+        entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
+        entry.name !== "ring_agent_call_v1(uuid, boolean)",
+    );
+    expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);
     beforeRecordings.tables = beforeRecordings.tables.filter(
       (table) => table.name !== "recordings",

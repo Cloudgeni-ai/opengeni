@@ -241,10 +241,10 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The daily sweep of the store (ADR 17) runs as a CronJob from the same
-image and identity (`computeControl.sweep`). It deletes only from Google
-Cloud Storage; with an `az://` or `s3://` archive turn it off
-(`sweep.enabled: false`), which the chart requires.
+The daily sweep of the store (ADR 17, 25) runs as a CronJob from the same
+image, identity and database (`computeControl.sweep`), as `compute-control
+sweep`: it reads the pointers the service keeps. It deletes on any archive,
+`gs://`, `az://` or `s3://`.
 
 ### Hosts
 
@@ -820,22 +820,79 @@ before users move to compute from Modal:
 
 - **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
   records the intent, stops the VM, removes its network and then deletes
-  the pointer in object storage; a step that fails is tried again, and the
-  sandbox shows as removing (or blocked) until all are done. A daily sweep
-  (`compute-host sweep --store ... --delete`) then deletes the chunks and
-  manifests no pointer names that were stored more than about a week
-  before it began ([ADR 17](adr/0017-sweeping-unnamed-chunks.md)). Age
-  counts from when an object was last stored, so a copy archived long ago
-  goes at the first sweep after nothing names it. A chunk another sandbox
-  still names stays: identical content is shared.
+  its pointer; a step that fails is tried again, and the sandbox shows as
+  removing (or blocked) until all are done. A daily sweep then deletes the
+  chunks and manifests no pointer names whose day ended at least a whole
+  day before it began, two to three days after the last pointer naming
+  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md)).
+  Objects in the old layout (`chunks/v1`, `manifests/v1`) go once they
+  were last stored more than a week before the sweep. A chunk another
+  sandbox still names stays: identical content is shared.
+- **Where pointers live.** In a fleet the control service keeps them, in
+  its database (`compute_pointers`); the sweep runs from the control image
+  (`compute-control sweep --store ... --delete`) with that database.
+  Upgrade the Helm chart together with the control image: the image no
+  longer carries `compute-host`, so an earlier chart's sweep job fails
+  against it rather than sweeping by the object store's pointers. A
+  host on its own keeps them in its object store, which must enforce
+  conditional writes (GCS, Azure, S3 itself; not Garage), and sweeps with
+  `compute-host sweep`. When a fleet first runs a release that keeps them
+  in the service, the service moves them in by itself once no host of an
+  earlier release is live, and marks the object store so that nothing
+  sweeps by the pointers left there; until then hosts of the new release
+  neither archive nor restore and the sweep refuses to start, so upgrade
+  every host soon after the service. `compute_control_pointers_imported`
+  says whether the move happened and
+  `compute_control_pointers_waiting_hosts` how many hosts of an earlier
+  release it waits for; `OpenGeniComputePointersWaiting` fires when that
+  stays above zero for 30 minutes. Right after the move, again a few
+  times over the next hour, and before each sweep that deletes, the
+  service adopts any pointer the object store still holds that it has
+  none of (one an import missed on a store that listed it late), and says
+  so. Objects of the old layout, which only those pointers name, are not
+  swept until a week after the move.
+- **Moving a fleet's archive to another store.** The pointers stay in the
+  service, so only chunks and manifests move: `compute-control
+  copy-archive --from <store> --to <store>` copies every one a pointer
+  names, checking each against its name as it reads it, and skips what
+  the other store holds already. What no pointer names (a sweep's
+  garbage), quarantined copies and the pointers an object store kept
+  stay behind, so it copies less than a whole-bucket copy and never
+  writes to the store it copies from. It needs the fleet's pointers in
+  the service, adopts any the import missed first, marks the other store
+  as one whose pointers the service keeps, and prints a report; it fails
+  if the other store lacks anything a pointer names, saying which
+  pointers or objects, and copying again picks up where it stopped. Each
+  store takes its provider's usual settings from the environment; for two
+  stores of one kind, such as two S3 stores, give the one copied to its
+  own in a file with `--to-env` (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, one `NAME=value` a line). `--at-once` (16)
+  bounds the objects copied at a time; lower it when the stores serve
+  other traffic. To move: copy while hosts still archive to the old
+  store, which can take hours for a large archive; stop the service and
+  every host (or drain them) so no archive is in flight; copy again,
+  which copies only what was stored since; point `serve --archive` and
+  every host's `--store` at the new store; start them, wake a few
+  sandboxes, and run `compute-control sweep --store <new>` without
+  `--delete`, whose `stored` should equal its `named`. Keep the old store
+  until wakes from the new one have run for a while.
+- **One clock.** Hosts in a fleet name the day of what they store by the
+  fleet's clock, the database's, which the service tells with every
+  pointer answer, moved on between answers by the host's monotonic clock,
+  so a step of its system clock changes nothing; the sweep starts by it
+  too. A host or replica whose own clock is more than a minute from it
+  logs a warning, but stores safely.
+- **The archive store must keep what it acknowledges.** A host drops its
+  local copy once the store holds the chunks, so a store that acknowledges
+  a write before it is durable (Garage in its `dangerous` consistency
+  mode, which acknowledges once one node has it) can lose a stored copy if
+  a node fails in the moment before it passed a write on.
 - **Forgotten memory images** (30 days after last use by default) lose
   their pointer entry together with their working-set pack, and their
   chunks go at a following sweep under the same rule.
-- **Only GCS sweeps delete.** A sweep that deletes needs deletes on
-  condition, which we use on GCS; on Azure and S3 it refuses and only
-  reports, so unnamed chunks stay there until conditional deletes are
-  built for those stores. Deleting a pointer there leaves an empty one,
-  which reads as no copy.
+- **Every store's sweep deletes.** No delete is conditional: a host writes
+  only names of its current day, so a late delete of an older day's name
+  never takes a newer write.
 - **Provider retention comes on top.** GCS soft delete keeps deleted
   objects 7 days by default; set the bucket's policy to what we promise.
 - **Quarantined objects** (stored copies that failed their checksum, kept
@@ -906,6 +963,17 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - any increase of `compute.alarm.count`. Each occurrence also writes a
     `compute.alarm` event naming the sandbox (or the stored object's key),
     so group alerts on that.
+    A `programs_lost` alarm for a VM the host did not end on purpose
+    comes with a `compute.vm.lost` event for the same sandbox, written
+    before the VM is torn down, since its logs may go with it.
+    `compute.vm.end` says how it was lost: `vm_exited` (its process ended
+    on its own: the guest rebooted, which its kernel does on a panic, or
+    the VMM failed or was killed), `memory_lost` (its memory could no
+    longer be served), `guest_stopped` (it took no connection: halted,
+    powered off or hung) or `ended_for_memory`. `compute.vm.guest_said`,
+    `.vmm_said` and `.pager_said` hold the last lines of the guest's
+    console, the VMM's own messages and its pager's log, which usually
+    say why.
   - `compute.canary.count` with outcome `failed` or `timed_out`, and a
     `compute.canary.last_run` older than one rotation plus a period for
     any path, which also catches an agent that died or hangs. A rotation
@@ -935,7 +1003,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   sandboxes may keep and how many it holds back (`compute.memory.level`,
   `.held_back`), how many the kernel cannot hold to their bound while the
   host is pressed, such as sandboxes full of data that does not compress
-  (`compute.memory.over_bound`), what sandboxes being put to sleep and
+  (`compute.memory.over_bound`), how many it is still bringing down to it
+  then, slow to start because it ages a VM's pages before it compresses
+  any (`compute.memory.bringing_down`; a sandbox counts there for up to a
+  minute without coming down before it counts over its bound and its
+  guest is shrunk), what sandboxes being put to sleep and
   spares ending are giving back (`compute.memory.relief`, which the levels
   count as available), the shortfall even with everyone at their request
   and that counted, which guests are shrunk for
@@ -1098,10 +1170,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   image needs it. Status shows the runtime the agent launches new VMs
   under, not the runtime of every saved image; each image records its own.
 - **The host kernel**: Firecracker does not promise that a memory image
-  restores under another host kernel. Before rolling a new host image out,
-  save sandboxes on the old one and wake them on the new one (with the
-  `save_wake` and `lab` tests and a store both hosts share), and keep the
-  old image to roll back to.
+  restores under another host kernel, and one made under a newer kernel
+  can be refused under an older one (KVM saved registers the older one
+  does not set). The runtime names the kernel, so warm templates are
+  rebuilt after a kernel change, and a saved image refused for another
+  kernel or processor is given up after a few wakes in a row: the sandbox
+  boots from its disk and its programs are lost, which the host alarms on.
+  So prefer kernel upgrades to rollbacks. Before rolling a new host image
+  out, save sandboxes on the old one and wake them on the new one (with
+  the `save_wake` and `lab` tests and a store both hosts share), and keep
+  the old image to roll back to.
 - **The guest kernel** a VM booted with stays through every save and wake;
   only a fresh boot picks up a new one. A sandbox's own disk then boots
   with the newest kernel, so a new guest kernel must be tested against the
@@ -1299,14 +1377,17 @@ Four layers, each a superset of what the one before cannot reach:
 GitHub's hosted x64 Linux runners are VMs with nested virtualization that
 expose `/dev/kvm` (root, group `kvm`, mode 0660); the job grants the runner
 user access with an ACL, makes an XFS lab directory on a loop file,
-reserves a quarter of the runner's memory as huge pages for the nested
+reserves half of the runner's memory as huge pages for the nested
 profile, and caches the downloaded Firecracker, kernel and base image by
-the pins' hash. It runs four sandboxes where the lab gate runs twelve.
+the pins' hash. A runner that restores them from the cache still gets swap
+and zswap from `lab/host-boot.sh`, which the gate's lab-setup step runs
+either way. It runs four sandboxes where the lab gate runs twelve.
 
 Run the gate on a lab host:
 
 ```sh
 bash lab/host-setup.sh                       # once
+bash lab/host-boot.sh                        # after each reboot: swap and zswap (the gate's lab-setup step runs it)
 PROFILE=nested bash ci/gate.sh               # all steps
 STEPS="engine save_wake" STORE=gs://bucket/gate bash ci/gate.sh
 ```

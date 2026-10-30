@@ -187,7 +187,9 @@ export function readyAt(pull: QueuedPull): number {
 /**
  * Choose the next batch. Priority and Version PRs go first; a failed batch's
  * remaining halves come next; then ready PRs in queue order. CI and batcher
- * changes run alone.
+ * changes run alone. A priority PR already in a failed batch's halves keeps
+ * its place there: building every priority PR again would retest the batch
+ * that just failed, unsplit, on every pass.
  */
 export function nextBatch(
   pulls: QueuedPull[],
@@ -199,7 +201,8 @@ export function nextBatch(
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.version || p.controlPlane;
 
-  const urgent = ready.filter((p) => p.priority || p.version);
+  const bisecting = new Set(pending.flat());
+  const urgent = ready.filter((p) => (p.priority || p.version) && !bisecting.has(p.number));
   if (urgent.length) {
     const first = urgent[0]!;
     const members = alone(first)
