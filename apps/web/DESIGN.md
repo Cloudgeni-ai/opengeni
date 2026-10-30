@@ -436,6 +436,14 @@ Learned on Settings > Models, 27 Sep 2026.
   genuinely needed, with the reason in place: Codex Apps, usage limit resets, an API key in a
   Personal workspace. Nobody else adds accounts; someone who can change a workspace's own account
   may still sign it in again or replace its key.
+- **One "Available in" for every shared thing.** Model accounts, Connect provider, vaults and the
+  Slack bot all use `WorkspaceReachFields`, which opens with its owner line ("Belongs to Acme.
+  Organization owners and admins manage it.") and offers "All workspaces in Acme" or "Selected
+  workspaces". A workspace's own thing always includes its home workspace, shown locked with the
+  reason. Your own thing always works in your Personal workspace, which is never a row; you choose
+  "All my workspaces" or "Selected workspaces". Organization things add a "Personal workspaces"
+  checkbox where the provider supports them. Pickers that choose an owner (rigs, machines) or where
+  a key or connected agent may act keep their own choices and reuse only `WorkspaceChecklist`.
 - **Who sees Models.** Organization owners and admins: everything. Workspace admins: the
   workspaces they administer plus their own Personal workspace and, read-only, the accounts those
   use, with "Only organization owners and admins can add accounts." Members: only their own
