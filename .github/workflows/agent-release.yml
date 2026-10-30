@@ -345,7 +345,9 @@ jobs:
         run: |
           set -euo pipefail
           shipped=("${{ matrix.asset }}" "opengeni-computer-native-${{ matrix.target }}.exe")
-          shipped+=(packages/browserd/dist/cua/x64/cua-driver.exe)
+          if [ "${{ matrix.target }}" = x86_64-pc-windows-msvc ]; then
+            shipped+=(packages/browserd/dist/cua/x64/cua-driver.exe)
+          fi
           for helper in "opengeni-browserd-${{ matrix.target }}.exe"; do
             if [ -f "$helper" ]; then shipped+=("$helper"); fi
           done
